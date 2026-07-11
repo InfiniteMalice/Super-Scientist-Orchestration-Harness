@@ -1,0 +1,559 @@
+schema_version: 1
+accessed_at: "2026-07-11"
+sources:
+  - id: S01
+    title: "ATLAS: Active Theory Learning for Automated Science"
+    authors:
+      - "Noémi Éltető"
+      - "Nathaniel D. Daw"
+      - "Kimberly L. Stachenfeld"
+      - "Kevin J. Miller"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2606.12386"
+    version_consulted: v1
+    accessed_at: "2026-07-11"
+    repository: null
+    license: unknown
+    project_use:
+      - competing mechanistic hypotheses
+      - discriminating-experiment interface
+    adoption_status: adapted
+    limitations:
+      - evaluated in silico on two bandit-agent recovery problems
+      - sample-efficiency results do not establish transfer to other sciences
+    notes:
+      - the project does not reproduce the Disentangled RNN implementation
+      - no source code was imported
+
+  - id: S02
+    title: "Can AI Agents Synthesize Scientific Conclusions?"
+    authors:
+      - "Hayoung Jung"
+      - "Pedro Viana Diniz"
+      - "José Reinaldo Corrêa Roveda"
+      - "Abner Fernandes da Silva"
+      - "Haeun Jung"
+      - "Enoch Tsai"
+      - "Aleksandra Korolova"
+      - "Manoel Horta Ribeiro"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2606.11337"
+    version_consulted: v1
+    accessed_at: "2026-07-11"
+    repository: "https://github.com/hayoungjungg/SciConBench@30b0c6d3ccfac844651db137dbd48e053b424e51"
+    license: unknown
+    project_use:
+      - atomic-fact evaluation
+      - clean-room evaluation boundary
+      - factual precision and recall metrics
+    adoption_status: adapted
+    limitations:
+      - primary benchmark domain is evidence-based medicine
+      - factual metrics do not establish causality or methodological validity
+      - the model judge has imperfect expert agreement
+    notes:
+      - Cochrane-authored content is not imported
+      - the project adapts evaluation concepts rather than reproducing SciConHarness
+
+  - id: S03
+    title: "Harness In-Context Operator Learning with Chain of Operators"
+    authors:
+      - "Minghui Yang"
+      - "Ling Guo"
+      - "Liu Yang"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2606.12318"
+    version_consulted: v1
+    accessed_at: "2026-07-11"
+    repository: null
+    license: unknown
+    project_use:
+      - optional explicit operator-chain protocol
+    adoption_status: deferred
+    limitations:
+      - experiments cover two PDE problem families
+      - general agent-orchestration transfer is not demonstrated
+    notes:
+      - no CHOP implementation is included in the epistemic kernel
+
+  - id: S04
+    title: "Organize then Retrieve: Hierarchical Memory Navigation for Efficient Agents"
+    authors:
+      - "Hao-Lun Hsu"
+      - "Nikki Lijing Kuang"
+      - "Boyi Liu"
+      - "Zhewei Yao"
+      - "Yuxiong He"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2606.11680"
+    version_consulted: v1
+    accessed_at: "2026-07-11"
+    repository: null
+    license: unknown
+    project_use:
+      - hierarchical source-linked memory
+      - retrieval coverage diagnostics
+    adoption_status: adapted
+    limitations:
+      - memory management quality depends on model capability
+      - retrieval policy is trained with reinforcement learning
+      - benchmark efficiency does not establish scientific reliability
+    notes:
+      - the first project implementation uses deterministic retrieval
+      - summaries remain non-authoritative views
+
+  - id: S05
+    title: "EurekAgent: Agent Environment Engineering is All You Need For Autonomous Scientific Discovery"
+    authors:
+      - "Amy Xin"
+      - "Jiening Siow"
+      - "Junjie Wang"
+      - "Zijun Yao"
+      - "Fanjin Zhang"
+      - "Jian Song"
+      - "Lei Hou"
+      - "Juanzi Li"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2606.13662"
+    version_consulted: v2
+    accessed_at: "2026-07-11"
+    repository: "https://github.com/THU-Team-Eureka/EurekAgent@08982e098c3bca6eaefa219ab3ce7fad369a2610"
+    license: unknown
+    project_use:
+      - typed permissions and budgets
+      - artifact isolation
+      - human intervention points
+    adoption_status: adapted
+    limitations:
+      - evidence is limited to metric-driven optimization tasks
+      - objective evaluators do not cover open-ended scientific validity
+    notes:
+      - the title claim is not adopted as an established conclusion
+      - repository compatibility is not claimed
+
+  - id: S06
+    title: "AgentBeats: Agentifying Agent Assessment for Openness, Standardization, and Reproducibility"
+    authors:
+      - "Xiaoyuan Liu"
+      - "Jianhong Tu"
+      - "Yuqi Chen"
+      - "Siyuan Xie"
+      - "Sihan Ren"
+      - "Tianneng Shi"
+      - "Gal Gantar"
+      - "Evan Sandoval"
+      - "Donghyun Lee"
+      - "Daniel Miao"
+      - "Peter J. Gilbert"
+      - "Nick Hynes"
+      - "Mauro Staver"
+      - "Warren He"
+      - "David Marn"
+      - "Andrew Low"
+      - "Xi Zhang"
+      - "Elron Bandel"
+      - "Michal Shmueli-Scheuer"
+      - "Siva Reddy"
+      - "Alexandre Drouin"
+      - "Alexandre Lacoste"
+      - "Ramayya Krishnan"
+      - "Elham Tabassi"
+      - "Yu Su"
+      - "Victor Barres"
+      - "Chenguang Wang"
+      - "Wenbo Guo"
+      - "Dawn Song"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2606.13608"
+    version_consulted: v2
+    accessed_at: "2026-07-11"
+    repository: null
+    license: unknown
+    project_use:
+      - agent-neutral evaluation protocol
+      - separation of evaluated and evaluating agents
+    adoption_status: adapted
+    limitations:
+      - a judge agent is not necessarily correct
+      - protocol standardization does not guarantee evaluation fairness
+    notes:
+      - A2A or MCP compatibility will not be claimed without tests
+      - deterministic tests remain authoritative where possible
+
+  - id: S07
+    title: "HarnessBridge: Learnable Bidirectional Controller for LLM Agent Harness"
+    authors:
+      - "Xiaoxuan Wang"
+      - "Haixin Wang"
+      - "Alexander Taylor"
+      - "Jason Cong"
+      - "Yizhou Sun"
+      - "Wei Wang"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2606.12882"
+    version_consulted: v1
+    accessed_at: "2026-07-11"
+    repository: "https://github.com/mandyyyyii/HarnessBridge@a00b54d33c39514b1d7791c41ed8914fd791b0ca"
+    license: unknown
+    project_use:
+      - typed observation and action projection interfaces
+      - raw-trajectory-preserving projected views
+    adoption_status: adapted
+    limitations:
+      - evaluation is confined to coding settings
+      - results are primarily single-run comparisons
+      - learned rejection and compression can be wrong
+    notes:
+      - learned projections are excluded from governance and admission authority
+      - the first implementation is deterministic
+
+  - id: S08
+    title: "HIPIF: Hierarchical Planning and Information Folding for Long-Horizon LLM Agent Learning"
+    authors:
+      - "Juncheng Diao"
+      - "Zhicong Lu"
+      - "Peiguang Li"
+      - "Yongwei Zhou"
+      - "Changyuan Tian"
+      - "Qingbin Li"
+      - "Rongxiang Weng"
+      - "Jingang Wang"
+      - "Xunliang Cai"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2606.10507"
+    version_consulted: v1
+    accessed_at: "2026-07-11"
+    repository: null
+    license: unknown
+    project_use:
+      - explicit plan hierarchy
+      - source-linked checkpoint summaries
+    adoption_status: adapted
+    limitations:
+      - evaluated on simulated structured environments
+      - method depends on reinforcement learning and structured outputs
+    notes:
+      - the project does not import process rewards or the training method
+
+  - id: S09
+    title: "Socratic agents for autonomous scientific discovery in high-dimensional physical systems"
+    authors:
+      - "Xianrui Zeng"
+      - "Pengfei Liu"
+      - "Yirui Zang"
+      - "Yang Shen"
+      - "Fei Yu"
+      - "Chunlei Yu"
+      - "Minghao Liu"
+      - "Yang Du"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2606.26722"
+    version_consulted: v1
+    accessed_at: "2026-07-11"
+    repository: null
+    license: unknown
+    project_use:
+      - Socratic critic role
+      - explicit counterexamples and falsification criteria
+    adoption_status: adapted
+    limitations:
+      - natural-language criticism remains ambiguous
+      - human supervision is part of the evaluated system
+      - results are specific to a multimode-fibre platform
+    notes:
+      - the critic can propose challenges but has no admission authority
+
+  - id: S10
+    title: "NAVI-Orbital: First In-Orbit Demonstration of a Zero-Shot Vision-Language Model for Autonomous Earth Observation"
+    authors:
+      - "Juan Manuel Delfa Victoria"
+      - "Taran Cyriac John"
+      - "Andrew W. Herson"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2606.18271"
+    version_consulted: v1
+    accessed_at: "2026-07-11"
+    repository: null
+    license: unknown
+    project_use:
+      - explicit persistent orchestration state
+      - bounded model roles under resource constraints
+    adoption_status: adapted
+    limitations:
+      - only two live in-orbit captures are reported
+      - dialogue robustness was not evaluated adversarially
+      - retries and regex gates do not bound hallucination
+    notes:
+      - no scientific-truth claim is imported
+
+  - id: S11
+    title: "GeoCert: Certified Geometric AI for Reliable Forecasting"
+    authors:
+      - "Regina Zhang"
+      - "Zongru Li"
+      - "Honggang Wen"
+      - "Xiaofeng Liu"
+      - "Siu-Ming Yiu"
+      - "Pietro Liò"
+      - "Kwok-Yan Lam"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2604.23474"
+    version_consulted: v1
+    accessed_at: "2026-07-11"
+    repository: "https://github.com/CoderPowerBeyond/GeoCert (unavailable on 2026-07-11)"
+    license: unknown
+    project_use:
+      - possible future conditional-verification plug-in
+    adoption_status: deferred
+    limitations:
+      - guarantees are conditional on encoded constraints and regularity assumptions
+      - the named reproducibility repository was unavailable
+      - broad certification claims require independent validation
+    notes:
+      - excluded from the immutable kernel
+      - no performance or certification result is reproduced
+
+  - id: S12
+    title: "Mnemosyne: Agentic Transaction Processing for Validating and Repairing AI-generated Workflows"
+    authors:
+      - "Edward Y. Chang"
+      - "Longling Geng"
+      - "Emily J. Chang"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2607.00269"
+    version_consulted: v2
+    accessed_at: "2026-07-11"
+    repository: "https://github.com/eyuchang/Mnemosyne (unavailable on 2026-07-11)"
+    license: unknown
+    project_use:
+      - untrusted proposal and deterministic admission separation
+      - effective-state projection
+      - append-only transition records
+      - evidence-preserving repair concepts
+    adoption_status: adapted
+    limitations:
+      - guarantees are relative to a finite executable constraint set
+      - gate closure is assumed rather than machine-checked for the Python codebase
+      - transaction validity does not establish scientific truth
+    notes:
+      - adapted to scientific records through a project-specific transaction model
+      - the repository branch linked from the paper returned 404
+
+  - id: S13
+    title: "Space Is Intelligence: Neural Semigroup Superposition for Riemannian Metric Generation"
+    authors:
+      - "Chenghao Xu"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2606.18828"
+    version_consulted: v1
+    accessed_at: "2026-07-11"
+    repository: null
+    license: unknown
+    project_use:
+      - possible specialized geometric-planning plug-in
+    adoption_status: deferred
+    limitations:
+      - validation is restricted to 2D planar point robots
+      - training uses one two-obstacle scene
+      - higher-dimensional and perception settings are unevaluated
+    notes:
+      - no component belongs in the epistemic kernel
+
+  - id: S14
+    title: "Optimizing Lithium Production Decisions under Geological, Demand, and Pricing Uncertainties: A POMDP Framework for Multi-Objective Decision Making"
+    authors:
+      - "Anna C. Edmonds"
+      - "Mansur M. Arief"
+      - "Robert J. Moss"
+      - "Mykel J. Kochenderfer"
+      - "Jef Caers"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2606.18598"
+    version_consulted: v1
+    accessed_at: "2026-07-11"
+    repository: "https://github.com/sisl/LiPOMDP.jl@4b23c1f1131cc4a1e54613d32819b690bf10dcdc"
+    license: unknown
+    project_use:
+      - possible future value-of-information planning interface
+    adoption_status: deferred
+    limitations:
+      - results depend on a domain-specific simulated model and reward
+      - prices are exogenous and demand and environmental modules are simplified
+    notes:
+      - the lithium reward model is not imported
+
+  - id: S15
+    title: "Can Agents Generalize to the Open World? Unveiling the Fragility of Static Training in Tool Use"
+    authors:
+      - "Song-Lin Lv"
+      - "Weiming Wu"
+      - "Rui Zhu"
+      - "Zi-Jian Cheng"
+      - "Lan-Zhe Guo"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2607.01084"
+    version_consulted: v1
+    accessed_at: "2026-07-11"
+    repository: "https://github.com/LAMDA-NeSy/OpenAgent@769692c14719d28c491fae992a3f814f1bb46f52"
+    license: unknown
+    project_use:
+      - controlled query, action, observation, and domain perturbation tests
+      - abstention and failure-recovery evaluation
+    adoption_status: adapted
+    limitations:
+      - experiments use a synthetic sandbox and one backbone family
+      - robustness intervention does not establish open-world reliability
+      - ICML 2026 acceptance was not independently confirmed in proceedings
+    notes:
+      - repository compatibility is not claimed
+
+  - id: S16
+    title: "Harness-Aware Self-Evolving: Co-Evolving Model Weights, Harness, and Task Solutions"
+    authors:
+      - "Haochen Luo"
+      - "Yi Huang"
+      - "Sichun Luo"
+      - "Fengyuan Liu"
+      - "Lei Li"
+      - "Zefa Hu"
+      - "Junlan Feng"
+      - "Qi Liu"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2607.03935"
+    version_consulted: v1
+    accessed_at: "2026-07-11"
+    repository: null
+    license: unknown
+    project_use:
+      - distinction between guidance and correctness-defining harness changes
+      - externally anchored evaluator-change review
+    adoption_status: adapted
+    limitations:
+      - evidence covers four optimization tasks
+      - mismatch-set agreement does not prove permanent evaluator correctness
+      - the method is an agentic reinforcement-learning system
+    notes:
+      - harness changes are quarantined proposals in this project
+      - evaluation and governance assets are not self-editable
+
+  - id: S17
+    title: "AlphaEvolve: A coding agent for scientific and algorithmic discovery"
+    authors:
+      - "Alexander Novikov"
+      - "Ngân Vũ"
+      - "Marvin Eisenberger"
+      - "Emilien Dupont"
+      - "Po-Sen Huang"
+      - "Adam Zsolt Wagner"
+      - "Sergey Shirobokov"
+      - "Borislav Kozlovskii"
+      - "Francisco J. R. Ruiz"
+      - "Abbas Mehrabian"
+      - "M. Pawan Kumar"
+      - "Abigail See"
+      - "Swarat Chaudhuri"
+      - "George Holland"
+      - "Alex Davies"
+      - "Sebastian Nowozin"
+      - "Pushmeet Kohli"
+      - "Matej Balog"
+    year: 2025
+    source_type: white_paper
+    canonical_locator: "https://arxiv.org/abs/2506.13131"
+    version_consulted: v1
+    accessed_at: "2026-07-11"
+    repository: null
+    license: unknown
+    project_use:
+      - possible optional evolutionary program-search provider
+    adoption_status: deferred
+    limitations:
+      - applicability depends on meaningful automated evaluators
+      - natural-science evaluation is only partially automatable
+    notes:
+      - search is excluded where a proxy could replace scientific validity
+
+  - id: S18
+    title: "QLoRA: Efficient Finetuning of Quantized LLMs"
+    authors:
+      - "Tim Dettmers"
+      - "Artidoro Pagnoni"
+      - "Ari Holtzman"
+      - "Luke Zettlemoyer"
+    year: 2023
+    source_type: peer_reviewed_paper
+    canonical_locator: "https://proceedings.neurips.cc/paper_files/paper/2023/hash/1feb87871436031bdc0f2beaa62a049b-Abstract.html"
+    version_consulted: "NeurIPS 2023 paper; arXiv:2305.14314v1"
+    accessed_at: "2026-07-11"
+    repository: "https://github.com/artidoro/qlora@7f4e95a68dc076bea9b3a413d2b512eca6d004e5"
+    license: unknown
+    project_use:
+      - optional quantized low-rank adapter training provider
+      - separation of adapter artifacts from a frozen base model
+    adoption_status: adapted
+    limitations:
+      - full-finetuning parity was not established at every reported model scale
+      - benchmark and automated-judge validity limitations are documented
+      - QLoRA does not inherently prevent hallucination or contamination
+    notes:
+      - only procedural learning is permitted
+      - code is not vendored and repository compatibility is not claimed
+
+  - id: S19
+    title: "Superpowers: An agentic skills framework and software development methodology"
+    authors:
+      - "Jesse Vincent"
+      - "contributors"
+    year: 2026
+    source_type: software
+    canonical_locator: "https://github.com/obra/superpowers"
+    version_consulted: "v6.1.1@d884ae04edebef577e82ff7c4e143debd0bbec99"
+    accessed_at: "2026-07-11"
+    repository: "https://github.com/obra/superpowers@d884ae04edebef577e82ff7c4e143debd0bbec99"
+    license: MIT
+    project_use:
+      - development-governance workflow
+      - brainstorming, planning, TDD, debugging, review, and verification discipline
+    adoption_status: adapted
+    limitations:
+      - supplies software-development methodology rather than scientific validation
+    notes:
+      - consulted installed using-superpowers and brainstorming skill files
+      - not vendored or imported into the runtime
+
+  - id: S20
+    title: "Repo Quality Gate"
+    authors:
+      - unknown
+    year: 2026
+    source_type: local_skill
+    canonical_locator: "C:/Users/evanh/.codex/skills/repo-quality-gate/SKILL.md"
+    version_consulted: "sha256:30A4A354B671DC50E2EFFC747E3CEFD8A16CD3C9F167D88F923F8F3FBE49B189"
+    accessed_at: "2026-07-11"
+    repository: null
+    license: unknown
+    project_use:
+      - development-time spec, testing, and quality review discipline
+    adoption_status: adapted
+    limitations:
+      - no canonical repository, version, author, or redistribution license is declared
+      - installation history identifies it as a locally created skill
+    notes:
+      - not vendored or represented as a runtime dependency
+      - the repository quality command is an independent project implementation
