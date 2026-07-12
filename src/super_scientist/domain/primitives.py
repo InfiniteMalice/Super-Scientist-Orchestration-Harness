@@ -16,7 +16,7 @@ ActorId = NewType("ActorId", str)
 def require_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
         raise ValueError("timestamp must be timezone-aware UTC")
-    return value
+    return value.replace(tzinfo=UTC)
 
 
 UtcTimestamp = Annotated[datetime, AfterValidator(require_utc)]

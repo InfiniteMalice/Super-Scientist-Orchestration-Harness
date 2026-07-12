@@ -31,6 +31,7 @@
 | --- | --- |
 | `pyproject.toml` | Build metadata, dependencies, CLI entry point, and tool configuration |
 | `src/super_scientist/__init__.py` | Package version export |
+| `src/super_scientist/py.typed` | PEP 561 marker for project-wide static type checking |
 | `src/super_scientist/domain/primitives.py` | UTC timestamps, canonical JSON, SHA-256, identifiers |
 | `src/super_scientist/domain/identity.py` | Actor identity and configuration-aware independence |
 | `src/super_scientist/config/models.py` | Runtime and immutable governance policy schemas |
@@ -197,6 +198,8 @@ git commit -m "build: initialize typed Python package"
 ---
 
 ### Task 2: Deterministic Primitives and Actor Identity
+
+Approved corrections: zero-offset timezone-aware inputs are normalized to canonical `datetime.UTC`; naive and nonzero-offset timestamps are rejected. Model actors require `provider_id` and `model_id`. Model independence fails closed when either model lacks a `configuration_hash`; same actors and exact matching complete fingerprints remain non-independent.
 
 **Files:**
 - Create: `src/super_scientist/domain/primitives.py`
