@@ -541,6 +541,12 @@ git commit -m "feat: add hashed governance policy configuration"
 - Consumes: `UtcTimestamp`, `sha256_hex`
 - Produces: `ArtifactRef`, `EvidenceRecord`, `EvidenceSpan`, `ArtifactStore`, and `FileArtifactStore.put(data) -> ArtifactRef`
 
+**Approved artifact threat boundary:**
+- The artifact root is private and trusted against malicious concurrent namespace mutation.
+- Static absolute/traversal paths and symlink or Windows reparse-point escapes at the root, parent, or leaf fail closed.
+- The store does not claim to prevent a hostile local process from replacing namespace entries between filesystem checks; Task 12 `SECURITY.md` must document this residual local-filesystem risk.
+- `media_type` is normalized descriptive metadata, not part of the SHA-256 byte address; reads verify bytes, length, and digest, not media type.
+
 - [ ] **Step 1: Write failing evidence and artifact tests**
 
 ```python
@@ -2983,7 +2989,7 @@ Create the five listed documents with these required statements:
 - `ARCHITECTURE.md`: inward dependency rule, SQLite and artifact boundaries, proposal/admission flow, audit chain, and citations `[S07]` and `[S12]` where provenance matters.
 - `GOVERNANCE.md`: active policy hash, self-approval prohibition, human approval boundary, quality-policy protection, and local RepoQualityGate provenance `[S20]`.
 - `CLAIM_LEDGER.md`: claim fields, legal transition graph, evidence-span requirements, deterministic versus review-required outcomes, and SciConBench inspiration `[S02]` without reproduction claims.
-- `SECURITY.md`: no shell/network/model authority, untrusted retrieved content, path containment, secret limitations, audit fail-closed behavior, disclosure process, and residual local-filesystem risks.
+- `SECURITY.md`: no shell/network/model authority, untrusted retrieved content, path containment, secret limitations, audit fail-closed behavior, disclosure process, and residual local-filesystem risks. State that the artifact root is private/trusted against malicious concurrent namespace mutation: static traversal, symlink, and Windows reparse-point escapes fail closed, while hostile replacement between filesystem checks remains a residual local-filesystem risk.
 
 Do not describe unimplemented hypotheses, experiments, orchestration, memory, QLoRA, or complete scientific runs as available features.
 

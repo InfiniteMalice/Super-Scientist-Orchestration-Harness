@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -16,14 +16,44 @@ class VerificationState(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
-def _freeze(value: Any) -> Any:
+type JsonScalar = None | bool | int | float | str
+type FrozenJsonValue = (
+    JsonScalar
+    | tuple[FrozenJsonValue, ...]
+    | frozenset[FrozenJsonValue]
+    | Mapping[str, FrozenJsonValue]
+)
+type FrozenJsonMapping = Mapping[str, FrozenJsonValue]
+
+
+def _freeze_json_value(value: object, field_name: str) -> FrozenJsonValue:
     if isinstance(value, Mapping):
-        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
-    if isinstance(value, list):
-        return tuple(_freeze(item) for item in value)
-    if isinstance(value, set):
-        return frozenset(_freeze(item) for item in value)
-    return value
+        frozen: dict[str, FrozenJsonValue] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{field_name} keys must be strings")
+            frozen[key] = _freeze_json_value(item, field_name)
+        return MappingProxyType(frozen)
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json_value(item, field_name) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_json_value(item, field_name) for item in value)
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    raise ValueError(f"unsupported {field_name} value: {type(value).__name__}")
+
+
+def _freeze_provenance(value: Mapping[str, str]) -> Mapping[str, str]:
+    frozen: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise ValueError("provenance keys must be strings")
+        if not isinstance(item, str):
+            raise ValueError(f"unsupported provenance value: {type(item).__name__}")
+        frozen[key] = item
+    return MappingProxyType(frozen)
 
 
 class ArtifactRef(BaseModel):
@@ -31,8 +61,18 @@ class ArtifactRef(BaseModel):
 
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=0)
-    media_type: str
+    media_type: str = Field(
+        description="Normalized descriptive metadata; it is not part of the SHA-256 byte address."
+    )
     relative_path: str
+
+    @field_validator("media_type")
+    @classmethod
+    def normalize_media_type(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not normalized:
+            raise ValueError("media_type must be nonblank")
+        return normalized
 
 
 class EvidenceSpan(BaseModel):
@@ -60,16 +100,28 @@ class EvidenceRecord(BaseModel):
     retrieved_at: UtcTimestamp
     artifact: ArtifactRef
     extracted_span: EvidenceSpan | None = None
-    structured_observation: Mapping[str, Any] | None = None
+    structured_observation: Mapping[str, object] | None = None
     provenance: Mapping[str, str]
     license: str | None = None
     ingestion_actor_id: str
     verification_state: VerificationState = VerificationState.HASH_VERIFIED
 
-    @field_validator("structured_observation", "provenance", mode="after")
+    @field_validator("structured_observation", mode="after")
     @classmethod
-    def freeze_collections(cls, value: Any) -> Any:
-        return _freeze(value)
+    def freeze_structured_observation(
+        cls, value: Mapping[str, object] | None
+    ) -> FrozenJsonMapping | None:
+        if value is None:
+            return None
+        frozen = _freeze_json_value(value, "structured observation")
+        if not isinstance(frozen, Mapping):
+            raise ValueError("structured observation must be a mapping")
+        return frozen
+
+    @field_validator("provenance", mode="after")
+    @classmethod
+    def freeze_provenance(cls, value: Mapping[str, str]) -> Mapping[str, str]:
+        return _freeze_provenance(value)
 
     @property
     def content_hash(self) -> str:

@@ -17,9 +17,18 @@ class ArtifactStore(Protocol):
 
 
 class FileArtifactStore:
+    """Store immutable artifacts beneath a private, trusted filesystem root.
+
+    Static symlink and Windows reparse-point escapes fail closed. Concurrent replacement of
+    namespace entries by a malicious local process is outside this store's threat boundary.
+    """
+
     def __init__(self, root: Path) -> None:
-        self._root = root.resolve()
+        self._root = root.absolute()
+        self._assert_static_namespace(self._root)
         self._root.mkdir(parents=True, exist_ok=True)
+        self._assert_static_namespace(self._root)
+        self._root = self._root.resolve()
         if not self._root.is_dir():
             raise ValueError("artifact root must be a directory")
 
@@ -28,7 +37,7 @@ class FileArtifactStore:
         relative = self._relative_path(digest)
         target = self._contained(relative)
         target.parent.mkdir(parents=True, exist_ok=True)
-        self._assert_no_symlinks(target)
+        self._assert_static_namespace(target)
 
         descriptor, temporary_name = tempfile.mkstemp(prefix=".artifact-", dir=target.parent)
         temporary = Path(temporary_name)
@@ -71,7 +80,7 @@ class FileArtifactStore:
         return Path("sha256") / digest[:2] / digest
 
     def _verify_existing(self, target: Path, digest: str) -> None:
-        self._assert_no_symlinks(target)
+        self._assert_static_namespace(target)
         self._require_regular_file(target)
         if sha256_hex(target.read_bytes()) != digest:
             raise ValueError("artifact hash mismatch for existing content address")
@@ -84,25 +93,29 @@ class FileArtifactStore:
             candidate.relative_to(self._root)
         except ValueError as error:
             raise ValueError("artifact path escapes configured root") from error
+        self._assert_static_namespace(candidate)
         if not candidate.resolve().is_relative_to(self._root):
             raise ValueError("artifact path escapes configured root")
-        self._assert_no_symlinks(candidate)
         return candidate
 
-    def _assert_no_symlinks(self, path: Path) -> None:
-        relative = path.relative_to(self._root)
-        current = self._root
-        for part in relative.parts:
+    @staticmethod
+    def _assert_static_namespace(path: Path) -> None:
+        absolute = path.absolute()
+        current = Path(absolute.anchor)
+        for part in absolute.parts[1:]:
             current /= part
             try:
-                mode = current.lstat().st_mode
+                entry = current.lstat()
             except FileNotFoundError:
                 continue
-            if stat.S_ISLNK(mode):
-                raise ValueError("artifact path contains a symlink")
+            if stat.S_ISLNK(entry.st_mode) or (
+                getattr(entry, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            ):
+                raise ValueError("artifact namespace contains a symlink or reparse point")
 
-    @staticmethod
-    def _require_regular_file(path: Path) -> None:
+    def _require_regular_file(self, path: Path) -> None:
+        self._assert_static_namespace(path)
         try:
             mode = path.lstat().st_mode
         except FileNotFoundError:
