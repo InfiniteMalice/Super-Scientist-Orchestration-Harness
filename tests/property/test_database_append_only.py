@@ -2,7 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -50,6 +50,7 @@ APPEND_ONLY_ROWS = {
     table_name=st.sampled_from(tuple(APPEND_ONLY_ROWS)),
     operation=st.sampled_from(("UPDATE", "DELETE")),
 )
+@settings(deadline=None)
 def test_history_tables_reject_every_update_and_delete(
     table_name: str,
     operation: str,

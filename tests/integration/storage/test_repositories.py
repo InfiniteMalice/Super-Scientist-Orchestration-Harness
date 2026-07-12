@@ -8,7 +8,7 @@ from typing import cast
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
-from sqlalchemy import Connection, event, insert, select
+from sqlalchemy import Connection, event, insert, select, update
 
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus, EvidenceLink
@@ -29,7 +29,7 @@ from super_scientist.providers.storage.database import (
     create_database_engine,
     upgrade_database,
 )
-from super_scientist.providers.storage.repositories import RepositorySet
+from super_scientist.providers.storage.repositories import RepositorySet, StorageIntegrityError
 from super_scientist.providers.storage.schema import (
     audit_events,
     claim_heads,
@@ -120,8 +120,12 @@ class RepositoryFixture:
 
     def policy_snapshot(self) -> PolicySnapshot:
         policy = GovernancePolicy(required_claim_checks=("source_exists", "evidence_span_exists"))
-        policy_hash = sha256_hex(canonical_json_bytes(policy.model_dump(mode="json")))
-        return PolicySnapshot(policy_hash=policy_hash, policy=policy)
+        canonical_policy = policy.model_dump(mode="json")
+        canonical_policy["human_approval_for"] = sorted(policy.human_approval_for)
+        return PolicySnapshot(
+            policy_hash=sha256_hex(canonical_json_bytes(canonical_policy)),
+            policy=policy,
+        )
 
 
 def _database_url(path: Path) -> str:
@@ -185,6 +189,27 @@ def test_claim_repository_required_lookup_rejects_missing_claim(
         repository_fixture.repositories.claims.get_head_required("missing")
 
 
+def test_claim_repository_rejects_orphan_regression_and_gap_versions(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    first = repository_fixture.claim("claim-1", version=1, status="PROPOSED")
+    orphan = repository_fixture.claim("claim-1", version=2, status="EVIDENCE_LINKED")
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.claims.add_version(orphan)
+
+    repository_fixture.repositories.claims.add_version(first)
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.claims.add_version(first)
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.claims.add_version(
+            repository_fixture.claim("claim-1", version=3, status="EVIDENCE_LINKED")
+        )
+
+    assert repository_fixture.repositories.claims.history("claim-1") == (first,)
+
+
 def test_transaction_repository_round_trips_by_idempotency_key(
     repository_fixture: RepositoryFixture,
 ) -> None:
@@ -199,9 +224,76 @@ def test_transaction_repository_round_trips_by_idempotency_key(
     ).scalar_one()
     assert stored is not None
     assert stored.proposal == proposal
-    assert stored.proposal_hash == sha256_hex(proposal_json.encode("utf-8"))
+    assert stored.proposal_hash == sha256_hex(
+        canonical_json_bytes(proposal.model_dump(mode="json"))
+    )
+    assert stored.proposal_hash != sha256_hex(proposal_json.encode("utf-8"))
     assert stored.decision == decision
     assert repository_fixture.repositories.transactions.list_all() == (stored,)
+
+
+@pytest.mark.parametrize(
+    ("row_proposal_id", "row_idempotency_key", "decision_proposal_id"),
+    [
+        ("different-proposal", "key-1", "proposal-1"),
+        ("proposal-1", "different-key", "proposal-1"),
+        ("proposal-1", "key-1", "different-proposal"),
+    ],
+)
+def test_transaction_repository_rejects_redundant_identity_corruption(
+    repository_fixture: RepositoryFixture,
+    row_proposal_id: str,
+    row_idempotency_key: str,
+    decision_proposal_id: str,
+) -> None:
+    proposal = repository_fixture.add_evidence_proposal("proposal-1", "key-1")
+    decision = TransactionDecision(proposal_id=decision_proposal_id, accepted=True)
+    proposal_json = PROPOSAL_ADAPTER.dump_json(proposal).decode("utf-8")
+    repository_fixture.connection.execute(
+        insert(transactions).values(
+            proposal_id=row_proposal_id,
+            idempotency_key=row_idempotency_key,
+            proposal_hash=sha256_hex(canonical_json_bytes(proposal.model_dump(mode="json"))),
+            proposal_json=proposal_json,
+            decision_json=decision.model_dump_json(),
+            created_at=repository_fixture.now.isoformat(),
+        )
+    )
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.transactions.get_by_idempotency_key(row_idempotency_key)
+
+
+def test_transaction_repository_rejects_stored_proposal_hash_corruption(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    proposal = repository_fixture.add_evidence_proposal("proposal-1", "key-1")
+    decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+    repository_fixture.connection.execute(
+        insert(transactions).values(
+            proposal_id=proposal.proposal_id,
+            idempotency_key=proposal.idempotency_key,
+            proposal_hash="f" * 64,
+            proposal_json=PROPOSAL_ADAPTER.dump_json(proposal).decode("utf-8"),
+            decision_json=decision.model_dump_json(),
+            created_at=repository_fixture.now.isoformat(),
+        )
+    )
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.transactions.get_by_idempotency_key(
+            proposal.idempotency_key
+        )
+
+
+def test_transaction_repository_rejects_decision_for_another_proposal(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    proposal = repository_fixture.add_evidence_proposal("proposal-1", "key-1")
+    decision = TransactionDecision(proposal_id="different-proposal", accepted=True)
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.transactions.add(proposal, decision, repository_fixture.now)
 
 
 def test_transaction_repository_round_trips_other_strict_proposal_variants(
@@ -261,6 +353,178 @@ def test_policy_and_audit_repositories_round_trip(
     assert repository_fixture.repositories.policies.get_active() == snapshot
     assert repository_fixture.repositories.audit.last() == event_record
     assert repository_fixture.repositories.audit.list_all() == (event_record,)
+
+
+def test_policy_repository_rejects_mismatched_snapshot_hash_before_activation(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    snapshot = repository_fixture.policy_snapshot().model_copy(update={"policy_hash": "f" * 64})
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.policies.add_and_activate(snapshot, repository_fixture.now)
+
+    policy_rows = repository_fixture.connection.execute(
+        select(governance_policies.c.policy_hash)
+    ).all()
+    state_rows = repository_fixture.connection.execute(
+        select(governance_state.c.singleton_id)
+    ).all()
+    assert policy_rows == []
+    assert state_rows == []
+
+
+def test_policy_repository_rejects_stored_policy_hash_corruption(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    snapshot = repository_fixture.policy_snapshot()
+    repository_fixture.connection.execute(
+        insert(governance_policies).values(
+            policy_hash="f" * 64,
+            policy_json=snapshot.policy.model_dump_json(),
+            created_at=repository_fixture.now.isoformat(),
+        )
+    )
+    repository_fixture.connection.execute(
+        insert(governance_state).values(singleton_id=1, active_policy_hash="f" * 64)
+    )
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.policies.get_active()
+
+
+def test_audit_repository_requires_the_exact_verified_next_event(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    first = append_event(None, "audit-1", "test", {"accepted": True}, repository_fixture.now)
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.audit.add(first.model_copy(update={"sequence": 2}))
+
+    repository_fixture.repositories.audit.add(first)
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.audit.add(
+            append_event(None, "audit-2", "test", {"accepted": True}, repository_fixture.now)
+        )
+
+    second = append_event(first, "audit-2", "test", {"accepted": True}, repository_fixture.now)
+    repository_fixture.repositories.audit.add(second)
+    assert repository_fixture.repositories.audit.list_all() == (first, second)
+
+
+def test_audit_repository_rejects_chain_corruption_on_reads(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    first = append_event(None, "audit-1", "test", {"accepted": True}, repository_fixture.now)
+    repository_fixture.repositories.audit.add(first)
+    corrupted = append_event(first, "audit-2", "test", {"accepted": True}, repository_fixture.now)
+    corrupted = corrupted.model_copy(update={"event_hash": "f" * 64})
+    repository_fixture.connection.execute(
+        insert(audit_events).values(
+            sequence=corrupted.sequence,
+            event_id=corrupted.event_id,
+            previous_hash=corrupted.previous_hash,
+            payload_hash=corrupted.payload_hash,
+            event_hash=corrupted.event_hash,
+            event_json=corrupted.model_dump_json(),
+        )
+    )
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.audit.last()
+
+
+def test_audit_repository_rejects_redundant_column_corruption(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    event_record = append_event(
+        None,
+        "audit-in-json",
+        "test",
+        {"accepted": True},
+        repository_fixture.now,
+    )
+    repository_fixture.connection.execute(
+        insert(audit_events).values(
+            sequence=event_record.sequence,
+            event_id="audit-in-column",
+            previous_hash=event_record.previous_hash,
+            payload_hash=event_record.payload_hash,
+            event_hash=event_record.event_hash,
+            event_json=event_record.model_dump_json(),
+        )
+    )
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.audit.list_all()
+
+
+def test_evidence_repository_rejects_redundant_column_corruption(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    record = repository_fixture.evidence_record("evidence-in-json")
+    repository_fixture.repositories.evidence.add(record)
+    stored_json = repository_fixture.connection.execute(
+        select(evidence_records.c.record_json).where(
+            evidence_records.c.evidence_id == record.evidence_id
+        )
+    ).scalar_one()
+    repository_fixture.connection.execute(
+        insert(evidence_records).values(
+            evidence_id="evidence-in-column",
+            content_hash=record.content_hash,
+            record_json=stored_json,
+            created_at=record.retrieved_at.isoformat(),
+        )
+    )
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.evidence.get("evidence-in-column")
+
+
+def test_claim_repository_rejects_redundant_version_and_head_identity_corruption(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    first = repository_fixture.claim("claim-a", version=1, status="PROPOSED")
+    other = repository_fixture.claim("claim-b", version=1, status="PROPOSED")
+    repository_fixture.repositories.claims.add_version(first)
+    repository_fixture.repositories.claims.add_version(other)
+    repository_fixture.connection.execute(
+        update(claim_heads)
+        .where(claim_heads.c.claim_id == first.claim_id)
+        .values(claim_version_id="claim-b:1", version=1, status=ClaimStatus.PROPOSED.value)
+    )
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.claims.get_head(first.claim_id)
+
+
+@pytest.mark.parametrize("column", ("version", "status", "content_hash", "created_at"))
+def test_claim_repository_rejects_redundant_version_column_corruption(
+    repository_fixture: RepositoryFixture,
+    column: str,
+) -> None:
+    claim = repository_fixture.claim("claim-1", version=2, status="EVIDENCE_LINKED")
+    record_json = claim.model_dump_json()
+    values: dict[str, object] = {
+        "claim_version_id": "claim-1:2",
+        "claim_id": claim.claim_id,
+        "version": claim.version,
+        "status": claim.status.value,
+        "record_json": record_json,
+        "content_hash": sha256_hex(record_json.encode("utf-8")),
+        "created_at": claim.created_at.isoformat(),
+    }
+    values[column] = {
+        "version": 1,
+        "status": ClaimStatus.PROPOSED.value,
+        "content_hash": "f" * 64,
+        "created_at": "2026-07-12T12:00:01+00:00",
+    }[column]
+    repository_fixture.connection.execute(insert(claim_versions).values(**values))
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.claims.history(claim.claim_id)
 
 
 def test_repositories_validate_persisted_json_contracts(
@@ -330,7 +594,7 @@ def test_repositories_validate_persisted_json_contracts(
         repository_fixture.repositories.claims.get_head("invalid-claim")
     with pytest.raises(ValidationError):
         repository_fixture.repositories.transactions.get_by_idempotency_key("key-1")
-    with pytest.raises(ValidationError):
+    with pytest.raises(StorageIntegrityError, match="storage integrity"):
         repository_fixture.repositories.audit.last()
     with pytest.raises(ValidationError):
         repository_fixture.repositories.policies.get_active()

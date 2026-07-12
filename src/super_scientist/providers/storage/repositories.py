@@ -9,11 +9,13 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter
 from sqlalchemy import Connection, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from super_scientist.config.loader import policy_hash
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
 from super_scientist.domain.evidence.models import EvidenceRecord, VerificationState
 from super_scientist.domain.identity import ActorKind
 from super_scientist.domain.primitives import UtcTimestamp, canonical_json_bytes, sha256_hex
+from super_scientist.kernel.audit.chain import append_event, verify_chain
 from super_scientist.kernel.audit.models import AuditEvent
 from super_scientist.kernel.transactions.models import Proposal, TransactionDecision
 from super_scientist.providers.storage.schema import (
@@ -34,6 +36,29 @@ _STORAGE_ENUMS: dict[str, type[Enum]] = {
     enum_type.__name__: enum_type
     for enum_type in (ActorKind, ClaimStatus, VerificationState)
 }
+
+
+class StorageIntegrityError(ValueError):
+    """Raised when durable repository state contradicts its canonical record."""
+
+
+def _require_integrity(condition: bool, detail: str) -> None:
+    if not condition:
+        raise StorageIntegrityError(f"storage integrity error: {detail}")
+
+
+def _stored_str(row: Mapping[str, object], column: str) -> str:
+    value = row[column]
+    if not isinstance(value, str):
+        raise StorageIntegrityError(f"storage integrity error: {column} must be a string")
+    return value
+
+
+def _stored_int(row: Mapping[str, object], column: str) -> int:
+    value = row[column]
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise StorageIntegrityError(f"storage integrity error: {column} must be an integer")
+    return value
 
 
 def _json_compatible(value: object) -> object:
@@ -146,6 +171,131 @@ def _validated_timestamp(value: UtcTimestamp) -> UtcTimestamp:
     return TIMESTAMP_ADAPTER.validate_python(value)
 
 
+def _proposal_hash(proposal: Proposal) -> str:
+    return sha256_hex(canonical_json_bytes(proposal.model_dump(mode="json")))
+
+
+def _decode_evidence_row(row: Mapping[str, object]) -> EvidenceRecord:
+    evidence_id = _stored_str(row, "evidence_id")
+    content_hash = _stored_str(row, "content_hash")
+    record_json = _stored_str(row, "record_json")
+    created_at = _stored_str(row, "created_at")
+    record = EvidenceRecord.model_validate(_load_storage_json(record_json))
+    _require_integrity(record.evidence_id == evidence_id, "evidence_id does not match record_json")
+    _require_integrity(
+        record.content_hash == content_hash,
+        "content_hash does not match record_json",
+    )
+    _require_integrity(
+        record.retrieved_at.isoformat() == created_at,
+        "created_at does not match record_json",
+    )
+    return record
+
+
+def _decode_claim_version_row(row: Mapping[str, object]) -> AtomicClaim:
+    claim_version_id = _stored_str(row, "claim_version_id")
+    claim_id = _stored_str(row, "claim_id")
+    version = _stored_int(row, "version")
+    status = _stored_str(row, "status")
+    record_json = _stored_str(row, "record_json")
+    content_hash = _stored_str(row, "content_hash")
+    created_at = _stored_str(row, "created_at")
+    claim = AtomicClaim.model_validate_json(record_json)
+    _require_integrity(
+        claim_version_id == f"{claim.claim_id}:{claim.version}",
+        "claim_version_id does not match record_json",
+    )
+    _require_integrity(claim.claim_id == claim_id, "claim_id does not match record_json")
+    _require_integrity(claim.version == version, "version does not match record_json")
+    _require_integrity(claim.status.value == status, "status does not match record_json")
+    _require_integrity(
+        sha256_hex(record_json.encode("utf-8")) == content_hash,
+        "content_hash does not match record_json",
+    )
+    _require_integrity(
+        claim.created_at.isoformat() == created_at,
+        "created_at does not match record_json",
+    )
+    return claim
+
+
+def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
+    proposal_id = _stored_str(row, "proposal_id")
+    idempotency_key = _stored_str(row, "idempotency_key")
+    stored_hash = _stored_str(row, "proposal_hash")
+    proposal_json = _stored_str(row, "proposal_json")
+    decision_json = _stored_str(row, "decision_json")
+    proposal = PROPOSAL_ADAPTER.validate_python(_load_storage_json(proposal_json))
+    decision = TransactionDecision.model_validate_json(decision_json)
+    _require_integrity(
+        stored_hash == _proposal_hash(proposal),
+        "proposal_hash does not match canonical proposal JSON",
+    )
+    _require_integrity(
+        proposal.proposal_id == proposal_id,
+        "proposal_id does not match proposal_json",
+    )
+    _require_integrity(
+        proposal.idempotency_key == idempotency_key,
+        "idempotency_key does not match proposal_json",
+    )
+    _require_integrity(
+        decision.proposal_id == proposal.proposal_id,
+        "decision proposal_id does not match proposal_json",
+    )
+    return StoredTransaction(
+        proposal=proposal,
+        proposal_hash=stored_hash,
+        decision=decision,
+    )
+
+
+def _decode_audit_row(row: Mapping[str, object]) -> AuditEvent:
+    sequence = _stored_int(row, "sequence")
+    event_id = _stored_str(row, "event_id")
+    previous_hash = _stored_str(row, "previous_hash")
+    payload_hash = _stored_str(row, "payload_hash")
+    event_hash = _stored_str(row, "event_hash")
+    event_json = _stored_str(row, "event_json")
+    try:
+        event = AuditEvent.model_validate_json(event_json)
+    except ValueError as error:
+        raise StorageIntegrityError("storage integrity error: invalid audit event JSON") from error
+    _require_integrity(event.sequence == sequence, "audit sequence does not match event_json")
+    _require_integrity(event.event_id == event_id, "audit event_id does not match event_json")
+    _require_integrity(
+        event.previous_hash == previous_hash,
+        "audit previous_hash does not match event_json",
+    )
+    _require_integrity(
+        event.payload_hash == payload_hash,
+        "audit payload_hash does not match event_json",
+    )
+    _require_integrity(event.event_hash == event_hash, "audit event_hash does not match event_json")
+    return event
+
+
+def _decode_policy_row(
+    row: Mapping[str, object],
+    *,
+    active_policy_hash: str | None = None,
+) -> PolicySnapshot:
+    stored_policy_hash = _stored_str(row, "policy_hash")
+    policy_json = _stored_str(row, "policy_json")
+    policy = GovernancePolicy.model_validate_json(policy_json)
+    _require_integrity(
+        stored_policy_hash == policy_hash(policy),
+        "policy_hash does not match policy_json",
+    )
+    if active_policy_hash is not None:
+        _require_integrity(
+            active_policy_hash == stored_policy_hash,
+            "active_policy_hash does not match governance policy",
+        )
+    return PolicySnapshot(policy_hash=stored_policy_hash, policy=policy)
+
+
 class StoredTransaction(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
@@ -160,17 +310,25 @@ class EvidenceRepository:
 
     def get(self, evidence_id: str) -> EvidenceRecord | None:
         row = self._connection.execute(
-            select(evidence_records.c.record_json).where(
-                evidence_records.c.evidence_id == evidence_id
-            )
-        ).scalar_one_or_none()
-        return None if row is None else EvidenceRecord.model_validate(_load_storage_json(row))
+            select(
+                evidence_records.c.evidence_id,
+                evidence_records.c.content_hash,
+                evidence_records.c.record_json,
+                evidence_records.c.created_at,
+            ).where(evidence_records.c.evidence_id == evidence_id)
+        ).mappings().one_or_none()
+        return None if row is None else _decode_evidence_row(dict(row))
 
     def list_all(self) -> tuple[EvidenceRecord, ...]:
         rows = self._connection.execute(
-            select(evidence_records.c.record_json).order_by(evidence_records.c.evidence_id)
-        ).scalars()
-        return tuple(EvidenceRecord.model_validate(_load_storage_json(row)) for row in rows)
+            select(
+                evidence_records.c.evidence_id,
+                evidence_records.c.content_hash,
+                evidence_records.c.record_json,
+                evidence_records.c.created_at,
+            ).order_by(evidence_records.c.evidence_id)
+        ).mappings()
+        return tuple(_decode_evidence_row(dict(row)) for row in rows)
 
     def add(self, record: EvidenceRecord) -> None:
         dumped = record.model_dump(mode="python", warnings="none")
@@ -192,14 +350,27 @@ class ClaimRepository:
 
     def get_head(self, claim_id: str) -> AtomicClaim | None:
         row = self._connection.execute(
-            select(claim_versions.c.record_json)
-            .join(
-                claim_heads,
-                claim_heads.c.claim_version_id == claim_versions.c.claim_version_id,
+            select(
+                claim_heads.c.claim_id.label("head_claim_id"),
+                claim_heads.c.claim_version_id.label("head_claim_version_id"),
+                claim_heads.c.version.label("head_version"),
+                claim_heads.c.status.label("head_status"),
+                claim_versions.c.claim_version_id.label("claim_version_id"),
+                claim_versions.c.claim_id,
+                claim_versions.c.version,
+                claim_versions.c.status,
+                claim_versions.c.record_json,
+                claim_versions.c.content_hash,
+                claim_versions.c.created_at,
+            ).select_from(
+                claim_heads.outerjoin(
+                    claim_versions,
+                    claim_heads.c.claim_version_id == claim_versions.c.claim_version_id,
+                )
             )
             .where(claim_heads.c.claim_id == claim_id)
-        ).scalar_one_or_none()
-        return None if row is None else AtomicClaim.model_validate_json(row)
+        ).mappings().one_or_none()
+        return None if row is None else self._decode_head_row(dict(row))
 
     def get_head_required(self, claim_id: str) -> AtomicClaim:
         claim = self.get_head(claim_id)
@@ -209,27 +380,68 @@ class ClaimRepository:
 
     def list_heads(self) -> tuple[AtomicClaim, ...]:
         rows = self._connection.execute(
-            select(claim_versions.c.record_json)
-            .join(
-                claim_heads,
-                claim_heads.c.claim_version_id == claim_versions.c.claim_version_id,
+            select(
+                claim_heads.c.claim_id.label("head_claim_id"),
+                claim_heads.c.claim_version_id.label("head_claim_version_id"),
+                claim_heads.c.version.label("head_version"),
+                claim_heads.c.status.label("head_status"),
+                claim_versions.c.claim_version_id.label("claim_version_id"),
+                claim_versions.c.claim_id,
+                claim_versions.c.version,
+                claim_versions.c.status,
+                claim_versions.c.record_json,
+                claim_versions.c.content_hash,
+                claim_versions.c.created_at,
+            ).select_from(
+                claim_heads.outerjoin(
+                    claim_versions,
+                    claim_heads.c.claim_version_id == claim_versions.c.claim_version_id,
+                )
             )
             .order_by(claim_heads.c.claim_id)
-        ).scalars()
-        return tuple(AtomicClaim.model_validate_json(row) for row in rows)
+        ).mappings()
+        return tuple(self._decode_head_row(dict(row)) for row in rows)
 
     def history(self, claim_id: str) -> tuple[AtomicClaim, ...]:
         rows = self._connection.execute(
-            select(claim_versions.c.record_json)
+            select(
+                claim_versions.c.claim_version_id,
+                claim_versions.c.claim_id,
+                claim_versions.c.version,
+                claim_versions.c.status,
+                claim_versions.c.record_json,
+                claim_versions.c.content_hash,
+                claim_versions.c.created_at,
+            )
             .where(claim_versions.c.claim_id == claim_id)
             .order_by(claim_versions.c.version)
-        ).scalars()
-        return tuple(AtomicClaim.model_validate_json(row) for row in rows)
+        ).mappings()
+        claims = tuple(_decode_claim_version_row(dict(row)) for row in rows)
+        for claim in claims:
+            _require_integrity(claim.claim_id == claim_id, "claim history has the wrong claim_id")
+        return claims
 
     def add_version(self, claim: AtomicClaim) -> None:
         record_json = _validated_model_json(AtomicClaim, claim)
         validated = AtomicClaim.model_validate_json(record_json)
         version_id = f"{validated.claim_id}:{validated.version}"
+        current_head = self.get_head(validated.claim_id)
+        if current_head is None:
+            _require_integrity(
+                validated.version == 1 and validated.parent_version_id is None,
+                "a claim without a head must begin at version 1",
+            )
+        else:
+            expected_version = current_head.version + 1
+            expected_parent_version_id = f"{current_head.claim_id}:{current_head.version}"
+            _require_integrity(
+                validated.version == expected_version,
+                "claim version must be the exact successor of the current head",
+            )
+            _require_integrity(
+                validated.parent_version_id == expected_parent_version_id,
+                "claim parent_version_id must reference the current head",
+            )
         self._connection.execute(
             insert(claim_versions).values(
                 claim_version_id=version_id,
@@ -258,6 +470,29 @@ class ClaimRepository:
             )
         )
 
+    @staticmethod
+    def _decode_head_row(row: Mapping[str, object]) -> AtomicClaim:
+        if row["record_json"] is None:
+            raise StorageIntegrityError("storage integrity error: claim head is dangling")
+        claim = _decode_claim_version_row(row)
+        _require_integrity(
+            _stored_str(row, "head_claim_id") == claim.claim_id,
+            "claim head claim_id does not match claim version",
+        )
+        _require_integrity(
+            _stored_str(row, "head_claim_version_id") == f"{claim.claim_id}:{claim.version}",
+            "claim head claim_version_id does not match claim version",
+        )
+        _require_integrity(
+            _stored_int(row, "head_version") == claim.version,
+            "claim head version does not match claim version",
+        )
+        _require_integrity(
+            _stored_str(row, "head_status") == claim.status.value,
+            "claim head status does not match claim version",
+        )
+        return claim
+
 
 class TransactionRepository:
     def __init__(self, connection: Connection) -> None:
@@ -266,36 +501,26 @@ class TransactionRepository:
     def get_by_idempotency_key(self, key: str) -> StoredTransaction | None:
         row = self._connection.execute(
             select(
+                transactions.c.proposal_id,
+                transactions.c.idempotency_key,
                 transactions.c.proposal_json,
                 transactions.c.proposal_hash,
                 transactions.c.decision_json,
             ).where(transactions.c.idempotency_key == key)
-        ).one_or_none()
-        if row is None:
-            return None
-        proposal_json, proposal_hash, decision_json = row
-        return StoredTransaction(
-            proposal=PROPOSAL_ADAPTER.validate_python(_load_storage_json(proposal_json)),
-            proposal_hash=proposal_hash,
-            decision=TransactionDecision.model_validate_json(decision_json),
-        )
+        ).mappings().one_or_none()
+        return None if row is None else _decode_transaction_row(dict(row))
 
     def list_all(self) -> tuple[StoredTransaction, ...]:
         rows = self._connection.execute(
             select(
+                transactions.c.proposal_id,
+                transactions.c.idempotency_key,
                 transactions.c.proposal_json,
                 transactions.c.proposal_hash,
                 transactions.c.decision_json,
             ).order_by(transactions.c.created_at, transactions.c.proposal_id)
-        )
-        return tuple(
-            StoredTransaction(
-                proposal=PROPOSAL_ADAPTER.validate_python(_load_storage_json(proposal_json)),
-                proposal_hash=proposal_hash,
-                decision=TransactionDecision.model_validate_json(decision_json),
-            )
-            for proposal_json, proposal_hash, decision_json in rows
-        )
+        ).mappings()
+        return tuple(_decode_transaction_row(dict(row)) for row in rows)
 
     def add(
         self,
@@ -309,12 +534,17 @@ class TransactionRepository:
             validated_proposal.model_dump(mode="python", warnings="none")
         )
         decision_json = _validated_model_json(TransactionDecision, decision)
+        validated_decision = TransactionDecision.model_validate_json(decision_json)
         validated_occurred_at = _validated_timestamp(occurred_at)
+        _require_integrity(
+            validated_decision.proposal_id == validated_proposal.proposal_id,
+            "decision proposal_id does not match proposal",
+        )
         self._connection.execute(
             insert(transactions).values(
                 proposal_id=validated_proposal.proposal_id,
                 idempotency_key=validated_proposal.idempotency_key,
-                proposal_hash=sha256_hex(proposal_json.encode("utf-8")),
+                proposal_hash=_proposal_hash(validated_proposal),
                 proposal_json=proposal_json,
                 decision_json=decision_json,
                 created_at=validated_occurred_at.isoformat(),
@@ -327,20 +557,27 @@ class AuditRepository:
         self._connection = connection
 
     def last(self) -> AuditEvent | None:
-        row = self._connection.execute(
-            select(audit_events.c.event_json).order_by(audit_events.c.sequence.desc()).limit(1)
-        ).scalar_one_or_none()
-        return None if row is None else AuditEvent.model_validate_json(row)
+        events = self._read_all_events()
+        return None if not events else events[-1]
 
     def list_all(self) -> tuple[AuditEvent, ...]:
-        rows = self._connection.execute(
-            select(audit_events.c.event_json).order_by(audit_events.c.sequence)
-        ).scalars()
-        return tuple(AuditEvent.model_validate_json(row) for row in rows)
+        return self._read_all_events()
 
     def add(self, event: AuditEvent) -> None:
         event_json = _validated_model_json(AuditEvent, event)
         validated = AuditEvent.model_validate_json(event_json)
+        events = self._read_all_events()
+        expected = append_event(
+            events[-1] if events else None,
+            validated.event_id,
+            validated.event_type,
+            validated.payload,
+            validated.occurred_at,
+        )
+        _require_integrity(
+            validated == expected,
+            "audit event is not the exact verified next event",
+        )
         self._connection.execute(
             insert(audit_events).values(
                 sequence=validated.sequence,
@@ -352,6 +589,25 @@ class AuditRepository:
             )
         )
 
+    def _read_all_events(self) -> tuple[AuditEvent, ...]:
+        rows = self._connection.execute(
+            select(
+                audit_events.c.sequence,
+                audit_events.c.event_id,
+                audit_events.c.previous_hash,
+                audit_events.c.payload_hash,
+                audit_events.c.event_hash,
+                audit_events.c.event_json,
+            ).order_by(audit_events.c.sequence)
+        ).mappings()
+        events = tuple(_decode_audit_row(dict(row)) for row in rows)
+        verification = verify_chain(events)
+        _require_integrity(
+            verification.valid,
+            f"audit chain is invalid at sequence {verification.first_invalid_sequence}",
+        )
+        return events
+
 
 class PolicyRepository:
     def __init__(self, connection: Connection) -> None:
@@ -361,12 +617,23 @@ class PolicyRepository:
         snapshot_json = _validated_model_json(PolicySnapshot, snapshot)
         validated = PolicySnapshot.model_validate_json(snapshot_json)
         validated_created_at = _validated_timestamp(created_at)
+        _require_integrity(
+            validated.policy_hash == policy_hash(validated.policy),
+            "policy_hash does not match policy_json",
+        )
         policy_insert = sqlite_insert(governance_policies).values(
             policy_hash=validated.policy_hash,
             policy_json=validated.policy.model_dump_json(),
             created_at=validated_created_at.isoformat(),
         )
         self._connection.execute(policy_insert.on_conflict_do_nothing())
+        stored_policy = self._connection.execute(
+            select(
+                governance_policies.c.policy_hash,
+                governance_policies.c.policy_json,
+            ).where(governance_policies.c.policy_hash == validated.policy_hash)
+        ).mappings().one()
+        _decode_policy_row(dict(stored_policy))
         state_insert = sqlite_insert(governance_state).values(
             singleton_id=1,
             active_policy_hash=validated.policy_hash,
@@ -379,23 +646,26 @@ class PolicyRepository:
         )
 
     def get_active(self) -> PolicySnapshot | None:
-        row = self._connection.execute(
+        active_policy_hash = self._connection.execute(
+            select(governance_state.c.active_policy_hash).where(
+                governance_state.c.singleton_id == 1
+            )
+        ).scalar_one_or_none()
+        if active_policy_hash is None:
+            return None
+        stored_policy = self._connection.execute(
             select(
                 governance_policies.c.policy_hash,
                 governance_policies.c.policy_json,
+            ).where(governance_policies.c.policy_hash == active_policy_hash)
+        ).mappings().one_or_none()
+        if stored_policy is None:
+            raise StorageIntegrityError(
+                "storage integrity error: active policy does not exist in governance_policies"
             )
-            .join(
-                governance_state,
-                governance_state.c.active_policy_hash == governance_policies.c.policy_hash,
-            )
-            .where(governance_state.c.singleton_id == 1)
-        ).one_or_none()
-        if row is None:
-            return None
-        policy_hash, policy_json = row
-        return PolicySnapshot(
-            policy_hash=policy_hash,
-            policy=GovernancePolicy.model_validate_json(policy_json),
+        return _decode_policy_row(
+            dict(stored_policy),
+            active_policy_hash=active_policy_hash,
         )
 
 
