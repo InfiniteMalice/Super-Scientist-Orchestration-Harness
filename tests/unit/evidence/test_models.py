@@ -1,0 +1,92 @@
+from datetime import UTC, datetime, timedelta, timezone
+from typing import cast
+
+import pytest
+from pydantic import ValidationError
+
+from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord, EvidenceSpan
+
+
+def test_artifact_ref_rejects_non_sha256_digest() -> None:
+    with pytest.raises(ValidationError):
+        ArtifactRef(
+            sha256="not-a-sha256",
+            size_bytes=0,
+            media_type="application/octet-stream",
+            relative_path="sha256/00/not-a-sha256",
+        )
+
+
+def test_evidence_span_must_fit_extracted_text() -> None:
+    with pytest.raises(ValueError, match="span offsets"):
+        EvidenceSpan(start=0, end=10, text="short")
+
+
+def test_evidence_span_end_must_follow_start() -> None:
+    with pytest.raises(ValueError, match="span end"):
+        EvidenceSpan(start=2, end=2, text="")
+
+
+def test_evidence_record_hash_matches_artifact() -> None:
+    artifact = ArtifactRef(
+        sha256="a" * 64,
+        size_bytes=3,
+        media_type="text/plain",
+        relative_path=f"sha256/aa/{'a' * 64}",
+    )
+    record = EvidenceRecord(
+        evidence_id="ev-1",
+        evidence_type="document",
+        source_locator="fixture://one",
+        retrieved_at=datetime.now(timezone(timedelta(0), name="zero-offset")),
+        artifact=artifact,
+        provenance={"collector": "test"},
+        ingestion_actor_id="actor-1",
+    )
+
+    assert record.content_hash == artifact.sha256
+    assert record.retrieved_at.tzinfo is UTC
+
+
+def test_evidence_records_are_frozen() -> None:
+    artifact = ArtifactRef(
+        sha256="a" * 64,
+        size_bytes=3,
+        media_type="text/plain",
+        relative_path=f"sha256/aa/{'a' * 64}",
+    )
+    record = EvidenceRecord(
+        evidence_id="ev-1",
+        evidence_type="document",
+        source_locator="fixture://one",
+        retrieved_at=datetime.now(UTC),
+        artifact=artifact,
+        provenance={"collector": "test"},
+        ingestion_actor_id="actor-1",
+    )
+
+    with pytest.raises(ValidationError):
+        record.evidence_id = "ev-2"
+
+
+def test_evidence_record_collections_are_deeply_immutable() -> None:
+    record = EvidenceRecord(
+        evidence_id="ev-1",
+        evidence_type="document",
+        source_locator="fixture://one",
+        retrieved_at=datetime.now(UTC),
+        artifact=ArtifactRef(
+            sha256="a" * 64,
+            size_bytes=3,
+            media_type="text/plain",
+            relative_path=f"sha256/aa/{'a' * 64}",
+        ),
+        structured_observation={"values": ["first"]},
+        provenance={"collector": "test"},
+        ingestion_actor_id="actor-1",
+    )
+
+    with pytest.raises(TypeError):
+        cast(dict[str, str], record.provenance)["collector"] = "other"
+    with pytest.raises(TypeError):
+        cast(dict[str, list[str]], record.structured_observation)["values"][0] = "other"
