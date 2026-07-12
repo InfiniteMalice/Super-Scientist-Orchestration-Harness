@@ -34,6 +34,7 @@ scientist-harness = "super_scientist.cli.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/super_scientist"]
+force-include = { "alembic" = "super_scientist/_migrations" }
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers --strict-config"
