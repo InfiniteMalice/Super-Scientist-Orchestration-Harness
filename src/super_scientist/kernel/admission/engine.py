@@ -156,6 +156,12 @@ class AdmissionEngine:
                 RejectionCode.MISSING_EVIDENCE,
                 "claim evidence checks failed",
             )
+        if any(check.outcome is CheckOutcome.REQUIRES_INDEPENDENT_REVIEW for check in checks):
+            return self.rejected(
+                proposal.proposal_id,
+                RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+                "claim checks require independent review",
+            )
         if not _required_checks_pass(checks, context.active_policy.policy.required_claim_checks):
             return self.rejected(
                 proposal.proposal_id,

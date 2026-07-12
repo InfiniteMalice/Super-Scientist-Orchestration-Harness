@@ -4,10 +4,12 @@ from typing import cast
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+import super_scientist.kernel.admission.engine as admission_engine
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus, EvidenceLink
 from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord, EvidenceSpan
 from super_scientist.domain.identity import ActorIdentity, ActorKind
+from super_scientist.evaluation.claim_drift.models import CheckOutcome, CheckResult
 from super_scientist.kernel.admission.engine import AdmissionContext, AdmissionEngine
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
@@ -310,6 +312,58 @@ def test_transition_rejects_policy_check_without_deterministic_coverage() -> Non
             evidence_by_id={evidence.evidence_id: evidence},
             claim_by_id={claim.claim_id: claim},
             required_claim_checks=("source_exists", "semantic_review"),
+        ),
+    )
+
+    assert not decision.accepted
+    assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+
+
+def test_transition_rejects_nonrequired_independent_review_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = _evidence()
+    claim = _claim(
+        status=ClaimStatus.EVIDENCE_LINKED,
+        evidence_links=(
+            EvidenceLink(evidence_id=evidence.evidence_id, supporting_span="fixture span"),
+        ),
+    )
+    proposal = TransitionClaim(
+        proposal_id="proposal-1",
+        idempotency_key="key-1",
+        proposer=_actor("proposer"),
+        claim_id=claim.claim_id,
+        expected_version=claim.version,
+        target_status=ClaimStatus.TESTABLE,
+    )
+    monkeypatch.setattr(
+        admission_engine,
+        "run_deterministic_checks",
+        lambda _claim, _evidence_by_id: (
+            CheckResult(
+                code="source_exists",
+                outcome=CheckOutcome.PASS_DETERMINISTIC,
+                reason="linked evidence exists",
+            ),
+            CheckResult(
+                code="evidence_span_exists",
+                outcome=CheckOutcome.PASS_DETERMINISTIC,
+                reason="supporting span exists in linked evidence",
+            ),
+            CheckResult(
+                code="semantic_review",
+                outcome=CheckOutcome.REQUIRES_INDEPENDENT_REVIEW,
+                reason="semantic evaluation requires an independent reviewer",
+            ),
+        ),
+    )
+
+    decision = AdmissionEngine().decide(
+        proposal,
+        _context(
+            evidence_by_id={evidence.evidence_id: evidence},
+            claim_by_id={claim.claim_id: claim},
         ),
     )
 

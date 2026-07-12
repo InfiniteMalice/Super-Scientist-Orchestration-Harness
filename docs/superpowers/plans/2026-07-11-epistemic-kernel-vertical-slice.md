@@ -1278,8 +1278,9 @@ git commit -m "feat: add atomic claims and deterministic drift checks"
 > Deterministic claim checks expose separate `source_exists` and
 > `evidence_span_exists` outcomes. A transition fails on any deterministic failure,
 > and each name in `active_policy.required_claim_checks` must be present and pass;
-> missing, not-applicable, or independent-review outcomes reject with
-> `INDEPENDENT_REVIEW_REQUIRED`.
+> missing or not-applicable required outcomes reject with
+> `INDEPENDENT_REVIEW_REQUIRED`; any emitted independent-review outcome rejects
+> with that code even when its check is not policy-required.
 
 **Files:**
 - Create: `src/super_scientist/kernel/transactions/models.py`
