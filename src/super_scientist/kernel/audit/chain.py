@@ -56,8 +56,17 @@ def append_event(
     )
 
 
+def _event_sequence(event: object) -> object:
+    if not isinstance(event, AuditEvent):
+        return None
+    try:
+        return event.sequence
+    except Exception:
+        return None
+
+
 def _invalid_verification(event: object, checked: int) -> AuditVerification:
-    candidate = event.sequence if isinstance(event, AuditEvent) else None
+    candidate = _event_sequence(event)
     sequence = candidate if type(candidate) is int and candidate >= 1 else checked
     return AuditVerification(
         valid=False,

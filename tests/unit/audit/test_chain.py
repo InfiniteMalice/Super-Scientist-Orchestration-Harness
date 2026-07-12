@@ -147,6 +147,26 @@ def test_audit_chain_uses_checked_ordinal_for_malformed_sequence(sequence: objec
     assert result.first_invalid_sequence == 1
 
 
+def test_audit_chain_reports_ordinal_for_missing_sequence() -> None:
+    event = append_event(None, "event-1", "transaction", {"ok": True}, TIMESTAMP)
+    malformed = AuditEvent.model_construct(
+        event_id=event.event_id,
+        event_type=event.event_type,
+        schema_version=event.schema_version,
+        occurred_at=event.occurred_at,
+        payload=event.payload,
+        payload_hash=event.payload_hash,
+        previous_hash=event.previous_hash,
+        event_hash=event.event_hash,
+    )
+
+    result = verify_chain([malformed])
+
+    assert not result.valid
+    assert result.checked_events == 1
+    assert result.first_invalid_sequence == 1
+
+
 @pytest.mark.parametrize("schema_version", [True, 1.0, "1", 0, 2])
 def test_audit_chain_rejects_tampered_schema_version(schema_version: object) -> None:
     event = append_event(None, "event-1", "transaction", {"ok": True}, TIMESTAMP)
