@@ -12,12 +12,15 @@ from super_scientist.evaluation.claim_drift.deterministic import (
 from super_scientist.evaluation.claim_drift.models import CheckOutcome, CheckResult
 
 
-def _evidence_record(extracted_text: str | None = None) -> EvidenceRecord:
+def _evidence_record(
+    extracted_text: str | None = None,
+    evidence_id: str = "evidence-1",
+) -> EvidenceRecord:
     span = None
     if extracted_text is not None:
         span = EvidenceSpan(start=0, end=len(extracted_text), text=extracted_text)
     return EvidenceRecord(
-        evidence_id="evidence-1",
+        evidence_id=evidence_id,
         evidence_type="document",
         source_locator="fixture://evidence-1",
         retrieved_at=datetime.now(UTC),
@@ -41,7 +44,7 @@ def _claim(evidence_links: tuple[EvidenceLink, ...] = ()) -> AtomicClaim:
         scope="Controlled laboratory setting",
         population_or_system="Test system",
         epistemic_modality="supports",
-        status=ClaimStatus.EVIDENCE_LINKED,
+        status=ClaimStatus.PROPOSED,
         evidence_links=evidence_links,
         created_at=datetime.now(UTC),
         created_by="actor-1",
@@ -64,6 +67,18 @@ def test_missing_supporting_span_fails_deterministically() -> None:
 
     assert result.outcome is CheckOutcome.FAIL_DETERMINISTIC
     assert result.code == "evidence_span_exists"
+
+
+def test_mismatched_mapping_key_and_evidence_id_fails_source_check() -> None:
+    link = EvidenceLink(evidence_id="evidence-1", supporting_span="result")
+
+    result = check_evidence_link(
+        link,
+        {"evidence-1": _evidence_record("result", evidence_id="different-evidence")},
+    )
+
+    assert result.outcome is CheckOutcome.FAIL_DETERMINISTIC
+    assert result.code == "source_exists"
 
 
 def test_exact_evidence_span_passes_deterministically() -> None:

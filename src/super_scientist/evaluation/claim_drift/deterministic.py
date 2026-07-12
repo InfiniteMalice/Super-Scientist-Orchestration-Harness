@@ -10,7 +10,7 @@ def check_evidence_link(
     evidence_by_id: Mapping[str, EvidenceRecord],
 ) -> CheckResult:
     evidence = evidence_by_id.get(link.evidence_id)
-    if evidence is None:
+    if evidence is None or evidence.evidence_id != link.evidence_id:
         return CheckResult(
             code="source_exists",
             outcome=CheckOutcome.FAIL_DETERMINISTIC,
