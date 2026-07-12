@@ -93,7 +93,26 @@ def test_exact_evidence_span_passes_deterministically() -> None:
     assert result.code == "evidence_link"
 
 
-def test_claim_without_evidence_links_fails_source_check() -> None:
+def test_claim_checks_report_source_and_span_outcomes_separately() -> None:
+    claim = _claim((EvidenceLink(evidence_id="evidence-1", supporting_span="result"),))
+
+    results = run_deterministic_checks(claim, {"evidence-1": _evidence_record("result")})
+
+    assert results == (
+        CheckResult(
+            code="source_exists",
+            outcome=CheckOutcome.PASS_DETERMINISTIC,
+            reason="linked evidence exists",
+        ),
+        CheckResult(
+            code="evidence_span_exists",
+            outcome=CheckOutcome.PASS_DETERMINISTIC,
+            reason="supporting span exists in linked evidence",
+        ),
+    )
+
+
+def test_claim_without_links_reports_unavailable_span_check() -> None:
     results = run_deterministic_checks(_claim(), {})
 
     assert results == (
@@ -102,6 +121,21 @@ def test_claim_without_evidence_links_fails_source_check() -> None:
             outcome=CheckOutcome.FAIL_DETERMINISTIC,
             reason="claim has no evidence links",
         ),
+        CheckResult(
+            code="evidence_span_exists",
+            outcome=CheckOutcome.NOT_APPLICABLE,
+            reason="supporting span cannot be checked without evidence links",
+        ),
+    )
+
+
+def test_claim_without_evidence_links_fails_source_check() -> None:
+    results = run_deterministic_checks(_claim(), {})
+
+    assert results[0] == CheckResult(
+        code="source_exists",
+        outcome=CheckOutcome.FAIL_DETERMINISTIC,
+        reason="claim has no evidence links",
     )
 
 

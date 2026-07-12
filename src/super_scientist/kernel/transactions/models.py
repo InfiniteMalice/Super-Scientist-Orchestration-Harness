@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_serializer, model_validator
 
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
 from super_scientist.domain.evidence.models import EvidenceRecord
@@ -14,6 +14,9 @@ from super_scientist.domain.primitives import UtcTimestamp
 
 
 class RejectionCode(StrEnum):
+    INVALID_PROPOSAL = "INVALID_PROPOSAL"
+    ENTITY_ID_MISMATCH = "ENTITY_ID_MISMATCH"
+    ENTITY_ALREADY_EXISTS = "ENTITY_ALREADY_EXISTS"
     SELF_APPROVAL = "SELF_APPROVAL"
     MISSING_EVIDENCE = "MISSING_EVIDENCE"
     EVIDENCE_HASH_MISMATCH = "EVIDENCE_HASH_MISMATCH"
@@ -25,14 +28,14 @@ class RejectionCode(StrEnum):
 
 
 class Approval(BaseModel):
-    model_config = ConfigDict(frozen=True, strict=True)
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     approver: ActorIdentity
     approved_at: UtcTimestamp
 
 
 class ProposalBase(BaseModel):
-    model_config = ConfigDict(frozen=True, strict=True)
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     proposal_id: str = Field(min_length=1)
     idempotency_key: str = Field(min_length=1)
@@ -68,19 +71,27 @@ Proposal = Annotated[
 
 
 class RejectionReason(BaseModel):
-    model_config = ConfigDict(frozen=True, strict=True)
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     code: RejectionCode
     message: str = Field(min_length=1)
 
 
 class TransactionDecision(BaseModel):
-    model_config = ConfigDict(frozen=True, strict=True)
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     proposal_id: str = Field(min_length=1)
     accepted: bool
     replayed: bool = False
     reasons: tuple[RejectionReason, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_reason_state(self) -> TransactionDecision:
+        if self.accepted and self.reasons:
+            raise ValueError("accepted decisions must not include rejection reasons")
+        if not self.accepted and not self.reasons:
+            raise ValueError("rejected decisions must include at least one rejection reason")
+        return self
 
 
 def _json_compatible(value: object) -> object:

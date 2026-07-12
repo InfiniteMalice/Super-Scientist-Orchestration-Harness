@@ -1264,6 +1264,23 @@ git commit -m "feat: add atomic claims and deterministic drift checks"
 
 ### Task 7: Typed Proposals and Pure Admission Engine
 
+> **Hardened contract correction (post-review):** The Task 7 code samples below are
+> superseded where they conflict with this contract. Every Task 7 Pydantic contract
+> is frozen, strict, and `extra="forbid"`; decisions may only be accepted with no
+> reasons or rejected with one or more reasons. `AdmissionEngine.decide` revalidates
+> proposal and context data at its public boundary and returns `INVALID_PROPOSAL`
+> rather than raising for malformed or bypass-constructed values. Context mapping
+> keys must match the contained entity IDs; duplicates and mismatches reject with
+> `ENTITY_ALREADY_EXISTS` and `ENTITY_ID_MISMATCH`. Approval uses
+> `are_independent`, not an actor-ID comparison. Valid replay remains an early,
+> marker-only return after input and context integrity validation.
+>
+> Deterministic claim checks expose separate `source_exists` and
+> `evidence_span_exists` outcomes. A transition fails on any deterministic failure,
+> and each name in `active_policy.required_claim_checks` must be present and pass;
+> missing, not-applicable, or independent-review outcomes reject with
+> `INDEPENDENT_REVIEW_REQUIRED`.
+
 **Files:**
 - Create: `src/super_scientist/kernel/transactions/models.py`
 - Create: `src/super_scientist/kernel/admission/engine.py`
