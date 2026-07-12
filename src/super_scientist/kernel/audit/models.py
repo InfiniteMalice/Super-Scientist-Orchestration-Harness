@@ -5,19 +5,15 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from super_scientist.domain.primitives import UtcTimestamp
 
 GENESIS_HASH = "0" * 64
+AUDIT_SCHEMA_VERSION = 1
 
 type JsonScalar = None | bool | int | float | str
-type FrozenJsonValue = (
-    JsonScalar
-    | tuple[FrozenJsonValue, ...]
-    | frozenset[FrozenJsonValue]
-    | Mapping[str, FrozenJsonValue]
-)
+type FrozenJsonValue = JsonScalar | tuple[FrozenJsonValue, ...] | Mapping[str, FrozenJsonValue]
 type FrozenJsonMapping = Mapping[str, FrozenJsonValue]
 
 
@@ -32,7 +28,7 @@ def _freeze_json_value(value: object) -> FrozenJsonValue:
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_json_value(item) for item in value)
     if isinstance(value, (set, frozenset)):
-        return frozenset(_freeze_json_value(item) for item in value)
+        raise ValueError("audit payload collections must be mappings or sequences")
     if value is None or isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, float) and math.isfinite(value):
@@ -47,13 +43,25 @@ def freeze_json_mapping(value: Mapping[str, Any]) -> FrozenJsonMapping:
     return frozen
 
 
+def _to_json_value(value: FrozenJsonValue) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _to_json_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_to_json_value(item) for item in value]
+    return value
+
+
+def json_compatible_payload(value: FrozenJsonMapping) -> dict[str, Any]:
+    return {key: _to_json_value(item) for key, item in value.items()}
+
+
 class AuditEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    sequence: int = Field(ge=1)
+    sequence: int = Field(strict=True, ge=1)
     event_id: str
     event_type: str
-    schema_version: int = 1
+    schema_version: int = Field(default=AUDIT_SCHEMA_VERSION, strict=True)
     occurred_at: UtcTimestamp
     payload: FrozenJsonMapping
     payload_hash: str
@@ -67,11 +75,15 @@ class AuditEvent(BaseModel):
             raise ValueError("audit payload must be a mapping")
         return freeze_json_mapping(value)
 
+    @field_serializer("payload", when_used="json")
+    def serialize_payload(self, value: FrozenJsonMapping) -> dict[str, Any]:
+        return json_compatible_payload(value)
+
 
 class AuditVerification(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     valid: bool
-    checked_events: int = Field(ge=0)
-    first_invalid_sequence: int | None = Field(default=None, ge=1)
+    checked_events: int = Field(strict=True, ge=0)
+    first_invalid_sequence: int | None = Field(default=None, strict=True, ge=1)
     reason: str | None = None

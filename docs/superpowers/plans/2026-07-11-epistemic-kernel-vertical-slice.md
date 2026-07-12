@@ -784,6 +784,9 @@ git commit -m "feat: add immutable evidence artifact storage"
 **Interfaces:**
 - Consumes: canonical JSON and SHA-256 primitives
 - Produces: `AuditEvent`, `AuditVerification`, `append_event(previous, event_id, event_type, payload, occurred_at)`, and `verify_chain(events)`
+- Audit payloads use durable JSON semantics: JSON-like scalars, string-keyed mappings, and
+  list/tuple sequences normalized to one immutable JSON-array representation. Sets,
+  frozensets, non-string mapping keys, non-finite floats, and unsupported values are rejected.
 
 - [ ] **Step 1: Write failing chain and tampering tests**
 
@@ -820,6 +823,7 @@ Expected: collection fails because audit modules do not exist.
 Create `src/super_scientist/kernel/audit/models.py`:
 
 ```python
+from collections.abc import Mapping
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -832,12 +836,12 @@ GENESIS_HASH = "0" * 64
 class AuditEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    sequence: int = Field(ge=1)
+    sequence: int = Field(strict=True, ge=1)
     event_id: str
     event_type: str
-    schema_version: int = 1
+    schema_version: int = Field(default=1, strict=True)
     occurred_at: UtcTimestamp
-    payload: dict[str, Any]
+    payload: Mapping[str, Any]
     payload_hash: str
     previous_hash: str
     event_hash: str
@@ -852,28 +856,39 @@ class AuditVerification(BaseModel):
     reason: str | None = None
 ```
 
+The implementation recursively freezes payload mappings and sequences, and provides an
+explicit JSON-mode serializer that converts immutable mappings/tuples back to ordinary
+JSON objects/arrays for `model_dump_json` and `model_validate_json` round trips. Verification
+must require exact integer types and expected values for `sequence` and `schema_version`,
+including on `model_copy`-constructed instances.
+
 - [ ] **Step 4: Implement append and verification**
 
 Create `src/super_scientist/kernel/audit/chain.py`:
 
 ```python
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from super_scientist.domain.primitives import UtcTimestamp, canonical_json_bytes, sha256_hex
-from super_scientist.kernel.audit.models import GENESIS_HASH, AuditEvent, AuditVerification
+from super_scientist.kernel.audit.models import (
+    GENESIS_HASH,
+    AuditEvent,
+    AuditVerification,
+    json_compatible_payload,
+)
 
 
 def append_event(
     previous: AuditEvent | None,
     event_id: str,
     event_type: str,
-    payload: dict[str, Any],
+    payload: Mapping[str, Any],
     occurred_at: UtcTimestamp,
 ) -> AuditEvent:
     sequence = 1 if previous is None else previous.sequence + 1
     previous_hash = GENESIS_HASH if previous is None else previous.event_hash
-    payload_hash = sha256_hex(canonical_json_bytes(payload))
+    payload_hash = sha256_hex(canonical_json_bytes(json_compatible_payload(payload)))
     envelope = {
         "sequence": sequence,
         "event_id": event_id,
@@ -912,6 +927,12 @@ def verify_chain(events: Iterable[AuditEvent]) -> AuditVerification:
         previous = event
     return AuditVerification(valid=True, checked_events=checked)
 ```
+
+`verify_chain` preflights sequence and schema metadata before replay, catches malformed
+event-field errors, and reports the checked ordinal as `first_invalid_sequence` whenever
+the event sequence is non-positive or not exactly an `int`. Payload mutation, collection
+type changes, linkage, metadata, and timestamp changes all return invalid verification
+results rather than raising.
 
 - [ ] **Step 5: Add a property test that any payload mutation is detected**
 

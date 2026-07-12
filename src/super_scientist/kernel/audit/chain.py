@@ -9,27 +9,18 @@ from super_scientist.domain.primitives import (
     sha256_hex,
 )
 from super_scientist.kernel.audit.models import (
+    AUDIT_SCHEMA_VERSION,
     GENESIS_HASH,
     AuditEvent,
     AuditVerification,
+    FrozenJsonMapping,
     freeze_json_mapping,
+    json_compatible_payload,
 )
 
 
-def _canonical_json_value(value: object) -> Any:
-    if isinstance(value, Mapping):
-        return {key: _canonical_json_value(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_canonical_json_value(item) for item in value]
-    if isinstance(value, frozenset):
-        values = [_canonical_json_value(item) for item in value]
-        return sorted(values, key=canonical_json_bytes)
-    return value
-
-
-def _payload_hash(payload: Mapping[str, object]) -> str:
-    canonical_payload = _canonical_json_value(payload)
-    return sha256_hex(canonical_json_bytes(canonical_payload))
+def _payload_hash(payload: FrozenJsonMapping) -> str:
+    return sha256_hex(canonical_json_bytes(json_compatible_payload(payload)))
 
 
 def append_event(
@@ -47,7 +38,7 @@ def append_event(
         "sequence": sequence,
         "event_id": event_id,
         "event_type": event_type,
-        "schema_version": 1,
+        "schema_version": AUDIT_SCHEMA_VERSION,
         "occurred_at": occurred_at.isoformat(),
         "payload_hash": payload_hash,
         "previous_hash": previous_hash,
@@ -56,7 +47,7 @@ def append_event(
         sequence=sequence,
         event_id=event_id,
         event_type=event_type,
-        schema_version=1,
+        schema_version=AUDIT_SCHEMA_VERSION,
         occurred_at=occurred_at,
         payload=frozen_payload,
         payload_hash=payload_hash,
@@ -65,12 +56,9 @@ def append_event(
     )
 
 
-def _invalid_verification(event: AuditEvent, checked: int) -> AuditVerification:
-    sequence = (
-        event.sequence
-        if isinstance(event.sequence, int) and not isinstance(event.sequence, bool)
-        else checked
-    )
+def _invalid_verification(event: object, checked: int) -> AuditVerification:
+    candidate = event.sequence if isinstance(event, AuditEvent) else None
+    sequence = candidate if type(candidate) is int and candidate >= 1 else checked
     return AuditVerification(
         valid=False,
         checked_events=checked,
@@ -79,11 +67,27 @@ def _invalid_verification(event: AuditEvent, checked: int) -> AuditVerification:
     )
 
 
+def _has_valid_replay_metadata(event: object) -> bool:
+    if not isinstance(event, AuditEvent):
+        return False
+    try:
+        return (
+            type(event.sequence) is int
+            and event.sequence >= 1
+            and type(event.schema_version) is int
+            and event.schema_version == AUDIT_SCHEMA_VERSION
+        )
+    except Exception:
+        return False
+
+
 def verify_chain(events: Iterable[AuditEvent]) -> AuditVerification:
     previous: AuditEvent | None = None
     checked = 0
     for event in events:
         checked += 1
+        if not _has_valid_replay_metadata(event):
+            return _invalid_verification(event, checked)
         try:
             expected = append_event(
                 previous,
