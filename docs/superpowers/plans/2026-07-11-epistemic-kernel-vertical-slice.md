@@ -131,7 +131,6 @@ scientist-harness = "super_scientist.cli.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/super_scientist"]
-force-include = { "alembic" = "super_scientist/_migrations" }
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers --strict-config"
@@ -1740,6 +1739,12 @@ def create_append_only_triggers() -> None:
 ```
 
 `downgrade()` drops the triggers before dropping tables in reverse dependency order. `alembic/env.py` sets `target_metadata = metadata` imported from `super_scientist.providers.storage.schema`.
+
+After creating the `alembic/` directory and its migration files, add the following exact setting under `[tool.hatch.build.targets.wheel]` in `pyproject.toml` so packaged wheels include the migrations:
+
+```toml
+force-include = { "alembic" = "super_scientist/_migrations" }
+```
 
 - [ ] **Step 5: Implement engine setup and `BEGIN IMMEDIATE` unit of work**
 
