@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from enum import StrEnum
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_serializer
+
+from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
+from super_scientist.domain.evidence.models import EvidenceRecord
+from super_scientist.domain.identity import ActorIdentity
+from super_scientist.domain.primitives import UtcTimestamp
+
+
+class RejectionCode(StrEnum):
+    SELF_APPROVAL = "SELF_APPROVAL"
+    MISSING_EVIDENCE = "MISSING_EVIDENCE"
+    EVIDENCE_HASH_MISMATCH = "EVIDENCE_HASH_MISMATCH"
+    INVALID_STATUS_TRANSITION = "INVALID_STATUS_TRANSITION"
+    INDEPENDENT_REVIEW_REQUIRED = "INDEPENDENT_REVIEW_REQUIRED"
+    PERMISSION_DENIED = "PERMISSION_DENIED"
+    IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
+    POLICY_HASH_MISMATCH = "POLICY_HASH_MISMATCH"
+
+
+class Approval(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    approver: ActorIdentity
+    approved_at: UtcTimestamp
+
+
+class ProposalBase(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    proposal_id: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    proposer: ActorIdentity
+    approval: Approval | None = None
+
+
+class AddEvidence(ProposalBase):
+    proposal_type: Literal["add_evidence"] = "add_evidence"
+    evidence: EvidenceRecord
+
+    @field_serializer("evidence", when_used="json")
+    def serialize_evidence(self, evidence: EvidenceRecord) -> object:
+        return _json_compatible(evidence.model_dump(warnings="none"))
+
+
+class ProposeClaim(ProposalBase):
+    proposal_type: Literal["propose_claim"] = "propose_claim"
+    claim: AtomicClaim
+
+
+class TransitionClaim(ProposalBase):
+    proposal_type: Literal["transition_claim"] = "transition_claim"
+    claim_id: str = Field(min_length=1)
+    expected_version: StrictInt = Field(ge=1)
+    target_status: ClaimStatus
+
+
+Proposal = Annotated[
+    AddEvidence | ProposeClaim | TransitionClaim,
+    Field(discriminator="proposal_type"),
+]
+
+
+class RejectionReason(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    code: RejectionCode
+    message: str = Field(min_length=1)
+
+
+class TransactionDecision(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    proposal_id: str = Field(min_length=1)
+    accepted: bool
+    replayed: bool = False
+    reasons: tuple[RejectionReason, ...] = ()
+
+
+def _json_compatible(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _json_compatible(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_json_compatible(item) for item in value]
+    if isinstance(value, frozenset):
+        compatible = [_json_compatible(item) for item in value]
+        return sorted(
+            compatible,
+            key=lambda item: json.dumps(
+                item,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+    return value
