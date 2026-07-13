@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -6,7 +7,7 @@ from super_scientist.domain.primitives import NonBlankText, Sha256Hex, StableIde
 
 
 class RuntimeSettings(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     database_url: NonBlankText = "sqlite:///scientist-harness.db"
     artifact_root: Path = Path("artifacts")
@@ -14,9 +15,9 @@ class RuntimeSettings(BaseModel):
 
 
 class GovernancePolicy(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: int = 1
+    schema_version: Literal[1] = 1
     required_claim_checks: tuple[StableIdentifier, ...] = Field(min_length=1)
     human_approval_for: frozenset[StableIdentifier] = Field(
         default_factory=lambda: frozenset({"governance_change", "adapter_promotion"})
@@ -41,7 +42,7 @@ class GovernancePolicy(BaseModel):
 
 
 class PolicySnapshot(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     policy_hash: Sha256Hex
     policy: GovernancePolicy

@@ -51,7 +51,9 @@ scientist-harness audit verify --root .kernel --json
 
 The second command reports `valid: true` and `checked_events: 0`. See
 `docs/examples/kernel-vertical-slice.md` for the deterministic offline evidence and
-claim example.
+claim example. `init` activates a policy only for a genuinely empty kernel database.
+If durable state exists but its active governance pointer is missing, initialization
+fails closed; `audit verify` still opens that storage and reports the integrity error.
 
 When `--json` is present, command parsing, required-option, option-value, and input-path
 failures also return exactly one schema-version-1 JSON error envelope with exit status
@@ -59,7 +61,9 @@ failures also return exactly one schema-version-1 JSON error envelope with exit 
 Policy file validation reports `INVALID_POLICY`; other command/domain validation reports
 `INVALID_ARGUMENT` or an `INVALID_PROPOSAL` decision. The CLI pins Typer 0.19.2 with
 Click 8.3.3 so parser translation uses the public Click hierarchy on a dependency line
-with no known audited vulnerability.
+with no known audited vulnerability. Governance policy files require schema version 1,
+valid UTF-8 JSON, and no unknown fields. Externally parsed identities, evidence, claims,
+and nested proposal records also reject unknown fields.
 
 ## Security Boundaries
 

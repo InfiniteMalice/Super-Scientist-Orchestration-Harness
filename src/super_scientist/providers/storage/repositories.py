@@ -751,8 +751,23 @@ class PolicyRepository:
 
 class RepositorySet:
     def __init__(self, connection: Connection) -> None:
+        self._connection = connection
         self.evidence = EvidenceRepository(connection)
         self.claims = ClaimRepository(connection)
         self.transactions = TransactionRepository(connection)
         self.audit = AuditRepository(connection)
         self.policies = PolicyRepository(connection)
+
+    def has_durable_state(self) -> bool:
+        tables = (
+            governance_policies,
+            governance_state,
+            evidence_records,
+            claim_versions,
+            claim_heads,
+            transactions,
+            audit_events,
+        )
+        return any(
+            self._connection.execute(select(table).limit(1)).first() is not None for table in tables
+        )

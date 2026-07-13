@@ -15,7 +15,7 @@ class ActorKind(StrEnum):
 
 
 class ActorIdentity(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     actor_id: StableIdentifier
     kind: ActorKind

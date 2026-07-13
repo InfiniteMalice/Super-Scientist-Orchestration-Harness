@@ -228,6 +228,14 @@ cannot silently alter active rules. A mismatch fails closed. Constitutional chan
 require a governance transaction, review under the active policy, quality evidence,
 and human approval.
 
+**Approved third final-review correction:** a missing active-policy pointer is not an
+invitation to initialize when any registered policy or other durable kernel state
+exists. Initialization may activate a policy only in a genuinely empty database;
+orphaned governance fails closed and remains inspectable through storage-only audit
+verification. Policy input is strict schema-version-1 JSON: invalid UTF-8, unsupported
+versions, and unknown fields are rejected. Externally parsed nested domain records also
+forbid unknown fields so canonical transaction identity cannot discard future input.
+
 ## 8. Domain Contracts
 
 ### 8.1 EvidenceRecord
@@ -340,6 +348,12 @@ Stable rejection codes include `SELF_APPROVAL`, `MISSING_EVIDENCE`,
 Policy rejection is a durable domain result, not an exception. Exceptions are reserved
 for infrastructure faults. Audit, policy, artifact, and projection integrity failures
 fail closed.
+
+Expected proposal-construction validation failures are durable only when a typed,
+trusted attempt envelope establishes proposal ID, idempotency key, proposer, and kind
+before factory invocation. An exact retry replays that rejection without invoking the
+factory. Unexpected programming and storage exceptions roll back and propagate as
+infrastructure faults; they are never converted to `INVALID_PROPOSAL`.
 
 ## 10. Identity and Authority
 

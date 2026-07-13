@@ -3,7 +3,9 @@
 ## Active Policy
 
 `scientist-harness init` loads `governance-policy.json`, validates it as a frozen typed
-policy, canonicalizes it, and computes a SHA-256 policy hash. The policy snapshot is an
+schema-version-1 policy with no unknown fields, canonicalizes it, and computes a SHA-256
+policy hash. Invalid UTF-8, malformed JSON, unsupported versions, and extras fail as
+`INVALID_POLICY`. The policy snapshot is an
 append-only SQLite record; `governance_state` holds its active hash. Application
 submissions compare their configured snapshot with that durable active hash before
 admission. Missing, malformed, altered, or mismatched policy state fails closed.
@@ -14,9 +16,13 @@ policy. Policy-mismatch events record configured and stored hashes separately an
 governed by the stored active policy; if no governing policy exists, the rejection
 cannot be durably attributed and no transaction or audit event is added.
 
-Re-running `init` with the same policy is idempotent. Re-running it after changing the
-policy file is rejected. A policy file edit therefore cannot silently alter active
-rules.
+Re-running `init` with the same active policy is idempotent. A migrated database is
+initializable only when every kernel table is genuinely empty. If any registered policy,
+transaction, audit event, evidence projection, claim version/head, or other durable
+kernel state exists without the active pointer, `init` refuses both unchanged and
+changed policy files. `audit verify` uses a storage-only path so it can report that
+orphaned state even though normal runtime construction is unavailable. Re-running
+`init` after changing an intact workspace policy is also rejected.
 
 ## Approval Boundary
 

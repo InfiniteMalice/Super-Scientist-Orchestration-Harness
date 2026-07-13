@@ -38,6 +38,29 @@ def test_policy_rejects_empty_required_checks() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"schema_version": 2, "required_claim_checks": ["source_exists"]},
+        {
+            "schema_version": 1,
+            "required_claim_checks": ["source_exists"],
+            "unexpected_field": "must be rejected",
+        },
+    ],
+    ids=["unsupported-version", "extra-field"],
+)
+def test_policy_file_rejects_unsupported_version_and_extras(
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        load_policy(path)
+
+
 def test_policy_collections_are_deeply_immutable() -> None:
     policy = GovernancePolicy(
         required_claim_checks=[" source_exists "],

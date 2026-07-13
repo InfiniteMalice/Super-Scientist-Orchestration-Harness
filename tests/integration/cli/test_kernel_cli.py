@@ -79,6 +79,60 @@ def test_init_emits_versioned_json_and_is_idempotent(tmp_path: Path) -> None:
     assert first["data"] == second["data"]
 
 
+def test_init_activates_policy_for_genuinely_empty_migrated_database(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'scientist-harness.db').resolve().as_posix()}"
+    kernel.upgrade_database(database_url)
+
+    result = runner.invoke(app, ["init", "--root", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json_payload(result)["success"] is True
+
+
+@pytest.mark.parametrize("changed_policy", [False, True], ids=["unchanged", "changed"])
+def test_init_refuses_orphaned_governance_and_audit_verify_reports_it(
+    tmp_path: Path,
+    changed_policy: bool,
+) -> None:
+    initialize_fixture(tmp_path)
+    database = sqlite3.connect(tmp_path / "scientist-harness.db")
+    try:
+        database.execute("DELETE FROM governance_state")
+        database.commit()
+    finally:
+        database.close()
+    if changed_policy:
+        (tmp_path / "governance-policy.json").write_text(
+            '{"schema_version":1,"required_claim_checks":["source_exists"]}',
+            encoding="utf-8",
+        )
+
+    init_result = runner.invoke(app, ["init", "--root", str(tmp_path), "--json"])
+
+    assert init_result.exit_code == 2
+    init_payload = json_payload(init_result)
+    assert init_payload["command"] == "init"
+    assert init_payload["errors"][0]["code"] == "STORAGE_INTEGRITY_ERROR"
+    database = sqlite3.connect(tmp_path / "scientist-harness.db")
+    try:
+        assert database.execute("SELECT COUNT(*) FROM governance_state").fetchone() == (0,)
+        assert database.execute("SELECT COUNT(*) FROM governance_policies").fetchone() == (1,)
+    finally:
+        database.close()
+
+    audit_result = runner.invoke(
+        app,
+        ["audit", "verify", "--root", str(tmp_path), "--json"],
+    )
+
+    assert audit_result.exit_code == 3
+    audit_payload = json_payload(audit_result)
+    assert audit_payload["command"] == "audit verify"
+    assert audit_payload["success"] is False
+    assert audit_payload["data"]["valid"] is False
+    assert audit_payload["errors"][0]["code"] == "AUDIT_INTEGRITY_ERROR"
+
+
 def test_init_disposes_every_created_engine(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -150,6 +204,18 @@ def test_init_rejects_policy_change_with_json_error(tmp_path: Path) -> None:
 
 def test_init_reports_malformed_policy_as_json_error(tmp_path: Path) -> None:
     (tmp_path / "governance-policy.json").write_text("{", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", "--root", str(tmp_path), "--json"])
+
+    assert result.exit_code == 2
+    payload = json_payload(result)
+    assert payload["command"] == "init"
+    assert payload["success"] is False
+    assert payload["errors"][0]["code"] == "INVALID_POLICY"
+
+
+def test_init_reports_invalid_utf8_policy_as_json_error(tmp_path: Path) -> None:
+    (tmp_path / "governance-policy.json").write_bytes(b"\xff\xfe")
 
     result = runner.invoke(app, ["init", "--root", str(tmp_path), "--json"])
 
@@ -272,12 +338,21 @@ def test_claim_domain_validation_is_invalid_proposal_not_invalid_policy(
     arguments[arguments.index("--proposition") + 1] = "   "
 
     result = runner.invoke(app, arguments)
+    replay = runner.invoke(app, arguments)
 
     assert result.exit_code == 2
+    assert replay.exit_code == 2
     payload = json_payload(result)
+    replay_payload = json_payload(replay)
     assert payload["command"] == "claim propose"
     assert payload["decision"]["reasons"][0]["code"] == "INVALID_PROPOSAL"
+    assert payload["decision"]["replayed"] is False
+    assert replay_payload["decision"]["replayed"] is True
     assert all(error["code"] != "INVALID_POLICY" for error in payload["errors"])
+    transactions = runner.invoke(app, ["transaction", "list", "--root", str(tmp_path), "--json"])
+    audit = runner.invoke(app, ["audit", "verify", "--root", str(tmp_path), "--json"])
+    assert len(json_payload(transactions)["data"]) == 1
+    assert json_payload(audit)["data"]["checked_events"] == 1
 
 
 def test_evidence_domain_validation_is_invalid_proposal_not_invalid_policy(
@@ -287,26 +362,33 @@ def test_evidence_domain_validation_is_invalid_proposal_not_invalid_policy(
     input_file = tmp_path / "observation.txt"
     input_file.write_text("observation", encoding="utf-8")
 
-    result = runner.invoke(
-        app,
-        [
-            "evidence",
-            "add",
-            "--root",
-            str(tmp_path),
-            "--source",
-            "   ",
-            "--file",
-            str(input_file),
-            "--json",
-        ],
-    )
+    arguments = [
+        "evidence",
+        "add",
+        "--root",
+        str(tmp_path),
+        "--source",
+        "   ",
+        "--file",
+        str(input_file),
+        "--json",
+    ]
+    result = runner.invoke(app, arguments)
+    replay = runner.invoke(app, arguments)
 
     assert result.exit_code == 2
+    assert replay.exit_code == 2
     payload = json_payload(result)
+    replay_payload = json_payload(replay)
     assert payload["command"] == "evidence add"
     assert payload["decision"]["reasons"][0]["code"] == "INVALID_PROPOSAL"
+    assert payload["decision"]["replayed"] is False
+    assert replay_payload["decision"]["replayed"] is True
     assert all(error["code"] != "INVALID_POLICY" for error in payload["errors"])
+    transactions = runner.invoke(app, ["transaction", "list", "--root", str(tmp_path), "--json"])
+    audit = runner.invoke(app, ["audit", "verify", "--root", str(tmp_path), "--json"])
+    assert len(json_payload(transactions)["data"]) == 1
+    assert json_payload(audit)["data"]["checked_events"] == 1
 
 
 def test_evidence_add_replays_with_stable_identity_and_keeps_projections(tmp_path: Path) -> None:

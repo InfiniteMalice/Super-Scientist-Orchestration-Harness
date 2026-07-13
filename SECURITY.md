@@ -14,6 +14,13 @@ stored only as a typed `InvalidProposal` rejection. If proposal or idempotency i
 cannot be recovered, the stable rejection is intentionally non-durable rather than
 inventing authority or leaking serializer/storage exceptions.
 
+Intent factories receive no authority to define their own durable identity: a typed
+attempt envelope fixes proposal ID, idempotency key, proposer, and kind before invocation.
+Expected model/input validation failures are durably rejected and replayed from storage.
+Unexpected programming or storage exceptions are not relabeled as invalid user input;
+they propagate while the unit of work rolls back. External configuration, identity,
+evidence, span, artifact, claim, evidence-link, and nested proposal models reject extras.
+
 `scientist-harness quality-gate` is a separate development command. It invokes only its
 eight fixed source-controlled argument vectors and exposes no arbitrary command, path,
 selection, skip, or threshold input. Its dependency audit may use network access. This
@@ -53,7 +60,9 @@ reconciles policy, claim heads and history, evidence projections, transactions, 
 audit decisions, then rehashes every authoritative artifact. It runs before mutation,
 before exact replay returns, and through `audit verify`. Corruption, policy mismatch,
 projection inconsistency, evidence replacement, and artifact mismatch stop the affected
-operation; an empty workspace remains valid.
+operation; a genuinely empty workspace remains valid. A database with any durable
+kernel row but no active governance pointer is corrupt, not uninitialized. `init` cannot
+repair or overwrite that authority gap; storage-only `audit verify` reports it.
 
 Durable state requires an active registered policy, and each audit event's governing
 and stored policy references, plus any configured policy reference it carries, are

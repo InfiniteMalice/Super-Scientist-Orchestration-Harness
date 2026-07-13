@@ -20,14 +20,14 @@ class ClaimStatus(StrEnum):
 
 
 class EvidenceLink(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     evidence_id: StableIdentifier
     supporting_span: NonBlankText
 
 
 class AtomicClaim(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     claim_id: StableIdentifier
     version: StrictInt = Field(ge=1)

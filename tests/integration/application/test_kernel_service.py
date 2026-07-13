@@ -23,6 +23,7 @@ from super_scientist.domain.evidence.models import (
 )
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
+from super_scientist.kernel.transactions import models as transaction_models
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
     Approval,
@@ -426,6 +427,12 @@ def test_concurrent_identical_intents_create_one_proposal_and_one_replay(
     kernel: KernelFixture,
 ) -> None:
     proposal = kernel.valid_add_evidence("proposal-concurrent", "key-concurrent", b"same")
+    attempt = transaction_models.ProposalAttempt(
+        proposal_id=proposal.proposal_id,
+        idempotency_key=proposal.idempotency_key,
+        proposer=proposal.proposer,
+        proposal_kind="add_evidence",
+    )
     barrier = Barrier(3)
     factory_lock = Lock()
     factory_calls = 0
@@ -438,7 +445,7 @@ def test_concurrent_identical_intents_create_one_proposal_and_one_replay(
 
     def submit() -> TransactionDecision:
         barrier.wait(timeout=10)
-        return kernel.service.submit_intent(proposal.idempotency_key, proposal_factory)
+        return kernel.service.submit_intent(attempt, proposal_factory)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(submit) for _ in range(2)]
@@ -641,6 +648,36 @@ def test_service_returns_stable_nondurable_rejection_when_identity_is_unusable(
         assert repositories.audit.list_all() == ()
 
 
+def test_nested_extra_cannot_collapse_into_clean_proposal_transaction(
+    kernel: KernelFixture,
+) -> None:
+    clean = kernel.valid_add_evidence(
+        "proposal-nested-extra",
+        "key-nested-extra",
+        b"strict",
+    )
+    payload = clean.model_dump(mode="json")
+    payload["evidence"]["artifact"]["unexpected_field"] = "must be rejected"
+
+    malformed_decision = kernel.service.submit(payload)
+    clean_decision = kernel.service.submit(clean)
+
+    assert not malformed_decision.accepted
+    assert malformed_decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    assert not clean_decision.accepted
+    assert clean_decision.reasons[0].code is RejectionCode.IDEMPOTENCY_CONFLICT
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        stored = repositories.transactions.get_by_idempotency_key(clean.idempotency_key)
+        assert stored is not None
+        assert isinstance(stored.proposal, transaction_models.InvalidProposal)
+        assert stored.proposal_hash != sha256_hex(
+            canonical_json_bytes(clean.model_dump(mode="json"))
+        )
+        assert repositories.evidence.list_all() == ()
+        assert len(repositories.audit.list_all()) == 2
+
+
 def test_submit_intent_durably_rejects_malformed_factory_result(
     kernel: KernelFixture,
 ) -> None:
@@ -649,9 +686,15 @@ def test_submit_intent_durably_rejects_malformed_factory_result(
         proposal_id="proposal-malformed-factory",
         idempotency_key="key-malformed-factory",
     )
+    attempt = transaction_models.ProposalAttempt(
+        proposal_id="proposal-malformed-factory",
+        idempotency_key="key-malformed-factory",
+        proposer=kernel.actor,
+        proposal_kind="add_evidence",
+    )
 
     decision = kernel.service.submit_intent(
-        "key-malformed-factory",
+        attempt,
         lambda: cast(Proposal, malformed),
     )
 
@@ -665,6 +708,93 @@ def test_submit_intent_durably_rejects_malformed_factory_result(
         assert len(repositories.audit.list_all()) == 1
 
 
+def test_submit_intent_durably_audits_validation_failure_and_replays_before_factory(
+    kernel: KernelFixture,
+) -> None:
+    proposal = kernel.valid_add_evidence(
+        "proposal-invalid-attempt",
+        "key-invalid-attempt",
+        b"unused",
+    )
+    attempt = transaction_models.ProposalAttempt(
+        proposal_id=proposal.proposal_id,
+        idempotency_key=proposal.idempotency_key,
+        proposer=proposal.proposer,
+        proposal_kind="add_evidence",
+    )
+    factory_calls = 0
+
+    def invalid_factory() -> AddEvidence:
+        nonlocal factory_calls
+        factory_calls += 1
+        evidence = proposal.evidence
+        invalid_evidence = EvidenceRecord(
+            evidence_id=evidence.evidence_id,
+            evidence_type=evidence.evidence_type,
+            source_locator="   ",
+            retrieved_at=evidence.retrieved_at,
+            artifact=evidence.artifact,
+            extracted_span=evidence.extracted_span,
+            structured_observation=evidence.structured_observation,
+            provenance=evidence.provenance,
+            license=evidence.license,
+            ingestion_actor_id=evidence.ingestion_actor_id,
+            verification_state=evidence.verification_state,
+        )
+        return proposal.model_copy(update={"evidence": invalid_evidence})
+
+    first = kernel.service.submit_intent(attempt, invalid_factory)
+    second = kernel.service.submit_intent(attempt, invalid_factory)
+
+    assert factory_calls == 1
+    assert not first.accepted
+    assert first.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    assert second.replayed
+    assert second.model_copy(update={"replayed": False}) == first
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        stored = repositories.transactions.get_by_idempotency_key(attempt.idempotency_key)
+        assert stored is not None
+        assert isinstance(stored.proposal, transaction_models.InvalidProposal)
+        assert stored.proposal.proposer == attempt.proposer
+        assert stored.proposal.attempted_proposal_kind == attempt.proposal_kind
+        assert len(repositories.transactions.list_all()) == 1
+        assert len(repositories.audit.list_all()) == 1
+        assert repositories.evidence.list_all() == ()
+
+
+def test_submit_intent_propagates_unexpected_factory_error_and_rolls_back(
+    kernel: KernelFixture,
+) -> None:
+    proposal = kernel.valid_add_evidence(
+        "proposal-runtime-error",
+        "key-runtime-error",
+        b"unused",
+    )
+    attempt = transaction_models.ProposalAttempt(
+        proposal_id=proposal.proposal_id,
+        idempotency_key=proposal.idempotency_key,
+        proposer=proposal.proposer,
+        proposal_kind="add_evidence",
+    )
+    factory_calls = 0
+
+    def broken_factory() -> AddEvidence:
+        nonlocal factory_calls
+        factory_calls += 1
+        raise RuntimeError("factory programming error")
+
+    with pytest.raises(RuntimeError, match="factory programming error"):
+        kernel.service.submit_intent(attempt, broken_factory)
+
+    assert factory_calls == 1
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        assert repositories.transactions.list_all() == ()
+        assert repositories.audit.list_all() == ()
+        assert repositories.evidence.list_all() == ()
+
+
 def test_submit_intent_rejects_factory_key_mismatch_without_raising(
     kernel: KernelFixture,
 ) -> None:
@@ -673,8 +803,14 @@ def test_submit_intent_rejects_factory_key_mismatch_without_raising(
         "different-key",
         b"unused",
     )
+    attempt = transaction_models.ProposalAttempt(
+        proposal_id=proposal.proposal_id,
+        idempotency_key="expected-key",
+        proposer=proposal.proposer,
+        proposal_kind="add_evidence",
+    )
 
-    decision = kernel.service.submit_intent("expected-key", lambda: proposal)
+    decision = kernel.service.submit_intent(attempt, lambda: proposal)
 
     assert not decision.accepted
     assert decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL

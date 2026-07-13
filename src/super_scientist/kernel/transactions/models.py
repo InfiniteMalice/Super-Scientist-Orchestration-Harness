@@ -12,6 +12,8 @@ from super_scientist.domain.evidence.models import EvidenceRecord
 from super_scientist.domain.identity import ActorIdentity
 from super_scientist.domain.primitives import NonBlankText, StableIdentifier, UtcTimestamp
 
+type ProposalKind = Literal["add_evidence", "propose_claim", "transition_claim"]
+
 
 class RejectionCode(StrEnum):
     INVALID_PROPOSAL = "INVALID_PROPOSAL"
@@ -32,6 +34,15 @@ class Approval(BaseModel):
 
     approver: ActorIdentity
     approved_at: UtcTimestamp
+
+
+class ProposalAttempt(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    proposal_id: StableIdentifier
+    idempotency_key: StableIdentifier
+    proposer: ActorIdentity
+    proposal_kind: ProposalKind
 
 
 class ProposalBase(BaseModel):
@@ -69,6 +80,8 @@ class InvalidProposal(BaseModel):
     proposal_id: StableIdentifier
     idempotency_key: StableIdentifier
     validation_error: NonBlankText
+    proposer: ActorIdentity | None = None
+    attempted_proposal_kind: ProposalKind | None = None
 
 
 Proposal = Annotated[

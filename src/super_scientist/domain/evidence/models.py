@@ -62,7 +62,7 @@ def _freeze_provenance(value: Mapping[str, str]) -> Mapping[str, str]:
 
 
 class ArtifactRef(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     sha256: Sha256Hex
     size_bytes: int = Field(ge=0)
@@ -81,7 +81,7 @@ class ArtifactRef(BaseModel):
 
 
 class EvidenceSpan(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     start: int = Field(ge=0)
     end: int = Field(gt=0)
@@ -97,7 +97,7 @@ class EvidenceSpan(BaseModel):
 
 
 class EvidenceRecord(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     evidence_id: StableIdentifier
     evidence_type: StableIdentifier

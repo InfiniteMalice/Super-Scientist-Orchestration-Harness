@@ -46,7 +46,7 @@ def verify_workspace(
         transactions = repositories.transactions.list_all()
         events = repositories.audit.list_all()
         _require(
-            active_policy is not None or not (evidence or heads or transactions or events),
+            active_policy is not None or not repositories.has_durable_state(),
             "durable workspace state requires an active registered policy",
         )
         audit_records = _validated_audit_records(events, repositories)

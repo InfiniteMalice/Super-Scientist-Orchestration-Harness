@@ -27,6 +27,7 @@ from super_scientist.kernel.transactions.models import (
     AddEvidence,
     Approval,
     Proposal,
+    ProposalAttempt,
     ProposeClaim,
     TransactionDecision,
 )
@@ -144,10 +145,10 @@ def _json_fallback(value: object) -> object:
 
 def _submit_intent(
     runtime: Runtime,
-    intent_key: str,
+    attempt: ProposalAttempt,
     create_proposal: Callable[[], Proposal],
 ) -> TransactionDecision:
-    return runtime.service.submit_intent(intent_key, create_proposal)
+    return runtime.service.submit_intent(attempt, create_proposal)
 
 
 def build_runtime(root: Path) -> Runtime:
@@ -197,7 +198,7 @@ def init_command(
         policy_path.write_text(policy.model_dump_json(indent=2), encoding="utf-8")
     try:
         snapshot = load_policy(policy_path)
-    except (JSONDecodeError, ValidationError) as error:
+    except (JSONDecodeError, UnicodeError, ValidationError) as error:
         raise CliBoundaryError("INVALID_POLICY", str(error)) from error
     url = _database_url(resolved)
     upgrade_database(url)
@@ -205,8 +206,14 @@ def init_command(
     clock = SystemClock()
     try:
         with DatabaseUnitOfWork(engine) as uow:
-            policies = uow.repositories().policies
+            repositories = uow.repositories()
+            policies = repositories.policies
             active = policies.get_active()
+            if active is None and repositories.has_durable_state():
+                raise StorageIntegrityError(
+                    "storage integrity error: active governance policy pointer is missing "
+                    "from a non-empty workspace"
+                )
             if active is not None and active.policy_hash != snapshot.policy_hash:
                 raise CliBoundaryError(
                     "POLICY_CHANGE_REJECTED",
@@ -251,9 +258,15 @@ def evidence_add(
             )
         }"
         evidence_id = _intent_identifier("ev", intent_key)
+        actor = _actor(runtime.clock)
+        attempt = ProposalAttempt(
+            proposal_id=_intent_identifier("proposal", intent_key),
+            idempotency_key=intent_key,
+            proposer=actor,
+            proposal_kind="add_evidence",
+        )
 
         def create_proposal() -> AddEvidence:
-            actor = _actor(runtime.clock)
             text = (
                 data.decode("utf-8") if artifact.media_type.startswith("text/") and data else None
             )
@@ -270,7 +283,7 @@ def evidence_add(
                 ingestion_actor_id=actor.actor_id,
             )
             return AddEvidence(
-                proposal_id=_intent_identifier("proposal", intent_key),
+                proposal_id=attempt.proposal_id,
                 idempotency_key=intent_key,
                 proposer=actor,
                 evidence=record,
@@ -278,7 +291,7 @@ def evidence_add(
 
         decision = _submit_intent(
             runtime,
-            intent_key,
+            attempt,
             create_proposal,
         )
         emit(
@@ -343,9 +356,15 @@ def claim_propose(
             )
         }"
         claim_id = _intent_identifier("claim", intent_key)
+        actor = _actor(runtime.clock)
+        attempt = ProposalAttempt(
+            proposal_id=_intent_identifier("proposal", intent_key),
+            idempotency_key=intent_key,
+            proposer=actor,
+            proposal_kind="propose_claim",
+        )
 
         def create_proposal() -> ProposeClaim:
-            actor = _actor(runtime.clock)
             claim = AtomicClaim(
                 claim_id=claim_id,
                 version=1,
@@ -361,7 +380,7 @@ def claim_propose(
                 Approval(approver=actor, approved_at=runtime.clock.now()) if self_approve else None
             )
             return ProposeClaim(
-                proposal_id=_intent_identifier("proposal", intent_key),
+                proposal_id=attempt.proposal_id,
                 idempotency_key=intent_key,
                 proposer=actor,
                 approval=approval,
@@ -370,7 +389,7 @@ def claim_propose(
 
         decision = _submit_intent(
             runtime,
-            intent_key,
+            attempt,
             create_proposal,
         )
         emit(
@@ -426,8 +445,19 @@ def audit_verify(
     root: Root,
     json_output: JsonOutput = False,
 ) -> None:
-    with build_runtime(root) as runtime, DatabaseUnitOfWork(runtime.engine) as uow:
-        result = verify_workspace(uow.repositories(), runtime.artifacts)
+    resolved = root.resolve()
+    if not (resolved / "scientist-harness.db").is_file():
+        raise CliBoundaryError(
+            "WORKSPACE_NOT_INITIALIZED",
+            "workspace is not initialized; run init first",
+        )
+    engine = create_database_engine(_database_url(resolved))
+    try:
+        artifacts = FileArtifactStore(resolved / "artifacts")
+        with DatabaseUnitOfWork(engine) as uow:
+            result = verify_workspace(uow.repositories(), artifacts)
+    finally:
+        engine.dispose()
     errors = (
         []
         if result.valid

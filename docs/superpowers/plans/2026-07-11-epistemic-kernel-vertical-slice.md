@@ -55,6 +55,13 @@ show a weaker boundary:
 - Durable workspaces and audit events are bound to registered governing policy
   snapshots. Malformed service proposals are normalized before use and are durable only
   when proposal and idempotency identifiers can be recovered safely.
+- `init` activates policy only in a genuinely empty database; durable state with a
+  missing active pointer is corruption, and storage-only `audit verify` must still
+  report it. Intent factories execute only after a typed `ProposalAttempt` fixes ID,
+  key, proposer, and kind; expected validation failures are durable and replayable,
+  while unexpected faults roll back and propagate. Policy input is schema version 1,
+  and all externally parsed config/domain/nested proposal models forbid extras without
+  rejecting legitimate JSON encodings of declared tuples and mappings.
 
 ---
 

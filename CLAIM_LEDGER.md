@@ -14,6 +14,8 @@ An `AtomicClaim` is a frozen, versioned record with these fields:
 Version 1 has no parent. Every later version must name
 `<claim_id>:<previous-version>` as its parent. Claim versions are append-only; the head
 table is a validated effective-state projection. A new claim must begin `PROPOSED`.
+External claim and evidence-link JSON forbids unknown fields; additions require an
+explicit schema change and cannot be silently discarded before proposal hashing.
 
 The atomic-fact evaluation framing is inspired by SciConBench [S02]. This project uses
 its own claim schema and deterministic validators, imports no benchmark content or

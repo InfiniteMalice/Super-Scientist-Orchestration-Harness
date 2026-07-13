@@ -60,14 +60,17 @@ projects a `HASH_VERIFIED` copy. Failure is a durable audited
 The public proposal union is `AddEvidence`, `ProposeClaim`, and `TransitionClaim`;
 `InvalidProposal` is an internal durable rejection envelope. Every normal proposal
 carries a proposal identifier, idempotency key, proposer identity, and optional
-approval. Submission follows this flow:
+approval. Intent submission first supplies a typed `ProposalAttempt` containing stable
+proposal/idempotency identifiers, proposer identity, and expected proposal kind.
+Submission follows this flow:
 
 ```text
-untrusted proposal or intent factory result
--> TypeAdapter normalization and safe identity recovery
+typed attempt envelope or untrusted direct proposal
 -> BEGIN IMMEDIATE
--> canonical proposal hash and idempotency lookup
+-> shared workspace integrity and idempotency lookup
 -> invoke an intent factory only when no decision exists
+-> strict TypeAdapter normalization and exact attempt-envelope matching
+-> canonical proposal hash
 -> active policy hash and proposal identity checks
 -> independent-approval check
 -> entity, status-transition, and evidence-span checks
@@ -85,8 +88,14 @@ required checks fail closed.
 Malformed direct-service input with recoverable proposal and idempotency identifiers is
 normalized into an audited `INVALID_PROPOSAL` transaction. When either identifier is
 unusable, the service returns a stable `INVALID_PROPOSAL` decision before storage; no
-truthful durable identity exists for an audit record. Evidence ingestion actors,
-initial claim creators, and transition creators must match their proposers.
+truthful durable identity exists for an audit record. Expected Pydantic/input decoding
+failures inside an intent factory use the prevalidated attempt identity and become one
+audited, replayable `INVALID_PROPOSAL`; retries do not invoke the factory. Unexpected
+programming and storage exceptions propagate and roll back. Factory results must match
+the attempt's ID, key, proposer, and kind. Evidence ingestion actors, initial claim
+creators, and transition creators must match their proposers. External config and
+nested domain records forbid unknown fields, while JSON arrays/objects remain accepted
+for declared tuple/mapping fields.
 
 `TransitionClaim` carries the complete intended next claim version. Admission validates
 that exact state and the application service projects it unchanged; it does not
@@ -112,7 +121,9 @@ Repository reads validate redundant columns against canonical event JSON and ver
 complete chain. Shared workspace verification also reconciles transactions with audit
 decisions and exact projections, validates claim heads/history, and rehashes every
 authoritative evidence artifact. `scientist-harness audit verify` exposes that whole
-workspace check and returns nonzero for corruption; an empty chain is valid.
+workspace check through a storage-only runtime and returns nonzero for corruption even
+when a missing active policy prevents normal service construction; an empty chain in a
+genuinely empty or initialized workspace is valid.
 
 JSON parser translation catches public Click exceptions. Typer 0.19.2 and Click 8.3.3
 are pinned because this is a security-audited compatibility line where Typer still

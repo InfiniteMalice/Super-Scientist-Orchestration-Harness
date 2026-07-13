@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Protocol
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from super_scientist.application.evidence_verification import verify_artifact_binding
 from super_scientist.application.workspace_integrity import require_workspace_integrity
@@ -22,6 +22,7 @@ from super_scientist.kernel.transactions.models import (
     AddEvidence,
     InvalidProposal,
     Proposal,
+    ProposalAttempt,
     ProposeClaim,
     RejectionCode,
     TransactionDecision,
@@ -73,31 +74,36 @@ class KernelService:
 
     def submit_intent(
         self,
-        idempotency_key: str,
+        attempt: ProposalAttempt,
         proposal_factory: ProposalFactory,
     ) -> TransactionDecision:
-        normalized_key = _safe_identifier(idempotency_key)
-        if normalized_key is None:
-            return _invalid_proposal_decision("invalid-proposal")
         with self._uow_factory() as uow:
             repositories = uow.repositories()
             require_workspace_integrity(repositories, self._artifact_store)
-            prior = repositories.transactions.get_by_idempotency_key(normalized_key)
+            prior = repositories.transactions.get_by_idempotency_key(attempt.idempotency_key)
             if prior is not None:
                 return prior.decision.model_copy(update={"replayed": True})
             try:
                 candidate = proposal_factory()
-            except Exception:
-                return _invalid_proposal_decision("invalid-proposal")
-            normalized = _normalize_proposal(candidate)
-            if isinstance(normalized, TransactionDecision):
-                return normalized
-            if normalized.idempotency_key != normalized_key:
-                normalized = InvalidProposal(
-                    proposal_id=normalized.proposal_id,
-                    idempotency_key=normalized_key,
-                    validation_error="proposal factory returned a different idempotency key",
+            except (UnicodeError, ValidationError) as error:
+                normalized: Proposal = _invalid_attempt(
+                    attempt,
+                    f"proposal factory input validation failed: {error}",
                 )
+            else:
+                normalized_result = _normalize_proposal(candidate)
+                if isinstance(normalized_result, TransactionDecision):
+                    normalized = _invalid_attempt(
+                        attempt,
+                        "proposal factory returned a malformed proposal",
+                    )
+                elif not _matches_attempt(normalized_result, attempt):
+                    normalized = _invalid_attempt(
+                        attempt,
+                        "proposal factory result did not match the trusted attempt envelope",
+                    )
+                else:
+                    normalized = normalized_result
             return self._submit_locked(normalized, repositories)
 
     def _submit_locked(
@@ -212,9 +218,12 @@ class KernelService:
 
 def _normalize_proposal(value: object) -> Proposal | TransactionDecision:
     try:
-        raw = dict(value.__dict__) if isinstance(value, BaseModel) else value
-        return PROPOSAL_ADAPTER.validate_python(raw)
-    except Exception:
+        if isinstance(value, BaseModel):
+            return PROPOSAL_ADAPTER.validate_python(dict(value.__dict__))
+        if isinstance(value, Mapping):
+            return PROPOSAL_ADAPTER.validate_json(canonical_json_bytes(value))
+        return PROPOSAL_ADAPTER.validate_python(value)
+    except (TypeError, ValueError):
         proposal_id = _safe_proposal_field(value, "proposal_id")
         idempotency_key = _safe_proposal_field(value, "idempotency_key")
         if proposal_id is None or idempotency_key is None:
@@ -251,4 +260,24 @@ def _invalid_proposal_decision(proposal_id: str) -> TransactionDecision:
         proposal_id,
         RejectionCode.INVALID_PROPOSAL,
         "proposal failed service boundary validation and could not be stored",
+    )
+
+
+def _matches_attempt(proposal: Proposal, attempt: ProposalAttempt) -> bool:
+    return (
+        not isinstance(proposal, InvalidProposal)
+        and proposal.proposal_id == attempt.proposal_id
+        and proposal.idempotency_key == attempt.idempotency_key
+        and proposal.proposer == attempt.proposer
+        and proposal.proposal_type == attempt.proposal_kind
+    )
+
+
+def _invalid_attempt(attempt: ProposalAttempt, message: str) -> InvalidProposal:
+    return InvalidProposal(
+        proposal_id=attempt.proposal_id,
+        idempotency_key=attempt.idempotency_key,
+        validation_error=message,
+        proposer=attempt.proposer,
+        attempted_proposal_kind=attempt.proposal_kind,
     )

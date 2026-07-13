@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
@@ -12,6 +11,6 @@ def policy_hash(policy: GovernancePolicy) -> str:
 
 
 def load_policy(path: Path) -> PolicySnapshot:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    policy = GovernancePolicy.model_validate(raw)
+    raw = path.read_text(encoding="utf-8")
+    policy = GovernancePolicy.model_validate_json(raw)
     return PolicySnapshot(policy_hash=policy_hash(policy), policy=policy)
