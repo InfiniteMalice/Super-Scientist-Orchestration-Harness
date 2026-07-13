@@ -20,7 +20,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install project and development tools
-        run: python -m pip install ".[dev]"
+        run: python -m pip install -e ".[dev]"
 
       - name: Run fixed quality gate
         run: scientist-harness quality-gate
@@ -55,7 +55,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install project and development tools
-        run: python -m pip install ".[dev]"
+        run: python -m pip install -e ".[dev]"
 
       - name: Exercise Windows junction containment
         run: >-

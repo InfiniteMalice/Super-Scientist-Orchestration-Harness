@@ -150,4 +150,4 @@ def test_quality_gate_rejects_extensibility_surfaces(
 
     assert result.exit_code == 2
     assert called is False
-    assert f"No such option: {option}" in result.output
+    assert f"No such option: {option}" in click.unstyle(result.output)
