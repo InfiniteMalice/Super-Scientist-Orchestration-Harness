@@ -24,6 +24,11 @@ changed policy files. `audit verify` uses a storage-only path so it can report t
 orphaned state even though normal runtime construction is unavailable. Re-running
 `init` after changing an intact workspace policy is also rejected.
 
+Integrity verification enumerates and validates every registered policy, including
+unreferenced rows. Governance state is cardinality-checked as a true singleton and the
+database constrains its identifier to 1; extra or malformed governance rows fail the
+workspace even when the active policy itself remains valid.
+
 ## Approval Boundary
 
 A proposal may include an approval, but the admission engine rejects it with

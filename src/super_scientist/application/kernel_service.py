@@ -10,6 +10,7 @@ from super_scientist.application.evidence_verification import verify_artifact_bi
 from super_scientist.application.workspace_integrity import require_workspace_integrity
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.evidence.models import VerificationState
+from super_scientist.domain.identity import ActorIdentity
 from super_scientist.domain.primitives import (
     StableIdentifier,
     UtcTimestamp,
@@ -23,6 +24,7 @@ from super_scientist.kernel.transactions.models import (
     InvalidProposal,
     Proposal,
     ProposalAttempt,
+    ProposalKind,
     ProposeClaim,
     RejectionCode,
     TransactionDecision,
@@ -47,6 +49,7 @@ type ProposalFactory = Callable[[], object]
 
 PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
 IDENTIFIER_ADAPTER: TypeAdapter[StableIdentifier] = TypeAdapter(StableIdentifier)
+PROPOSAL_KIND_ADAPTER: TypeAdapter[ProposalKind] = TypeAdapter(ProposalKind)
 
 
 class KernelService:
@@ -82,13 +85,32 @@ class KernelService:
             require_workspace_integrity(repositories, self._artifact_store)
             prior = repositories.transactions.get_by_idempotency_key(attempt.idempotency_key)
             if prior is not None:
-                return prior.decision.model_copy(update={"replayed": True})
+                if prior.proposal.attempt_fingerprint == _attempt_fingerprint(attempt):
+                    return prior.decision.model_copy(update={"replayed": True})
+                conflict_proposal = _invalid_attempt(
+                    attempt,
+                    "idempotency key was reused with a different trusted attempt envelope",
+                )
+                decision = AdmissionEngine.rejected(
+                    attempt.proposal_id,
+                    RejectionCode.IDEMPOTENCY_CONFLICT,
+                    "idempotency key was reused with a different trusted attempt envelope",
+                )
+                stored_policy = repositories.policies.get_active()
+                if stored_policy is not None:
+                    self._audit(conflict_proposal, decision, repositories, stored_policy)
+                return decision
             try:
                 candidate = proposal_factory()
-            except (UnicodeError, ValidationError) as error:
+            except ValidationError as error:
                 normalized: Proposal = _invalid_attempt(
                     attempt,
-                    f"proposal factory input validation failed: {error}",
+                    _sanitized_validation_message(error),
+                )
+            except UnicodeError:
+                normalized = _invalid_attempt(
+                    attempt,
+                    "proposal factory input decoding failed",
                 )
             else:
                 normalized_result = _normalize_proposal(candidate)
@@ -103,7 +125,9 @@ class KernelService:
                         "proposal factory result did not match the trusted attempt envelope",
                     )
                 else:
-                    normalized = normalized_result
+                    normalized = normalized_result.model_copy(
+                        update={"attempt_fingerprint": _attempt_fingerprint(attempt)}
+                    )
             return self._submit_locked(normalized, repositories)
 
     def _submit_locked(
@@ -232,6 +256,8 @@ def _normalize_proposal(value: object) -> Proposal | TransactionDecision:
             proposal_id=proposal_id,
             idempotency_key=idempotency_key,
             validation_error="proposal failed service boundary validation",
+            proposer=_safe_proposer(value),
+            attempted_proposal_kind=_safe_proposal_kind(value),
         )
 
 
@@ -280,4 +306,60 @@ def _invalid_attempt(attempt: ProposalAttempt, message: str) -> InvalidProposal:
         validation_error=message,
         proposer=attempt.proposer,
         attempted_proposal_kind=attempt.proposal_kind,
+        attempt_fingerprint=_attempt_fingerprint(attempt),
     )
+
+
+def _attempt_fingerprint(attempt: ProposalAttempt) -> str:
+    proposer = attempt.proposer.model_dump(mode="json")
+    proposer.pop("created_at")
+    return sha256_hex(
+        canonical_json_bytes(
+            {
+                "proposal_id": attempt.proposal_id,
+                "idempotency_key": attempt.idempotency_key,
+                "proposer": proposer,
+                "proposal_kind": attempt.proposal_kind,
+                "intent_digest": attempt.intent_digest,
+            }
+        )
+    )
+
+
+def _sanitized_validation_message(error: ValidationError) -> str:
+    diagnostics: list[str] = []
+    for item in error.errors(include_url=False, include_context=False, include_input=False):
+        location = ".".join(str(segment) for segment in item.get("loc", ())) or "root"
+        diagnostics.append(f"{item.get('type', 'validation_error')} at {location}")
+    return "proposal factory input validation failed: " + "; ".join(diagnostics)
+
+
+def _safe_proposer(value: object) -> ActorIdentity | None:
+    candidate = _raw_proposal_field(value, "proposer")
+    if candidate is None:
+        return None
+    try:
+        if isinstance(candidate, Mapping):
+            return ActorIdentity.model_validate_json(canonical_json_bytes(candidate))
+        return ActorIdentity.model_validate(candidate)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_proposal_kind(value: object) -> ProposalKind | None:
+    candidate = _raw_proposal_field(value, "proposal_type")
+    try:
+        return PROPOSAL_KIND_ADAPTER.validate_python(candidate)
+    except (TypeError, ValueError):
+        return None
+
+
+def _raw_proposal_field(value: object, field: str) -> object:
+    try:
+        if isinstance(value, BaseModel):
+            return value.__dict__.get(field)
+        if isinstance(value, Mapping):
+            return value.get(field)
+        return getattr(value, field, None)
+    except Exception:
+        return None

@@ -1,10 +1,11 @@
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Engine, delete, func, select, update
+from sqlalchemy import Engine, delete, func, insert, select, update
 
 from super_scientist.application.kernel_service import KernelService
 from super_scientist.application.workspace_integrity import verify_workspace
@@ -342,6 +343,64 @@ def test_workspace_verifier_rejects_unregistered_audit_policy_reference(
 
     assert not result.valid
     assert "policy" in result.reason
+
+
+@pytest.mark.parametrize("damage", ["extra-policy", "second-state"])
+def test_workspace_verifier_validates_every_governance_row(
+    integrity: IntegrityFixture,
+    damage: str,
+) -> None:
+    with integrity.uow() as unit_of_work:
+        assert unit_of_work.connection is not None
+        if damage == "extra-policy":
+            unit_of_work.connection.execute(
+                insert(governance_policies).values(
+                    policy_hash="f" * 64,
+                    policy_json='{"schema_version":2,"required_claim_checks":["source_exists"]}',
+                    created_at=NOW.isoformat(),
+                )
+            )
+        else:
+            unit_of_work.connection.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
+            unit_of_work.connection.execute(
+                insert(governance_state).values(
+                    singleton_id=2,
+                    active_policy_hash=integrity.policy.policy_hash,
+                )
+            )
+
+    result = _verify(integrity)
+
+    assert not result.valid
+    assert "governance" in result.reason or "policy" in result.reason
+
+
+@pytest.mark.parametrize("damage", ["extra", "missing-version"])
+def test_workspace_verifier_rejects_noncanonical_stored_audit_envelope(
+    integrity: IntegrityFixture,
+    damage: str,
+) -> None:
+    proposal = integrity.claim_proposal()
+    assert integrity.service.submit(proposal).accepted
+    with integrity.uow() as unit_of_work:
+        assert unit_of_work.connection is not None
+        raw = unit_of_work.connection.execute(select(audit_events.c.event_json)).scalar_one()
+        envelope = json.loads(raw)
+        if damage == "extra":
+            envelope["unexpected_field"] = "must be rejected"
+        else:
+            del envelope["schema_version"]
+        unit_of_work.connection.exec_driver_sql("DROP TRIGGER audit_events_no_update")
+        unit_of_work.connection.execute(
+            update(audit_events).values(
+                event_json=json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+            )
+        )
+
+    result = _verify(integrity)
+
+    assert not result.valid
+    assert "audit" in result.reason
 
 
 def test_workspace_verifier_checks_links_on_withdrawn_history(

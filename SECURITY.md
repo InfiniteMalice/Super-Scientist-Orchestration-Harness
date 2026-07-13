@@ -20,6 +20,9 @@ Expected model/input validation failures are durably rejected and replayed from 
 Unexpected programming or storage exceptions are not relabeled as invalid user input;
 they propagate while the unit of work rolls back. External configuration, identity,
 evidence, span, artifact, claim, evidence-link, and nested proposal models reject extras.
+Durable validation diagnostics contain only approved error types and field locations.
+An intent retry must match the stored fingerprint of its canonical input digest, IDs,
+logical proposer, and proposal kind; same-key mismatches are audited conflicts.
 
 `scientist-harness quality-gate` is a separate development command. It invokes only its
 eight fixed source-controlled argument vectors and exposes no arbitrary command, path,
@@ -63,6 +66,9 @@ projection inconsistency, evidence replacement, and artifact mismatch stop the a
 operation; a genuinely empty workspace remains valid. A database with any durable
 kernel row but no active governance pointer is corrupt, not uninitialized. `init` cannot
 repair or overwrite that authority gap; storage-only `audit verify` reports it.
+All registered policy rows and governance-state cardinality are verified. Stored audit
+envelopes require an explicit integer schema version 1 and reject unknown fields, so
+tampering cannot disappear during model parsing.
 
 Durable state requires an active registered policy, and each audit event's governing
 and stored policy references, plus any configured policy reference it carries, are

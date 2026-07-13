@@ -1,4 +1,13 @@
-from sqlalchemy import Column, Integer, MetaData, String, Table, Text, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+)
 
 metadata = MetaData()
 
@@ -15,6 +24,7 @@ governance_state = Table(
     metadata,
     Column("singleton_id", Integer, primary_key=True),
     Column("active_policy_hash", String(64), nullable=False),
+    CheckConstraint("singleton_id = 1", name="ck_governance_state_singleton"),
 )
 
 evidence_records = Table(

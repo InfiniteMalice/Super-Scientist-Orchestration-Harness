@@ -65,6 +65,11 @@ with no known audited vulnerability. Governance policy files require schema vers
 valid UTF-8 JSON, and no unknown fields. Externally parsed identities, evidence, claims,
 and nested proposal records also reject unknown fields.
 
+Exact retries compare a stored trusted-attempt fingerprint; reusing a key with different
+intent content, proposal identity, logical proposer, or proposal kind returns an audited
+`IDEMPOTENCY_CONFLICT`. Orphaned governance is reported as storage corruption by ordinary
+runtime commands as well as `audit verify`.
+
 ## Security Boundaries
 
 The kernel runtime has no model, network, or arbitrary shell authority. Retrieved or

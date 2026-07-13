@@ -41,6 +41,7 @@ def verify_workspace(
     events: tuple[AuditEvent, ...] = ()
     try:
         active_policy = repositories.policies.get_active()
+        repositories.policies.list_all()
         evidence = repositories.evidence.list_all()
         heads = repositories.claims.list_heads()
         transactions = repositories.transactions.list_all()

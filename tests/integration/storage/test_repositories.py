@@ -672,7 +672,7 @@ def test_repositories_validate_persisted_json_contracts(
         repository_fixture.repositories.transactions.get_by_idempotency_key("key-1")
     with pytest.raises(StorageIntegrityError, match="storage integrity"):
         repository_fixture.repositories.audit.last()
-    with pytest.raises(ValidationError):
+    with pytest.raises(StorageIntegrityError, match="storage integrity"):
         repository_fixture.repositories.policies.get_active()
 
 

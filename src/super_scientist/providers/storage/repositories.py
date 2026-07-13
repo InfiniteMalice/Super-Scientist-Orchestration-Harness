@@ -14,7 +14,12 @@ from super_scientist.config.models import GovernancePolicy, PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
 from super_scientist.domain.evidence.models import EvidenceRecord, VerificationState
 from super_scientist.domain.identity import ActorKind
-from super_scientist.domain.primitives import UtcTimestamp, canonical_json_bytes, sha256_hex
+from super_scientist.domain.primitives import (
+    Sha256Hex,
+    UtcTimestamp,
+    canonical_json_bytes,
+    sha256_hex,
+)
 from super_scientist.kernel.audit.chain import append_event, verify_chain
 from super_scientist.kernel.audit.models import AuditEvent
 from super_scientist.kernel.transactions.models import Proposal, TransactionDecision
@@ -30,6 +35,7 @@ from super_scientist.providers.storage.schema import (
 
 PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
 TIMESTAMP_ADAPTER: TypeAdapter[UtcTimestamp] = TypeAdapter(UtcTimestamp)
+SHA256_ADAPTER: TypeAdapter[Sha256Hex] = TypeAdapter(Sha256Hex)
 _STORAGE_TYPE_KEY = "__super_scientist_storage_type__"
 _STORAGE_ITEMS_KEY = "items"
 _STORAGE_ENUMS: dict[str, type[Enum]] = {
@@ -278,7 +284,14 @@ def _decode_policy_row(
 ) -> PolicySnapshot:
     stored_policy_hash = _stored_str(row, "policy_hash")
     policy_json = _stored_str(row, "policy_json")
-    policy = GovernancePolicy.model_validate_json(policy_json)
+    created_at = _stored_str(row, "created_at")
+    try:
+        policy = GovernancePolicy.model_validate_json(policy_json)
+        _validated_timestamp(datetime.fromisoformat(created_at))
+    except (TypeError, ValueError) as error:
+        raise StorageIntegrityError(
+            "storage integrity error: invalid governance policy row"
+        ) from error
     _require_integrity(
         stored_policy_hash == policy_hash(policy),
         "policy_hash does not match policy_json",
@@ -691,6 +704,7 @@ class PolicyRepository:
                 select(
                     governance_policies.c.policy_hash,
                     governance_policies.c.policy_json,
+                    governance_policies.c.created_at,
                 ).where(governance_policies.c.policy_hash == validated.policy_hash)
             )
             .mappings()
@@ -709,18 +723,31 @@ class PolicyRepository:
         )
 
     def get_active(self) -> PolicySnapshot | None:
-        active_policy_hash = self._connection.execute(
-            select(governance_state.c.active_policy_hash).where(
-                governance_state.c.singleton_id == 1
-            )
-        ).scalar_one_or_none()
-        if active_policy_hash is None:
+        state_rows = tuple(
+            self._connection.execute(
+                select(
+                    governance_state.c.singleton_id,
+                    governance_state.c.active_policy_hash,
+                )
+            ).mappings()
+        )
+        if not state_rows:
             return None
+        _require_integrity(len(state_rows) == 1, "governance_state must contain one singleton row")
+        state = dict(state_rows[0])
+        _require_integrity(
+            _stored_int(state, "singleton_id") == 1,
+            "governance_state singleton_id must equal 1",
+        )
+        active_policy_hash = SHA256_ADAPTER.validate_python(
+            _stored_str(state, "active_policy_hash")
+        )
         stored_policy = (
             self._connection.execute(
                 select(
                     governance_policies.c.policy_hash,
                     governance_policies.c.policy_json,
+                    governance_policies.c.created_at,
                 ).where(governance_policies.c.policy_hash == active_policy_hash)
             )
             .mappings()
@@ -741,12 +768,23 @@ class PolicyRepository:
                 select(
                     governance_policies.c.policy_hash,
                     governance_policies.c.policy_json,
+                    governance_policies.c.created_at,
                 ).where(governance_policies.c.policy_hash == policy_hash_value)
             )
             .mappings()
             .one_or_none()
         )
         return None if stored_policy is None else _decode_policy_row(dict(stored_policy))
+
+    def list_all(self) -> tuple[PolicySnapshot, ...]:
+        rows = self._connection.execute(
+            select(
+                governance_policies.c.policy_hash,
+                governance_policies.c.policy_json,
+                governance_policies.c.created_at,
+            ).order_by(governance_policies.c.created_at, governance_policies.c.policy_hash)
+        ).mappings()
+        return tuple(_decode_policy_row(dict(row)) for row in rows)
 
 
 class RepositorySet:

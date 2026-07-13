@@ -9,7 +9,7 @@ from threading import Barrier, Lock
 from typing import cast
 
 import pytest
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 
 from super_scientist.application.kernel_service import KernelService
 from super_scientist.application.workspace_integrity import verify_workspace
@@ -40,6 +40,7 @@ from super_scientist.providers.storage.database import (
     upgrade_database,
 )
 from super_scientist.providers.storage.repositories import AuditRepository
+from super_scientist.providers.storage.schema import audit_events, transactions
 
 NOW = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
 
@@ -432,6 +433,7 @@ def test_concurrent_identical_intents_create_one_proposal_and_one_replay(
         idempotency_key=proposal.idempotency_key,
         proposer=proposal.proposer,
         proposal_kind="add_evidence",
+        intent_digest=sha256_hex(canonical_json_bytes(proposal.model_dump(mode="json"))),
     )
     barrier = Barrier(3)
     factory_lock = Lock()
@@ -460,6 +462,53 @@ def test_concurrent_identical_intents_create_one_proposal_and_one_replay(
         assert len(repositories.evidence.list_all()) == 1
         assert len(repositories.transactions.list_all()) == 1
         assert len(repositories.audit.list_all()) == 1
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ["proposal-id", "intent-digest", "proposer", "proposal-kind"],
+)
+def test_intent_replay_requires_exact_trusted_attempt_envelope(
+    kernel: KernelFixture,
+    mismatch: str,
+) -> None:
+    proposal = kernel.valid_add_evidence("proposal-intent", "key-intent", b"same")
+    attempt = transaction_models.ProposalAttempt(
+        proposal_id=proposal.proposal_id,
+        idempotency_key=proposal.idempotency_key,
+        proposer=proposal.proposer,
+        proposal_kind="add_evidence",
+        intent_digest=sha256_hex(canonical_json_bytes(proposal.model_dump(mode="json"))),
+    )
+    assert kernel.service.submit_intent(attempt, lambda: proposal).accepted
+    changes: dict[str, object]
+    if mismatch == "proposal-id":
+        changes = {"proposal_id": "different-proposal"}
+    elif mismatch == "intent-digest":
+        changes = {"intent_digest": "f" * 64}
+    elif mismatch == "proposer":
+        changes = {"proposer": attempt.proposer.model_copy(update={"actor_id": "other-actor"})}
+    else:
+        changes = {"proposal_kind": "propose_claim"}
+    conflicting_attempt = attempt.model_copy(update=changes)
+    factory_calls = 0
+
+    def conflicting_factory() -> AddEvidence:
+        nonlocal factory_calls
+        factory_calls += 1
+        return proposal
+
+    decision = kernel.service.submit_intent(conflicting_attempt, conflicting_factory)
+
+    assert factory_calls == 0
+    assert not decision.accepted
+    assert not decision.replayed
+    assert decision.proposal_id == conflicting_attempt.proposal_id
+    assert decision.reasons[0].code is RejectionCode.IDEMPOTENCY_CONFLICT
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        assert len(repositories.transactions.list_all()) == 1
+        assert len(repositories.audit.list_all()) == 2
 
 
 def test_reused_idempotency_key_with_new_content_is_rejected_and_audited(
@@ -671,6 +720,8 @@ def test_nested_extra_cannot_collapse_into_clean_proposal_transaction(
         stored = repositories.transactions.get_by_idempotency_key(clean.idempotency_key)
         assert stored is not None
         assert isinstance(stored.proposal, transaction_models.InvalidProposal)
+        assert stored.proposal.proposer == clean.proposer
+        assert stored.proposal.attempted_proposal_kind == clean.proposal_type
         assert stored.proposal_hash != sha256_hex(
             canonical_json_bytes(clean.model_dump(mode="json"))
         )
@@ -691,6 +742,7 @@ def test_submit_intent_durably_rejects_malformed_factory_result(
         idempotency_key="key-malformed-factory",
         proposer=kernel.actor,
         proposal_kind="add_evidence",
+        intent_digest="a" * 64,
     )
 
     decision = kernel.service.submit_intent(
@@ -721,6 +773,7 @@ def test_submit_intent_durably_audits_validation_failure_and_replays_before_fact
         idempotency_key=proposal.idempotency_key,
         proposer=proposal.proposer,
         proposal_kind="add_evidence",
+        intent_digest="b" * 64,
     )
     factory_calls = 0
 
@@ -763,6 +816,36 @@ def test_submit_intent_durably_audits_validation_failure_and_replays_before_fact
         assert repositories.evidence.list_all() == ()
 
 
+def test_submit_intent_redacts_sensitive_validation_input_from_durable_records(
+    kernel: KernelFixture,
+) -> None:
+    secret = "TOP-SECRET-VALIDATION-INPUT"
+    proposal = kernel.valid_add_evidence("proposal-redacted", "key-redacted", b"unused")
+    attempt = transaction_models.ProposalAttempt(
+        proposal_id=proposal.proposal_id,
+        idempotency_key=proposal.idempotency_key,
+        proposer=proposal.proposer,
+        proposal_kind="add_evidence",
+        intent_digest="c" * 64,
+    )
+
+    def invalid_factory() -> AddEvidence:
+        payload = proposal.evidence.model_dump(mode="python", warnings="none")
+        payload["retrieved_at"] = secret
+        return proposal.model_copy(update={"evidence": EvidenceRecord.model_validate(payload)})
+
+    decision = kernel.service.submit_intent(attempt, invalid_factory)
+
+    assert decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    with kernel.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        proposal_json = connection.execute(select(transactions.c.proposal_json)).scalar_one()
+        event_json = connection.execute(select(audit_events.c.event_json)).scalar_one()
+        assert secret not in proposal_json
+        assert secret not in event_json
+
+
 def test_submit_intent_propagates_unexpected_factory_error_and_rolls_back(
     kernel: KernelFixture,
 ) -> None:
@@ -776,6 +859,7 @@ def test_submit_intent_propagates_unexpected_factory_error_and_rolls_back(
         idempotency_key=proposal.idempotency_key,
         proposer=proposal.proposer,
         proposal_kind="add_evidence",
+        intent_digest="d" * 64,
     )
     factory_calls = 0
 
@@ -808,6 +892,7 @@ def test_submit_intent_rejects_factory_key_mismatch_without_raising(
         idempotency_key="expected-key",
         proposer=proposal.proposer,
         proposal_kind="add_evidence",
+        intent_digest="e" * 64,
     )
 
     decision = kernel.service.submit_intent(attempt, lambda: proposal)

@@ -236,6 +236,13 @@ verification. Policy input is strict schema-version-1 JSON: invalid UTF-8, unsup
 versions, and unknown fields are rejected. Externally parsed nested domain records also
 forbid unknown fields so canonical transaction identity cannot discard future input.
 
+**Approved fourth final-review correction:** trusted intent attempts include a canonical
+input digest and persist a fingerprint over that digest, IDs, logical proposer, and kind.
+Only exact fingerprints replay; mismatches are audited idempotency conflicts. Durable
+validation diagnostics exclude rejected input values. Workspace verification decodes
+all registered policies, enforces governance-state singleton cardinality, and rejects
+stored audit envelopes with extras or a missing/non-integer schema version 1.
+
 ## 8. Domain Contracts
 
 ### 8.1 EvidenceRecord

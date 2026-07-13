@@ -176,6 +176,7 @@ def test_runtime_build_failure_disposes_engine(
     result = runner.invoke(app, ["transaction", "list", "--root", str(tmp_path), "--json"])
 
     assert result.exit_code == 2
+    assert json_payload(result)["errors"][0]["code"] == "STORAGE_INTEGRITY_ERROR"
     assert len(states) == 1
     assert states[0]["dispose_calls"] == 1
 

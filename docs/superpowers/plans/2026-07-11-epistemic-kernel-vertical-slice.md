@@ -3155,3 +3155,31 @@ Before declaring this plan implemented:
 6. Invoke `superpowers:verification-before-completion` and capture command output.
 7. Do not merge into `main`; prepare the branch for later draft-PR integration after
    the remaining subsystem plans are implemented.
+
+---
+
+## Implementation Status (2026-07-13)
+
+All twelve implementation task groups and their per-task review loops are complete on
+`feat/epistemic-kernel`. The original checklist above is retained as the execution
+record; these commit ranges are the authoritative completion map:
+
+| Task | Commit range |
+| --- | --- |
+| 1 | `f10f462..589c265` |
+| 2 | `589c265..16bc8cb` |
+| 3 | `16bc8cb..1c3c2bd` |
+| 4 | `1c3c2bd..59a9d95` |
+| 5 | `59a9d95..f5b4f8d` |
+| 6 | `f5b4f8d..adc638a` |
+| 7 | `adc638a..989cbb4` |
+| 8 | `989cbb4..b152e53` |
+| 9 | `b152e53..0883e9f` |
+| 10 | `0883e9f..39d8776` |
+| 11 | `39d8776..75ae66b` |
+| 12 | `75ae66b..e8774ae` |
+
+Whole-branch review corrections continue after Task 12 in commits `2158427`,
+`06b2817`, `a21f16a`, and the final review-hardening commit that follows this status
+appendix. Fresh final verification and draft-PR details are recorded in the pull request;
+the branch is intentionally not merged into `main` by this plan.

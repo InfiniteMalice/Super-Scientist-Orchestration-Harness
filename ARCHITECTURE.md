@@ -92,7 +92,11 @@ truthful durable identity exists for an audit record. Expected Pydantic/input de
 failures inside an intent factory use the prevalidated attempt identity and become one
 audited, replayable `INVALID_PROPOSAL`; retries do not invoke the factory. Unexpected
 programming and storage exceptions propagate and roll back. Factory results must match
-the attempt's ID, key, proposer, and kind. Evidence ingestion actors, initial claim
+the attempt's ID, key, proposer, and kind. The stored proposal carries a fingerprint of
+the canonical intent digest, proposal ID, key, logical proposer, and kind; only an exact
+fingerprint replays, while a mismatch is an audited `IDEMPOTENCY_CONFLICT`. Validation
+diagnostics persist only error types and field locations, never rejected input values.
+Evidence ingestion actors, initial claim
 creators, and transition creators must match their proposers. External config and
 nested domain records forbid unknown fields, while JSON arrays/objects remain accepted
 for declared tuple/mapping fields.
@@ -124,6 +128,11 @@ authoritative evidence artifact. `scientist-harness audit verify` exposes that w
 workspace check through a storage-only runtime and returns nonzero for corruption even
 when a missing active policy prevents normal service construction; an empty chain in a
 genuinely empty or initialized workspace is valid.
+
+Workspace verification decodes every registered governance policy, not only the active
+or audit-referenced rows, and requires exactly zero or one `governance_state` row with
+singleton ID 1. SQLite enforces that identifier with a check constraint. Stored audit
+events require an explicit integer schema version 1 and reject unknown envelope fields.
 
 JSON parser translation catches public Click exceptions. Typer 0.19.2 and Click 8.3.3
 are pinned because this is a security-audited compatibility line where Typer still

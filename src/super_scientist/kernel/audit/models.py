@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
@@ -15,7 +15,7 @@ from super_scientist.domain.primitives import (
 )
 
 GENESIS_HASH = "0" * 64
-AUDIT_SCHEMA_VERSION = 1
+AUDIT_SCHEMA_VERSION: Literal[1] = 1
 
 type JsonScalar = None | bool | int | float | str
 type FrozenJsonValue = JsonScalar | tuple[FrozenJsonValue, ...] | Mapping[str, FrozenJsonValue]
@@ -61,17 +61,24 @@ def json_compatible_payload(value: FrozenJsonMapping) -> dict[str, Any]:
 
 
 class AuditEvent(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     sequence: int = Field(strict=True, ge=1)
     event_id: StableIdentifier
     event_type: StableIdentifier
-    schema_version: int = Field(default=AUDIT_SCHEMA_VERSION, strict=True)
+    schema_version: Literal[1]
     occurred_at: UtcTimestamp
     payload: FrozenJsonMapping
     payload_hash: Sha256Hex
     previous_hash: Sha256Hex
     event_hash: Sha256Hex
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def require_schema_version_one(cls, value: object) -> object:
+        if type(value) is not int or value != AUDIT_SCHEMA_VERSION:
+            raise ValueError("audit schema_version must be integer 1")
+        return value
 
     @field_validator("payload", mode="after")
     @classmethod

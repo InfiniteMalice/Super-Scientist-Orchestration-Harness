@@ -111,3 +111,19 @@ def test_projection_rows_remain_mutable(tmp_path: Path) -> None:
         assert connection.execute(text("SELECT COUNT(*) FROM governance_state")).scalar_one() == 0
         assert connection.execute(text("SELECT COUNT(*) FROM claim_heads")).scalar_one() == 0
     engine.dispose()
+
+
+def test_governance_state_enforces_singleton_identifier(tmp_path: Path) -> None:
+    url = _database_url(tmp_path / "kernel.db")
+    upgrade_database(url)
+    engine = create_database_engine(url)
+
+    with engine.begin() as connection, pytest.raises(Exception, match="CHECK constraint failed"):
+        connection.execute(
+            text(
+                "INSERT INTO governance_state (singleton_id, active_policy_hash) "
+                "VALUES (2, :digest)"
+            ),
+            {"digest": "a" * 64},
+        )
+    engine.dispose()

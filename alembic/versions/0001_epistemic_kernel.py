@@ -43,6 +43,7 @@ def upgrade() -> None:
         "governance_state",
         sa.Column("singleton_id", sa.Integer(), primary_key=True),
         sa.Column("active_policy_hash", sa.String(length=64), nullable=False),
+        sa.CheckConstraint("singleton_id = 1", name="ck_governance_state_singleton"),
     )
     op.create_table(
         "evidence_records",

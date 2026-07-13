@@ -162,8 +162,15 @@ def build_runtime(root: Path) -> Runtime:
     try:
         clock = SystemClock()
         with DatabaseUnitOfWork(engine) as uow:
-            policy = uow.repositories().policies.get_active()
+            repositories = uow.repositories()
+            policy = repositories.policies.get_active()
+            has_durable_state = repositories.has_durable_state()
         if policy is None:
+            if has_durable_state:
+                raise StorageIntegrityError(
+                    "storage integrity error: active governance policy pointer is missing "
+                    "from a non-empty workspace"
+                )
             raise CliBoundaryError(
                 "WORKSPACE_NOT_INITIALIZED",
                 "workspace is not initialized; run init first",
@@ -246,17 +253,16 @@ def evidence_add(
     with build_runtime(root) as runtime:
         data = file.read_bytes()
         artifact = runtime.artifacts.put(data, media_type)
-        intent_key = f"evidence:{
-            sha256_hex(
-                canonical_json_bytes(
-                    {
-                        'source': source,
-                        'content_hash': artifact.sha256,
-                        'media_type': artifact.media_type,
-                    }
-                )
+        intent_digest = sha256_hex(
+            canonical_json_bytes(
+                {
+                    "source": source,
+                    "content_hash": artifact.sha256,
+                    "media_type": artifact.media_type,
+                }
             )
-        }"
+        )
+        intent_key = f"evidence:{intent_digest}"
         evidence_id = _intent_identifier("ev", intent_key)
         actor = _actor(runtime.clock)
         attempt = ProposalAttempt(
@@ -264,6 +270,7 @@ def evidence_add(
             idempotency_key=intent_key,
             proposer=actor,
             proposal_kind="add_evidence",
+            intent_digest=intent_digest,
         )
 
         def create_proposal() -> AddEvidence:
@@ -342,19 +349,18 @@ def claim_propose(
     json_output: JsonOutput = False,
 ) -> None:
     with build_runtime(root) as runtime:
-        intent_key = f"claim:{
-            sha256_hex(
-                canonical_json_bytes(
-                    {
-                        'proposition': proposition,
-                        'scope': scope,
-                        'system': system,
-                        'modality': modality,
-                        'self_approve': self_approve,
-                    }
-                )
+        intent_digest = sha256_hex(
+            canonical_json_bytes(
+                {
+                    "proposition": proposition,
+                    "scope": scope,
+                    "system": system,
+                    "modality": modality,
+                    "self_approve": self_approve,
+                }
             )
-        }"
+        )
+        intent_key = f"claim:{intent_digest}"
         claim_id = _intent_identifier("claim", intent_key)
         actor = _actor(runtime.clock)
         attempt = ProposalAttempt(
@@ -362,6 +368,7 @@ def claim_propose(
             idempotency_key=intent_key,
             proposer=actor,
             proposal_kind="propose_claim",
+            intent_digest=intent_digest,
         )
 
         def create_proposal() -> ProposeClaim:

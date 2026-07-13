@@ -10,7 +10,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_valid
 from super_scientist.domain.claims.models import AtomicClaim
 from super_scientist.domain.evidence.models import EvidenceRecord
 from super_scientist.domain.identity import ActorIdentity
-from super_scientist.domain.primitives import NonBlankText, StableIdentifier, UtcTimestamp
+from super_scientist.domain.primitives import (
+    NonBlankText,
+    Sha256Hex,
+    StableIdentifier,
+    UtcTimestamp,
+)
 
 type ProposalKind = Literal["add_evidence", "propose_claim", "transition_claim"]
 
@@ -43,6 +48,7 @@ class ProposalAttempt(BaseModel):
     idempotency_key: StableIdentifier
     proposer: ActorIdentity
     proposal_kind: ProposalKind
+    intent_digest: Sha256Hex
 
 
 class ProposalBase(BaseModel):
@@ -52,6 +58,7 @@ class ProposalBase(BaseModel):
     idempotency_key: StableIdentifier
     proposer: ActorIdentity
     approval: Approval | None = None
+    attempt_fingerprint: Sha256Hex | None = None
 
 
 class AddEvidence(ProposalBase):
@@ -82,6 +89,7 @@ class InvalidProposal(BaseModel):
     validation_error: NonBlankText
     proposer: ActorIdentity | None = None
     attempted_proposal_kind: ProposalKind | None = None
+    attempt_fingerprint: Sha256Hex | None = None
 
 
 Proposal = Annotated[
