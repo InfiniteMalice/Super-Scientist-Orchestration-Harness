@@ -192,6 +192,43 @@ def test_reused_idempotency_key_with_new_content_is_rejected_and_audited(
         assert len(repositories.audit.list_all()) == 2
 
 
+def test_exact_retry_replays_when_constructor_policy_is_stale(kernel: KernelFixture) -> None:
+    proposal = kernel.valid_add_evidence("p-5", "k-5", b"observation")
+    first = kernel.service.submit(proposal)
+    stale_policy = _policy_snapshot(("source_exists", "evidence_span_exists"))
+    stale_service = KernelService(kernel.uow_factory, stale_policy, FixedClock())
+
+    replay = stale_service.submit(proposal)
+
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        assert replay.replayed
+        assert replay.model_copy(update={"replayed": False}) == first
+        assert len(repositories.audit.list_all()) == 1
+
+
+def test_idempotency_conflict_is_audited_when_constructor_policy_is_stale(
+    kernel: KernelFixture,
+) -> None:
+    first = kernel.valid_add_evidence("p-6", "shared-key", b"first")
+    conflicting = kernel.valid_add_evidence("p-7", "shared-key", b"different")
+    stale_policy = _policy_snapshot(("source_exists", "evidence_span_exists"))
+    stale_service = KernelService(kernel.uow_factory, stale_policy, FixedClock())
+
+    assert kernel.service.submit(first).accepted
+    decision = stale_service.submit(conflicting)
+
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        stored = repositories.transactions.get_by_idempotency_key(first.idempotency_key)
+        assert decision.reasons[0].code is RejectionCode.IDEMPOTENCY_CONFLICT
+        assert repositories.evidence.get(conflicting.evidence.evidence_id) is None
+        assert stored is not None
+        assert stored.proposal == first
+        assert stored.decision.accepted
+        assert len(repositories.audit.list_all()) == 2
+
+
 def test_missing_active_policy_is_rejected_and_audited(
     unregistered_kernel: KernelFixture,
 ) -> None:

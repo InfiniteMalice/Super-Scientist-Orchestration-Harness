@@ -46,6 +46,17 @@ class KernelService:
         proposal_hash = sha256_hex(canonical_json_bytes(proposal.model_dump(mode="json")))
         with self._uow_factory() as uow:
             repositories = uow.repositories()
+            prior = repositories.transactions.get_by_idempotency_key(proposal.idempotency_key)
+            if prior is not None:
+                if prior.proposal_hash != proposal_hash:
+                    decision = AdmissionEngine.rejected(
+                        proposal.proposal_id,
+                        RejectionCode.IDEMPOTENCY_CONFLICT,
+                        "idempotency key was reused with different proposal content",
+                    )
+                    self._audit(proposal, decision, repositories, conflict=True)
+                    return decision
+                return prior.decision.model_copy(update={"replayed": True})
             stored_policy = repositories.policies.get_active()
             existing_proposal = repositories.transactions.get_by_proposal_id(proposal.proposal_id)
             if (
@@ -66,17 +77,6 @@ class KernelService:
                     conflict=existing_proposal is not None,
                 )
                 return decision
-            prior = repositories.transactions.get_by_idempotency_key(proposal.idempotency_key)
-            if prior is not None:
-                if prior.proposal_hash != proposal_hash:
-                    decision = AdmissionEngine.rejected(
-                        proposal.proposal_id,
-                        RejectionCode.IDEMPOTENCY_CONFLICT,
-                        "idempotency key was reused with different proposal content",
-                    )
-                    self._audit(proposal, decision, repositories, conflict=True)
-                    return decision
-                return prior.decision.model_copy(update={"replayed": True})
             if existing_proposal is not None:
                 decision = AdmissionEngine.rejected(
                     proposal.proposal_id,
