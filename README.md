@@ -53,14 +53,19 @@ The second command reports `valid: true` and `checked_events: 0`. See
 `docs/examples/kernel-vertical-slice.md` for the deterministic offline evidence and
 claim example.
 
+When `--json` is present, command parsing, required-option, option-value, and input-path
+failures also return exactly one schema-version-1 JSON error envelope with exit status
+2. Without `--json`, Typer's normal human help and error rendering is unchanged.
+
 ## Security Boundaries
 
 The kernel runtime has no model, network, or arbitrary shell authority. Retrieved or
 local evidence content remains untrusted data. Artifact paths are content-derived and
 must remain beneath a private local artifact root; static traversal, symlink, and
-Windows reparse-point escapes fail closed. Audit, policy, projection, and artifact
-integrity errors stop the affected operation. See `SECURITY.md` for the threat boundary
-and residual local-filesystem risks.
+Windows reparse-point escapes fail closed. Submitted evidence begins unverified; the
+application service rehashes it before projecting a hash-verified record. Audit
+verification reconciles transactions, projections, history, and artifact bytes.
+Integrity errors stop the affected operation. See `SECURITY.md` for details.
 
 The quality command is a development operation, separate from scientific runtime
 authority. It executes only the eight source-controlled checks in its fixed registry:

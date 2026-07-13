@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Barrier, Lock
 
 import pytest
 from sqlalchemy import Engine
 
 from super_scientist.application.kernel_service import KernelService
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
-from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
-from super_scientist.domain.evidence.models import EvidenceRecord
+from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus, EvidenceLink
+from super_scientist.domain.evidence.models import (
+    ArtifactRef,
+    EvidenceRecord,
+    EvidenceSpan,
+    VerificationState,
+)
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.kernel.transactions.models import (
@@ -19,6 +26,8 @@ from super_scientist.kernel.transactions.models import (
     Approval,
     ProposeClaim,
     RejectionCode,
+    TransactionDecision,
+    TransitionClaim,
 )
 from super_scientist.providers.storage.artifacts import FileArtifactStore
 from super_scientist.providers.storage.database import (
@@ -44,6 +53,19 @@ class KernelFixture:
     actor: ActorIdentity
     policy: PolicySnapshot
 
+    def add_evidence(
+        self,
+        proposal_id: str,
+        key: str,
+        record: EvidenceRecord,
+    ) -> AddEvidence:
+        return AddEvidence(
+            proposal_id=proposal_id,
+            idempotency_key=key,
+            proposer=self.actor,
+            evidence=record,
+        )
+
     def valid_add_evidence(self, proposal_id: str, key: str, content: bytes) -> AddEvidence:
         artifact = self.artifact_store.put(content, "text/plain")
         evidence = EvidenceRecord(
@@ -54,6 +76,7 @@ class KernelFixture:
             artifact=artifact,
             provenance={"collector": "kernel-service-test"},
             ingestion_actor_id=self.actor.actor_id,
+            verification_state=VerificationState.UNVERIFIED,
         )
         return AddEvidence(
             proposal_id=proposal_id,
@@ -110,7 +133,7 @@ def _build_kernel(tmp_path: Path) -> tuple[KernelFixture, Engine]:
 
     return (
         KernelFixture(
-            service=KernelService(uow_factory, policy, FixedClock()),
+            service=KernelService(uow_factory, policy, FixedClock(), artifact_store),
             uow_factory=uow_factory,
             artifact_store=artifact_store,
             actor=actor,
@@ -144,8 +167,165 @@ def test_accepted_evidence_is_committed_with_audit(kernel: KernelFixture) -> Non
     with kernel.uow_factory() as unit_of_work:
         repositories = unit_of_work.repositories()
         assert decision.accepted
-        assert repositories.evidence.get(proposal.evidence.evidence_id) == proposal.evidence
+        stored = repositories.evidence.get(proposal.evidence.evidence_id)
+        assert stored == proposal.evidence.model_copy(
+            update={"verification_state": VerificationState.HASH_VERIFIED}
+        )
         assert repositories.audit.list_all()[-1].payload["decision"]["accepted"] is True
+
+
+def _record_for_ref(
+    kernel: KernelFixture,
+    artifact: ArtifactRef,
+    *,
+    extracted_span: EvidenceSpan | None = None,
+    verification_state: VerificationState = VerificationState.UNVERIFIED,
+) -> EvidenceRecord:
+    return EvidenceRecord(
+        evidence_id="evidence-adversarial",
+        evidence_type="observation",
+        source_locator="fixture://adversarial",
+        retrieved_at=NOW,
+        artifact=artifact,
+        extracted_span=extracted_span,
+        provenance={"collector": "kernel-service-test"},
+        ingestion_actor_id=kernel.actor.actor_id,
+        verification_state=verification_state,
+    )
+
+
+def _assert_durable_hash_rejection(kernel: KernelFixture, proposal: AddEvidence) -> None:
+    decision = kernel.service.submit(proposal)
+
+    assert not decision.accepted
+    assert decision.reasons[0].code is RejectionCode.EVIDENCE_HASH_MISMATCH
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        stored = repositories.transactions.get_by_idempotency_key(proposal.idempotency_key)
+        assert stored is not None
+        assert stored.decision == decision
+        assert repositories.evidence.get(proposal.evidence.evidence_id) is None
+        assert repositories.audit.list_all()[-1].payload["decision"]["reasons"][0]["code"] == (
+            RejectionCode.EVIDENCE_HASH_MISMATCH.value
+        )
+
+
+def test_nonexistent_artifact_is_durably_rejected(kernel: KernelFixture) -> None:
+    digest = sha256_hex(b"missing")
+    artifact = ArtifactRef(
+        sha256=digest,
+        size_bytes=7,
+        media_type="application/octet-stream",
+        relative_path=f"sha256/{digest[:2]}/{digest}",
+    )
+    proposal = kernel.add_evidence(
+        "proposal-missing",
+        "key-missing",
+        _record_for_ref(kernel, artifact),
+    )
+
+    _assert_durable_hash_rejection(kernel, proposal)
+
+
+def test_tampered_artifact_is_durably_rejected(kernel: KernelFixture) -> None:
+    artifact = kernel.artifact_store.put(b"original", "application/octet-stream")
+    kernel.artifact_store.resolve(artifact).write_bytes(b"tampered")
+    proposal = kernel.add_evidence(
+        "proposal-tampered",
+        "key-tampered",
+        _record_for_ref(kernel, artifact),
+    )
+
+    _assert_durable_hash_rejection(kernel, proposal)
+
+
+def test_wrong_digest_reference_is_durably_rejected(kernel: KernelFixture) -> None:
+    artifact = kernel.artifact_store.put(b"original", "application/octet-stream")
+    wrong_digest = sha256_hex(b"different")
+    wrong_ref = artifact.model_copy(
+        update={
+            "sha256": wrong_digest,
+            "relative_path": f"sha256/{wrong_digest[:2]}/{wrong_digest}",
+        }
+    )
+    proposal = kernel.add_evidence(
+        "proposal-digest",
+        "key-digest",
+        _record_for_ref(kernel, wrong_ref),
+    )
+
+    _assert_durable_hash_rejection(kernel, proposal)
+
+
+def test_wrong_artifact_size_is_durably_rejected(kernel: KernelFixture) -> None:
+    artifact = kernel.artifact_store.put(b"original", "application/octet-stream")
+    proposal = kernel.add_evidence(
+        "proposal-size",
+        "key-size",
+        _record_for_ref(kernel, artifact.model_copy(update={"size_bytes": 999})),
+    )
+
+    _assert_durable_hash_rejection(kernel, proposal)
+
+
+def test_caller_claimed_hash_verification_is_durably_rejected(kernel: KernelFixture) -> None:
+    artifact = kernel.artifact_store.put(b"original", "application/octet-stream")
+    proposal = kernel.add_evidence(
+        "proposal-claimed-verified",
+        "key-claimed-verified",
+        _record_for_ref(
+            kernel,
+            artifact,
+            verification_state=VerificationState.HASH_VERIFIED,
+        ),
+    )
+
+    _assert_durable_hash_rejection(kernel, proposal)
+
+
+def test_text_span_must_bind_to_artifact_text(kernel: KernelFixture) -> None:
+    artifact = kernel.artifact_store.put(b"actual", "text/plain")
+    proposal = kernel.add_evidence(
+        "proposal-span",
+        "key-span",
+        _record_for_ref(
+            kernel,
+            artifact,
+            extracted_span=EvidenceSpan(start=0, end=6, text="unreal"),
+        ),
+    )
+
+    _assert_durable_hash_rejection(kernel, proposal)
+
+
+@pytest.mark.parametrize(
+    ("content", "media_type", "span"),
+    [
+        (b"binary\x00evidence", "application/octet-stream", None),
+        (b"prefix exact suffix", "text/plain", EvidenceSpan(start=7, end=12, text="exact")),
+    ],
+)
+def test_unverified_binary_and_text_evidence_are_verified_before_projection(
+    kernel: KernelFixture,
+    content: bytes,
+    media_type: str,
+    span: EvidenceSpan | None,
+) -> None:
+    artifact = kernel.artifact_store.put(content, media_type)
+    proposal = kernel.add_evidence(
+        f"proposal-valid-{media_type}",
+        f"key-valid-{media_type}",
+        _record_for_ref(kernel, artifact, extracted_span=span),
+    )
+
+    decision = kernel.service.submit(proposal)
+
+    assert decision.accepted
+    with kernel.uow_factory() as unit_of_work:
+        stored = unit_of_work.repositories().evidence.get(proposal.evidence.evidence_id)
+        assert stored is not None
+        assert stored.verification_state is VerificationState.HASH_VERIFIED
+        assert stored.extracted_span == span
 
 
 def test_rejected_claim_is_audited_but_not_projected(kernel: KernelFixture) -> None:
@@ -160,6 +340,73 @@ def test_rejected_claim_is_audited_but_not_projected(kernel: KernelFixture) -> N
         assert repositories.audit.list_all()[-1].payload["decision"]["accepted"] is False
 
 
+def test_transition_projects_the_exact_intended_next_claim(kernel: KernelFixture) -> None:
+    artifact = kernel.artifact_store.put(b"supporting fixture span", "text/plain")
+    evidence = _record_for_ref(
+        kernel,
+        artifact,
+        extracted_span=EvidenceSpan(
+            start=0,
+            end=len("supporting fixture span"),
+            text="supporting fixture span",
+        ),
+    ).model_copy(update={"evidence_id": "transition-evidence"})
+    assert kernel.service.submit(
+        kernel.add_evidence("proposal-transition-evidence", "key-transition-evidence", evidence)
+    ).accepted
+    current = AtomicClaim(
+        claim_id="claim-transition",
+        version=1,
+        proposition="The fixture contains a supporting span.",
+        scope="fixture",
+        population_or_system="fixture system",
+        epistemic_modality="observed",
+        status=ClaimStatus.PROPOSED,
+        created_at=NOW,
+        created_by=kernel.actor.actor_id,
+    )
+    assert kernel.service.submit(
+        ProposeClaim(
+            proposal_id="proposal-transition-claim",
+            idempotency_key="key-transition-claim",
+            proposer=kernel.actor,
+            claim=current,
+        )
+    ).accepted
+    next_claim = AtomicClaim(
+        claim_id=current.claim_id,
+        version=2,
+        proposition=current.proposition,
+        scope=current.scope,
+        population_or_system=current.population_or_system,
+        epistemic_modality=current.epistemic_modality,
+        status=ClaimStatus.EVIDENCE_LINKED,
+        evidence_links=(
+            EvidenceLink(
+                evidence_id=evidence.evidence_id,
+                supporting_span="fixture span",
+            ),
+        ),
+        assumptions=("The fixture is stable.",),
+        parent_version_id=f"{current.claim_id}:1",
+        created_at=NOW + timedelta(seconds=1),
+        created_by=kernel.actor.actor_id,
+    )
+    transition = TransitionClaim(
+        proposal_id="proposal-transition",
+        idempotency_key="key-transition",
+        proposer=kernel.actor,
+        next_claim=next_claim,
+    )
+
+    decision = kernel.service.submit(transition)
+
+    assert decision.accepted
+    with kernel.uow_factory() as unit_of_work:
+        history = unit_of_work.repositories().claims.history(current.claim_id)
+        assert history == (current, next_claim)
+
+
 def test_duplicate_submission_returns_original_decision(kernel: KernelFixture) -> None:
     proposal = kernel.valid_add_evidence("p-3", "k-3", b"same")
 
@@ -170,6 +417,39 @@ def test_duplicate_submission_returns_original_decision(kernel: KernelFixture) -
         assert second.replayed
         assert second.model_copy(update={"replayed": False}) == first
         assert len(unit_of_work.repositories().audit.list_all()) == 1
+
+
+def test_concurrent_identical_intents_create_one_proposal_and_one_replay(
+    kernel: KernelFixture,
+) -> None:
+    proposal = kernel.valid_add_evidence("proposal-concurrent", "key-concurrent", b"same")
+    barrier = Barrier(3)
+    factory_lock = Lock()
+    factory_calls = 0
+
+    def proposal_factory() -> AddEvidence:
+        nonlocal factory_calls
+        with factory_lock:
+            factory_calls += 1
+        return proposal
+
+    def submit() -> TransactionDecision:
+        barrier.wait(timeout=10)
+        return kernel.service.submit_intent(proposal.idempotency_key, proposal_factory)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(submit) for _ in range(2)]
+        barrier.wait(timeout=10)
+        decisions = [future.result(timeout=10) for future in futures]
+
+    assert factory_calls == 1
+    assert sorted(decision.replayed for decision in decisions) == [False, True]
+    assert all(decision.accepted for decision in decisions)
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        assert len(repositories.evidence.list_all()) == 1
+        assert len(repositories.transactions.list_all()) == 1
+        assert len(repositories.audit.list_all()) == 1
 
 
 def test_reused_idempotency_key_with_new_content_is_rejected_and_audited(
@@ -196,7 +476,12 @@ def test_exact_retry_replays_when_constructor_policy_is_stale(kernel: KernelFixt
     proposal = kernel.valid_add_evidence("p-5", "k-5", b"observation")
     first = kernel.service.submit(proposal)
     stale_policy = _policy_snapshot(("source_exists", "evidence_span_exists"))
-    stale_service = KernelService(kernel.uow_factory, stale_policy, FixedClock())
+    stale_service = KernelService(
+        kernel.uow_factory,
+        stale_policy,
+        FixedClock(),
+        kernel.artifact_store,
+    )
 
     replay = stale_service.submit(proposal)
 
@@ -213,7 +498,12 @@ def test_idempotency_conflict_is_audited_when_constructor_policy_is_stale(
     first = kernel.valid_add_evidence("p-6", "shared-key", b"first")
     conflicting = kernel.valid_add_evidence("p-7", "shared-key", b"different")
     stale_policy = _policy_snapshot(("source_exists", "evidence_span_exists"))
-    stale_service = KernelService(kernel.uow_factory, stale_policy, FixedClock())
+    stale_service = KernelService(
+        kernel.uow_factory,
+        stale_policy,
+        FixedClock(),
+        kernel.artifact_store,
+    )
 
     assert kernel.service.submit(first).accepted
     decision = stale_service.submit(conflicting)
@@ -281,10 +571,37 @@ def test_reused_proposal_id_is_rejected_and_audited(kernel: KernelFixture) -> No
     with kernel.uow_factory() as unit_of_work:
         repositories = unit_of_work.repositories()
         assert decision.reasons[0].code is RejectionCode.ENTITY_ALREADY_EXISTS
-        assert repositories.evidence.get(first.evidence.evidence_id) == first.evidence
+        assert repositories.evidence.get(first.evidence.evidence_id) == first.evidence.model_copy(
+            update={"verification_state": VerificationState.HASH_VERIFIED}
+        )
         assert repositories.evidence.get(colliding.evidence.evidence_id) is None
         assert len(repositories.transactions.list_all()) == 1
         assert len(repositories.audit.list_all()) == 2
+
+
+def test_conflict_audit_id_cannot_collide_with_later_proposal_id(
+    kernel: KernelFixture,
+) -> None:
+    first = kernel.valid_add_evidence("p", "key-first", b"first")
+    conflict = kernel.valid_add_evidence("p", "key-conflict", b"conflict")
+    conflict = conflict.model_copy(
+        update={
+            "evidence": conflict.evidence.model_copy(update={"evidence_id": "evidence-conflict"})
+        }
+    )
+    later = kernel.valid_add_evidence("p-2", "key-later", b"later")
+
+    assert kernel.service.submit(first).accepted
+    assert not kernel.service.submit(conflict).accepted
+    assert kernel.service.submit(later).accepted
+
+    with kernel.uow_factory() as unit_of_work:
+        events = unit_of_work.repositories().audit.list_all()
+        assert [event.event_id for event in events] == [
+            "audit-event-00000000000000000001",
+            "audit-event-00000000000000000002",
+            "audit-event-00000000000000000003",
+        ]
 
 
 def test_audit_failure_rolls_back_database_rows_but_not_prepared_artifact(

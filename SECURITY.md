@@ -21,6 +21,12 @@ size mismatch, symlinks, and Windows reparse points fail closed. Existing digest
 are verified instead of overwritten. Temporary files are created under the target
 directory and synchronized before linking to the final content address.
 
+Submitted `EvidenceRecord` metadata is not a verification authority. Records default to
+`UNVERIFIED`, and `KernelService` is the only boundary that promotes them to
+`HASH_VERIFIED`. It reads through the configured artifact store, validates containment,
+size, digest, media handling, and text-span binding, and durably rejects failures as
+`EVIDENCE_HASH_MISMATCH`. CLI and direct API submissions use this same path.
+
 The artifact root is private/trusted against malicious concurrent namespace mutation:
 static traversal, symlink, and Windows reparse-point escapes fail closed, while hostile
 replacement between filesystem checks remains a residual local-filesystem risk. Run the
@@ -34,11 +40,14 @@ authorization boundary.
 
 ## Integrity And Secrets
 
-Audit events hash canonical payloads and link each event to its predecessor. Repository
-reads validate redundant SQLite columns against canonical records and verify the chain.
-Audit corruption, policy mismatch, projection inconsistency, evidence replacement, and
-artifact mismatch stop the affected read or mutation. `audit verify` returns nonzero on
-corruption and reports an empty chain as valid.
+Audit events use trusted sequence-derived identifiers, hash canonical payloads, and link
+each event to its predecessor. Repository reads validate redundant SQLite columns
+against canonical records and verify the chain. Shared workspace verification also
+reconciles policy, claim heads and history, evidence projections, transactions, and
+audit decisions, then rehashes every authoritative artifact. It runs before mutation,
+before exact replay returns, and through `audit verify`. Corruption, policy mismatch,
+projection inconsistency, evidence replacement, and artifact mismatch stop the affected
+operation; an empty workspace remains valid.
 
 The kernel has no secret store, credential broker, runtime redaction service, or
 dedicated secret scanner. Do not put API keys, credentials, private tokens, or regulated

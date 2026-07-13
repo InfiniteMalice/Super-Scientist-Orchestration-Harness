@@ -10,6 +10,7 @@ from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
 from super_scientist.domain.claims.transitions import validate_transition
 from super_scientist.domain.evidence.models import EvidenceRecord
 from super_scientist.domain.identity import are_independent
+from super_scientist.domain.primitives import StableIdentifier
 from super_scientist.evaluation.claim_drift.deterministic import run_deterministic_checks
 from super_scientist.evaluation.claim_drift.models import CheckOutcome, CheckResult
 from super_scientist.kernel.transactions.models import (
@@ -39,9 +40,9 @@ class AdmissionContext(BaseModel):
     )
 
     active_policy: PolicySnapshot
-    evidence_by_id: Mapping[str, EvidenceRecord]
-    claim_by_id: Mapping[str, AtomicClaim]
-    prior_decision_by_idempotency_key: Mapping[str, TransactionDecision]
+    evidence_by_id: Mapping[StableIdentifier, EvidenceRecord]
+    claim_by_id: Mapping[StableIdentifier, AtomicClaim]
+    prior_decision_by_idempotency_key: Mapping[StableIdentifier, TransactionDecision]
 
     @field_validator(
         "evidence_by_id",
@@ -127,21 +128,47 @@ class AdmissionEngine:
         proposal: TransitionClaim,
         context: AdmissionContext,
     ) -> TransactionDecision:
-        current = context.claim_by_id.get(proposal.claim_id)
+        next_claim = proposal.next_claim
+        current = context.claim_by_id.get(next_claim.claim_id)
         if current is None:
             return self.rejected(
                 proposal.proposal_id,
                 RejectionCode.INVALID_STATUS_TRANSITION,
                 "claim does not exist",
             )
-        if current.version != proposal.expected_version:
+        if next_claim.version != current.version + 1:
             return self.rejected(
                 proposal.proposal_id,
                 RejectionCode.INVALID_STATUS_TRANSITION,
-                "claim version does not match expected version",
+                "next claim version must exactly succeed the current version",
             )
 
-        transition = validate_transition(current.status, proposal.target_status)
+        if next_claim.parent_version_id != f"{current.claim_id}:{current.version}":
+            return self.rejected(
+                proposal.proposal_id,
+                RejectionCode.INVALID_STATUS_TRANSITION,
+                "next claim parent must reference the current version",
+            )
+        if next_claim.created_by != proposal.proposer.actor_id:
+            return self.rejected(
+                proposal.proposal_id,
+                RejectionCode.INVALID_STATUS_TRANSITION,
+                "next claim creator must match the transition proposer",
+            )
+        immutable_fields = (
+            "proposition",
+            "scope",
+            "population_or_system",
+            "epistemic_modality",
+        )
+        if any(getattr(next_claim, field) != getattr(current, field) for field in immutable_fields):
+            return self.rejected(
+                proposal.proposal_id,
+                RejectionCode.INVALID_STATUS_TRANSITION,
+                "claim identity content cannot change during a status transition",
+            )
+
+        transition = validate_transition(current.status, next_claim.status)
         if not transition.allowed:
             return self.rejected(
                 proposal.proposal_id,
@@ -149,7 +176,19 @@ class AdmissionEngine:
                 transition.reason or "invalid transition",
             )
 
-        checks = run_deterministic_checks(current, context.evidence_by_id)
+        if next_claim.status is ClaimStatus.WITHDRAWN:
+            return TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+
+        if next_claim.status is ClaimStatus.EVIDENCE_LINKED:
+            current_links = set(current.evidence_links)
+            if not any(link not in current_links for link in next_claim.evidence_links):
+                return self.rejected(
+                    proposal.proposal_id,
+                    RejectionCode.MISSING_EVIDENCE,
+                    "EVIDENCE_LINKED requires at least one new evidence link",
+                )
+
+        checks = run_deterministic_checks(next_claim, context.evidence_by_id)
         if any(check.outcome is CheckOutcome.FAIL_DETERMINISTIC for check in checks):
             return self.rejected(
                 proposal.proposal_id,
@@ -167,6 +206,16 @@ class AdmissionEngine:
                 proposal.proposal_id,
                 RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
                 "required policy checks are unresolved",
+            )
+        if next_claim.status in {
+            ClaimStatus.REPRODUCED,
+            ClaimStatus.CORROBORATED,
+            ClaimStatus.CONSTRAINT_VALIDATED,
+        }:
+            return self.rejected(
+                proposal.proposal_id,
+                RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+                f"{next_claim.status.value} proof is not implemented",
             )
         return TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
 

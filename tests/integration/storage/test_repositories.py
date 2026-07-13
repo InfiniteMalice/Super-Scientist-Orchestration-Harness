@@ -328,9 +328,11 @@ def test_transaction_repository_round_trips_other_strict_proposal_variants(
             proposal_id="proposal-transition",
             idempotency_key="key-transition",
             proposer=repository_fixture.actor("proposer"),
-            claim_id="claim-1",
-            expected_version=1,
-            target_status=ClaimStatus.EVIDENCE_LINKED,
+            next_claim=repository_fixture.claim(
+                "claim-1",
+                version=2,
+                status="EVIDENCE_LINKED",
+            ),
         ),
     )
 
@@ -358,7 +360,6 @@ def test_policy_and_audit_repositories_round_trip(
     snapshot = repository_fixture.policy_snapshot()
     event_record = append_event(
         None,
-        "audit-1",
         "test",
         {"accepted": True},
         repository_fixture.now,
@@ -412,7 +413,7 @@ def test_policy_repository_rejects_stored_policy_hash_corruption(
 def test_audit_repository_requires_the_exact_verified_next_event(
     repository_fixture: RepositoryFixture,
 ) -> None:
-    first = append_event(None, "audit-1", "test", {"accepted": True}, repository_fixture.now)
+    first = append_event(None, "test", {"accepted": True}, repository_fixture.now)
 
     with pytest.raises(ValueError, match="storage integrity"):
         repository_fixture.repositories.audit.add(first.model_copy(update={"sequence": 2}))
@@ -421,10 +422,10 @@ def test_audit_repository_requires_the_exact_verified_next_event(
 
     with pytest.raises(ValueError, match="storage integrity"):
         repository_fixture.repositories.audit.add(
-            append_event(None, "audit-2", "test", {"accepted": True}, repository_fixture.now)
+            append_event(None, "test", {"accepted": True}, repository_fixture.now)
         )
 
-    second = append_event(first, "audit-2", "test", {"accepted": True}, repository_fixture.now)
+    second = append_event(first, "test", {"accepted": True}, repository_fixture.now)
     repository_fixture.repositories.audit.add(second)
     assert repository_fixture.repositories.audit.list_all() == (first, second)
 
@@ -432,9 +433,9 @@ def test_audit_repository_requires_the_exact_verified_next_event(
 def test_audit_repository_rejects_chain_corruption_on_reads(
     repository_fixture: RepositoryFixture,
 ) -> None:
-    first = append_event(None, "audit-1", "test", {"accepted": True}, repository_fixture.now)
+    first = append_event(None, "test", {"accepted": True}, repository_fixture.now)
     repository_fixture.repositories.audit.add(first)
-    corrupted = append_event(first, "audit-2", "test", {"accepted": True}, repository_fixture.now)
+    corrupted = append_event(first, "test", {"accepted": True}, repository_fixture.now)
     corrupted = corrupted.model_copy(update={"event_hash": "f" * 64})
     repository_fixture.connection.execute(
         insert(audit_events).values(
@@ -456,7 +457,6 @@ def test_audit_repository_rejects_redundant_column_corruption(
 ) -> None:
     event_record = append_event(
         None,
-        "audit-in-json",
         "test",
         {"accepted": True},
         repository_fixture.now,
@@ -683,7 +683,7 @@ def test_repository_writes_revalidate_bypassed_models(
     claim = repository_fixture.claim("claim-1", version=1, status="PROPOSED")
     proposal = repository_fixture.add_evidence_proposal("proposal-1", "key-1")
     decision = TransactionDecision(proposal_id="proposal-1", accepted=True)
-    audit_event = append_event(None, "audit-1", "test", {}, repository_fixture.now)
+    audit_event = append_event(None, "test", {}, repository_fixture.now)
     snapshot = repository_fixture.policy_snapshot()
 
     with pytest.raises(ValidationError):

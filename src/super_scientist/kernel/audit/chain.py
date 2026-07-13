@@ -25,13 +25,13 @@ def _payload_hash(payload: FrozenJsonMapping) -> str:
 
 def append_event(
     previous: AuditEvent | None,
-    event_id: str,
     event_type: str,
     payload: Mapping[str, Any],
     occurred_at: UtcTimestamp,
 ) -> AuditEvent:
     frozen_payload = freeze_json_mapping(payload)
     sequence = 1 if previous is None else previous.sequence + 1
+    event_id = f"audit-event-{sequence:020d}"
     previous_hash = GENESIS_HASH if previous is None else previous.event_hash
     payload_hash = _payload_hash(frozen_payload)
     envelope = {
@@ -100,7 +100,6 @@ def verify_chain(events: Iterable[AuditEvent]) -> AuditVerification:
         try:
             expected = append_event(
                 previous,
-                event.event_id,
                 event.event_type,
                 event.payload,
                 event.occurred_at,

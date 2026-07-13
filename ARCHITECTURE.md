@@ -49,6 +49,12 @@ target directory, flushes and synchronizes its bytes, then creates the immutable
 path. An existing digest must contain matching bytes. Reads verify the recorded size and
 SHA-256 digest. See `SECURITY.md` for the filesystem threat boundary.
 
+`EvidenceRecord` input defaults to `UNVERIFIED`; caller-supplied verification claims are
+not authority. `KernelService` owns the artifact-store dependency, validates the
+digest-derived path, bytes, size, digest, media handling, and any text span, then
+projects a `HASH_VERIFIED` copy. Failure is a durable audited
+`EVIDENCE_HASH_MISMATCH` rejection.
+
 ## Proposal And Admission Flow
 
 The implemented proposal union is `AddEvidence`, `ProposeClaim`, and `TransitionClaim`.
@@ -56,8 +62,10 @@ Every proposal carries a proposal identifier, idempotency key, proposer identity
 optional approval. Submission follows this flow:
 
 ```text
-typed proposal
+typed proposal or intent factory
+-> BEGIN IMMEDIATE
 -> canonical proposal hash and idempotency lookup
+-> invoke an intent factory only when no decision exists
 -> active policy hash and proposal identity checks
 -> independent-approval check
 -> entity, status-transition, and evidence-span checks
@@ -66,10 +74,15 @@ typed proposal
 -> append transaction decision and audit event atomically
 ```
 
-An exact idempotent replay returns the stored decision without another mutation. Reuse
-of a key with different canonical content is rejected and audited. Policy mismatch,
+An exact idempotent replay first verifies related stored state and returns the stored
+decision without readmission, another mutation, or another audit. Reuse of a key with
+different canonical content is rejected and audited. Policy mismatch,
 self-approval, duplicate entities, illegal transitions, missing evidence, and unresolved
 required checks fail closed.
+
+`TransitionClaim` carries the complete intended next claim version. Admission validates
+that exact state and the application service projects it unchanged; it does not
+synthesize status-only transitions.
 
 This untrusted-proposal versus deterministic-admission boundary, plus append-only
 transition records and effective-state projection, is adapted conceptually from
@@ -81,9 +94,12 @@ does not reproduce Mnemosyne, and does not make scientific-truth guarantees.
 Each non-replayed decision produces an immutable audit event containing the proposal,
 decision, and active policy hash. The event stores a canonical payload hash, previous
 event hash, sequence, schema version, and an event hash over the canonical envelope.
-Genesis uses a zero hash. Repository reads validate redundant columns against canonical
-event JSON and verify the complete chain. `scientist-harness audit verify` returns a
-nonzero status for corrupt storage or invalid linkage; an empty chain is valid.
+Its identifier is generated solely from the trusted sequence. Genesis uses a zero hash.
+Repository reads validate redundant columns against canonical event JSON and verify the
+complete chain. Shared workspace verification also reconciles transactions with audit
+decisions and exact projections, validates claim heads/history, and rehashes every
+authoritative evidence artifact. `scientist-harness audit verify` exposes that whole
+workspace check and returns nonzero for corruption; an empty chain is valid.
 
 Source metadata for [S07] and [S12] is maintained in
 `docs/sources/source-register.yaml`.

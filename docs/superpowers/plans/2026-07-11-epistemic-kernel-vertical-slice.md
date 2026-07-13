@@ -23,6 +23,32 @@
 - Use TDD for every behavioral change and commit after each task.
 - This plan does not implement hypotheses, experiments, run orchestration, hierarchical memory, QLoRA, or the full release quality suite; each belongs to a later approved subsystem plan.
 
+## Final Review Corrections
+
+The following rules supersede example snippets later in this plan where those snippets
+show a weaker boundary:
+
+- Submitted evidence defaults to `UNVERIFIED`. `KernelService` owns the artifact-store
+  dependency and validates containment, bytes, size, digest, media handling, and any
+  text-span binding before projecting a `HASH_VERIFIED` record. Invalid evidence is a
+  durable audited `EVIDENCE_HASH_MISMATCH` rejection.
+- `TransitionClaim` carries the complete intended next `AtomicClaim`. Admission validates
+  the exact successor, immutable identity fields, parent, creator, edge, evidence links,
+  and status-specific proof semantics. Withdrawal does not require evidence. Because
+  independent corroboration, reproduction, and constraint-proof records are outside this
+  slice, those high-assurance transitions fail closed as review-required.
+- One shared workspace verifier reconciles repositories, policy, claim heads/history,
+  projections, transactions, and audit decisions and rehashes authoritative artifacts.
+  Mutation, exact replay, and `audit verify` use it; exact replay still neither readmits
+  under current policy nor appends state.
+- Intent lookup and proposal-factory invocation occur inside the same service-owned
+  `BEGIN IMMEDIATE` transaction. Audit event identifiers come only from the trusted
+  sequence, never caller-controlled proposal identifiers.
+- With `--json`, parser-time failures produce one schema-version-1 JSON error envelope.
+  Human parse behavior is unchanged. CLI engines are disposed on every path.
+- Durable identifiers and claim text are stripped and nonblank. Fields represented as
+  SHA-256 values are lowercase 64-hex strings.
+
 ---
 
 ## File Map
@@ -52,7 +78,9 @@
 | `alembic.ini` | Migration configuration |
 | `alembic/env.py` | Migration environment using project metadata |
 | `alembic/versions/0001_epistemic_kernel.py` | Initial schema and append-only triggers |
+| `src/super_scientist/application/evidence_verification.py` | Shared artifact bytes, media, and text-span verification |
 | `src/super_scientist/application/kernel_service.py` | Artifact preparation and transactional application use cases |
+| `src/super_scientist/application/workspace_integrity.py` | Cross-repository, audit, projection, and artifact verification |
 | `src/super_scientist/cli/main.py` | Typer root application and JSON result rendering |
 | `src/super_scientist/cli/output.py` | Stable human and JSON decision envelopes |
 | `src/super_scientist/cli/kernel.py` | Init, evidence, claim, transaction, and audit commands |

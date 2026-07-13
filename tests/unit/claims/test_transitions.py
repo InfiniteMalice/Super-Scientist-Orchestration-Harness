@@ -131,3 +131,39 @@ def test_claim_allows_distinct_evidence_link_pairs() -> None:
     )
 
     assert len(claim.evidence_links) == 2
+
+
+def test_claim_identifiers_and_text_are_stripped() -> None:
+    claim = _claim(
+        claim_id="  claim-1  ",
+        proposition="  proposition  ",
+        scope="  scope  ",
+        population_or_system="  system  ",
+        epistemic_modality="  observed  ",
+        created_by="  actor-1  ",
+    )
+
+    assert (
+        claim.claim_id,
+        claim.proposition,
+        claim.scope,
+        claim.population_or_system,
+        claim.epistemic_modality,
+        claim.created_by,
+    ) == ("claim-1", "proposition", "scope", "system", "observed", "actor-1")
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "claim_id",
+        "proposition",
+        "scope",
+        "population_or_system",
+        "epistemic_modality",
+        "created_by",
+    ],
+)
+def test_claim_durable_text_rejects_blank(field: str) -> None:
+    with pytest.raises(ValidationError):
+        _claim(**{field: " \t "})

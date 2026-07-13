@@ -5,12 +5,32 @@ import json
 from datetime import UTC, datetime
 from typing import Annotated, Any, NewType
 
-from pydantic import AfterValidator
+from pydantic import AfterValidator, BeforeValidator, Field
 
 EvidenceId = NewType("EvidenceId", str)
 ClaimId = NewType("ClaimId", str)
 TransactionId = NewType("TransactionId", str)
 ActorId = NewType("ActorId", str)
+
+
+def _strip_text(value: object) -> object:
+    return value.strip() if isinstance(value, str) else value
+
+
+StableIdentifier = Annotated[
+    str,
+    BeforeValidator(_strip_text),
+    Field(strict=True, min_length=1),
+]
+NonBlankText = Annotated[
+    str,
+    BeforeValidator(_strip_text),
+    Field(strict=True, min_length=1),
+]
+Sha256Hex = Annotated[
+    str,
+    Field(strict=True, pattern=r"^[0-9a-f]{64}$"),
+]
 
 
 def require_utc(value: datetime) -> datetime:

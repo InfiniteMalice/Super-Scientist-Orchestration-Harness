@@ -7,7 +7,12 @@ from types import MappingProxyType
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from super_scientist.domain.primitives import UtcTimestamp
+from super_scientist.domain.primitives import (
+    NonBlankText,
+    Sha256Hex,
+    StableIdentifier,
+    UtcTimestamp,
+)
 
 
 class VerificationState(StrEnum):
@@ -59,12 +64,12 @@ def _freeze_provenance(value: Mapping[str, str]) -> Mapping[str, str]:
 class ArtifactRef(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sha256: Sha256Hex
     size_bytes: int = Field(ge=0)
     media_type: str = Field(
         description="Normalized descriptive metadata; it is not part of the SHA-256 byte address."
     )
-    relative_path: str
+    relative_path: NonBlankText
 
     @field_validator("media_type")
     @classmethod
@@ -94,17 +99,17 @@ class EvidenceSpan(BaseModel):
 class EvidenceRecord(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    evidence_id: str
-    evidence_type: str
-    source_locator: str
+    evidence_id: StableIdentifier
+    evidence_type: StableIdentifier
+    source_locator: NonBlankText
     retrieved_at: UtcTimestamp
     artifact: ArtifactRef
     extracted_span: EvidenceSpan | None = None
     structured_observation: Mapping[str, object] | None = None
-    provenance: Mapping[str, str]
-    license: str | None = None
-    ingestion_actor_id: str
-    verification_state: VerificationState = VerificationState.HASH_VERIFIED
+    provenance: Mapping[StableIdentifier, NonBlankText]
+    license: NonBlankText | None = None
+    ingestion_actor_id: StableIdentifier
+    verification_state: VerificationState = VerificationState.UNVERIFIED
 
     @field_validator("structured_observation", mode="after")
     @classmethod

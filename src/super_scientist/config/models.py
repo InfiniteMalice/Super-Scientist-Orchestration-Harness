@@ -2,11 +2,13 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from super_scientist.domain.primitives import NonBlankText, Sha256Hex, StableIdentifier
+
 
 class RuntimeSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    database_url: str = "sqlite:///scientist-harness.db"
+    database_url: NonBlankText = "sqlite:///scientist-harness.db"
     artifact_root: Path = Path("artifacts")
     policy_path: Path = Path("governance-policy.json")
 
@@ -15,8 +17,8 @@ class GovernancePolicy(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     schema_version: int = 1
-    required_claim_checks: tuple[str, ...] = Field(min_length=1)
-    human_approval_for: frozenset[str] = Field(
+    required_claim_checks: tuple[StableIdentifier, ...] = Field(min_length=1)
+    human_approval_for: frozenset[StableIdentifier] = Field(
         default_factory=lambda: frozenset({"governance_change", "adapter_promotion"})
     )
 
@@ -41,5 +43,5 @@ class GovernancePolicy(BaseModel):
 class PolicySnapshot(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    policy_hash: str
+    policy_hash: Sha256Hex
     policy: GovernancePolicy

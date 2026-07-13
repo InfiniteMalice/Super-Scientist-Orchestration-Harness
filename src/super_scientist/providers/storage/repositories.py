@@ -629,7 +629,6 @@ class AuditRepository:
         events = self._read_all_events()
         expected = append_event(
             events[-1] if events else None,
-            validated.event_id,
             validated.event_type,
             validated.payload,
             validated.occurred_at,

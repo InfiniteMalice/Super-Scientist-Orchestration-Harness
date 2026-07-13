@@ -70,7 +70,7 @@ def test_replaying_a_submission_is_stable(content: bytes) -> None:
         def uow_factory() -> DatabaseUnitOfWork:
             return DatabaseUnitOfWork(engine)
 
-        service = KernelService(uow_factory, policy, FixedClock())
+        service = KernelService(uow_factory, policy, FixedClock(), artifact_store)
 
         first = service.submit(proposal)
         replay = service.submit(proposal)

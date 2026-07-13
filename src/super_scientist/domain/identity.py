@@ -4,7 +4,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from super_scientist.domain.primitives import UtcTimestamp
+from super_scientist.domain.primitives import Sha256Hex, StableIdentifier, UtcTimestamp
 
 
 class ActorKind(StrEnum):
@@ -17,13 +17,13 @@ class ActorKind(StrEnum):
 class ActorIdentity(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    actor_id: str
+    actor_id: StableIdentifier
     kind: ActorKind
     created_at: UtcTimestamp
-    provider_id: str | None = None
-    model_id: str | None = None
-    adapter_id: str | None = None
-    configuration_hash: str | None = None
+    provider_id: StableIdentifier | None = None
+    model_id: StableIdentifier | None = None
+    adapter_id: StableIdentifier | None = None
+    configuration_hash: Sha256Hex | None = None
 
     @model_validator(mode="after")
     def require_model_identity(self) -> ActorIdentity:

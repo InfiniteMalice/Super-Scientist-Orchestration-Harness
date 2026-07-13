@@ -4,7 +4,12 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
-from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord, EvidenceSpan
+from super_scientist.domain.evidence.models import (
+    ArtifactRef,
+    EvidenceRecord,
+    EvidenceSpan,
+    VerificationState,
+)
 
 
 def test_artifact_ref_rejects_non_sha256_digest() -> None:
@@ -68,6 +73,56 @@ def test_evidence_record_hash_matches_artifact() -> None:
 
     assert record.content_hash == artifact.sha256
     assert record.retrieved_at.tzinfo is UTC
+    assert record.verification_state is VerificationState.UNVERIFIED
+
+
+def test_evidence_identifiers_and_text_are_stripped() -> None:
+    record = EvidenceRecord(
+        evidence_id="  ev-1  ",
+        evidence_type="  document  ",
+        source_locator="  fixture://one  ",
+        retrieved_at=datetime.now(UTC),
+        artifact=ArtifactRef(
+            sha256="a" * 64,
+            size_bytes=3,
+            media_type="text/plain",
+            relative_path=f"sha256/aa/{'a' * 64}",
+        ),
+        provenance={"collector": "test"},
+        ingestion_actor_id="  actor-1  ",
+    )
+
+    assert (
+        record.evidence_id,
+        record.evidence_type,
+        record.source_locator,
+        record.ingestion_actor_id,
+    ) == ("ev-1", "document", "fixture://one", "actor-1")
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["evidence_id", "evidence_type", "source_locator", "ingestion_actor_id"],
+)
+def test_evidence_durable_text_rejects_blank(field: str) -> None:
+    values: dict[str, object] = {
+        "evidence_id": "ev-1",
+        "evidence_type": "document",
+        "source_locator": "fixture://one",
+        "retrieved_at": datetime.now(UTC),
+        "artifact": ArtifactRef(
+            sha256="a" * 64,
+            size_bytes=3,
+            media_type="text/plain",
+            relative_path=f"sha256/aa/{'a' * 64}",
+        ),
+        "provenance": {"collector": "test"},
+        "ingestion_actor_id": "actor-1",
+    }
+    values[field] = "  "
+
+    with pytest.raises(ValidationError):
+        EvidenceRecord(**values)
 
 
 def test_evidence_records_are_frozen() -> None:

@@ -7,7 +7,12 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
-from super_scientist.domain.primitives import UtcTimestamp
+from super_scientist.domain.primitives import (
+    NonBlankText,
+    Sha256Hex,
+    StableIdentifier,
+    UtcTimestamp,
+)
 
 GENESIS_HASH = "0" * 64
 AUDIT_SCHEMA_VERSION = 1
@@ -59,14 +64,14 @@ class AuditEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     sequence: int = Field(strict=True, ge=1)
-    event_id: str
-    event_type: str
+    event_id: StableIdentifier
+    event_type: StableIdentifier
     schema_version: int = Field(default=AUDIT_SCHEMA_VERSION, strict=True)
     occurred_at: UtcTimestamp
     payload: FrozenJsonMapping
-    payload_hash: str
-    previous_hash: str
-    event_hash: str
+    payload_hash: Sha256Hex
+    previous_hash: Sha256Hex
+    event_hash: Sha256Hex
 
     @field_validator("payload", mode="after")
     @classmethod
@@ -86,4 +91,4 @@ class AuditVerification(BaseModel):
     valid: bool
     checked_events: int = Field(strict=True, ge=0)
     first_invalid_sequence: int | None = Field(default=None, strict=True, ge=1)
-    reason: str | None = None
+    reason: NonBlankText | None = None

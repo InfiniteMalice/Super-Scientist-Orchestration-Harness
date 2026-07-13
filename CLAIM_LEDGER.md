@@ -35,10 +35,12 @@ SUPERSEDED -> (terminal)
 WITHDRAWN -> (terminal)
 ```
 
-Admission requires the expected current version and rejects every edge absent from this
-graph. An accepted transition appends a new claim version and advances the head; it does
-not overwrite history. The domain and application service support transitions, but the
-current CLI exposes only claim proposal and history commands.
+`TransitionClaim` carries the complete intended next `AtomicClaim`, not only a target
+status. Admission validates that exact record: claim identity content is immutable, the
+version and parent must be the exact successor, and `created_by` must match the
+transition proposer. The application service projects the admitted record unchanged.
+Every edge absent from the graph is rejected. The current CLI exposes only claim
+proposal and history commands.
 
 ## Evidence Spans
 
@@ -51,6 +53,8 @@ During transition admission, `source_exists` requires the linked evidence identi
 exist, and `evidence_span_exists` requires the supporting text to occur in that evidence
 record's extracted span. The default active policy requires both checks. Missing sources,
 missing extracted text, or absent supporting text cause deterministic rejection.
+`EVIDENCE_LINKED` must add at least one valid link. `WITHDRAWN` is a terminal intent and
+does not run generic evidence checks.
 
 ## Deterministic And Review-Required Outcomes
 
@@ -61,7 +65,9 @@ or a required check that did not deterministically pass rejects it as
 `INDEPENDENT_REVIEW_REQUIRED`.
 
 The current source and span validators produce deterministic pass, fail, or
-not-applicable results. No independent-review workflow is implemented, so the kernel
-does not auto-promote a review-required claim. These statuses record scoped lifecycle
-state; none certifies scientific truth. Source metadata for [S02] is maintained in
-`docs/sources/source-register.yaml`.
+not-applicable results. Distinct reproduction records, independent corroboration
+reviews, and encoded constraint proofs are not implemented. Transitions to
+`REPRODUCED`, `CORROBORATED`, and `CONSTRAINT_VALIDATED` therefore fail closed as
+`INDEPENDENT_REVIEW_REQUIRED`; evidence links alone cannot confer those statuses.
+These statuses do not certify scientific truth. Source metadata for [S02] is maintained
+in `docs/sources/source-register.yaml`.

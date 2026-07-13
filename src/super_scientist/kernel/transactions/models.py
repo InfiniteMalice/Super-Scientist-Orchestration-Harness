@@ -5,12 +5,12 @@ from collections.abc import Mapping
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
-from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
+from super_scientist.domain.claims.models import AtomicClaim
 from super_scientist.domain.evidence.models import EvidenceRecord
 from super_scientist.domain.identity import ActorIdentity
-from super_scientist.domain.primitives import UtcTimestamp
+from super_scientist.domain.primitives import NonBlankText, StableIdentifier, UtcTimestamp
 
 
 class RejectionCode(StrEnum):
@@ -37,8 +37,8 @@ class Approval(BaseModel):
 class ProposalBase(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    proposal_id: str = Field(min_length=1)
-    idempotency_key: str = Field(min_length=1)
+    proposal_id: StableIdentifier
+    idempotency_key: StableIdentifier
     proposer: ActorIdentity
     approval: Approval | None = None
 
@@ -59,9 +59,7 @@ class ProposeClaim(ProposalBase):
 
 class TransitionClaim(ProposalBase):
     proposal_type: Literal["transition_claim"] = "transition_claim"
-    claim_id: str = Field(min_length=1)
-    expected_version: StrictInt = Field(ge=1)
-    target_status: ClaimStatus
+    next_claim: AtomicClaim
 
 
 Proposal = Annotated[
@@ -74,13 +72,13 @@ class RejectionReason(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     code: RejectionCode
-    message: str = Field(min_length=1)
+    message: NonBlankText
 
 
 class TransactionDecision(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    proposal_id: str = Field(min_length=1)
+    proposal_id: StableIdentifier
     accepted: bool
     replayed: bool = False
     reasons: tuple[RejectionReason, ...] = ()

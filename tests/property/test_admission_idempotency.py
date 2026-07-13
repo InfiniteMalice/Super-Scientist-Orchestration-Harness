@@ -54,7 +54,9 @@ def _context(
     )
 
 
-@given(st.text(min_size=1, max_size=32))
+@given(
+    st.text(min_size=1, max_size=32).filter(lambda key: bool(key.strip()) and key == key.strip())
+)
 def test_same_idempotency_key_replays_same_decision(key: str) -> None:
     proposal = _proposal(key)
     engine = AdmissionEngine()

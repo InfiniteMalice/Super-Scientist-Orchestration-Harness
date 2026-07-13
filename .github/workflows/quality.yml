@@ -40,3 +40,25 @@ jobs:
           name: distributions
           path: dist/*
           if-no-files-found: ignore
+
+  windows-artifact-security:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and development tools
+        run: python -m pip install ".[dev]"
+
+      - name: Exercise Windows junction containment
+        run: >-
+          python -m pytest
+          tests/integration/storage/test_windows_reparse_artifacts.py
+          -v

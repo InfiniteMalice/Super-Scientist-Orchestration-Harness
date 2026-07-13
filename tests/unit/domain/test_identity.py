@@ -45,6 +45,19 @@ def test_model_actor_requires_provider_and_model_ids() -> None:
         )
 
 
+@pytest.mark.parametrize("configuration_hash", ["hash", "A" * 64, "a" * 63])
+def test_model_configuration_hash_must_be_canonical_sha256(configuration_hash: str) -> None:
+    with pytest.raises(ValidationError, match="configuration_hash"):
+        ActorIdentity(
+            actor_id="actor-1",
+            kind=ActorKind.MODEL,
+            provider_id="provider",
+            model_id="model",
+            configuration_hash=configuration_hash,
+            created_at=datetime.now(UTC),
+        )
+
+
 def test_same_model_and_adapter_without_configuration_hash_are_not_independent() -> None:
     left = ActorIdentity.model("a", "provider", "model", "adapter", datetime.now(UTC))
     right = ActorIdentity.model("b", "provider", "model", "adapter", datetime.now(UTC))
@@ -58,7 +71,7 @@ def test_missing_configuration_hash_on_either_model_is_not_independent() -> None
         provider_id="provider",
         model_id="model",
         adapter_id="adapter",
-        configuration_hash="hash",
+        configuration_hash="a" * 64,
         created_at=datetime.now(UTC),
     )
     missing_left = complete.model_copy(
@@ -79,7 +92,7 @@ def test_same_actor_is_not_independent_even_with_different_configuration() -> No
         provider_id="provider-a",
         model_id="model-a",
         adapter_id="adapter-a",
-        configuration_hash="hash-a",
+        configuration_hash="a" * 64,
         created_at=datetime.now(UTC),
     )
     right = left.model_copy(
@@ -87,7 +100,7 @@ def test_same_actor_is_not_independent_even_with_different_configuration() -> No
             "provider_id": "provider-b",
             "model_id": "model-b",
             "adapter_id": "adapter-b",
-            "configuration_hash": "hash-b",
+            "configuration_hash": "b" * 64,
         }
     )
 
@@ -101,7 +114,7 @@ def test_exact_same_model_fingerprint_is_not_independent() -> None:
         provider_id="provider",
         model_id="model",
         adapter_id="adapter",
-        configuration_hash="hash",
+        configuration_hash="a" * 64,
         created_at=datetime.now(UTC),
     )
     right = left.model_copy(update={"actor_id": "right"})

@@ -1,6 +1,10 @@
-from typing import Annotated
+import sys
+from collections.abc import Sequence
+from typing import Annotated, Any
 
 import typer
+from typer._click.exceptions import ClickException
+from typer.core import TyperGroup
 
 from super_scientist.cli.kernel import (
     audit_app,
@@ -12,7 +16,71 @@ from super_scientist.cli.kernel import (
 from super_scientist.cli.output import emit
 from super_scientist.quality.runner import QualityCheckResult, run_quality_gate
 
-app = typer.Typer(no_args_is_help=True)
+_COMMAND_PATHS = (
+    ("evidence", "add"),
+    ("evidence", "show"),
+    ("claim", "propose"),
+    ("claim", "history"),
+    ("transaction", "list"),
+    ("audit", "verify"),
+    ("quality-gate",),
+    ("init",),
+)
+
+
+def _command_name(args: Sequence[str]) -> str:
+    for path in _COMMAND_PATHS:
+        width = len(path)
+        if any(
+            tuple(args[index : index + width]) == path for index in range(len(args) - width + 1)
+        ):
+            return " ".join(path)
+    return "scientist-harness"
+
+
+class JsonEnvelopeGroup(TyperGroup):
+    def main(
+        self,
+        args: Sequence[str] | None = None,
+        prog_name: str | None = None,
+        complete_var: str | None = None,
+        standalone_mode: bool = True,
+        windows_expand_args: bool = True,
+        **extra: Any,
+    ) -> Any:
+        raw_args = list(sys.argv[1:] if args is None else args)
+        if "--json" not in raw_args:
+            return super().main(
+                args=raw_args,
+                prog_name=prog_name,
+                complete_var=complete_var,
+                standalone_mode=standalone_mode,
+                windows_expand_args=windows_expand_args,
+                **extra,
+            )
+        try:
+            result = super().main(
+                args=raw_args,
+                prog_name=prog_name,
+                complete_var=complete_var,
+                standalone_mode=False,
+                windows_expand_args=windows_expand_args,
+                **extra,
+            )
+        except ClickException as error:
+            emit(
+                _command_name(raw_args),
+                False,
+                True,
+                errors=[{"code": "INVALID_ARGUMENT", "message": error.format_message()}],
+            )
+            raise SystemExit(error.exit_code) from None
+        if isinstance(result, int) and result != 0:
+            raise SystemExit(result)
+        return result
+
+
+app = typer.Typer(cls=JsonEnvelopeGroup, no_args_is_help=True)
 app.command("init")(init_command)
 app.add_typer(evidence_app, name="evidence")
 app.add_typer(claim_app, name="claim")

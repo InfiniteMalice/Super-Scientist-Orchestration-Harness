@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import pytest
@@ -7,6 +7,7 @@ from pydantic import TypeAdapter, ValidationError
 import super_scientist.kernel.admission.engine as admission_engine
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus, EvidenceLink
+from super_scientist.domain.claims.transitions import ALLOWED
 from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord, EvidenceSpan
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.evaluation.claim_drift.models import CheckOutcome, CheckResult
@@ -73,6 +74,31 @@ def _claim(
         created_at=datetime(2026, 7, 12, tzinfo=UTC),
         created_by=actor_id,
     )
+
+
+def _next_claim(
+    current: AtomicClaim,
+    target_status: ClaimStatus,
+    *,
+    actor_id: str = "proposer",
+    evidence_links: tuple[EvidenceLink, ...] | None = None,
+    **updates: object,
+) -> AtomicClaim:
+    values = current.model_dump(mode="python")
+    values.update(
+        {
+            "version": current.version + 1,
+            "status": target_status,
+            "evidence_links": (
+                current.evidence_links if evidence_links is None else evidence_links
+            ),
+            "parent_version_id": f"{current.claim_id}:{current.version}",
+            "created_at": current.created_at + timedelta(seconds=1),
+            "created_by": actor_id,
+        }
+    )
+    values.update(updates)
+    return AtomicClaim.model_validate(values)
 
 
 def _evidence(extracted_text: str = "supporting fixture span") -> EvidenceRecord:
@@ -188,9 +214,7 @@ def test_model_construct_context_is_revalidated_and_frozen() -> None:
         proposal_id="proposal-1",
         idempotency_key="key-1",
         proposer=_actor("proposer"),
-        claim_id=claim.claim_id,
-        expected_version=claim.version,
-        target_status=ClaimStatus.TESTABLE,
+        next_claim=_next_claim(claim, ClaimStatus.TESTABLE),
     )
     context = AdmissionContext.model_construct(
         active_policy=_policy(),
@@ -233,33 +257,47 @@ def test_new_claim_must_begin_proposed() -> None:
     assert decision.reasons[0].code is RejectionCode.INVALID_STATUS_TRANSITION
 
 
-def test_transition_requires_existing_claim_at_expected_version() -> None:
+def test_transition_requires_exact_successor_version() -> None:
+    current = _claim()
     proposal = TransitionClaim(
         proposal_id="proposal-1",
         idempotency_key="key-1",
         proposer=_actor("proposer"),
-        claim_id="claim-1",
-        expected_version=2,
-        target_status=ClaimStatus.EVIDENCE_LINKED,
+        next_claim=_next_claim(
+            current,
+            ClaimStatus.WITHDRAWN,
+            version=3,
+            parent_version_id="claim-1:2",
+        ),
     )
 
-    decision = AdmissionEngine().decide(proposal, _context(claim_by_id={"claim-1": _claim()}))
+    decision = AdmissionEngine().decide(
+        proposal,
+        _context(claim_by_id={current.claim_id: current}),
+    )
 
     assert not decision.accepted
     assert decision.reasons[0].code is RejectionCode.INVALID_STATUS_TRANSITION
 
 
 def test_transition_rejects_undeclared_status_edge() -> None:
+    current = _claim()
+    link = EvidenceLink(evidence_id="evidence-1", supporting_span="fixture span")
     proposal = TransitionClaim(
         proposal_id="proposal-1",
         idempotency_key="key-1",
         proposer=_actor("proposer"),
-        claim_id="claim-1",
-        expected_version=1,
-        target_status=ClaimStatus.CORROBORATED,
+        next_claim=_next_claim(
+            current,
+            ClaimStatus.CORROBORATED,
+            evidence_links=(link,),
+        ),
     )
 
-    decision = AdmissionEngine().decide(proposal, _context(claim_by_id={"claim-1": _claim()}))
+    decision = AdmissionEngine().decide(
+        proposal,
+        _context(claim_by_id={current.claim_id: current}),
+    )
 
     assert not decision.accepted
     assert decision.reasons[0].code is RejectionCode.INVALID_STATUS_TRANSITION
@@ -274,9 +312,7 @@ def test_transition_rejects_missing_deterministic_evidence() -> None:
         proposal_id="proposal-1",
         idempotency_key="key-1",
         proposer=_actor("proposer"),
-        claim_id=claim.claim_id,
-        expected_version=claim.version,
-        target_status=ClaimStatus.TESTABLE,
+        next_claim=_next_claim(claim, ClaimStatus.TESTABLE),
     )
 
     decision = AdmissionEngine().decide(proposal, _context(claim_by_id={claim.claim_id: claim}))
@@ -297,9 +333,7 @@ def test_transition_rejects_policy_check_without_deterministic_coverage() -> Non
         proposal_id="proposal-1",
         idempotency_key="key-1",
         proposer=_actor("proposer"),
-        claim_id=claim.claim_id,
-        expected_version=claim.version,
-        target_status=ClaimStatus.TESTABLE,
+        next_claim=_next_claim(claim, ClaimStatus.TESTABLE),
     )
 
     decision = AdmissionEngine().decide(
@@ -329,9 +363,7 @@ def test_transition_rejects_nonrequired_independent_review_result(
         proposal_id="proposal-1",
         idempotency_key="key-1",
         proposer=_actor("proposer"),
-        claim_id=claim.claim_id,
-        expected_version=claim.version,
-        target_status=ClaimStatus.TESTABLE,
+        next_claim=_next_claim(claim, ClaimStatus.TESTABLE),
     )
     monkeypatch.setattr(
         admission_engine,
@@ -379,9 +411,7 @@ def test_transition_accepts_declared_edge_with_exact_evidence() -> None:
         proposal_id="proposal-1",
         idempotency_key="key-1",
         proposer=_actor("proposer"),
-        claim_id=claim.claim_id,
-        expected_version=claim.version,
-        target_status=ClaimStatus.TESTABLE,
+        next_claim=_next_claim(claim, ClaimStatus.TESTABLE),
     )
 
     decision = AdmissionEngine().decide(
@@ -393,6 +423,174 @@ def test_transition_accepts_declared_edge_with_exact_evidence() -> None:
     )
 
     assert decision == TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+
+
+def test_withdrawal_skips_evidence_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    current = _claim()
+    proposal = TransitionClaim(
+        proposal_id="proposal-withdraw",
+        idempotency_key="key-withdraw",
+        proposer=_actor("proposer"),
+        next_claim=_next_claim(current, ClaimStatus.WITHDRAWN, evidence_links=()),
+    )
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> tuple[CheckResult, ...]:
+        raise AssertionError("withdrawal must not run evidence checks")
+
+    monkeypatch.setattr(admission_engine, "run_deterministic_checks", fail_if_called)
+
+    decision = AdmissionEngine().decide(
+        proposal,
+        _context(claim_by_id={current.claim_id: current}),
+    )
+
+    assert decision.accepted
+
+
+def test_evidence_linked_requires_a_new_valid_link() -> None:
+    evidence = _evidence()
+    existing_link = EvidenceLink(
+        evidence_id=evidence.evidence_id,
+        supporting_span="fixture span",
+    )
+    current = _claim(evidence_links=(existing_link,))
+    proposal = TransitionClaim(
+        proposal_id="proposal-evidence-linked",
+        idempotency_key="key-evidence-linked",
+        proposer=_actor("proposer"),
+        next_claim=_next_claim(
+            current,
+            ClaimStatus.EVIDENCE_LINKED,
+            evidence_links=(existing_link,),
+        ),
+    )
+
+    decision = AdmissionEngine().decide(
+        proposal,
+        _context(
+            evidence_by_id={evidence.evidence_id: evidence},
+            claim_by_id={current.claim_id: current},
+        ),
+    )
+
+    assert not decision.accepted
+    assert decision.reasons[0].code is RejectionCode.MISSING_EVIDENCE
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("proposition", "changed proposition"),
+        ("scope", "changed scope"),
+        ("population_or_system", "changed system"),
+        ("epistemic_modality", "changed modality"),
+    ],
+)
+def test_transition_rejects_changes_to_claim_identity_content(field: str, value: str) -> None:
+    current = _claim()
+    proposal = TransitionClaim(
+        proposal_id=f"proposal-{field}",
+        idempotency_key=f"key-{field}",
+        proposer=_actor("proposer"),
+        next_claim=_next_claim(current, ClaimStatus.WITHDRAWN, **{field: value}),
+    )
+
+    decision = AdmissionEngine().decide(
+        proposal,
+        _context(claim_by_id={current.claim_id: current}),
+    )
+
+    assert not decision.accepted
+    assert decision.reasons[0].code is RejectionCode.INVALID_STATUS_TRANSITION
+
+
+def test_transition_creator_must_match_proposer() -> None:
+    current = _claim()
+    proposal = TransitionClaim(
+        proposal_id="proposal-creator",
+        idempotency_key="key-creator",
+        proposer=_actor("proposer"),
+        next_claim=_next_claim(
+            current,
+            ClaimStatus.WITHDRAWN,
+            actor_id="different-actor",
+        ),
+    )
+
+    decision = AdmissionEngine().decide(
+        proposal,
+        _context(claim_by_id={current.claim_id: current}),
+    )
+
+    assert not decision.accepted
+    assert decision.reasons[0].code is RejectionCode.INVALID_STATUS_TRANSITION
+
+
+def test_transition_parent_is_revalidated_at_public_boundary() -> None:
+    current = _claim()
+    invalid_next = _next_claim(current, ClaimStatus.WITHDRAWN).model_copy(
+        update={"parent_version_id": "claim-1:99"}
+    )
+    proposal = TransitionClaim.model_construct(
+        proposal_type="transition_claim",
+        proposal_id="proposal-parent",
+        idempotency_key="key-parent",
+        proposer=_actor("proposer"),
+        approval=None,
+        next_claim=invalid_next,
+    )
+
+    decision = AdmissionEngine().decide(
+        proposal,
+        _context(claim_by_id={current.claim_id: current}),
+    )
+
+    assert not decision.accepted
+    assert decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+
+
+@pytest.mark.parametrize(
+    ("current_status", "target_status"),
+    [(current, target) for current, targets in ALLOWED.items() for target in targets],
+)
+def test_every_declared_transition_has_status_specific_admission(
+    current_status: ClaimStatus,
+    target_status: ClaimStatus,
+) -> None:
+    evidence = _evidence()
+    link = EvidenceLink(evidence_id=evidence.evidence_id, supporting_span="fixture span")
+    current_links = () if current_status is ClaimStatus.PROPOSED else (link,)
+    current = _claim(status=current_status, evidence_links=current_links)
+    next_links = () if target_status is ClaimStatus.WITHDRAWN else (link,)
+    proposal = TransitionClaim(
+        proposal_id=f"proposal-{current_status}-{target_status}",
+        idempotency_key=f"key-{current_status}-{target_status}",
+        proposer=_actor("proposer"),
+        next_claim=_next_claim(
+            current,
+            target_status,
+            evidence_links=next_links,
+        ),
+    )
+
+    decision = AdmissionEngine().decide(
+        proposal,
+        _context(
+            evidence_by_id={evidence.evidence_id: evidence},
+            claim_by_id={current.claim_id: current},
+        ),
+    )
+
+    proof_statuses = {
+        ClaimStatus.REPRODUCED,
+        ClaimStatus.CORROBORATED,
+        ClaimStatus.CONSTRAINT_VALIDATED,
+    }
+    if target_status in proof_statuses:
+        assert not decision.accepted
+        assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+    else:
+        assert decision.accepted
 
 
 def test_add_evidence_is_accepted_without_mutating_context() -> None:

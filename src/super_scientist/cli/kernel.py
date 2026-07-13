@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from functools import wraps
 from json import JSONDecodeError
 from pathlib import Path
+from types import TracebackType
 from typing import Annotated, ParamSpec
 
 import typer
@@ -14,6 +15,7 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from super_scientist.application.kernel_service import KernelService, SystemClock
+from super_scientist.application.workspace_integrity import verify_workspace
 from super_scientist.cli.output import emit
 from super_scientist.config.loader import load_policy
 from super_scientist.config.models import GovernancePolicy
@@ -21,8 +23,6 @@ from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
 from super_scientist.domain.evidence.models import EvidenceRecord, EvidenceSpan
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
-from super_scientist.kernel.audit.chain import verify_chain
-from super_scientist.kernel.audit.models import AuditVerification
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
     Approval,
@@ -111,6 +111,18 @@ class Runtime:
     service: KernelService
     clock: SystemClock
 
+    def __enter__(self) -> Runtime:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc, traceback
+        self.engine.dispose()
+
 
 def _database_url(root: Path) -> str:
     return f"sqlite:///{(root / 'scientist-harness.db').resolve().as_posix()}"
@@ -135,10 +147,7 @@ def _submit_intent(
     intent_key: str,
     create_proposal: Callable[[], Proposal],
 ) -> TransactionDecision:
-    with DatabaseUnitOfWork(runtime.engine) as uow:
-        stored = uow.repositories().transactions.get_by_idempotency_key(intent_key)
-    proposal = stored.proposal if stored is not None else create_proposal()
-    return runtime.service.submit(proposal)
+    return runtime.service.submit_intent(intent_key, create_proposal)
 
 
 def build_runtime(root: Path) -> Runtime:
@@ -149,20 +158,30 @@ def build_runtime(root: Path) -> Runtime:
             "workspace is not initialized; run init first",
         )
     engine = create_database_engine(_database_url(resolved))
-    clock = SystemClock()
-    with DatabaseUnitOfWork(engine) as uow:
-        policy = uow.repositories().policies.get_active()
-    if policy is None:
-        raise CliBoundaryError(
-            "WORKSPACE_NOT_INITIALIZED",
-            "workspace is not initialized; run init first",
+    try:
+        clock = SystemClock()
+        with DatabaseUnitOfWork(engine) as uow:
+            policy = uow.repositories().policies.get_active()
+        if policy is None:
+            raise CliBoundaryError(
+                "WORKSPACE_NOT_INITIALIZED",
+                "workspace is not initialized; run init first",
+            )
+        artifacts = FileArtifactStore(resolved / "artifacts")
+        return Runtime(
+            engine=engine,
+            artifacts=artifacts,
+            service=KernelService(
+                lambda: DatabaseUnitOfWork(engine),
+                policy,
+                clock,
+                artifacts,
+            ),
+            clock=clock,
         )
-    return Runtime(
-        engine=engine,
-        artifacts=FileArtifactStore(resolved / "artifacts"),
-        service=KernelService(lambda: DatabaseUnitOfWork(engine), policy, clock),
-        clock=clock,
-    )
+    except BaseException:
+        engine.dispose()
+        raise
 
 
 @_command_boundary("init")
@@ -181,15 +200,18 @@ def init_command(
     upgrade_database(url)
     engine = create_database_engine(url)
     clock = SystemClock()
-    with DatabaseUnitOfWork(engine) as uow:
-        policies = uow.repositories().policies
-        active = policies.get_active()
-        if active is not None and active.policy_hash != snapshot.policy_hash:
-            raise CliBoundaryError(
-                "POLICY_CHANGE_REJECTED",
-                "changing an initialized governance policy requires the approval workflow",
-            )
-        policies.add_and_activate(snapshot, clock.now())
+    try:
+        with DatabaseUnitOfWork(engine) as uow:
+            policies = uow.repositories().policies
+            active = policies.get_active()
+            if active is not None and active.policy_hash != snapshot.policy_hash:
+                raise CliBoundaryError(
+                    "POLICY_CHANGE_REJECTED",
+                    "changing an initialized governance policy requires the approval workflow",
+                )
+            policies.add_and_activate(snapshot, clock.now())
+    finally:
+        engine.dispose()
     emit(
         "init",
         True,
@@ -211,58 +233,60 @@ def evidence_add(
     media_type: MediaType = "text/plain",
     json_output: JsonOutput = False,
 ) -> None:
-    runtime = build_runtime(root)
-    data = file.read_bytes()
-    artifact = runtime.artifacts.put(data, media_type)
-    intent_key = f"evidence:{
-        sha256_hex(
-            canonical_json_bytes(
-                {
-                    'source': source,
-                    'content_hash': artifact.sha256,
-                    'media_type': artifact.media_type,
-                }
+    with build_runtime(root) as runtime:
+        data = file.read_bytes()
+        artifact = runtime.artifacts.put(data, media_type)
+        intent_key = f"evidence:{
+            sha256_hex(
+                canonical_json_bytes(
+                    {
+                        'source': source,
+                        'content_hash': artifact.sha256,
+                        'media_type': artifact.media_type,
+                    }
+                )
             )
-        )
-    }"
-    evidence_id = _intent_identifier("ev", intent_key)
+        }"
+        evidence_id = _intent_identifier("ev", intent_key)
 
-    def create_proposal() -> AddEvidence:
-        actor = _actor(runtime.clock)
-        text = data.decode("utf-8") if artifact.media_type.startswith("text/") and data else None
-        record = EvidenceRecord(
-            evidence_id=evidence_id,
-            evidence_type="document",
-            source_locator=source,
-            retrieved_at=runtime.clock.now(),
-            artifact=artifact,
-            extracted_span=(
-                None if text is None else EvidenceSpan(start=0, end=len(text), text=text)
-            ),
-            provenance={"collector": "local-cli", "input_file": str(file.resolve())},
-            ingestion_actor_id=actor.actor_id,
-        )
-        return AddEvidence(
-            proposal_id=_intent_identifier("proposal", intent_key),
-            idempotency_key=intent_key,
-            proposer=actor,
-            evidence=record,
-        )
+        def create_proposal() -> AddEvidence:
+            actor = _actor(runtime.clock)
+            text = (
+                data.decode("utf-8") if artifact.media_type.startswith("text/") and data else None
+            )
+            record = EvidenceRecord(
+                evidence_id=evidence_id,
+                evidence_type="document",
+                source_locator=source,
+                retrieved_at=runtime.clock.now(),
+                artifact=artifact,
+                extracted_span=(
+                    None if text is None else EvidenceSpan(start=0, end=len(text), text=text)
+                ),
+                provenance={"collector": "local-cli", "input_file": str(file.resolve())},
+                ingestion_actor_id=actor.actor_id,
+            )
+            return AddEvidence(
+                proposal_id=_intent_identifier("proposal", intent_key),
+                idempotency_key=intent_key,
+                proposer=actor,
+                evidence=record,
+            )
 
-    decision = _submit_intent(
-        runtime,
-        intent_key,
-        create_proposal,
-    )
-    emit(
-        "evidence add",
-        decision.accepted,
-        json_output,
-        data={"evidence_id": evidence_id},
-        decision=decision.model_dump(mode="json"),
-    )
-    if not decision.accepted:
-        raise typer.Exit(code=2)
+        decision = _submit_intent(
+            runtime,
+            intent_key,
+            create_proposal,
+        )
+        emit(
+            "evidence add",
+            decision.accepted,
+            json_output,
+            data={"evidence_id": evidence_id},
+            decision=decision.model_dump(mode="json"),
+        )
+        if not decision.accepted:
+            raise typer.Exit(code=2)
 
 
 @evidence_app.command("show")
@@ -272,8 +296,7 @@ def evidence_show(
     evidence_id: EvidenceId,
     json_output: JsonOutput = False,
 ) -> None:
-    runtime = build_runtime(root)
-    with DatabaseUnitOfWork(runtime.engine) as uow:
+    with build_runtime(root) as runtime, DatabaseUnitOfWork(runtime.engine) as uow:
         record = uow.repositories().evidence.get(evidence_id)
     if record is None:
         emit(
@@ -302,60 +325,60 @@ def claim_propose(
     self_approve: SelfApprove = False,
     json_output: JsonOutput = False,
 ) -> None:
-    runtime = build_runtime(root)
-    intent_key = f"claim:{
-        sha256_hex(
-            canonical_json_bytes(
-                {
-                    'proposition': proposition,
-                    'scope': scope,
-                    'system': system,
-                    'modality': modality,
-                    'self_approve': self_approve,
-                }
+    with build_runtime(root) as runtime:
+        intent_key = f"claim:{
+            sha256_hex(
+                canonical_json_bytes(
+                    {
+                        'proposition': proposition,
+                        'scope': scope,
+                        'system': system,
+                        'modality': modality,
+                        'self_approve': self_approve,
+                    }
+                )
             )
-        )
-    }"
-    claim_id = _intent_identifier("claim", intent_key)
+        }"
+        claim_id = _intent_identifier("claim", intent_key)
 
-    def create_proposal() -> ProposeClaim:
-        actor = _actor(runtime.clock)
-        claim = AtomicClaim(
-            claim_id=claim_id,
-            version=1,
-            proposition=proposition,
-            scope=scope,
-            population_or_system=system,
-            epistemic_modality=modality,
-            status=ClaimStatus.PROPOSED,
-            created_at=runtime.clock.now(),
-            created_by=actor.actor_id,
-        )
-        approval = (
-            Approval(approver=actor, approved_at=runtime.clock.now()) if self_approve else None
-        )
-        return ProposeClaim(
-            proposal_id=_intent_identifier("proposal", intent_key),
-            idempotency_key=intent_key,
-            proposer=actor,
-            approval=approval,
-            claim=claim,
-        )
+        def create_proposal() -> ProposeClaim:
+            actor = _actor(runtime.clock)
+            claim = AtomicClaim(
+                claim_id=claim_id,
+                version=1,
+                proposition=proposition,
+                scope=scope,
+                population_or_system=system,
+                epistemic_modality=modality,
+                status=ClaimStatus.PROPOSED,
+                created_at=runtime.clock.now(),
+                created_by=actor.actor_id,
+            )
+            approval = (
+                Approval(approver=actor, approved_at=runtime.clock.now()) if self_approve else None
+            )
+            return ProposeClaim(
+                proposal_id=_intent_identifier("proposal", intent_key),
+                idempotency_key=intent_key,
+                proposer=actor,
+                approval=approval,
+                claim=claim,
+            )
 
-    decision = _submit_intent(
-        runtime,
-        intent_key,
-        create_proposal,
-    )
-    emit(
-        "claim propose",
-        decision.accepted,
-        json_output,
-        data={"claim_id": claim_id},
-        decision=decision.model_dump(mode="json"),
-    )
-    if not decision.accepted:
-        raise typer.Exit(code=2)
+        decision = _submit_intent(
+            runtime,
+            intent_key,
+            create_proposal,
+        )
+        emit(
+            "claim propose",
+            decision.accepted,
+            json_output,
+            data={"claim_id": claim_id},
+            decision=decision.model_dump(mode="json"),
+        )
+        if not decision.accepted:
+            raise typer.Exit(code=2)
 
 
 @claim_app.command("history")
@@ -365,8 +388,7 @@ def claim_history(
     claim_id: ClaimId,
     json_output: JsonOutput = False,
 ) -> None:
-    runtime = build_runtime(root)
-    with DatabaseUnitOfWork(runtime.engine) as uow:
+    with build_runtime(root) as runtime, DatabaseUnitOfWork(runtime.engine) as uow:
         history = uow.repositories().claims.history(claim_id)
     emit(
         "claim history",
@@ -382,8 +404,7 @@ def transaction_list(
     root: Root,
     json_output: JsonOutput = False,
 ) -> None:
-    runtime = build_runtime(root)
-    with DatabaseUnitOfWork(runtime.engine) as uow:
+    with build_runtime(root) as runtime, DatabaseUnitOfWork(runtime.engine) as uow:
         stored = uow.repositories().transactions.list_all()
     data = [
         {
@@ -402,21 +423,24 @@ def audit_verify(
     root: Root,
     json_output: JsonOutput = False,
 ) -> None:
-    runtime = build_runtime(root)
-    try:
-        with DatabaseUnitOfWork(runtime.engine) as uow:
-            events = uow.repositories().audit.list_all()
-    except StorageIntegrityError as error:
-        result = AuditVerification(valid=False, checked_events=0, reason=str(error))
-        emit(
-            "audit verify",
-            False,
-            json_output,
-            data=result.model_dump(mode="json"),
-            errors=[{"code": "AUDIT_INTEGRITY_ERROR", "message": str(error)}],
-        )
-        raise typer.Exit(code=3) from None
-    result = verify_chain(events)
-    emit("audit verify", result.valid, json_output, data=result.model_dump(mode="json"))
+    with build_runtime(root) as runtime, DatabaseUnitOfWork(runtime.engine) as uow:
+        result = verify_workspace(uow.repositories(), runtime.artifacts)
+    errors = (
+        []
+        if result.valid
+        else [
+            {
+                "code": "AUDIT_INTEGRITY_ERROR",
+                "message": result.reason or "workspace integrity verification failed",
+            }
+        ]
+    )
+    emit(
+        "audit verify",
+        result.valid,
+        json_output,
+        data=result.model_dump(mode="json"),
+        errors=errors,
+    )
     if not result.valid:
         raise typer.Exit(code=3)
