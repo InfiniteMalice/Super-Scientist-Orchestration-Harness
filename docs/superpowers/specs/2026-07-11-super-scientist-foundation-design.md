@@ -243,6 +243,13 @@ validation diagnostics exclude rejected input values. Workspace verification dec
 all registered policies, enforces governance-state singleton cardinality, and rejects
 stored audit envelopes with extras or a missing/non-integer schema version 1.
 
+**Approved fifth final-review correction:** trusted intent fingerprints are service-owned
+transaction metadata bound into the audit chain, never public proposal input. Replay also
+checks stored proposal and decision identity. Policy version 1 is an exact integer;
+durable validation diagnostics are fixed redacted text; evidence path provenance is part
+of canonical intent identity; and persisted decoding/timestamp failures are storage
+integrity errors. Parser error attribution follows only the leading command path.
+
 ## 8. Domain Contracts
 
 ### 8.1 EvidenceRecord

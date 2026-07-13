@@ -11,6 +11,7 @@ from typing import cast
 import pytest
 from sqlalchemy import Engine, select
 
+from super_scientist.application import kernel_service as kernel_service_module
 from super_scientist.application.kernel_service import KernelService
 from super_scientist.application.workspace_integrity import verify_workspace
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
@@ -511,6 +512,34 @@ def test_intent_replay_requires_exact_trusted_attempt_envelope(
         assert len(repositories.audit.list_all()) == 2
 
 
+def test_direct_submission_cannot_forge_service_owned_intent_fingerprint(
+    kernel: KernelFixture,
+) -> None:
+    proposal = kernel.valid_add_evidence("proposal-forged", "key-forged", b"same")
+    attempt = transaction_models.ProposalAttempt(
+        proposal_id=proposal.proposal_id,
+        idempotency_key=proposal.idempotency_key,
+        proposer=proposal.proposer,
+        proposal_kind="add_evidence",
+        intent_digest="f" * 64,
+    )
+    payload = proposal.model_dump(mode="json")
+    payload["attempt_fingerprint"] = kernel_service_module._attempt_fingerprint(attempt)
+
+    direct = kernel.service.submit(payload)
+    replay = kernel.service.submit_intent(attempt, lambda: proposal)
+
+    assert not direct.accepted
+    assert direct.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    assert not replay.accepted
+    assert not replay.replayed
+    assert replay.reasons[0].code is RejectionCode.IDEMPOTENCY_CONFLICT
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        assert repositories.transactions.get_by_idempotency_key(attempt.idempotency_key) is not None
+        assert len(repositories.audit.list_all()) == 2
+
+
 def test_reused_idempotency_key_with_new_content_is_rejected_and_audited(
     kernel: KernelFixture,
 ) -> None:
@@ -831,7 +860,7 @@ def test_submit_intent_redacts_sensitive_validation_input_from_durable_records(
 
     def invalid_factory() -> AddEvidence:
         payload = proposal.evidence.model_dump(mode="python", warnings="none")
-        payload["retrieved_at"] = secret
+        payload[secret] = "rejected"
         return proposal.model_copy(update={"evidence": EvidenceRecord.model_validate(payload)})
 
     decision = kernel.service.submit_intent(attempt, invalid_factory)

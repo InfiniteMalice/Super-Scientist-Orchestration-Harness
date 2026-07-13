@@ -85,7 +85,11 @@ class KernelService:
             require_workspace_integrity(repositories, self._artifact_store)
             prior = repositories.transactions.get_by_idempotency_key(attempt.idempotency_key)
             if prior is not None:
-                if prior.proposal.attempt_fingerprint == _attempt_fingerprint(attempt):
+                if (
+                    prior.intent_fingerprint == _attempt_fingerprint(attempt)
+                    and prior.proposal.proposal_id == attempt.proposal_id
+                    and prior.decision.proposal_id == attempt.proposal_id
+                ):
                     return prior.decision.model_copy(update={"replayed": True})
                 conflict_proposal = _invalid_attempt(
                     attempt,
@@ -98,7 +102,13 @@ class KernelService:
                 )
                 stored_policy = repositories.policies.get_active()
                 if stored_policy is not None:
-                    self._audit(conflict_proposal, decision, repositories, stored_policy)
+                    self._audit(
+                        conflict_proposal,
+                        decision,
+                        repositories,
+                        stored_policy,
+                        intent_fingerprint=_attempt_fingerprint(attempt),
+                    )
                 return decision
             try:
                 candidate = proposal_factory()
@@ -125,15 +135,19 @@ class KernelService:
                         "proposal factory result did not match the trusted attempt envelope",
                     )
                 else:
-                    normalized = normalized_result.model_copy(
-                        update={"attempt_fingerprint": _attempt_fingerprint(attempt)}
-                    )
-            return self._submit_locked(normalized, repositories)
+                    normalized = normalized_result
+            return self._submit_locked(
+                normalized,
+                repositories,
+                intent_fingerprint=_attempt_fingerprint(attempt),
+            )
 
     def _submit_locked(
         self,
         proposal: Proposal,
         repositories: RepositorySet,
+        *,
+        intent_fingerprint: str | None = None,
     ) -> TransactionDecision:
         proposal_hash = sha256_hex(canonical_json_bytes(proposal.model_dump(mode="json")))
         stored_policy = repositories.policies.get_active()
@@ -146,7 +160,13 @@ class KernelService:
                     "idempotency key was reused with different proposal content",
                 )
                 if stored_policy is not None:
-                    self._audit(proposal, decision, repositories, stored_policy)
+                    self._audit(
+                        proposal,
+                        decision,
+                        repositories,
+                        stored_policy,
+                        intent_fingerprint=intent_fingerprint,
+                    )
                 return decision
             return prior.decision.model_copy(update={"replayed": True})
         existing_proposal = repositories.transactions.get_by_proposal_id(proposal.proposal_id)
@@ -160,8 +180,19 @@ class KernelService:
             if stored_policy is None or configured_policy is None:
                 return decision
             if existing_proposal is None:
-                repositories.transactions.add(proposal, decision, self._clock.now())
-            self._audit(proposal, decision, repositories, stored_policy)
+                repositories.transactions.add(
+                    proposal,
+                    decision,
+                    self._clock.now(),
+                    intent_fingerprint=intent_fingerprint,
+                )
+            self._audit(
+                proposal,
+                decision,
+                repositories,
+                stored_policy,
+                intent_fingerprint=intent_fingerprint,
+            )
             return decision
         if existing_proposal is not None:
             decision = AdmissionEngine.rejected(
@@ -169,7 +200,13 @@ class KernelService:
                 RejectionCode.ENTITY_ALREADY_EXISTS,
                 "proposal id already exists",
             )
-            self._audit(proposal, decision, repositories, stored_policy)
+            self._audit(
+                proposal,
+                decision,
+                repositories,
+                stored_policy,
+                intent_fingerprint=intent_fingerprint,
+            )
             return decision
         context = AdmissionContext(
             active_policy=stored_policy,
@@ -187,14 +224,36 @@ class KernelService:
                     RejectionCode.EVIDENCE_HASH_MISMATCH,
                     f"evidence artifact verification failed: {error}",
                 )
-                repositories.transactions.add(proposal, decision, self._clock.now())
-                self._audit(proposal, decision, repositories, stored_policy)
+                repositories.transactions.add(
+                    proposal,
+                    decision,
+                    self._clock.now(),
+                    intent_fingerprint=intent_fingerprint,
+                )
+                self._audit(
+                    proposal,
+                    decision,
+                    repositories,
+                    stored_policy,
+                    intent_fingerprint=intent_fingerprint,
+                )
                 return decision
         decision = self._engine.decide(admitted_proposal, context)
         if decision.accepted:
             self._project(admitted_proposal, repositories)
-        repositories.transactions.add(proposal, decision, self._clock.now())
-        self._audit(proposal, decision, repositories, stored_policy)
+        repositories.transactions.add(
+            proposal,
+            decision,
+            self._clock.now(),
+            intent_fingerprint=intent_fingerprint,
+        )
+        self._audit(
+            proposal,
+            decision,
+            repositories,
+            stored_policy,
+            intent_fingerprint=intent_fingerprint,
+        )
         return decision
 
     def _verified_evidence_proposal(self, proposal: AddEvidence) -> AddEvidence:
@@ -213,6 +272,8 @@ class KernelService:
         decision: TransactionDecision,
         repositories: RepositorySet,
         stored_policy: PolicySnapshot,
+        *,
+        intent_fingerprint: str | None = None,
     ) -> None:
         previous = repositories.audit.last()
         payload: dict[str, object] = {
@@ -223,6 +284,8 @@ class KernelService:
         }
         if repositories.policies.get(self._active_policy.policy_hash) is not None:
             payload["configured_policy_hash"] = self._active_policy.policy_hash
+        if intent_fingerprint is not None:
+            payload["intent_fingerprint"] = intent_fingerprint
         event = append_event(
             previous,
             "transaction_decision",
@@ -306,7 +369,6 @@ def _invalid_attempt(attempt: ProposalAttempt, message: str) -> InvalidProposal:
         validation_error=message,
         proposer=attempt.proposer,
         attempted_proposal_kind=attempt.proposal_kind,
-        attempt_fingerprint=_attempt_fingerprint(attempt),
     )
 
 
@@ -327,11 +389,8 @@ def _attempt_fingerprint(attempt: ProposalAttempt) -> str:
 
 
 def _sanitized_validation_message(error: ValidationError) -> str:
-    diagnostics: list[str] = []
-    for item in error.errors(include_url=False, include_context=False, include_input=False):
-        location = ".".join(str(segment) for segment in item.get("loc", ())) or "root"
-        diagnostics.append(f"{item.get('type', 'validation_error')} at {location}")
-    return "proposal factory input validation failed: " + "; ".join(diagnostics)
+    del error
+    return "proposal factory input validation failed"
 
 
 def _safe_proposer(value: object) -> ActorIdentity | None:

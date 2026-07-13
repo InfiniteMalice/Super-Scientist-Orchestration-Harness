@@ -23,6 +23,13 @@ class GovernancePolicy(BaseModel):
         default_factory=lambda: frozenset({"governance_change", "adapter_promotion"})
     )
 
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def require_schema_version_one(cls, value: object) -> object:
+        if type(value) is not int or value != 1:
+            raise ValueError("schema_version must be integer 1")
+        return value
+
     @field_validator("required_claim_checks", mode="before")
     @classmethod
     def normalize_required_claim_checks(cls, value: object) -> tuple[str, ...]:

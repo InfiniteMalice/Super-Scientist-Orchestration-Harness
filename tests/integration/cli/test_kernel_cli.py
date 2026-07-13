@@ -181,6 +181,23 @@ def test_runtime_build_failure_disposes_engine(
     assert states[0]["dispose_calls"] == 1
 
 
+def test_runtime_classifies_malformed_active_policy_hash_as_storage_integrity(
+    tmp_path: Path,
+) -> None:
+    initialize_fixture(tmp_path)
+    database = sqlite3.connect(tmp_path / "scientist-harness.db")
+    try:
+        database.execute("UPDATE governance_state SET active_policy_hash = 'not-a-digest'")
+        database.commit()
+    finally:
+        database.close()
+
+    result = runner.invoke(app, ["transaction", "list", "--root", str(tmp_path), "--json"])
+
+    assert result.exit_code == 2
+    assert json_payload(result)["errors"][0]["code"] == "STORAGE_INTEGRITY_ERROR"
+
+
 def test_init_rejects_policy_change_with_json_error(tmp_path: Path) -> None:
     initialize_fixture(tmp_path)
     (tmp_path / "governance-policy.json").write_text(
@@ -213,6 +230,27 @@ def test_init_reports_malformed_policy_as_json_error(tmp_path: Path) -> None:
     assert payload["command"] == "init"
     assert payload["success"] is False
     assert payload["errors"][0]["code"] == "INVALID_POLICY"
+
+
+@pytest.mark.parametrize("schema_version", [True, 1.0], ids=["boolean", "float"])
+def test_init_rejects_coercive_policy_schema_versions(
+    tmp_path: Path,
+    schema_version: object,
+) -> None:
+    (tmp_path / "governance-policy.json").write_text(
+        json.dumps(
+            {
+                "schema_version": schema_version,
+                "required_claim_checks": ["source_exists"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["init", "--root", str(tmp_path), "--json"])
+
+    assert result.exit_code == 2
+    assert json_payload(result)["errors"][0]["code"] == "INVALID_POLICY"
 
 
 def test_init_reports_invalid_utf8_policy_as_json_error(tmp_path: Path) -> None:
@@ -434,6 +472,58 @@ def test_evidence_add_replays_with_stable_identity_and_keeps_projections(tmp_pat
     assert len(json_payload(transactions)["data"]) == 1
     assert audit.exit_code == 0, audit.output
     assert json_payload(audit)["data"]["checked_events"] == 1
+
+
+def test_evidence_add_distinguishes_equal_bytes_from_different_input_paths(
+    tmp_path: Path,
+) -> None:
+    initialize_fixture(tmp_path)
+    first_file = tmp_path / "first.txt"
+    second_file = tmp_path / "second.txt"
+    first_file.write_text("same observation", encoding="utf-8")
+    second_file.write_text("same observation", encoding="utf-8")
+
+    def add(path: Path) -> object:
+        return runner.invoke(
+            app,
+            [
+                "evidence",
+                "add",
+                "--root",
+                str(tmp_path),
+                "--source",
+                "fixture://same-source",
+                "--file",
+                str(path),
+                "--json",
+            ],
+        )
+
+    first = add(first_file)
+    second = add(second_file)
+
+    assert first.exit_code == 0, first.output
+    assert second.exit_code == 0, second.output
+    assert json_payload(first)["data"]["evidence_id"] != json_payload(second)["data"]["evidence_id"]
+    transactions_result = runner.invoke(
+        app, ["transaction", "list", "--root", str(tmp_path), "--json"]
+    )
+    stored = json_payload(transactions_result)["data"]
+    assert len(stored) == 2
+    assert {item["proposal"]["evidence"]["provenance"]["input_file"] for item in stored} == {
+        str(first_file.resolve()),
+        str(second_file.resolve()),
+    }
+
+
+def test_parser_error_uses_leading_command_not_option_values() -> None:
+    result = runner.invoke(
+        app,
+        ["claim", "propose", "--proposition", "evidence", "add", "--json"],
+    )
+
+    assert result.exit_code != 0
+    assert json_payload(result)["command"] == "claim propose"
 
 
 def test_claim_propose_replays_with_stable_identity_and_history(tmp_path: Path) -> None:

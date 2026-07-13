@@ -28,6 +28,8 @@ Integrity verification enumerates and validates every registered policy, includi
 unreferenced rows. Governance state is cardinality-checked as a true singleton and the
 database constrains its identifier to 1; extra or malformed governance rows fail the
 workspace even when the active policy itself remains valid.
+Policy schema version is an exact integer 1; JSON booleans, floats, strings, and other
+coercible representations are rejected as `INVALID_POLICY`.
 
 ## Approval Boundary
 

@@ -76,8 +76,8 @@ def require_workspace_integrity(
 def _validated_audit_records(
     events: tuple[AuditEvent, ...],
     repositories: RepositorySet,
-) -> tuple[tuple[Proposal, TransactionDecision], ...]:
-    records: list[tuple[Proposal, TransactionDecision]] = []
+) -> tuple[tuple[Proposal, TransactionDecision, str | None], ...]:
+    records: list[tuple[Proposal, TransactionDecision, str | None]] = []
     for event in events:
         _require(event.event_type == "transaction_decision", "unexpected audit event type")
         payload = json_compatible_payload(event.payload)
@@ -94,6 +94,7 @@ def _validated_audit_records(
         )
         configured_hash = _optional_policy_hash(payload, "configured_policy_hash")
         stored_hash = _optional_policy_hash(payload, "stored_policy_hash")
+        intent_fingerprint = _optional_policy_hash(payload, "intent_fingerprint")
         if configured_hash is not None:
             _require(
                 repositories.policies.get(configured_hash) is not None,
@@ -112,25 +113,29 @@ def _validated_audit_records(
             proposal.proposal_id == decision.proposal_id,
             "audit proposal and decision identifiers do not match",
         )
-        records.append((proposal, decision))
+        records.append((proposal, decision, intent_fingerprint))
     return tuple(records)
 
 
 def _require_transaction_audit_consistency(
     transactions: tuple[StoredTransaction, ...],
-    audit_records: tuple[tuple[Proposal, TransactionDecision], ...],
+    audit_records: tuple[tuple[Proposal, TransactionDecision, str | None], ...],
 ) -> None:
     for transaction in transactions:
         matches = sum(
-            proposal == transaction.proposal and decision == transaction.decision
-            for proposal, decision in audit_records
+            proposal == transaction.proposal
+            and decision == transaction.decision
+            and intent_fingerprint == transaction.intent_fingerprint
+            for proposal, decision, intent_fingerprint in audit_records
         )
         _require(matches == 1, "transaction does not have one exact audit decision")
-    for proposal, decision in audit_records:
+    for proposal, decision, intent_fingerprint in audit_records:
         if decision.accepted:
             _require(
                 any(
-                    transaction.proposal == proposal and transaction.decision == decision
+                    transaction.proposal == proposal
+                    and transaction.decision == decision
+                    and transaction.intent_fingerprint == intent_fingerprint
                     for transaction in transactions
                 ),
                 "accepted audit decision has no stored transaction",

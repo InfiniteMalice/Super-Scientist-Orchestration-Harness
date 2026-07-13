@@ -74,6 +74,7 @@ def upgrade() -> None:
         "transactions",
         sa.Column("proposal_id", sa.String(length=128), primary_key=True),
         sa.Column("idempotency_key", sa.String(length=128), nullable=False, unique=True),
+        sa.Column("intent_fingerprint", sa.String(length=64), nullable=True),
         sa.Column("proposal_hash", sa.String(length=64), nullable=False),
         sa.Column("proposal_json", sa.Text(), nullable=False),
         sa.Column("decision_json", sa.Text(), nullable=False),

@@ -42,13 +42,22 @@ def test_policy_rejects_empty_required_checks() -> None:
     "payload",
     [
         {"schema_version": 2, "required_claim_checks": ["source_exists"]},
+        {"schema_version": True, "required_claim_checks": ["source_exists"]},
+        {"schema_version": 1.0, "required_claim_checks": ["source_exists"]},
+        {"schema_version": "1", "required_claim_checks": ["source_exists"]},
         {
             "schema_version": 1,
             "required_claim_checks": ["source_exists"],
             "unexpected_field": "must be rejected",
         },
     ],
-    ids=["unsupported-version", "extra-field"],
+    ids=[
+        "unsupported-version",
+        "boolean-version",
+        "float-version",
+        "string-version",
+        "extra-field",
+    ],
 )
 def test_policy_file_rejects_unsupported_version_and_extras(
     tmp_path: Path,

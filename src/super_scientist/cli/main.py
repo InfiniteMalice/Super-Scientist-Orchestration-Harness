@@ -32,10 +32,7 @@ _COMMAND_PATHS = (
 
 def _command_name(args: Sequence[str]) -> str:
     for path in _COMMAND_PATHS:
-        width = len(path)
-        if any(
-            tuple(args[index : index + width]) == path for index in range(len(args) - width + 1)
-        ):
+        if tuple(args[: len(path)]) == path:
             return " ".join(path)
     return "scientist-harness"
 

@@ -63,6 +63,7 @@ transactions = Table(
     metadata,
     Column("proposal_id", String(128), primary_key=True),
     Column("idempotency_key", String(128), nullable=False, unique=True),
+    Column("intent_fingerprint", String(64), nullable=True),
     Column("proposal_hash", String(64), nullable=False),
     Column("proposal_json", Text, nullable=False),
     Column("decision_json", Text, nullable=False),

@@ -259,6 +259,7 @@ def evidence_add(
                     "source": source,
                     "content_hash": artifact.sha256,
                     "media_type": artifact.media_type,
+                    "input_file": str(file.resolve()),
                 }
             )
         )
@@ -439,6 +440,7 @@ def transaction_list(
         {
             "proposal": item.proposal.model_dump(mode="json"),
             "proposal_hash": item.proposal_hash,
+            "intent_fingerprint": item.intent_fingerprint,
             "decision": item.decision.model_dump(mode="json"),
         }
         for item in stored

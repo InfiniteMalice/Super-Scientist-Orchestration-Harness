@@ -181,7 +181,12 @@ def _decode_evidence_row(row: Mapping[str, object]) -> EvidenceRecord:
     content_hash = _stored_str(row, "content_hash")
     record_json = _stored_str(row, "record_json")
     created_at = _stored_str(row, "created_at")
-    record = EvidenceRecord.model_validate(_load_storage_json(record_json))
+    try:
+        record = EvidenceRecord.model_validate(_load_storage_json(record_json))
+    except (TypeError, ValueError) as error:
+        raise StorageIntegrityError(
+            "storage integrity error: invalid evidence record JSON"
+        ) from error
     _require_integrity(record.evidence_id == evidence_id, "evidence_id does not match record_json")
     _require_integrity(
         record.content_hash == content_hash,
@@ -202,7 +207,10 @@ def _decode_claim_version_row(row: Mapping[str, object]) -> AtomicClaim:
     record_json = _stored_str(row, "record_json")
     content_hash = _stored_str(row, "content_hash")
     created_at = _stored_str(row, "created_at")
-    claim = AtomicClaim.model_validate_json(record_json)
+    try:
+        claim = AtomicClaim.model_validate_json(record_json)
+    except (TypeError, ValueError) as error:
+        raise StorageIntegrityError("storage integrity error: invalid claim record JSON") from error
     _require_integrity(
         claim_version_id == f"{claim.claim_id}:{claim.version}",
         "claim_version_id does not match record_json",
@@ -224,11 +232,24 @@ def _decode_claim_version_row(row: Mapping[str, object]) -> AtomicClaim:
 def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
     proposal_id = _stored_str(row, "proposal_id")
     idempotency_key = _stored_str(row, "idempotency_key")
+    raw_intent_fingerprint = row["intent_fingerprint"]
     stored_hash = _stored_str(row, "proposal_hash")
     proposal_json = _stored_str(row, "proposal_json")
     decision_json = _stored_str(row, "decision_json")
-    proposal = PROPOSAL_ADAPTER.validate_python(_load_storage_json(proposal_json))
-    decision = TransactionDecision.model_validate_json(decision_json)
+    created_at = _stored_str(row, "created_at")
+    try:
+        intent_fingerprint = (
+            None
+            if raw_intent_fingerprint is None
+            else SHA256_ADAPTER.validate_python(raw_intent_fingerprint)
+        )
+        proposal = PROPOSAL_ADAPTER.validate_python(_load_storage_json(proposal_json))
+        decision = TransactionDecision.model_validate_json(decision_json)
+        _validated_timestamp(datetime.fromisoformat(created_at))
+    except (TypeError, ValueError) as error:
+        raise StorageIntegrityError(
+            "storage integrity error: invalid transaction record"
+        ) from error
     _require_integrity(
         stored_hash == _proposal_hash(proposal),
         "proposal_hash does not match canonical proposal JSON",
@@ -249,6 +270,7 @@ def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
         proposal=proposal,
         proposal_hash=stored_hash,
         decision=decision,
+        intent_fingerprint=intent_fingerprint,
     )
 
 
@@ -310,6 +332,7 @@ class StoredTransaction(BaseModel):
     proposal: Proposal
     proposal_hash: str
     decision: TransactionDecision
+    intent_fingerprint: Sha256Hex | None = None
 
 
 class EvidenceRepository:
@@ -559,9 +582,11 @@ class TransactionRepository:
                 select(
                     transactions.c.proposal_id,
                     transactions.c.idempotency_key,
+                    transactions.c.intent_fingerprint,
                     transactions.c.proposal_json,
                     transactions.c.proposal_hash,
                     transactions.c.decision_json,
+                    transactions.c.created_at,
                 ).where(transactions.c.proposal_id == proposal_id)
             )
             .mappings()
@@ -575,9 +600,11 @@ class TransactionRepository:
                 select(
                     transactions.c.proposal_id,
                     transactions.c.idempotency_key,
+                    transactions.c.intent_fingerprint,
                     transactions.c.proposal_json,
                     transactions.c.proposal_hash,
                     transactions.c.decision_json,
+                    transactions.c.created_at,
                 ).where(transactions.c.idempotency_key == key)
             )
             .mappings()
@@ -590,9 +617,11 @@ class TransactionRepository:
             select(
                 transactions.c.proposal_id,
                 transactions.c.idempotency_key,
+                transactions.c.intent_fingerprint,
                 transactions.c.proposal_json,
                 transactions.c.proposal_hash,
                 transactions.c.decision_json,
+                transactions.c.created_at,
             ).order_by(transactions.c.created_at, transactions.c.proposal_id)
         ).mappings()
         return tuple(_decode_transaction_row(dict(row)) for row in rows)
@@ -602,6 +631,8 @@ class TransactionRepository:
         proposal: Proposal,
         decision: TransactionDecision,
         occurred_at: UtcTimestamp,
+        *,
+        intent_fingerprint: str | None = None,
     ) -> None:
         dumped_proposal = proposal.model_dump(mode="python", warnings="none")
         validated_proposal = PROPOSAL_ADAPTER.validate_python(dumped_proposal)
@@ -609,6 +640,16 @@ class TransactionRepository:
         decision_json = _validated_model_json(TransactionDecision, decision)
         validated_decision = TransactionDecision.model_validate_json(decision_json)
         validated_occurred_at = _validated_timestamp(occurred_at)
+        try:
+            validated_intent_fingerprint = (
+                None
+                if intent_fingerprint is None
+                else SHA256_ADAPTER.validate_python(intent_fingerprint)
+            )
+        except (TypeError, ValueError) as error:
+            raise StorageIntegrityError(
+                "storage integrity error: invalid intent fingerprint"
+            ) from error
         _require_integrity(
             validated_decision.proposal_id == validated_proposal.proposal_id,
             "decision proposal_id does not match proposal",
@@ -617,6 +658,7 @@ class TransactionRepository:
             insert(transactions).values(
                 proposal_id=validated_proposal.proposal_id,
                 idempotency_key=validated_proposal.idempotency_key,
+                intent_fingerprint=validated_intent_fingerprint,
                 proposal_hash=_proposal_hash(validated_proposal),
                 proposal_json=proposal_json,
                 decision_json=decision_json,
@@ -739,9 +781,14 @@ class PolicyRepository:
             _stored_int(state, "singleton_id") == 1,
             "governance_state singleton_id must equal 1",
         )
-        active_policy_hash = SHA256_ADAPTER.validate_python(
-            _stored_str(state, "active_policy_hash")
-        )
+        try:
+            active_policy_hash = SHA256_ADAPTER.validate_python(
+                _stored_str(state, "active_policy_hash")
+            )
+        except (TypeError, ValueError) as error:
+            raise StorageIntegrityError(
+                "storage integrity error: invalid active policy hash"
+            ) from error
         stored_policy = (
             self._connection.execute(
                 select(

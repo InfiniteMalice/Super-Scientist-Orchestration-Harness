@@ -69,6 +69,9 @@ Exact retries compare a stored trusted-attempt fingerprint; reusing a key with d
 intent content, proposal identity, logical proposer, or proposal kind returns an audited
 `IDEMPOTENCY_CONFLICT`. Orphaned governance is reported as storage corruption by ordinary
 runtime commands as well as `audit verify`.
+Evidence intent identity includes the resolved input path because that path is retained
+as authoritative provenance; equal bytes from different paths are therefore distinct
+ingestions.
 
 ## Security Boundaries
 

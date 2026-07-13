@@ -300,6 +300,28 @@ def test_transaction_repository_rejects_stored_proposal_hash_corruption(
         )
 
 
+def test_transaction_repository_rejects_malformed_created_at(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    proposal = repository_fixture.add_evidence_proposal("proposal-time", "key-time")
+    decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+    repository_fixture.connection.execute(
+        insert(transactions).values(
+            proposal_id=proposal.proposal_id,
+            idempotency_key=proposal.idempotency_key,
+            proposal_hash=sha256_hex(canonical_json_bytes(proposal.model_dump(mode="json"))),
+            proposal_json=PROPOSAL_ADAPTER.dump_json(proposal).decode("utf-8"),
+            decision_json=decision.model_dump_json(),
+            created_at="not-a-timestamp",
+        )
+    )
+
+    with pytest.raises(StorageIntegrityError, match="storage integrity"):
+        repository_fixture.repositories.transactions.get_by_idempotency_key(
+            proposal.idempotency_key
+        )
+
+
 def test_transaction_repository_rejects_decision_for_another_proposal(
     repository_fixture: RepositoryFixture,
 ) -> None:
@@ -664,11 +686,11 @@ def test_repositories_validate_persisted_json_contracts(
     )
     connection.execute(insert(governance_state).values(singleton_id=1, active_policy_hash="a" * 64))
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(StorageIntegrityError, match="storage integrity"):
         repository_fixture.repositories.evidence.get("invalid-evidence")
-    with pytest.raises(ValidationError):
+    with pytest.raises(StorageIntegrityError, match="storage integrity"):
         repository_fixture.repositories.claims.get_head("invalid-claim")
-    with pytest.raises(ValidationError):
+    with pytest.raises(StorageIntegrityError, match="storage integrity"):
         repository_fixture.repositories.transactions.get_by_idempotency_key("key-1")
     with pytest.raises(StorageIntegrityError, match="storage integrity"):
         repository_fixture.repositories.audit.last()

@@ -18,9 +18,11 @@ from super_scientist.domain.evidence.models import (
     VerificationState,
 )
 from super_scientist.domain.identity import ActorIdentity, ActorKind
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.kernel.audit.chain import append_event
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
+    ProposalAttempt,
     ProposeClaim,
     RejectionCode,
     TransactionDecision,
@@ -277,6 +279,29 @@ def test_exact_replay_fails_closed_on_artifact_corruption_without_new_audit(
 
     with integrity.engine.connect() as connection:
         assert connection.execute(select(func.count()).select_from(audit_events)).scalar_one() == 1
+
+
+def test_workspace_verifier_binds_service_owned_intent_fingerprint_to_audit(
+    integrity: IntegrityFixture,
+) -> None:
+    proposal = integrity.evidence_proposal()
+    attempt = ProposalAttempt(
+        proposal_id=proposal.proposal_id,
+        idempotency_key=proposal.idempotency_key,
+        proposer=proposal.proposer,
+        proposal_kind="add_evidence",
+        intent_digest=sha256_hex(canonical_json_bytes(proposal.model_dump(mode="json"))),
+    )
+    assert integrity.service.submit_intent(attempt, lambda: proposal).accepted
+    with integrity.uow() as unit_of_work:
+        assert unit_of_work.connection is not None
+        unit_of_work.connection.exec_driver_sql("DROP TRIGGER transactions_no_update")
+        unit_of_work.connection.execute(update(transactions).values(intent_fingerprint="f" * 64))
+
+    result = _verify(integrity)
+
+    assert not result.valid
+    assert "transaction" in result.reason or "fingerprint" in result.reason
 
 
 @pytest.mark.parametrize("damage", ["missing-pointer", "missing-policy-row"])

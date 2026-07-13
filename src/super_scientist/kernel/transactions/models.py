@@ -58,7 +58,6 @@ class ProposalBase(BaseModel):
     idempotency_key: StableIdentifier
     proposer: ActorIdentity
     approval: Approval | None = None
-    attempt_fingerprint: Sha256Hex | None = None
 
 
 class AddEvidence(ProposalBase):
@@ -89,7 +88,6 @@ class InvalidProposal(BaseModel):
     validation_error: NonBlankText
     proposer: ActorIdentity | None = None
     attempted_proposal_kind: ProposalKind | None = None
-    attempt_fingerprint: Sha256Hex | None = None
 
 
 Proposal = Annotated[

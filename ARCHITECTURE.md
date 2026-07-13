@@ -92,10 +92,12 @@ truthful durable identity exists for an audit record. Expected Pydantic/input de
 failures inside an intent factory use the prevalidated attempt identity and become one
 audited, replayable `INVALID_PROPOSAL`; retries do not invoke the factory. Unexpected
 programming and storage exceptions propagate and roll back. Factory results must match
-the attempt's ID, key, proposer, and kind. The stored proposal carries a fingerprint of
-the canonical intent digest, proposal ID, key, logical proposer, and kind; only an exact
-fingerprint replays, while a mismatch is an audited `IDEMPOTENCY_CONFLICT`. Validation
-diagnostics persist only error types and field locations, never rejected input values.
+the attempt's ID, key, proposer, and kind. A service-owned transaction column and its
+audit record carry a fingerprint of the canonical intent digest, proposal ID, key,
+logical proposer, and kind; public proposals cannot set it. Only an exact fingerprint
+and proposal/decision identity replay, while a mismatch is an audited
+`IDEMPOTENCY_CONFLICT`. Durable validation diagnostics are fixed redacted text and never
+include rejected input values, field names, or dynamic locations.
 Evidence ingestion actors, initial claim
 creators, and transition creators must match their proposers. External config and
 nested domain records forbid unknown fields, while JSON arrays/objects remain accepted
@@ -133,6 +135,8 @@ Workspace verification decodes every registered governance policy, not only the 
 or audit-referenced rows, and requires exactly zero or one `governance_state` row with
 singleton ID 1. SQLite enforces that identifier with a check constraint. Stored audit
 events require an explicit integer schema version 1 and reject unknown envelope fields.
+Transaction reads validate their timestamps and canonical records; persisted decoding
+failures are storage-integrity errors rather than user-input errors.
 
 JSON parser translation catches public Click exceptions. Typer 0.19.2 and Click 8.3.3
 are pinned because this is a security-audited compatibility line where Typer still
