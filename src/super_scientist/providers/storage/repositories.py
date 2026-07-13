@@ -416,6 +416,13 @@ class ClaimRepository:
         heads = tuple(self._decode_head_row(dict(row)) for row in rows)
         for head in heads:
             self._require_latest_head(head)
+        history_claim_ids = set(
+            self._connection.execute(select(claim_versions.c.claim_id).distinct()).scalars()
+        )
+        _require_integrity(
+            {head.claim_id for head in heads} == history_claim_ids,
+            "claim versions exist without a head projection",
+        )
         return heads
 
     def history(self, claim_id: str) -> tuple[AtomicClaim, ...]:

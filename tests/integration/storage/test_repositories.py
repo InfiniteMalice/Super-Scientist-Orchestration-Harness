@@ -8,7 +8,7 @@ from typing import cast
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
-from sqlalchemy import Connection, event, insert, select, update
+from sqlalchemy import Connection, delete, event, insert, select, update
 
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus, EvidenceLink
@@ -522,6 +522,19 @@ def test_claim_repository_rejects_stale_head_projection(
     with pytest.raises(ValueError, match="storage integrity"):
         repository_fixture.repositories.claims.get_head(first.claim_id)
     with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.claims.list_heads()
+
+
+def test_claim_repository_list_heads_rejects_deleted_projection(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    claim = repository_fixture.claim("claim-1", version=1, status="PROPOSED")
+    repository_fixture.repositories.claims.add_version(claim)
+    repository_fixture.connection.execute(
+        delete(claim_heads).where(claim_heads.c.claim_id == claim.claim_id)
+    )
+
+    with pytest.raises(StorageIntegrityError, match="storage integrity"):
         repository_fixture.repositories.claims.list_heads()
 
 
