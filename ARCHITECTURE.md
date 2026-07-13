@@ -98,6 +98,9 @@ logical proposer, and kind; public proposals cannot set it. Only an exact finger
 and proposal/decision identity replay, while a mismatch is an audited
 `IDEMPOTENCY_CONFLICT`. Durable validation diagnostics are fixed redacted text and never
 include rejected input values, field names, or dynamic locations.
+Direct submission and intent submission are distinct replay modes: a direct request has
+no trusted fingerprint and therefore conflicts with an intent-owned transaction even
+when the proposal JSON is identical.
 Evidence ingestion actors, initial claim
 creators, and transition creators must match their proposers. External config and
 nested domain records forbid unknown fields, while JSON arrays/objects remain accepted
@@ -137,6 +140,10 @@ singleton ID 1. SQLite enforces that identifier with a check constraint. Stored 
 events require an explicit integer schema version 1 and reject unknown envelope fields.
 Transaction reads validate their timestamps and canonical records; persisted decoding
 failures are storage-integrity errors rather than user-input errors.
+Every transaction-decision audit payload records whether that event persisted a
+transaction. Verification requires bidirectional agreement, so loss of accepted or
+rejected transaction rows fails closed while transactionless conflict events remain
+explicit and valid.
 
 JSON parser translation catches public Click exceptions. Typer 0.19.2 and Click 8.3.3
 are pinned because this is a security-audited compatibility line where Typer still

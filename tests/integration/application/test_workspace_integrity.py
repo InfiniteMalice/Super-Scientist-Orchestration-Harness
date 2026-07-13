@@ -22,6 +22,7 @@ from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.kernel.audit.chain import append_event
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
+    InvalidProposal,
     ProposalAttempt,
     ProposeClaim,
     RejectionCode,
@@ -177,6 +178,7 @@ def test_workspace_verifier_rechecks_stored_text_span_binding(
             "proposal": proposal.model_dump(mode="json"),
             "decision": decision.model_dump(mode="json"),
             "policy_hash": integrity.policy.policy_hash,
+            "transaction_persisted": True,
         },
         NOW,
     )
@@ -237,6 +239,7 @@ def test_workspace_verifier_detects_transaction_audit_mismatch(
             "proposal": proposal.model_dump(mode="json"),
             "decision": mismatch.model_dump(mode="json"),
             "policy_hash": integrity.policy.policy_hash,
+            "transaction_persisted": True,
         },
         NOW,
     )
@@ -304,6 +307,27 @@ def test_workspace_verifier_binds_service_owned_intent_fingerprint_to_audit(
     assert "transaction" in result.reason or "fingerprint" in result.reason
 
 
+def test_workspace_verifier_rejects_lost_rejected_transaction_row(
+    integrity: IntegrityFixture,
+) -> None:
+    proposal = InvalidProposal(
+        proposal_id="proposal-rejected-loss",
+        idempotency_key="key-rejected-loss",
+        validation_error="fixture rejection",
+    )
+    decision = integrity.service.submit(proposal)
+    assert not decision.accepted
+    with integrity.uow() as unit_of_work:
+        assert unit_of_work.connection is not None
+        unit_of_work.connection.exec_driver_sql("DROP TRIGGER transactions_no_delete")
+        unit_of_work.connection.execute(delete(transactions))
+
+    result = _verify(integrity)
+
+    assert not result.valid
+    assert "transaction" in result.reason
+
+
 @pytest.mark.parametrize("damage", ["missing-pointer", "missing-policy-row"])
 def test_durable_workspace_and_exact_replay_require_registered_active_policy(
     integrity: IntegrityFixture,
@@ -346,6 +370,7 @@ def test_workspace_verifier_rejects_unregistered_audit_policy_reference(
             "proposal": proposal.model_dump(mode="json"),
             "decision": decision.model_dump(mode="json"),
             "policy_hash": "f" * 64,
+            "transaction_persisted": True,
         },
         NOW,
     )
@@ -463,6 +488,7 @@ def test_workspace_verifier_checks_links_on_withdrawn_history(
                     "proposal": transition.model_dump(mode="json"),
                     "decision": decision.model_dump(mode="json"),
                     "policy_hash": integrity.policy.policy_hash,
+                    "transaction_persisted": True,
                 },
                 NOW,
             )

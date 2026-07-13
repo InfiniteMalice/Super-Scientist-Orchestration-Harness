@@ -76,8 +76,8 @@ def require_workspace_integrity(
 def _validated_audit_records(
     events: tuple[AuditEvent, ...],
     repositories: RepositorySet,
-) -> tuple[tuple[Proposal, TransactionDecision, str | None], ...]:
-    records: list[tuple[Proposal, TransactionDecision, str | None]] = []
+) -> tuple[tuple[Proposal, TransactionDecision, str | None, bool], ...]:
+    records: list[tuple[Proposal, TransactionDecision, str | None, bool]] = []
     for event in events:
         _require(event.event_type == "transaction_decision", "unexpected audit event type")
         payload = json_compatible_payload(event.payload)
@@ -95,6 +95,7 @@ def _validated_audit_records(
         configured_hash = _optional_policy_hash(payload, "configured_policy_hash")
         stored_hash = _optional_policy_hash(payload, "stored_policy_hash")
         intent_fingerprint = _optional_policy_hash(payload, "intent_fingerprint")
+        transaction_persisted = _strict_bool(payload, "transaction_persisted")
         if configured_hash is not None:
             _require(
                 repositories.policies.get(configured_hash) is not None,
@@ -113,33 +114,38 @@ def _validated_audit_records(
             proposal.proposal_id == decision.proposal_id,
             "audit proposal and decision identifiers do not match",
         )
-        records.append((proposal, decision, intent_fingerprint))
+        records.append((proposal, decision, intent_fingerprint, transaction_persisted))
     return tuple(records)
 
 
 def _require_transaction_audit_consistency(
     transactions: tuple[StoredTransaction, ...],
-    audit_records: tuple[tuple[Proposal, TransactionDecision, str | None], ...],
+    audit_records: tuple[tuple[Proposal, TransactionDecision, str | None, bool], ...],
 ) -> None:
     for transaction in transactions:
         matches = sum(
             proposal == transaction.proposal
             and decision == transaction.decision
             and intent_fingerprint == transaction.intent_fingerprint
-            for proposal, decision, intent_fingerprint in audit_records
+            and transaction_persisted
+            for proposal, decision, intent_fingerprint, transaction_persisted in audit_records
         )
         _require(matches == 1, "transaction does not have one exact audit decision")
-    for proposal, decision, intent_fingerprint in audit_records:
-        if decision.accepted:
-            _require(
-                any(
-                    transaction.proposal == proposal
-                    and transaction.decision == decision
-                    and transaction.intent_fingerprint == intent_fingerprint
-                    for transaction in transactions
-                ),
-                "accepted audit decision has no stored transaction",
-            )
+    for proposal, decision, intent_fingerprint, transaction_persisted in audit_records:
+        exact_transaction_exists = any(
+            transaction.proposal == proposal
+            and transaction.decision == decision
+            and transaction.intent_fingerprint == intent_fingerprint
+            for transaction in transactions
+        )
+        _require(
+            exact_transaction_exists == transaction_persisted,
+            "audit transaction persistence does not match stored transactions",
+        )
+        _require(
+            not decision.accepted or transaction_persisted,
+            "accepted audit decision has no stored transaction",
+        )
 
 
 def _require_projection_consistency(
@@ -231,6 +237,13 @@ def _optional_policy_hash(mapping: Mapping[str, object], key: str) -> str | None
     if value is None:
         return None
     return SHA256_ADAPTER.validate_python(value)
+
+
+def _strict_bool(mapping: Mapping[str, object], key: str) -> bool:
+    value = _mapping_value(mapping, key)
+    if type(value) is not bool:
+        raise StorageIntegrityError(f"audit payload {key} must be a boolean")
+    return value
 
 
 def _add_unique[KeyT, ValueT](

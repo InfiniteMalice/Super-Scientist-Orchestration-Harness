@@ -153,7 +153,10 @@ class KernelService:
         stored_policy = repositories.policies.get_active()
         prior = repositories.transactions.get_by_idempotency_key(proposal.idempotency_key)
         if prior is not None:
-            if prior.proposal_hash != proposal_hash:
+            if (
+                prior.proposal_hash != proposal_hash
+                or prior.intent_fingerprint != intent_fingerprint
+            ):
                 decision = AdmissionEngine.rejected(
                     proposal.proposal_id,
                     RejectionCode.IDEMPOTENCY_CONFLICT,
@@ -176,8 +179,7 @@ class KernelService:
                 RejectionCode.POLICY_HASH_MISMATCH,
                 "stored active policy does not match the configured policy snapshot",
             )
-            configured_policy = repositories.policies.get(self._active_policy.policy_hash)
-            if stored_policy is None or configured_policy is None:
+            if stored_policy is None:
                 return decision
             if existing_proposal is None:
                 repositories.transactions.add(
@@ -276,11 +278,21 @@ class KernelService:
         intent_fingerprint: str | None = None,
     ) -> None:
         previous = repositories.audit.last()
+        stored_transaction = repositories.transactions.get_by_idempotency_key(
+            proposal.idempotency_key
+        )
+        transaction_persisted = (
+            stored_transaction is not None
+            and stored_transaction.proposal == proposal
+            and stored_transaction.decision == decision
+            and stored_transaction.intent_fingerprint == intent_fingerprint
+        )
         payload: dict[str, object] = {
             "proposal": proposal.model_dump(mode="json"),
             "decision": decision.model_dump(mode="json"),
             "policy_hash": stored_policy.policy_hash,
             "stored_policy_hash": stored_policy.policy_hash,
+            "transaction_persisted": transaction_persisted,
         }
         if repositories.policies.get(self._active_policy.policy_hash) is not None:
             payload["configured_policy_hash"] = self._active_policy.policy_hash

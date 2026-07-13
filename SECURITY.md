@@ -24,6 +24,8 @@ Durable validation diagnostics are fixed redacted text with no rejected values, 
 names, or dynamic locations. An intent retry must match a service-owned transaction and
 audit fingerprint of its canonical input digest, IDs, logical proposer, and proposal
 kind; public proposals cannot populate it and same-key mismatches are audited conflicts.
+Direct submission cannot replay an intent-owned transaction without that fingerprint;
+cross-mode key reuse is an audited conflict.
 
 `scientist-harness quality-gate` is a separate development command. It invokes only its
 eight fixed source-controlled argument vectors and exposes no arbitrary command, path,
@@ -73,6 +75,9 @@ tampering cannot disappear during model parsing.
 Persisted evidence, claim, transaction, policy, and audit decoding failures are reported
 as storage corruption. Transaction timestamps and intent fingerprints are validated on
 read, and fingerprints are bound into the audit chain.
+Audit events also bind a strict `transaction_persisted` fact. Workspace verification
+requires exact bidirectional agreement for accepted and rejected decisions, preventing
+lost rejection rows from reopening an idempotency key.
 
 Durable state requires an active registered policy, and each audit event's governing
 and stored policy references, plus any configured policy reference it carries, are

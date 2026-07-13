@@ -250,6 +250,13 @@ durable validation diagnostics are fixed redacted text; evidence path provenance
 of canonical intent identity; and persisted decoding/timestamp failures are storage
 integrity errors. Parser error attribution follows only the leading command path.
 
+**Approved sixth final-review correction:** direct and intent submission are distinct
+replay modes; only the latter supplies a trusted fingerprint. Every audit decision binds
+whether it persisted a transaction, and workspace verification requires bidirectional
+agreement for accepted and rejected outcomes. A valid stored governing policy durably
+governs mismatch rejection even when the configured snapshot is unregistered; that
+unregistered hash is omitted from audit attribution.
+
 ## 8. Domain Contracts
 
 ### 8.1 EvidenceRecord

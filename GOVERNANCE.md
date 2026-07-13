@@ -15,6 +15,9 @@ pointer to a registered snapshot. Every audit event names a registered governing
 policy. Policy-mismatch events record configured and stored hashes separately and are
 governed by the stored active policy; if no governing policy exists, the rejection
 cannot be durably attributed and no transaction or audit event is added.
+When a valid stored governing policy exists but the service's configured snapshot is
+unregistered, the mismatch rejection is still persisted and audited under the stored
+policy; the unregistered configured hash is omitted from authoritative attribution.
 
 Re-running `init` with the same active policy is idempotent. A migrated database is
 initializable only when every kernel table is genuinely empty. If any registered policy,

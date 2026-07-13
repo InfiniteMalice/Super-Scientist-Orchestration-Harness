@@ -540,6 +540,30 @@ def test_direct_submission_cannot_forge_service_owned_intent_fingerprint(
         assert len(repositories.audit.list_all()) == 2
 
 
+def test_direct_submission_cannot_replay_intent_owned_transaction(
+    kernel: KernelFixture,
+) -> None:
+    proposal = kernel.valid_add_evidence("proposal-cross-mode", "key-cross-mode", b"same")
+    attempt = transaction_models.ProposalAttempt(
+        proposal_id=proposal.proposal_id,
+        idempotency_key=proposal.idempotency_key,
+        proposer=proposal.proposer,
+        proposal_kind="add_evidence",
+        intent_digest="a" * 64,
+    )
+    assert kernel.service.submit_intent(attempt, lambda: proposal).accepted
+
+    decision = kernel.service.submit(proposal)
+
+    assert not decision.accepted
+    assert not decision.replayed
+    assert decision.reasons[0].code is RejectionCode.IDEMPOTENCY_CONFLICT
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        assert len(repositories.transactions.list_all()) == 1
+        assert len(repositories.audit.list_all()) == 2
+
+
 def test_reused_idempotency_key_with_new_content_is_rejected_and_audited(
     kernel: KernelFixture,
 ) -> None:
@@ -646,6 +670,35 @@ def test_mismatched_active_policy_is_rejected_and_audited(kernel: KernelFixture)
         assert payload["policy_hash"] == stored_policy.policy_hash
         assert payload["configured_policy_hash"] == kernel.policy.policy_hash
         assert payload["stored_policy_hash"] == stored_policy.policy_hash
+
+
+def test_unregistered_configured_policy_rejection_is_durable_under_active_policy(
+    kernel: KernelFixture,
+) -> None:
+    unregistered_policy = _policy_snapshot(("source_exists", "unregistered-check"))
+    stale_service = KernelService(
+        kernel.uow_factory,
+        unregistered_policy,
+        FixedClock(),
+        kernel.artifact_store,
+    )
+    proposal = kernel.valid_add_evidence("proposal-unregistered", "key-unregistered", b"same")
+
+    first = stale_service.submit(proposal)
+    replay = kernel.service.submit(proposal)
+
+    assert first.reasons[0].code is RejectionCode.POLICY_HASH_MISMATCH
+    assert replay.replayed
+    assert replay.model_copy(update={"replayed": False}) == first
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        stored = repositories.transactions.get_by_idempotency_key(proposal.idempotency_key)
+        assert stored is not None
+        assert stored.decision == first
+        events = repositories.audit.list_all()
+        assert len(events) == 1
+        assert "configured_policy_hash" not in events[0].payload
+        assert events[0].payload["policy_hash"] == kernel.policy.policy_hash
 
 
 def test_reused_proposal_id_is_rejected_and_audited(kernel: KernelFixture) -> None:
