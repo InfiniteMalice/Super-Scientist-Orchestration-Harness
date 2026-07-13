@@ -29,9 +29,12 @@ def run_cli(root: Path, *args: str, expected_code: int = 0) -> dict[str, object]
             f"{completed.stderr.strip()}"
         )
     try:
-        envelope = cast(dict[str, object], json.loads(completed.stdout))
+        parsed = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
         fail(f"{' '.join(args)} did not emit JSON: {error}")
+    if not isinstance(parsed, dict):
+        fail(f"{' '.join(args)} did not emit a JSON object")
+    envelope = cast(dict[str, object], parsed)
     if envelope.get("schema_version") != 1:
         fail(f"{' '.join(args)} did not emit schema-version-1 JSON")
     print(json.dumps(envelope, ensure_ascii=False, sort_keys=True))
@@ -90,6 +93,7 @@ def main() -> int:
         if (
             not isinstance(reasons, list)
             or not reasons
+            or not isinstance(reasons[0], dict)
             or reasons[0].get("code") != "SELF_APPROVAL"
         ):
             fail("self-approved claim was not rejected with SELF_APPROVAL")

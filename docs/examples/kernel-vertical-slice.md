@@ -1,6 +1,8 @@
 # Kernel Vertical Slice
 
-Run the deterministic, fully offline example from the repository root:
+Run the deterministic, fully offline example from the repository root. Because
+this repository uses a `src` layout, first install the project into the active
+Python environment, for example with `python -m pip install -e .`.
 
 ```bash
 python examples/kernel_vertical_slice.py
