@@ -1,0 +1,70 @@
+name: Quality
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and development tools
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run fixed quality gate
+        run: scientist-harness quality-gate
+
+      - name: Upload coverage output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-data
+          path: .coverage
+          if-no-files-found: ignore
+
+      - name: Upload distributions
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/*
+          if-no-files-found: ignore
+
+  windows-artifact-security:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and development tools
+        run: python -m pip install -e ".[dev]"
+
+      - name: Exercise Windows junction containment
+        run: >-
+          python -m pytest
+          tests/integration/storage/test_windows_reparse_artifacts.py
+          -v
