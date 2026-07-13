@@ -40,12 +40,16 @@ def verify_workspace(
 ) -> AuditVerification:
     events: tuple[AuditEvent, ...] = ()
     try:
-        repositories.policies.get_active()
+        active_policy = repositories.policies.get_active()
         evidence = repositories.evidence.list_all()
         heads = repositories.claims.list_heads()
         transactions = repositories.transactions.list_all()
         events = repositories.audit.list_all()
-        audit_records = _validated_audit_records(events)
+        _require(
+            active_policy is not None or not (evidence or heads or transactions or events),
+            "durable workspace state requires an active registered policy",
+        )
+        audit_records = _validated_audit_records(events, repositories)
         _require_transaction_audit_consistency(transactions, audit_records)
         _require_projection_consistency(repositories, transactions, evidence, heads)
         _require_artifact_consistency(evidence, artifact_store)
@@ -70,6 +74,7 @@ def require_workspace_integrity(
 
 def _validated_audit_records(
     events: tuple[AuditEvent, ...],
+    repositories: RepositorySet,
 ) -> tuple[tuple[Proposal, TransactionDecision], ...]:
     records: list[tuple[Proposal, TransactionDecision]] = []
     for event in events:
@@ -81,7 +86,27 @@ def _validated_audit_records(
         decision = TransactionDecision.model_validate_json(
             canonical_json_bytes(_mapping_value(payload, "decision"))
         )
-        SHA256_ADAPTER.validate_python(_mapping_value(payload, "policy_hash"))
+        governing_hash = SHA256_ADAPTER.validate_python(_mapping_value(payload, "policy_hash"))
+        _require(
+            repositories.policies.get(governing_hash) is not None,
+            "audit event governing policy is not registered",
+        )
+        configured_hash = _optional_policy_hash(payload, "configured_policy_hash")
+        stored_hash = _optional_policy_hash(payload, "stored_policy_hash")
+        if configured_hash is not None:
+            _require(
+                repositories.policies.get(configured_hash) is not None,
+                "audit event configured policy is not registered",
+            )
+        if stored_hash is not None:
+            _require(
+                repositories.policies.get(stored_hash) is not None,
+                "audit event stored policy is not registered",
+            )
+            _require(
+                stored_hash == governing_hash,
+                "audit event governing and stored policies do not match",
+            )
         _require(
             proposal.proposal_id == decision.proposal_id,
             "audit proposal and decision identifiers do not match",
@@ -178,7 +203,9 @@ def _require_claim_evidence_consistency(
     evidence_by_id = {record.evidence_id: record for record in evidence}
     for head in heads:
         for claim in repositories.claims.history(head.claim_id):
-            if claim.status in {ClaimStatus.PROPOSED, ClaimStatus.WITHDRAWN}:
+            if claim.status is ClaimStatus.PROPOSED:
+                continue
+            if claim.status is ClaimStatus.WITHDRAWN and not claim.evidence_links:
                 continue
             checks = run_deterministic_checks(claim, evidence_by_id)
             _require(
@@ -191,6 +218,13 @@ def _mapping_value(mapping: Mapping[str, object], key: str) -> object:
     if key not in mapping:
         raise StorageIntegrityError(f"audit payload is missing {key}")
     return mapping[key]
+
+
+def _optional_policy_hash(mapping: Mapping[str, object], key: str) -> str | None:
+    value = mapping.get(key)
+    if value is None:
+        return None
+    return SHA256_ADAPTER.validate_python(value)
 
 
 def _add_unique[KeyT, ValueT](

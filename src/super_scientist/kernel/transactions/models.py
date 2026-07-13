@@ -62,8 +62,17 @@ class TransitionClaim(ProposalBase):
     next_claim: AtomicClaim
 
 
+class InvalidProposal(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    proposal_type: Literal["invalid_proposal"] = "invalid_proposal"
+    proposal_id: StableIdentifier
+    idempotency_key: StableIdentifier
+    validation_error: NonBlankText
+
+
 Proposal = Annotated[
-    AddEvidence | ProposeClaim | TransitionClaim,
+    AddEvidence | ProposeClaim | TransitionClaim | InvalidProposal,
     Field(discriminator="proposal_type"),
 ]
 

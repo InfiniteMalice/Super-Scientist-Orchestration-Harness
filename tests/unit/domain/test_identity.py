@@ -120,3 +120,29 @@ def test_exact_same_model_fingerprint_is_not_independent() -> None:
     right = left.model_copy(update={"actor_id": "right"})
 
     assert not are_independent(left, right)
+
+
+def test_configuration_only_model_aliases_are_not_independent() -> None:
+    left = ActorIdentity(
+        actor_id="left",
+        kind=ActorKind.MODEL,
+        provider_id="provider",
+        model_id="model",
+        adapter_id="adapter",
+        configuration_hash="a" * 64,
+        created_at=datetime.now(UTC),
+    )
+    right = left.model_copy(update={"actor_id": "right", "configuration_hash": "b" * 64})
+
+    assert not are_independent(left, right)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("model_id", "other-model"), ("adapter_id", "other-adapter")],
+)
+def test_distinct_model_or_adapter_identity_is_independent(field: str, value: str) -> None:
+    left = ActorIdentity.model("left", "provider", "model", "adapter", datetime.now(UTC))
+    right = left.model_copy(update={"actor_id": "right", field: value})
+
+    assert are_independent(left, right)

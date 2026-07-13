@@ -56,6 +56,10 @@ claim example.
 When `--json` is present, command parsing, required-option, option-value, and input-path
 failures also return exactly one schema-version-1 JSON error envelope with exit status
 2. Without `--json`, Typer's normal human help and error rendering is unchanged.
+Policy file validation reports `INVALID_POLICY`; other command/domain validation reports
+`INVALID_ARGUMENT` or an `INVALID_PROPOSAL` decision. The CLI pins Typer 0.19.2 with
+Click 8.3.3 so parser translation uses the public Click hierarchy on a dependency line
+with no known audited vulnerability.
 
 ## Security Boundaries
 
@@ -64,7 +68,9 @@ local evidence content remains untrusted data. Artifact paths are content-derive
 must remain beneath a private local artifact root; static traversal, symlink, and
 Windows reparse-point escapes fail closed. Submitted evidence begins unverified; the
 application service rehashes it before projecting a hash-verified record. Audit
-verification reconciles transactions, projections, history, and artifact bytes.
+verification reconciles registered policy authority, transactions, projections,
+history, and artifact bytes. Configuration-only model aliases cannot approve one
+another, and unsupported proof-bearing claim statuses fail closed for review.
 Integrity errors stop the affected operation. See `SECURITY.md` for details.
 
 The quality command is a development operation, separate from scientific runtime

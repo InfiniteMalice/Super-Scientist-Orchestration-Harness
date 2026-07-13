@@ -68,7 +68,7 @@ def _error_payload(error: Exception) -> dict[str, str]:
     if isinstance(error, CliBoundaryError):
         return {"code": error.code, "message": str(error)}
     if isinstance(error, (JSONDecodeError, ValidationError)):
-        return {"code": "INVALID_POLICY", "message": str(error)}
+        return {"code": "INVALID_ARGUMENT", "message": str(error)}
     if isinstance(error, StorageIntegrityError):
         return {"code": "STORAGE_INTEGRITY_ERROR", "message": str(error)}
     if isinstance(error, SQLAlchemyError):
@@ -195,7 +195,10 @@ def init_command(
     if not policy_path.exists():
         policy = GovernancePolicy(required_claim_checks=("source_exists", "evidence_span_exists"))
         policy_path.write_text(policy.model_dump_json(indent=2), encoding="utf-8")
-    snapshot = load_policy(policy_path)
+    try:
+        snapshot = load_policy(policy_path)
+    except (JSONDecodeError, ValidationError) as error:
+        raise CliBoundaryError("INVALID_POLICY", str(error)) from error
     url = _database_url(resolved)
     upgrade_database(url)
     engine = create_database_engine(url)

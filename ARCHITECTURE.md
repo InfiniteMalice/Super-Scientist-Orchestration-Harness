@@ -57,12 +57,14 @@ projects a `HASH_VERIFIED` copy. Failure is a durable audited
 
 ## Proposal And Admission Flow
 
-The implemented proposal union is `AddEvidence`, `ProposeClaim`, and `TransitionClaim`.
-Every proposal carries a proposal identifier, idempotency key, proposer identity, and
-optional approval. Submission follows this flow:
+The public proposal union is `AddEvidence`, `ProposeClaim`, and `TransitionClaim`;
+`InvalidProposal` is an internal durable rejection envelope. Every normal proposal
+carries a proposal identifier, idempotency key, proposer identity, and optional
+approval. Submission follows this flow:
 
 ```text
-typed proposal or intent factory
+untrusted proposal or intent factory result
+-> TypeAdapter normalization and safe identity recovery
 -> BEGIN IMMEDIATE
 -> canonical proposal hash and idempotency lookup
 -> invoke an intent factory only when no decision exists
@@ -80,9 +82,18 @@ different canonical content is rejected and audited. Policy mismatch,
 self-approval, duplicate entities, illegal transitions, missing evidence, and unresolved
 required checks fail closed.
 
+Malformed direct-service input with recoverable proposal and idempotency identifiers is
+normalized into an audited `INVALID_PROPOSAL` transaction. When either identifier is
+unusable, the service returns a stable `INVALID_PROPOSAL` decision before storage; no
+truthful durable identity exists for an audit record. Evidence ingestion actors,
+initial claim creators, and transition creators must match their proposers.
+
 `TransitionClaim` carries the complete intended next claim version. Admission validates
 that exact state and the application service projects it unchanged; it does not
 synthesize status-only transitions.
+Withdrawal preserves assumptions and evidence links exactly. Falsification,
+supersession, reproduction, corroboration, and constraint validation remain
+review-required until their typed proof records exist.
 
 This untrusted-proposal versus deterministic-admission boundary, plus append-only
 transition records and effective-state projection, is adapted conceptually from
@@ -91,15 +102,23 @@ does not reproduce Mnemosyne, and does not make scientific-truth guarantees.
 
 ## Audit Chain
 
-Each non-replayed decision produces an immutable audit event containing the proposal,
-decision, and active policy hash. The event stores a canonical payload hash, previous
-event hash, sequence, schema version, and an event hash over the canonical envelope.
+Each durably attributable non-replayed decision produces an immutable audit event
+containing the proposal, decision, registered governing policy hash, and stored-policy
+attribution. Registered configured-policy attribution is included separately; an
+unregistered stale-service hash is never promoted into an authoritative event. The event stores a canonical payload hash,
+previous event hash, sequence, schema version, and an event hash over the canonical envelope.
 Its identifier is generated solely from the trusted sequence. Genesis uses a zero hash.
 Repository reads validate redundant columns against canonical event JSON and verify the
 complete chain. Shared workspace verification also reconciles transactions with audit
 decisions and exact projections, validates claim heads/history, and rehashes every
 authoritative evidence artifact. `scientist-harness audit verify` exposes that whole
 workspace check and returns nonzero for corruption; an empty chain is valid.
+
+JSON parser translation catches public Click exceptions. Typer 0.19.2 and Click 8.3.3
+are pinned because this is a security-audited compatibility line where Typer still
+subclasses the public Click hierarchy; later Typer releases vendor incompatible Click
+exception classes. Typer's documented custom `cls` extension still requires its
+`TyperGroup` base, which has no top-level export in that compatibility line.
 
 Source metadata for [S07] and [S12] is maintained in
 `docs/sources/source-register.yaml`.

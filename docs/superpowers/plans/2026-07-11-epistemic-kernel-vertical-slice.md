@@ -48,6 +48,13 @@ show a weaker boundary:
   Human parse behavior is unchanged. CLI engines are disposed on every path.
 - Durable identifiers and claim text are stripped and nonblank. Fields represented as
   SHA-256 values are lowercase 64-hex strings.
+- Configuration hashes are provenance only: same-provider/model/adapter aliases are not
+  independent approvers. `FALSIFIED` and `SUPERSEDED` remain review-required until
+  typed falsification and successor proof records exist. Withdrawal is status-only and
+  proposer identity must match evidence ingestion and claim creation metadata.
+- Durable workspaces and audit events are bound to registered governing policy
+  snapshots. Malformed service proposals are normalized before use and are durable only
+  when proposal and idempotency identifiers can be recovered safely.
 
 ---
 
@@ -59,7 +66,7 @@ show a weaker boundary:
 | `src/super_scientist/__init__.py` | Package version export |
 | `src/super_scientist/py.typed` | PEP 561 marker for project-wide static type checking |
 | `src/super_scientist/domain/primitives.py` | UTC timestamps, canonical JSON, SHA-256, identifiers |
-| `src/super_scientist/domain/identity.py` | Actor identity and configuration-aware independence |
+| `src/super_scientist/domain/identity.py` | Actor identity and model/adapter-aware independence |
 | `src/super_scientist/config/models.py` | Runtime and immutable governance policy schemas |
 | `src/super_scientist/config/loader.py` | Typed configuration loading and policy hashing |
 | `src/super_scientist/domain/evidence/models.py` | Evidence candidates, records, spans, and verification state |
@@ -227,7 +234,7 @@ git commit -m "build: initialize typed Python package"
 
 ### Task 2: Deterministic Primitives and Actor Identity
 
-Approved corrections: zero-offset timezone-aware inputs are normalized to canonical `datetime.UTC`; naive and nonzero-offset timestamps are rejected. Model actors require `provider_id` and `model_id`. Model independence fails closed when either model lacks a `configuration_hash`; same actors and exact matching complete fingerprints remain non-independent.
+Approved corrections: zero-offset timezone-aware inputs are normalized to canonical `datetime.UTC`; naive and nonzero-offset timestamps are rejected. Model actors require `provider_id` and `model_id`. Configuration hashes remain validated provenance but do not establish independence; same provider/model/adapter aliases remain non-independent, while a genuinely distinct model or adapter identity may be independent without a configuration hash.
 
 **Files:**
 - Create: `src/super_scientist/domain/primitives.py`

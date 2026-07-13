@@ -8,6 +8,12 @@ through deterministic admission. Retrieved or user-supplied evidence is untruste
 its text cannot introduce commands, permissions, policies, or executable tool
 definitions.
 
+`KernelService` revalidates direct objects and intent-factory results before hashing,
+lookup, attribute access, or artifact handling. Malformed input with safe durable IDs is
+stored only as a typed `InvalidProposal` rejection. If proposal or idempotency identity
+cannot be recovered, the stable rejection is intentionally non-durable rather than
+inventing authority or leaking serializer/storage exceptions.
+
 `scientist-harness quality-gate` is a separate development command. It invokes only its
 eight fixed source-controlled argument vectors and exposes no arbitrary command, path,
 selection, skip, or threshold input. Its dependency audit may use network access. This
@@ -48,6 +54,13 @@ audit decisions, then rehashes every authoritative artifact. It runs before muta
 before exact replay returns, and through `audit verify`. Corruption, policy mismatch,
 projection inconsistency, evidence replacement, and artifact mismatch stop the affected
 operation; an empty workspace remains valid.
+
+Durable state requires an active registered policy, and each audit event's governing
+and stored policy references, plus any configured policy reference it carries, are
+checked against registered snapshots. Unregistered stale-service configuration is not
+recorded as authoritative policy attribution.
+Exact replay does not readmit under current policy, but it fails closed when that policy
+registration or active pointer is missing or inconsistent.
 
 The kernel has no secret store, credential broker, runtime redaction service, or
 dedicated secret scanner. Do not put API keys, credentials, private tokens, or regulated

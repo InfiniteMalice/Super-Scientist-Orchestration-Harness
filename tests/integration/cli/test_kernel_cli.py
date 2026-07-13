@@ -264,6 +264,51 @@ def test_human_parse_errors_keep_typer_rendering(tmp_path: Path) -> None:
         json.loads(result.stdout)
 
 
+def test_claim_domain_validation_is_invalid_proposal_not_invalid_policy(
+    tmp_path: Path,
+) -> None:
+    initialize_fixture(tmp_path)
+    arguments = claim_arguments(tmp_path)
+    arguments[arguments.index("--proposition") + 1] = "   "
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code == 2
+    payload = json_payload(result)
+    assert payload["command"] == "claim propose"
+    assert payload["decision"]["reasons"][0]["code"] == "INVALID_PROPOSAL"
+    assert all(error["code"] != "INVALID_POLICY" for error in payload["errors"])
+
+
+def test_evidence_domain_validation_is_invalid_proposal_not_invalid_policy(
+    tmp_path: Path,
+) -> None:
+    initialize_fixture(tmp_path)
+    input_file = tmp_path / "observation.txt"
+    input_file.write_text("observation", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "evidence",
+            "add",
+            "--root",
+            str(tmp_path),
+            "--source",
+            "   ",
+            "--file",
+            str(input_file),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 2
+    payload = json_payload(result)
+    assert payload["command"] == "evidence add"
+    assert payload["decision"]["reasons"][0]["code"] == "INVALID_PROPOSAL"
+    assert all(error["code"] != "INVALID_POLICY" for error in payload["errors"])
+
+
 def test_evidence_add_replays_with_stable_identity_and_keeps_projections(tmp_path: Path) -> None:
     initialize_fixture(tmp_path)
     input_file = tmp_path / "observation.txt"

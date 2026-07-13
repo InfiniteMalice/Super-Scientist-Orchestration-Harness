@@ -1,18 +1,26 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Protocol
+
+from pydantic import BaseModel, TypeAdapter
 
 from super_scientist.application.evidence_verification import verify_artifact_binding
 from super_scientist.application.workspace_integrity import require_workspace_integrity
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.evidence.models import VerificationState
-from super_scientist.domain.primitives import UtcTimestamp, canonical_json_bytes, sha256_hex
+from super_scientist.domain.primitives import (
+    StableIdentifier,
+    UtcTimestamp,
+    canonical_json_bytes,
+    sha256_hex,
+)
 from super_scientist.kernel.admission.engine import AdmissionContext, AdmissionEngine
 from super_scientist.kernel.audit.chain import append_event
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
+    InvalidProposal,
     Proposal,
     ProposeClaim,
     RejectionCode,
@@ -34,7 +42,10 @@ class SystemClock:
         return datetime.now(UTC)
 
 
-type ProposalFactory = Callable[[], Proposal]
+type ProposalFactory = Callable[[], object]
+
+PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
+IDENTIFIER_ADAPTER: TypeAdapter[StableIdentifier] = TypeAdapter(StableIdentifier)
 
 
 class KernelService:
@@ -51,27 +62,43 @@ class KernelService:
         self._artifact_store = artifact_store
         self._engine = AdmissionEngine()
 
-    def submit(self, proposal: Proposal) -> TransactionDecision:
+    def submit(self, proposal: object) -> TransactionDecision:
+        normalized = _normalize_proposal(proposal)
+        if isinstance(normalized, TransactionDecision):
+            return normalized
         with self._uow_factory() as uow:
             repositories = uow.repositories()
             require_workspace_integrity(repositories, self._artifact_store)
-            return self._submit_locked(proposal, repositories)
+            return self._submit_locked(normalized, repositories)
 
     def submit_intent(
         self,
         idempotency_key: str,
         proposal_factory: ProposalFactory,
     ) -> TransactionDecision:
+        normalized_key = _safe_identifier(idempotency_key)
+        if normalized_key is None:
+            return _invalid_proposal_decision("invalid-proposal")
         with self._uow_factory() as uow:
             repositories = uow.repositories()
             require_workspace_integrity(repositories, self._artifact_store)
-            prior = repositories.transactions.get_by_idempotency_key(idempotency_key)
+            prior = repositories.transactions.get_by_idempotency_key(normalized_key)
             if prior is not None:
                 return prior.decision.model_copy(update={"replayed": True})
-            proposal = proposal_factory()
-            if proposal.idempotency_key != idempotency_key:
-                raise ValueError("proposal factory returned a different idempotency key")
-            return self._submit_locked(proposal, repositories)
+            try:
+                candidate = proposal_factory()
+            except Exception:
+                return _invalid_proposal_decision("invalid-proposal")
+            normalized = _normalize_proposal(candidate)
+            if isinstance(normalized, TransactionDecision):
+                return normalized
+            if normalized.idempotency_key != normalized_key:
+                normalized = InvalidProposal(
+                    proposal_id=normalized.proposal_id,
+                    idempotency_key=normalized_key,
+                    validation_error="proposal factory returned a different idempotency key",
+                )
+            return self._submit_locked(normalized, repositories)
 
     def _submit_locked(
         self,
@@ -79,6 +106,7 @@ class KernelService:
         repositories: RepositorySet,
     ) -> TransactionDecision:
         proposal_hash = sha256_hex(canonical_json_bytes(proposal.model_dump(mode="json")))
+        stored_policy = repositories.policies.get_active()
         prior = repositories.transactions.get_by_idempotency_key(proposal.idempotency_key)
         if prior is not None:
             if prior.proposal_hash != proposal_hash:
@@ -87,10 +115,10 @@ class KernelService:
                     RejectionCode.IDEMPOTENCY_CONFLICT,
                     "idempotency key was reused with different proposal content",
                 )
-                self._audit(proposal, decision, repositories)
+                if stored_policy is not None:
+                    self._audit(proposal, decision, repositories, stored_policy)
                 return decision
             return prior.decision.model_copy(update={"replayed": True})
-        stored_policy = repositories.policies.get_active()
         existing_proposal = repositories.transactions.get_by_proposal_id(proposal.proposal_id)
         if stored_policy is None or stored_policy.policy_hash != self._active_policy.policy_hash:
             decision = AdmissionEngine.rejected(
@@ -98,9 +126,12 @@ class KernelService:
                 RejectionCode.POLICY_HASH_MISMATCH,
                 "stored active policy does not match the configured policy snapshot",
             )
+            configured_policy = repositories.policies.get(self._active_policy.policy_hash)
+            if stored_policy is None or configured_policy is None:
+                return decision
             if existing_proposal is None:
                 repositories.transactions.add(proposal, decision, self._clock.now())
-            self._audit(proposal, decision, repositories)
+            self._audit(proposal, decision, repositories, stored_policy)
             return decision
         if existing_proposal is not None:
             decision = AdmissionEngine.rejected(
@@ -108,7 +139,7 @@ class KernelService:
                 RejectionCode.ENTITY_ALREADY_EXISTS,
                 "proposal id already exists",
             )
-            self._audit(proposal, decision, repositories)
+            self._audit(proposal, decision, repositories, stored_policy)
             return decision
         context = AdmissionContext(
             active_policy=stored_policy,
@@ -127,13 +158,13 @@ class KernelService:
                     f"evidence artifact verification failed: {error}",
                 )
                 repositories.transactions.add(proposal, decision, self._clock.now())
-                self._audit(proposal, decision, repositories)
+                self._audit(proposal, decision, repositories, stored_policy)
                 return decision
         decision = self._engine.decide(admitted_proposal, context)
         if decision.accepted:
             self._project(admitted_proposal, repositories)
         repositories.transactions.add(proposal, decision, self._clock.now())
-        self._audit(proposal, decision, repositories)
+        self._audit(proposal, decision, repositories, stored_policy)
         return decision
 
     def _verified_evidence_proposal(self, proposal: AddEvidence) -> AddEvidence:
@@ -151,16 +182,21 @@ class KernelService:
         proposal: Proposal,
         decision: TransactionDecision,
         repositories: RepositorySet,
+        stored_policy: PolicySnapshot,
     ) -> None:
         previous = repositories.audit.last()
+        payload: dict[str, object] = {
+            "proposal": proposal.model_dump(mode="json"),
+            "decision": decision.model_dump(mode="json"),
+            "policy_hash": stored_policy.policy_hash,
+            "stored_policy_hash": stored_policy.policy_hash,
+        }
+        if repositories.policies.get(self._active_policy.policy_hash) is not None:
+            payload["configured_policy_hash"] = self._active_policy.policy_hash
         event = append_event(
             previous,
             "transaction_decision",
-            {
-                "proposal": proposal.model_dump(mode="json"),
-                "decision": decision.model_dump(mode="json"),
-                "policy_hash": self._active_policy.policy_hash,
-            },
+            payload,
             self._clock.now(),
         )
         repositories.audit.add(event)
@@ -172,3 +208,47 @@ class KernelService:
             repositories.claims.add_version(proposal.claim)
         elif isinstance(proposal, TransitionClaim):
             repositories.claims.add_version(proposal.next_claim)
+
+
+def _normalize_proposal(value: object) -> Proposal | TransactionDecision:
+    try:
+        raw = dict(value.__dict__) if isinstance(value, BaseModel) else value
+        return PROPOSAL_ADAPTER.validate_python(raw)
+    except Exception:
+        proposal_id = _safe_proposal_field(value, "proposal_id")
+        idempotency_key = _safe_proposal_field(value, "idempotency_key")
+        if proposal_id is None or idempotency_key is None:
+            return _invalid_proposal_decision(proposal_id or "invalid-proposal")
+        return InvalidProposal(
+            proposal_id=proposal_id,
+            idempotency_key=idempotency_key,
+            validation_error="proposal failed service boundary validation",
+        )
+
+
+def _safe_proposal_field(value: object, field: str) -> str | None:
+    try:
+        if isinstance(value, BaseModel):
+            candidate = value.__dict__.get(field)
+        elif isinstance(value, Mapping):
+            candidate = value.get(field)
+        else:
+            candidate = getattr(value, field, None)
+    except Exception:
+        return None
+    return _safe_identifier(candidate)
+
+
+def _safe_identifier(value: object) -> str | None:
+    try:
+        return IDENTIFIER_ADAPTER.validate_python(value)
+    except Exception:
+        return None
+
+
+def _invalid_proposal_decision(proposal_id: str) -> TransactionDecision:
+    return AdmissionEngine.rejected(
+        proposal_id,
+        RejectionCode.INVALID_PROPOSAL,
+        "proposal failed service boundary validation and could not be stored",
+    )

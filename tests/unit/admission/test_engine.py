@@ -164,6 +164,28 @@ def test_configuration_equivalent_model_cannot_approve_claim() -> None:
     assert decision.reasons[0].code is RejectionCode.SELF_APPROVAL
 
 
+def test_configuration_only_model_alias_cannot_approve_claim() -> None:
+    proposer = _model_actor("model-proposer")
+    approver = proposer.model_copy(
+        update={"actor_id": "model-approver", "configuration_hash": "d" * 64}
+    )
+    proposal = ProposeClaim(
+        proposal_id="proposal-config-alias",
+        idempotency_key="key-config-alias",
+        proposer=proposer,
+        approval=Approval(
+            approver=approver,
+            approved_at=datetime(2026, 7, 12, tzinfo=UTC),
+        ),
+        claim=_claim(proposer.actor_id),
+    )
+
+    decision = AdmissionEngine().decide(proposal, _context())
+
+    assert not decision.accepted
+    assert decision.reasons[0].code is RejectionCode.SELF_APPROVAL
+
+
 def test_replay_returns_prior_decision_without_reconsidering_proposal() -> None:
     prior = AdmissionEngine.rejected("old-proposal", RejectionCode.PERMISSION_DENIED, "denied")
     proposal = ProposeClaim(
@@ -523,6 +545,35 @@ def test_transition_creator_must_match_proposer() -> None:
     )
 
     assert not decision.accepted
+    assert decision.reasons[0].code is RejectionCode.ENTITY_ID_MISMATCH
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"assumptions": ("smuggled assumption",)},
+        {
+            "evidence_links": (
+                EvidenceLink(evidence_id="missing-evidence", supporting_span="missing span"),
+            )
+        },
+    ],
+)
+def test_withdrawal_is_status_only(updates: dict[str, object]) -> None:
+    current = _claim()
+    proposal = TransitionClaim(
+        proposal_id="proposal-withdraw-status-only",
+        idempotency_key="key-withdraw-status-only",
+        proposer=_actor("proposer"),
+        next_claim=_next_claim(current, ClaimStatus.WITHDRAWN, **updates),
+    )
+
+    decision = AdmissionEngine().decide(
+        proposal,
+        _context(claim_by_id={current.claim_id: current}),
+    )
+
+    assert not decision.accepted
     assert decision.reasons[0].code is RejectionCode.INVALID_STATUS_TRANSITION
 
 
@@ -561,7 +612,7 @@ def test_every_declared_transition_has_status_specific_admission(
     link = EvidenceLink(evidence_id=evidence.evidence_id, supporting_span="fixture span")
     current_links = () if current_status is ClaimStatus.PROPOSED else (link,)
     current = _claim(status=current_status, evidence_links=current_links)
-    next_links = () if target_status is ClaimStatus.WITHDRAWN else (link,)
+    next_links = current_links if target_status is ClaimStatus.WITHDRAWN else (link,)
     proposal = TransitionClaim(
         proposal_id=f"proposal-{current_status}-{target_status}",
         idempotency_key=f"key-{current_status}-{target_status}",
@@ -585,12 +636,53 @@ def test_every_declared_transition_has_status_specific_admission(
         ClaimStatus.REPRODUCED,
         ClaimStatus.CORROBORATED,
         ClaimStatus.CONSTRAINT_VALIDATED,
+        ClaimStatus.FALSIFIED,
+        ClaimStatus.SUPERSEDED,
     }
     if target_status in proof_statuses:
         assert not decision.accepted
         assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
     else:
         assert decision.accepted
+
+
+@pytest.mark.parametrize(
+    ("current_status", "target_status"),
+    [
+        (ClaimStatus.PROPOSED, ClaimStatus.FALSIFIED),
+        (ClaimStatus.FALSIFIED, ClaimStatus.SUPERSEDED),
+    ],
+)
+def test_unimplemented_terminal_proof_precedes_generic_evidence_validation(
+    current_status: ClaimStatus,
+    target_status: ClaimStatus,
+) -> None:
+    missing_link = EvidenceLink(
+        evidence_id="missing-evidence",
+        supporting_span="missing span",
+    )
+    current = _claim(
+        status=current_status,
+        evidence_links=() if current_status is ClaimStatus.PROPOSED else (missing_link,),
+    )
+    proposal = TransitionClaim(
+        proposal_id=f"proposal-{target_status}",
+        idempotency_key=f"key-{target_status}",
+        proposer=_actor("proposer"),
+        next_claim=_next_claim(
+            current,
+            target_status,
+            evidence_links=(missing_link,),
+        ),
+    )
+
+    decision = AdmissionEngine().decide(
+        proposal,
+        _context(claim_by_id={current.claim_id: current}),
+    )
+
+    assert not decision.accepted
+    assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
 
 
 def test_add_evidence_is_accepted_without_mutating_context() -> None:
@@ -608,6 +700,31 @@ def test_add_evidence_is_accepted_without_mutating_context() -> None:
     assert decision.accepted
     assert evidence_by_id == {}
     assert dict(context.evidence_by_id) == {}
+
+
+@pytest.mark.parametrize("proposal_type", ["evidence", "claim"])
+def test_initial_entity_creator_must_match_proposer(proposal_type: str) -> None:
+    proposer = _actor("proposer")
+    proposal: Proposal
+    if proposal_type == "evidence":
+        proposal = AddEvidence(
+            proposal_id="proposal-provenance",
+            idempotency_key="key-provenance",
+            proposer=proposer,
+            evidence=_evidence().model_copy(update={"ingestion_actor_id": "different-actor"}),
+        )
+    else:
+        proposal = ProposeClaim(
+            proposal_id="proposal-provenance",
+            idempotency_key="key-provenance",
+            proposer=proposer,
+            claim=_claim("different-actor"),
+        )
+
+    decision = AdmissionEngine().decide(proposal, _context())
+
+    assert not decision.accepted
+    assert decision.reasons[0].code is RejectionCode.ENTITY_ID_MISMATCH
 
 
 @pytest.mark.parametrize("proposal_type", ["evidence", "claim"])

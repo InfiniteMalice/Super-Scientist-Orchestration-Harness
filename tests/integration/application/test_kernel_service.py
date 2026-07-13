@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier, Lock
+from typing import cast
 
 import pytest
 from sqlalchemy import Engine
 
 from super_scientist.application.kernel_service import KernelService
+from super_scientist.application.workspace_integrity import verify_workspace
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus, EvidenceLink
 from super_scientist.domain.evidence.models import (
@@ -24,6 +26,7 @@ from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
     Approval,
+    Proposal,
     ProposeClaim,
     RejectionCode,
     TransactionDecision,
@@ -516,10 +519,13 @@ def test_idempotency_conflict_is_audited_when_constructor_policy_is_stale(
         assert stored is not None
         assert stored.proposal == first
         assert stored.decision.accepted
-        assert len(repositories.audit.list_all()) == 2
+        events = repositories.audit.list_all()
+        assert len(events) == 2
+        assert "configured_policy_hash" not in events[-1].payload
+        assert verify_workspace(repositories, kernel.artifact_store).valid
 
 
-def test_missing_active_policy_is_rejected_and_audited(
+def test_missing_active_policy_is_rejected_without_unauthoritative_audit(
     unregistered_kernel: KernelFixture,
 ) -> None:
     proposal = unregistered_kernel.valid_add_evidence("p-5", "k-5", b"observation")
@@ -531,9 +537,8 @@ def test_missing_active_policy_is_rejected_and_audited(
         stored = repositories.transactions.get_by_idempotency_key(proposal.idempotency_key)
         assert decision.reasons[0].code is RejectionCode.POLICY_HASH_MISMATCH
         assert repositories.evidence.get(proposal.evidence.evidence_id) is None
-        assert stored is not None
-        assert stored.decision == decision
-        assert repositories.audit.list_all()[-1].payload["decision"]["accepted"] is False
+        assert stored is None
+        assert repositories.audit.list_all() == ()
 
 
 def test_mismatched_active_policy_is_rejected_and_audited(kernel: KernelFixture) -> None:
@@ -551,7 +556,11 @@ def test_mismatched_active_policy_is_rejected_and_audited(kernel: KernelFixture)
         assert repositories.evidence.get(proposal.evidence.evidence_id) is None
         assert stored is not None
         assert stored.decision == decision
-        assert repositories.audit.list_all()[-1].payload["decision"]["accepted"] is False
+        payload = repositories.audit.list_all()[-1].payload
+        assert payload["decision"]["accepted"] is False
+        assert payload["policy_hash"] == stored_policy.policy_hash
+        assert payload["configured_policy_hash"] == kernel.policy.policy_hash
+        assert payload["stored_policy_hash"] == stored_policy.policy_hash
 
 
 def test_reused_proposal_id_is_rejected_and_audited(kernel: KernelFixture) -> None:
@@ -577,6 +586,104 @@ def test_reused_proposal_id_is_rejected_and_audited(kernel: KernelFixture) -> No
         assert repositories.evidence.get(colliding.evidence.evidence_id) is None
         assert len(repositories.transactions.list_all()) == 1
         assert len(repositories.audit.list_all()) == 2
+
+
+@pytest.mark.parametrize("malformation", ["construct", "unchecked-copy"])
+def test_service_durably_rejects_malformed_proposal_with_recoverable_identity(
+    kernel: KernelFixture,
+    malformation: str,
+) -> None:
+    if malformation == "construct":
+        malformed = AddEvidence.model_construct(
+            proposal_type="add_evidence",
+            proposal_id="proposal-malformed-construct",
+            idempotency_key="key-malformed-construct",
+        )
+    else:
+        malformed = kernel.valid_add_evidence(
+            "proposal-malformed-copy",
+            "key-malformed-copy",
+            b"unused",
+        ).model_copy(update={"evidence": {"evidence_id": "incomplete"}})
+
+    decision = kernel.service.submit(cast(Proposal, malformed))
+
+    assert not decision.accepted
+    assert decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        stored = repositories.transactions.get_by_idempotency_key(
+            cast(str, malformed.idempotency_key)
+        )
+        assert stored is not None
+        assert stored.decision == decision
+        assert len(repositories.audit.list_all()) == 1
+        assert repositories.evidence.list_all() == ()
+
+
+def test_service_returns_stable_nondurable_rejection_when_identity_is_unusable(
+    kernel: KernelFixture,
+) -> None:
+    malformed = AddEvidence.model_construct(
+        proposal_type="add_evidence",
+        proposal_id="   ",
+        idempotency_key=object(),
+    )
+
+    decision = kernel.service.submit(cast(Proposal, malformed))
+
+    assert not decision.accepted
+    assert decision.proposal_id == "invalid-proposal"
+    assert decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        assert repositories.transactions.list_all() == ()
+        assert repositories.audit.list_all() == ()
+
+
+def test_submit_intent_durably_rejects_malformed_factory_result(
+    kernel: KernelFixture,
+) -> None:
+    malformed = AddEvidence.model_construct(
+        proposal_type="add_evidence",
+        proposal_id="proposal-malformed-factory",
+        idempotency_key="key-malformed-factory",
+    )
+
+    decision = kernel.service.submit_intent(
+        "key-malformed-factory",
+        lambda: cast(Proposal, malformed),
+    )
+
+    assert not decision.accepted
+    assert decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        stored = repositories.transactions.get_by_idempotency_key("key-malformed-factory")
+        assert stored is not None
+        assert stored.decision == decision
+        assert len(repositories.audit.list_all()) == 1
+
+
+def test_submit_intent_rejects_factory_key_mismatch_without_raising(
+    kernel: KernelFixture,
+) -> None:
+    proposal = kernel.valid_add_evidence(
+        "proposal-wrong-factory-key",
+        "different-key",
+        b"unused",
+    )
+
+    decision = kernel.service.submit_intent("expected-key", lambda: proposal)
+
+    assert not decision.accepted
+    assert decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        stored = repositories.transactions.get_by_idempotency_key("expected-key")
+        assert stored is not None
+        assert stored.decision == decision
+        assert repositories.evidence.list_all() == ()
 
 
 def test_conflict_audit_id_cannot_collide_with_later_proposal_id(

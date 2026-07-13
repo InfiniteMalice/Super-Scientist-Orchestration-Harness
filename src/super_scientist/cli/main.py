@@ -3,7 +3,9 @@ from collections.abc import Sequence
 from typing import Annotated, Any
 
 import typer
-from typer._click.exceptions import ClickException
+from click import ClickException
+
+# Typer's documented custom-cls hook has no top-level TyperGroup export in 0.19.2.
 from typer.core import TyperGroup
 
 from super_scientist.cli.kernel import (

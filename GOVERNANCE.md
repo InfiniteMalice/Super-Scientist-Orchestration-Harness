@@ -8,6 +8,12 @@ append-only SQLite record; `governance_state` holds its active hash. Application
 submissions compare their configured snapshot with that durable active hash before
 admission. Missing, malformed, altered, or mismatched policy state fails closed.
 
+Any workspace with transactions, audit events, or projections must have an active
+pointer to a registered snapshot. Every audit event names a registered governing
+policy. Policy-mismatch events record configured and stored hashes separately and are
+governed by the stored active policy; if no governing policy exists, the rejection
+cannot be durably attributed and no transaction or audit event is added.
+
 Re-running `init` with the same policy is idempotent. Re-running it after changing the
 policy file is rejected. A policy file edit therefore cannot silently alter active
 rules.
@@ -16,11 +22,11 @@ rules.
 
 A proposal may include an approval, but the admission engine rejects it with
 `SELF_APPROVAL` when proposer and approver are not independent. Equal actor identities
-are never independent. For two model identities, each must include a provider, model,
-and configuration hash; the adapter may be absent. Their complete
-`(provider_id, model_id, adapter_id, configuration_hash)` tuples must differ, but every
-individual field does not have to differ. Model agreement is not treated as human
-approval.
+are never independent. Two model actors are independent only when their
+`(provider_id, model_id, adapter_id)` identities differ. A configuration-hash, prompt,
+seed, decoding, or other configuration-only change on the same model and adapter is an
+alias, not an independent approver. A distinct typed human or non-model actor remains
+independent when its actor identity differs. Model agreement is not human approval.
 
 The default policy names `governance_change` and `adapter_promotion` as requiring human
 approval. Those proposal types and their approval workflow are not implemented in this

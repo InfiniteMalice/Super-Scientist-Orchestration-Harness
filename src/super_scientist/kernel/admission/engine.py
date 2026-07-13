@@ -15,6 +15,7 @@ from super_scientist.evaluation.claim_drift.deterministic import run_determinist
 from super_scientist.evaluation.claim_drift.models import CheckOutcome, CheckResult
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
+    InvalidProposal,
     Proposal,
     ProposeClaim,
     RejectionCode,
@@ -80,6 +81,13 @@ class AdmissionEngine:
         if prior is not None:
             return prior.model_copy(update={"replayed": True})
 
+        if isinstance(normalized_proposal, InvalidProposal):
+            return self.rejected(
+                normalized_proposal.proposal_id,
+                RejectionCode.INVALID_PROPOSAL,
+                normalized_proposal.validation_error,
+            )
+
         if normalized_proposal.approval and not are_independent(
             normalized_proposal.proposer,
             normalized_proposal.approval.approver,
@@ -91,6 +99,15 @@ class AdmissionEngine:
             )
 
         if isinstance(normalized_proposal, AddEvidence):
+            if (
+                normalized_proposal.evidence.ingestion_actor_id
+                != normalized_proposal.proposer.actor_id
+            ):
+                return self.rejected(
+                    normalized_proposal.proposal_id,
+                    RejectionCode.ENTITY_ID_MISMATCH,
+                    "evidence ingestion actor must match the proposal proposer",
+                )
             if normalized_proposal.evidence.evidence_id in normalized_context.evidence_by_id:
                 return self.rejected(
                     normalized_proposal.proposal_id,
@@ -100,6 +117,12 @@ class AdmissionEngine:
             return TransactionDecision(proposal_id=normalized_proposal.proposal_id, accepted=True)
 
         if isinstance(normalized_proposal, ProposeClaim):
+            if normalized_proposal.claim.created_by != normalized_proposal.proposer.actor_id:
+                return self.rejected(
+                    normalized_proposal.proposal_id,
+                    RejectionCode.ENTITY_ID_MISMATCH,
+                    "claim creator must match the proposal proposer",
+                )
             if normalized_proposal.claim.claim_id in normalized_context.claim_by_id:
                 return self.rejected(
                     normalized_proposal.proposal_id,
@@ -152,7 +175,7 @@ class AdmissionEngine:
         if next_claim.created_by != proposal.proposer.actor_id:
             return self.rejected(
                 proposal.proposal_id,
-                RejectionCode.INVALID_STATUS_TRANSITION,
+                RejectionCode.ENTITY_ID_MISMATCH,
                 "next claim creator must match the transition proposer",
             )
         immutable_fields = (
@@ -177,7 +200,29 @@ class AdmissionEngine:
             )
 
         if next_claim.status is ClaimStatus.WITHDRAWN:
+            if (
+                next_claim.assumptions != current.assumptions
+                or next_claim.evidence_links != current.evidence_links
+            ):
+                return self.rejected(
+                    proposal.proposal_id,
+                    RejectionCode.INVALID_STATUS_TRANSITION,
+                    "withdrawal may change only status and required lineage metadata",
+                )
             return TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+
+        if next_claim.status in {
+            ClaimStatus.REPRODUCED,
+            ClaimStatus.CORROBORATED,
+            ClaimStatus.CONSTRAINT_VALIDATED,
+            ClaimStatus.FALSIFIED,
+            ClaimStatus.SUPERSEDED,
+        }:
+            return self.rejected(
+                proposal.proposal_id,
+                RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+                f"{next_claim.status.value} proof is not implemented",
+            )
 
         if next_claim.status is ClaimStatus.EVIDENCE_LINKED:
             current_links = set(current.evidence_links)
@@ -206,16 +251,6 @@ class AdmissionEngine:
                 proposal.proposal_id,
                 RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
                 "required policy checks are unresolved",
-            )
-        if next_claim.status in {
-            ClaimStatus.REPRODUCED,
-            ClaimStatus.CORROBORATED,
-            ClaimStatus.CONSTRAINT_VALIDATED,
-        }:
-            return self.rejected(
-                proposal.proposal_id,
-                RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
-                f"{next_claim.status.value} proof is not implemented",
             )
         return TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
 

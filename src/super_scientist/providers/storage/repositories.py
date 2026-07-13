@@ -735,6 +735,19 @@ class PolicyRepository:
             active_policy_hash=active_policy_hash,
         )
 
+    def get(self, policy_hash_value: str) -> PolicySnapshot | None:
+        stored_policy = (
+            self._connection.execute(
+                select(
+                    governance_policies.c.policy_hash,
+                    governance_policies.c.policy_json,
+                ).where(governance_policies.c.policy_hash == policy_hash_value)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return None if stored_policy is None else _decode_policy_row(dict(stored_policy))
+
 
 class RepositorySet:
     def __init__(self, connection: Connection) -> None:

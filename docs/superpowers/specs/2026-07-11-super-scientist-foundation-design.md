@@ -266,6 +266,16 @@ corrections create successor claims.
 independent evidence or review under configuration-aware identity rules. Different
 prompts on the same model and adapter do not count as independent replication.
 
+**Approved final-review correction:** configuration awareness identifies execution
+provenance but does not create independence. Two model actors with the same provider,
+model, and adapter are aliases for approval purposes even when their
+`configuration_hash` values differ; independence requires a distinct model/adapter
+identity or a distinct typed human/non-model authority. In the implemented vertical
+slice, typed falsification/counterevidence reviews and successor references are not yet
+modeled, so `FALSIFIED` and `SUPERSEDED` transitions fail closed as
+`INDEPENDENT_REVIEW_REQUIRED`. Withdrawal is status-only apart from required lineage,
+timestamp, and authorized creator metadata.
+
 ### 8.3 Hypothesis and contradiction
 
 A hypothesis contains its statement, mechanism, assumptions, predictions,

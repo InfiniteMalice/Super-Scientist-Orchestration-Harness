@@ -42,6 +42,12 @@ transition proposer. The application service projects the admitted record unchan
 Every edge absent from the graph is rejected. The current CLI exposes only claim
 proposal and history commands.
 
+Evidence ingestion actors and initial claim creators must equal their proposal
+proposer. A withdrawal changes only status plus required version, lineage, timestamp,
+and creator metadata; proposition, scope, system, modality, assumptions, and evidence
+links remain exact. It skips admission-time evidence requirements but workspace
+verification still validates every historical link on a withdrawn record.
+
 ## Evidence Spans
 
 Every status except `PROPOSED` and `WITHDRAWN` requires at least one evidence link. A
@@ -66,8 +72,9 @@ or a required check that did not deterministically pass rejects it as
 
 The current source and span validators produce deterministic pass, fail, or
 not-applicable results. Distinct reproduction records, independent corroboration
-reviews, and encoded constraint proofs are not implemented. Transitions to
-`REPRODUCED`, `CORROBORATED`, and `CONSTRAINT_VALIDATED` therefore fail closed as
-`INDEPENDENT_REVIEW_REQUIRED`; evidence links alone cannot confer those statuses.
-These statuses do not certify scientific truth. Source metadata for [S02] is maintained
-in `docs/sources/source-register.yaml`.
+reviews, encoded constraint proofs, typed counterevidence/falsification review, and
+successor references are not implemented. Transitions to `REPRODUCED`, `CORROBORATED`,
+`CONSTRAINT_VALIDATED`, `FALSIFIED`, and `SUPERSEDED` therefore fail closed as
+`INDEPENDENT_REVIEW_REQUIRED`; ordinary evidence links alone cannot confer those
+statuses. These statuses do not certify scientific truth. Source metadata for [S02] is
+maintained in `docs/sources/source-register.yaml`.

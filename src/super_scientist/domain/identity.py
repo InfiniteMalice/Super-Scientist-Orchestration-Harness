@@ -59,19 +59,15 @@ def are_independent(left: ActorIdentity, right: ActorIdentity) -> bool:
             or left.model_id is None
             or right.provider_id is None
             or right.model_id is None
-            or left.configuration_hash is None
-            or right.configuration_hash is None
         ):
             return False
         return (
             left.provider_id,
             left.model_id,
             left.adapter_id,
-            left.configuration_hash,
         ) != (
             right.provider_id,
             right.model_id,
             right.adapter_id,
-            right.configuration_hash,
         )
     return True

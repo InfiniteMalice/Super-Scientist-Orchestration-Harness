@@ -1,12 +1,38 @@
 import json
+import tomllib
+from importlib.metadata import version
+from pathlib import Path
 
+import click
 import pytest
+from pydantic import TypeAdapter, ValidationError
 from typer.testing import CliRunner
 
-from super_scientist.cli import main
+from super_scientist.cli import kernel, main
+from super_scientist.domain.primitives import StableIdentifier
 from super_scientist.quality.runner import CHECKS, QualityCheckResult
 
 cli_runner = CliRunner()
+
+
+def test_cli_uses_public_click_exceptions_and_pinned_compatibility_line() -> None:
+    source = Path(main.__file__).read_text(encoding="utf-8")
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+
+    assert "typer._click" not in source
+    assert "from click import ClickException" in source
+    assert "typer==0.19.2" in project["project"]["dependencies"]
+    assert "click==8.3.3" in project["project"]["dependencies"]
+    assert version("typer") == "0.19.2"
+    assert version("click") == "8.3.3"
+    assert issubclass(main.JsonEnvelopeGroup, click.Group)
+
+
+def test_nonpolicy_validation_error_maps_to_invalid_argument() -> None:
+    with pytest.raises(ValidationError) as captured:
+        TypeAdapter(StableIdentifier).validate_python("   ")
+
+    assert kernel._error_payload(captured.value)["code"] == "INVALID_ARGUMENT"
 
 
 def test_quality_gate_json_records_every_fixed_check(

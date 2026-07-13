@@ -4,13 +4,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Engine, func, select, update
+from sqlalchemy import Engine, delete, func, select, update
 
 from super_scientist.application.kernel_service import KernelService
 from super_scientist.application.workspace_integrity import verify_workspace
 from super_scientist.config.loader import policy_hash
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
-from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
+from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus, EvidenceLink
 from super_scientist.domain.evidence.models import (
     EvidenceRecord,
     EvidenceSpan,
@@ -23,6 +23,7 @@ from super_scientist.kernel.transactions.models import (
     ProposeClaim,
     RejectionCode,
     TransactionDecision,
+    TransitionClaim,
 )
 from super_scientist.providers.storage.artifacts import FileArtifactStore
 from super_scientist.providers.storage.database import (
@@ -31,7 +32,13 @@ from super_scientist.providers.storage.database import (
     upgrade_database,
 )
 from super_scientist.providers.storage.repositories import StorageIntegrityError
-from super_scientist.providers.storage.schema import audit_events, claim_heads
+from super_scientist.providers.storage.schema import (
+    audit_events,
+    claim_heads,
+    governance_policies,
+    governance_state,
+    transactions,
+)
 
 NOW = datetime(2026, 7, 13, 13, 0, tzinfo=UTC)
 
@@ -47,6 +54,7 @@ class IntegrityFixture:
     service: KernelService
     artifacts: FileArtifactStore
     actor: ActorIdentity
+    policy: PolicySnapshot
 
     def uow(self) -> DatabaseUnitOfWork:
         return DatabaseUnitOfWork(self.engine)
@@ -105,7 +113,13 @@ def integrity(tmp_path: Path) -> Iterator[IntegrityFixture]:
         FixedClock(),
         artifacts,
     )
-    yield IntegrityFixture(engine=engine, service=service, artifacts=artifacts, actor=actor)
+    yield IntegrityFixture(
+        engine=engine,
+        service=service,
+        artifacts=artifacts,
+        actor=actor,
+        policy=snapshot,
+    )
     engine.dispose()
 
 
@@ -159,7 +173,7 @@ def test_workspace_verifier_rechecks_stored_text_span_binding(
         {
             "proposal": proposal.model_dump(mode="json"),
             "decision": decision.model_dump(mode="json"),
-            "policy_hash": "a" * 64,
+            "policy_hash": integrity.policy.policy_hash,
         },
         NOW,
     )
@@ -219,7 +233,7 @@ def test_workspace_verifier_detects_transaction_audit_mismatch(
         {
             "proposal": proposal.model_dump(mode="json"),
             "decision": mismatch.model_dump(mode="json"),
-            "policy_hash": "a" * 64,
+            "policy_hash": integrity.policy.policy_hash,
         },
         NOW,
     )
@@ -262,3 +276,115 @@ def test_exact_replay_fails_closed_on_artifact_corruption_without_new_audit(
 
     with integrity.engine.connect() as connection:
         assert connection.execute(select(func.count()).select_from(audit_events)).scalar_one() == 1
+
+
+@pytest.mark.parametrize("damage", ["missing-pointer", "missing-policy-row"])
+def test_durable_workspace_and_exact_replay_require_registered_active_policy(
+    integrity: IntegrityFixture,
+    damage: str,
+) -> None:
+    proposal = integrity.evidence_proposal()
+    assert integrity.service.submit(proposal).accepted
+    with integrity.uow() as unit_of_work:
+        assert unit_of_work.connection is not None
+        if damage == "missing-pointer":
+            unit_of_work.connection.execute(delete(governance_state))
+        else:
+            unit_of_work.connection.exec_driver_sql("DROP TRIGGER governance_policies_no_delete")
+            unit_of_work.connection.execute(
+                delete(governance_policies).where(
+                    governance_policies.c.policy_hash == integrity.policy.policy_hash
+                )
+            )
+
+    result = _verify(integrity)
+
+    assert not result.valid
+    assert "policy" in result.reason
+    with pytest.raises(StorageIntegrityError, match="workspace integrity"):
+        integrity.service.submit(proposal)
+    with integrity.engine.connect() as connection:
+        assert connection.execute(select(func.count()).select_from(transactions)).scalar_one() == 1
+        assert connection.execute(select(func.count()).select_from(audit_events)).scalar_one() == 1
+
+
+def test_workspace_verifier_rejects_unregistered_audit_policy_reference(
+    integrity: IntegrityFixture,
+) -> None:
+    proposal = integrity.claim_proposal()
+    decision = integrity.service.submit(proposal)
+    replacement = append_event(
+        None,
+        "transaction_decision",
+        {
+            "proposal": proposal.model_dump(mode="json"),
+            "decision": decision.model_dump(mode="json"),
+            "policy_hash": "f" * 64,
+        },
+        NOW,
+    )
+    with integrity.uow() as unit_of_work:
+        assert unit_of_work.connection is not None
+        unit_of_work.connection.exec_driver_sql("DROP TRIGGER audit_events_no_update")
+        unit_of_work.connection.execute(
+            update(audit_events)
+            .where(audit_events.c.sequence == 1)
+            .values(
+                event_id=replacement.event_id,
+                previous_hash=replacement.previous_hash,
+                payload_hash=replacement.payload_hash,
+                event_hash=replacement.event_hash,
+                event_json=replacement.model_dump_json(),
+            )
+        )
+
+    result = _verify(integrity)
+
+    assert not result.valid
+    assert "policy" in result.reason
+
+
+def test_workspace_verifier_checks_links_on_withdrawn_history(
+    integrity: IntegrityFixture,
+) -> None:
+    proposal = integrity.claim_proposal()
+    assert integrity.service.submit(proposal).accepted
+    withdrawn = proposal.claim.model_copy(
+        update={
+            "version": 2,
+            "status": ClaimStatus.WITHDRAWN,
+            "evidence_links": (
+                EvidenceLink(evidence_id="missing-evidence", supporting_span="missing span"),
+            ),
+            "parent_version_id": f"{proposal.claim.claim_id}:1",
+            "created_by": integrity.actor.actor_id,
+        }
+    )
+    transition = TransitionClaim(
+        proposal_id="proposal-corrupt-withdrawal",
+        idempotency_key="key-corrupt-withdrawal",
+        proposer=integrity.actor,
+        next_claim=withdrawn,
+    )
+    decision = TransactionDecision(proposal_id=transition.proposal_id, accepted=True)
+    with integrity.uow() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        repositories.claims.add_version(withdrawn)
+        repositories.transactions.add(transition, decision, NOW)
+        repositories.audit.add(
+            append_event(
+                repositories.audit.last(),
+                "transaction_decision",
+                {
+                    "proposal": transition.model_dump(mode="json"),
+                    "decision": decision.model_dump(mode="json"),
+                    "policy_hash": integrity.policy.policy_hash,
+                },
+                NOW,
+            )
+        )
+
+    result = _verify(integrity)
+
+    assert not result.valid
+    assert "evidence links" in result.reason
