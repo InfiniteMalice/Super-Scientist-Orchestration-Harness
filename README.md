@@ -155,8 +155,10 @@ and development-governance systems, but no cited system is marked as reproduced,
 source repository compatibility is claimed without tests.
 
 Source metadata, versions consulted, repository commits where available, limitations,
-and adoption status are recorded in `docs/sources/source-register.yaml`. The narrative
-mapping from source ideas to project components is in `docs/research-inspirations.md`.
+and adoption status are recorded in
+[docs/sources/source-register.yaml](docs/sources/source-register.yaml). The narrative
+mapping from source ideas to project components is in
+[docs/research-inspirations.md](docs/research-inspirations.md).
 Use those files as the source of truth for attribution.
 
 The implemented kernel slice most directly adapts these ideas:
