@@ -1,23 +1,34 @@
 import subprocess
+import sys
 
 import pytest
 
 from super_scientist.quality import runner
-from super_scientist.quality.runner import CHECKS
+from super_scientist.quality.runner import CHECKS, QualityCheck
 
 
 def test_quality_registry_is_fixed_and_complete_for_kernel_slice() -> None:
-    assert tuple(check.name for check in CHECKS) == (
-        "format",
-        "lint",
-        "types",
-        "tests",
-        "security",
-        "dependencies",
-        "build",
-        "package",
+    expected = (
+        QualityCheck("format", (sys.executable, "-m", "ruff", "format", "--check", ".")),
+        QualityCheck("lint", (sys.executable, "-m", "ruff", "check", ".")),
+        QualityCheck("types", (sys.executable, "-m", "mypy", "src")),
+        QualityCheck(
+            "tests",
+            (
+                sys.executable,
+                "-m",
+                "pytest",
+                "--cov=super_scientist",
+                "--cov-branch",
+                "--cov-fail-under=90",
+            ),
+        ),
+        QualityCheck("security", (sys.executable, "-m", "bandit", "-q", "-r", "src")),
+        QualityCheck("dependencies", (sys.executable, "-m", "pip_audit")),
+        QualityCheck("build", (sys.executable, "-m", "build")),
+        QualityCheck("package", (sys.executable, "-m", "twine", "check", "dist/*")),
     )
-    assert all(isinstance(check.argv, tuple) for check in CHECKS)
+    assert tuple(CHECKS) == expected
 
 
 def test_report_records_failure_and_marks_remaining_checks_not_run(

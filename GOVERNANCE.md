@@ -16,8 +16,10 @@ rules.
 
 A proposal may include an approval, but the admission engine rejects it with
 `SELF_APPROVAL` when proposer and approver are not independent. Equal actor identities
-are never independent. Two model identities also require complete, differing provider,
-model, adapter, and configuration identity; model agreement is not treated as human
+are never independent. For two model identities, each must include a provider, model,
+and configuration hash; the adapter may be absent. Their complete
+`(provider_id, model_id, adapter_id, configuration_hash)` tuples must differ, but every
+individual field does not have to differ. Model agreement is not treated as human
 approval.
 
 The default policy names `governance_change` and `adapter_promotion` as requiring human

@@ -13,7 +13,25 @@ or paid API dependency:
 
 ```bash
 python -m venv .venv
+```
+
+Activate that environment in Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+Or activate it in a POSIX shell:
+
+```bash
+source .venv/bin/activate
+```
+
+Then install and verify the CLI using the activated environment:
+
+```bash
 python -m pip install .
+scientist-harness --help
 ```
 
 Install the development tools only when running tests or the repository quality gate:

@@ -92,8 +92,24 @@ def test_quality_gate_terminal_mode_replays_check_output(
     assert "quality-gate: ok" in result.output
 
 
-def test_quality_gate_rejects_check_selection(
+@pytest.mark.parametrize(
+    ("arguments", "option"),
+    [
+        pytest.param(("--command", "ruff check ."), "--command", id="arbitrary-command"),
+        pytest.param(("--path", "src"), "--path", id="arbitrary-path"),
+        pytest.param(("--skip", "format"), "--skip", id="skip"),
+        pytest.param(("--check", "lint"), "--check", id="check-selection"),
+        pytest.param(
+            ("--cov-fail-under", "0"),
+            "--cov-fail-under",
+            id="threshold-override",
+        ),
+    ],
+)
+def test_quality_gate_rejects_extensibility_surfaces(
     monkeypatch: pytest.MonkeyPatch,
+    arguments: tuple[str, str],
+    option: str,
 ) -> None:
     called = False
 
@@ -104,8 +120,8 @@ def test_quality_gate_rejects_check_selection(
 
     monkeypatch.setattr(main, "run_quality_gate", unexpected_gate)
 
-    result = cli_runner.invoke(main.app, ["quality-gate", "--check", "lint"])
+    result = cli_runner.invoke(main.app, ["quality-gate", *arguments])
 
     assert result.exit_code == 2
     assert called is False
-    assert "No such option: --check" in result.output
+    assert f"No such option: {option}" in result.output
