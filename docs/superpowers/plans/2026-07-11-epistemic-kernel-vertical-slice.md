@@ -3179,7 +3179,10 @@ record; these commit ranges are the authoritative completion map:
 | 11 | `39d8776..75ae66b` |
 | 12 | `75ae66b..e8774ae` |
 
-Whole-branch review corrections continue after Task 12 in commits `2158427`,
-`06b2817`, `a21f16a`, and the final review-hardening commit that follows this status
-appendix. Fresh final verification and draft-PR details are recorded in the pull request;
-the branch is intentionally not merged into `main` by this plan.
+Whole-branch review corrections after Task 12 are recorded in commits `2158427`,
+`06b2817`, `a21f16a`, `62dbe19`, `3b37e1a`, and `da9d4b8`. Those waves harden evidence
+authority, transitions, policy attribution, strict parsing, intent replay, durable
+diagnostic redaction, governance integrity, audit-bound transaction metadata, and
+bidirectional rejected-history verification. Fresh final verification and draft-PR
+details are recorded in the pull request; the branch is intentionally not merged into
+`main` by this plan.
