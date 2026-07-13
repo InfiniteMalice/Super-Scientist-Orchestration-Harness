@@ -232,6 +232,20 @@ def test_transaction_repository_round_trips_by_idempotency_key(
     assert repository_fixture.repositories.transactions.list_all() == (stored,)
 
 
+def test_transaction_repository_looks_up_by_proposal_id(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    proposal = repository_fixture.add_evidence_proposal("proposal-1", "key-1")
+    decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+
+    repository_fixture.repositories.transactions.add(proposal, decision, repository_fixture.now)
+
+    stored = repository_fixture.repositories.transactions.get_by_proposal_id(proposal.proposal_id)
+    assert stored is not None
+    assert stored.proposal == proposal
+    assert repository_fixture.repositories.transactions.get_by_proposal_id("missing") is None
+
+
 @pytest.mark.parametrize(
     ("row_proposal_id", "row_idempotency_key", "decision_proposal_id"),
     [

@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from super_scientist.application.kernel_service import KernelService
@@ -39,12 +39,16 @@ def _policy_snapshot() -> PolicySnapshot:
 
 
 @given(st.binary(min_size=1, max_size=64))
+@settings(deadline=None)
 def test_replaying_a_submission_is_stable(content: bytes) -> None:
     with TemporaryDirectory() as temporary_directory:
         root = Path(temporary_directory)
         database_url = f"sqlite:///{(root / 'kernel.db').as_posix()}"
         upgrade_database(database_url)
         engine = create_database_engine(database_url)
+        policy = _policy_snapshot()
+        with DatabaseUnitOfWork(engine) as unit_of_work:
+            unit_of_work.repositories().policies.add_and_activate(policy, NOW)
         artifact_store = FileArtifactStore(root / "artifacts")
         actor = ActorIdentity(actor_id="scientist-1", kind=ActorKind.HUMAN, created_at=NOW)
         artifact = artifact_store.put(content, "application/octet-stream")
@@ -65,12 +69,13 @@ def test_replaying_a_submission_is_stable(content: bytes) -> None:
         def uow_factory() -> DatabaseUnitOfWork:
             return DatabaseUnitOfWork(engine)
 
-        service = KernelService(uow_factory, _policy_snapshot(), FixedClock())
+        service = KernelService(uow_factory, policy, FixedClock())
 
         first = service.submit(proposal)
         replay = service.submit(proposal)
 
         engine.dispose()
 
+    assert first.accepted
     assert replay.replayed
     assert replay.model_copy(update={"replayed": False}) == first

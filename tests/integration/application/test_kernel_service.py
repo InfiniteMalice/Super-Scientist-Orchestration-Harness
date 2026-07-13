@@ -42,6 +42,7 @@ class KernelFixture:
     uow_factory: Callable[[], DatabaseUnitOfWork]
     artifact_store: FileArtifactStore
     actor: ActorIdentity
+    policy: PolicySnapshot
 
     def valid_add_evidence(self, proposal_id: str, key: str, content: bytes) -> AddEvidence:
         artifact = self.artifact_store.put(content, "text/plain")
@@ -86,8 +87,8 @@ def _database_url(path: Path) -> str:
     return f"sqlite:///{path.as_posix()}"
 
 
-def _policy_snapshot() -> PolicySnapshot:
-    policy = GovernancePolicy(required_claim_checks=("source_exists",))
+def _policy_snapshot(required_claim_checks: tuple[str, ...] = ("source_exists",)) -> PolicySnapshot:
+    policy = GovernancePolicy(required_claim_checks=required_claim_checks)
     policy_data = policy.model_dump(mode="json")
     policy_data["human_approval_for"] = sorted(policy.human_approval_for)
     return PolicySnapshot(
@@ -96,23 +97,42 @@ def _policy_snapshot() -> PolicySnapshot:
     )
 
 
-@pytest.fixture
-def kernel(tmp_path: Path) -> Iterator[KernelFixture]:
+def _build_kernel(tmp_path: Path) -> tuple[KernelFixture, Engine]:
     database_url = _database_url(tmp_path / "kernel.db")
     upgrade_database(database_url)
     engine: Engine = create_database_engine(database_url)
     artifact_store = FileArtifactStore(tmp_path / "artifacts")
     actor = ActorIdentity(actor_id="scientist-1", kind=ActorKind.HUMAN, created_at=NOW)
+    policy = _policy_snapshot()
 
     def uow_factory() -> DatabaseUnitOfWork:
         return DatabaseUnitOfWork(engine)
 
-    yield KernelFixture(
-        service=KernelService(uow_factory, _policy_snapshot(), FixedClock()),
-        uow_factory=uow_factory,
-        artifact_store=artifact_store,
-        actor=actor,
+    return (
+        KernelFixture(
+            service=KernelService(uow_factory, policy, FixedClock()),
+            uow_factory=uow_factory,
+            artifact_store=artifact_store,
+            actor=actor,
+            policy=policy,
+        ),
+        engine,
     )
+
+
+@pytest.fixture
+def kernel(tmp_path: Path) -> Iterator[KernelFixture]:
+    fixture, engine = _build_kernel(tmp_path)
+    with fixture.uow_factory() as unit_of_work:
+        unit_of_work.repositories().policies.add_and_activate(fixture.policy, NOW)
+    yield fixture
+    engine.dispose()
+
+
+@pytest.fixture
+def unregistered_kernel(tmp_path: Path) -> Iterator[KernelFixture]:
+    fixture, engine = _build_kernel(tmp_path)
+    yield fixture
     engine.dispose()
 
 
@@ -162,8 +182,72 @@ def test_reused_idempotency_key_with_new_content_is_rejected_and_audited(
     decision = kernel.service.submit(conflicting)
 
     with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        stored = repositories.transactions.get_by_idempotency_key(first.idempotency_key)
         assert decision.reasons[0].code is RejectionCode.IDEMPOTENCY_CONFLICT
-        assert len(unit_of_work.repositories().audit.list_all()) == 2
+        assert repositories.evidence.get(conflicting.evidence.evidence_id) is None
+        assert stored is not None
+        assert stored.proposal == first
+        assert stored.decision.accepted
+        assert len(repositories.audit.list_all()) == 2
+
+
+def test_missing_active_policy_is_rejected_and_audited(
+    unregistered_kernel: KernelFixture,
+) -> None:
+    proposal = unregistered_kernel.valid_add_evidence("p-5", "k-5", b"observation")
+
+    decision = unregistered_kernel.service.submit(proposal)
+
+    with unregistered_kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        stored = repositories.transactions.get_by_idempotency_key(proposal.idempotency_key)
+        assert decision.reasons[0].code is RejectionCode.POLICY_HASH_MISMATCH
+        assert repositories.evidence.get(proposal.evidence.evidence_id) is None
+        assert stored is not None
+        assert stored.decision == decision
+        assert repositories.audit.list_all()[-1].payload["decision"]["accepted"] is False
+
+
+def test_mismatched_active_policy_is_rejected_and_audited(kernel: KernelFixture) -> None:
+    stored_policy = _policy_snapshot(("source_exists", "evidence_span_exists"))
+    with kernel.uow_factory() as unit_of_work:
+        unit_of_work.repositories().policies.add_and_activate(stored_policy, NOW)
+    proposal = kernel.valid_add_evidence("p-6", "k-6", b"observation")
+
+    decision = kernel.service.submit(proposal)
+
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        stored = repositories.transactions.get_by_idempotency_key(proposal.idempotency_key)
+        assert decision.reasons[0].code is RejectionCode.POLICY_HASH_MISMATCH
+        assert repositories.evidence.get(proposal.evidence.evidence_id) is None
+        assert stored is not None
+        assert stored.decision == decision
+        assert repositories.audit.list_all()[-1].payload["decision"]["accepted"] is False
+
+
+def test_reused_proposal_id_is_rejected_and_audited(kernel: KernelFixture) -> None:
+    first = kernel.valid_add_evidence("p-7", "k-7", b"first")
+    colliding = kernel.valid_add_evidence("p-7", "k-8", b"different")
+    colliding = colliding.model_copy(
+        update={
+            "evidence": colliding.evidence.model_copy(
+                update={"evidence_id": "evidence-p-7-conflict"}
+            )
+        }
+    )
+
+    assert kernel.service.submit(first).accepted
+    decision = kernel.service.submit(colliding)
+
+    with kernel.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        assert decision.reasons[0].code is RejectionCode.ENTITY_ALREADY_EXISTS
+        assert repositories.evidence.get(first.evidence.evidence_id) == first.evidence
+        assert repositories.evidence.get(colliding.evidence.evidence_id) is None
+        assert len(repositories.transactions.list_all()) == 1
+        assert len(repositories.audit.list_all()) == 2
 
 
 def test_audit_failure_rolls_back_database_rows_but_not_prepared_artifact(

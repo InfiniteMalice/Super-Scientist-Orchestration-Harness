@@ -46,6 +46,26 @@ class KernelService:
         proposal_hash = sha256_hex(canonical_json_bytes(proposal.model_dump(mode="json")))
         with self._uow_factory() as uow:
             repositories = uow.repositories()
+            stored_policy = repositories.policies.get_active()
+            existing_proposal = repositories.transactions.get_by_proposal_id(proposal.proposal_id)
+            if (
+                stored_policy is None
+                or stored_policy.policy_hash != self._active_policy.policy_hash
+            ):
+                decision = AdmissionEngine.rejected(
+                    proposal.proposal_id,
+                    RejectionCode.POLICY_HASH_MISMATCH,
+                    "stored active policy does not match the configured policy snapshot",
+                )
+                if existing_proposal is None:
+                    repositories.transactions.add(proposal, decision, self._clock.now())
+                self._audit(
+                    proposal,
+                    decision,
+                    repositories,
+                    conflict=existing_proposal is not None,
+                )
+                return decision
             prior = repositories.transactions.get_by_idempotency_key(proposal.idempotency_key)
             if prior is not None:
                 if prior.proposal_hash != proposal_hash:
@@ -57,8 +77,16 @@ class KernelService:
                     self._audit(proposal, decision, repositories, conflict=True)
                     return decision
                 return prior.decision.model_copy(update={"replayed": True})
+            if existing_proposal is not None:
+                decision = AdmissionEngine.rejected(
+                    proposal.proposal_id,
+                    RejectionCode.ENTITY_ALREADY_EXISTS,
+                    "proposal id already exists",
+                )
+                self._audit(proposal, decision, repositories, conflict=True)
+                return decision
             context = AdmissionContext(
-                active_policy=self._active_policy,
+                active_policy=stored_policy,
                 evidence_by_id={
                     item.evidence_id: item for item in repositories.evidence.list_all()
                 },

@@ -540,6 +540,22 @@ class TransactionRepository:
     def __init__(self, connection: Connection) -> None:
         self._connection = connection
 
+    def get_by_proposal_id(self, proposal_id: str) -> StoredTransaction | None:
+        row = (
+            self._connection.execute(
+                select(
+                    transactions.c.proposal_id,
+                    transactions.c.idempotency_key,
+                    transactions.c.proposal_json,
+                    transactions.c.proposal_hash,
+                    transactions.c.decision_json,
+                ).where(transactions.c.proposal_id == proposal_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return None if row is None else _decode_transaction_row(dict(row))
+
     def get_by_idempotency_key(self, key: str) -> StoredTransaction | None:
         row = (
             self._connection.execute(
