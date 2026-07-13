@@ -147,7 +147,7 @@ explicit and valid.
 
 JSON parser translation catches public Click exceptions. Typer 0.19.2 and Click 8.3.3
 are pinned because this is a security-audited compatibility line where Typer still
-subclasses the public Click hierarchy; later Typer releases vendor incompatible Click
+subclasses the public Click hierarchy; later Typer releases vendor-incompatible Click
 exception classes. Typer's documented custom `cls` extension still requires its
 `TyperGroup` base, which has no top-level export in that compatibility line.
 

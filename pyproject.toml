@@ -13,7 +13,7 @@ authors = [{ name = "InfiniteMalice" }]
 dependencies = [
   "alembic>=1.13,<2",
   "click==8.3.3",
-  "pydantic>=2,<3",
+  "pydantic>=2.11,<3",
   "sqlalchemy>=2,<3",
   "typer==0.19.2",
 ]

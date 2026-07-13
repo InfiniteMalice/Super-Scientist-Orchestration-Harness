@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 
 from pydantic import TypeAdapter
@@ -122,22 +123,38 @@ def _require_transaction_audit_consistency(
     transactions: tuple[StoredTransaction, ...],
     audit_records: tuple[tuple[Proposal, TransactionDecision, str | None, bool], ...],
 ) -> None:
+    def key(
+        proposal: Proposal,
+        decision: TransactionDecision,
+        intent_fingerprint: str | None,
+    ) -> tuple[bytes, bytes, str | None]:
+        return (
+            canonical_json_bytes(proposal.model_dump(mode="json")),
+            canonical_json_bytes(decision.model_dump(mode="json")),
+            intent_fingerprint,
+        )
+
+    transaction_keys = {
+        key(transaction.proposal, transaction.decision, transaction.intent_fingerprint)
+        for transaction in transactions
+    }
+    persisted_audit_counts = Counter(
+        key(proposal, decision, intent_fingerprint)
+        for proposal, decision, intent_fingerprint, transaction_persisted in audit_records
+        if transaction_persisted
+    )
     for transaction in transactions:
-        matches = sum(
-            proposal == transaction.proposal
-            and decision == transaction.decision
-            and intent_fingerprint == transaction.intent_fingerprint
-            and transaction_persisted
-            for proposal, decision, intent_fingerprint, transaction_persisted in audit_records
+        transaction_key = key(
+            transaction.proposal,
+            transaction.decision,
+            transaction.intent_fingerprint,
         )
-        _require(matches == 1, "transaction does not have one exact audit decision")
+        _require(
+            persisted_audit_counts[transaction_key] == 1,
+            "transaction does not have one exact audit decision",
+        )
     for proposal, decision, intent_fingerprint, transaction_persisted in audit_records:
-        exact_transaction_exists = any(
-            transaction.proposal == proposal
-            and transaction.decision == decision
-            and transaction.intent_fingerprint == intent_fingerprint
-            for transaction in transactions
-        )
+        exact_transaction_exists = key(proposal, decision, intent_fingerprint) in transaction_keys
         _require(
             exact_transaction_exists == transaction_persisted,
             "audit transaction persistence does not match stored transactions",

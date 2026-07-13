@@ -543,7 +543,7 @@ sources:
       - unknown
     year: 2026
     source_type: local_skill
-    canonical_locator: "C:/Users/evanh/.codex/skills/repo-quality-gate/SKILL.md"
+    canonical_locator: "~/.codex/skills/repo-quality-gate/SKILL.md"
     version_consulted: "sha256:30A4A354B671DC50E2EFFC747E3CEFD8A16CD3C9F167D88F923F8F3FBE49B189"
     accessed_at: "2026-07-11"
     repository: null

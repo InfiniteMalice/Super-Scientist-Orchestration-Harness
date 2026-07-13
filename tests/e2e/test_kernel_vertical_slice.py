@@ -10,6 +10,7 @@ def run_cli(root: Path, *args: str, expected_code: int = 0) -> dict[str, object]
         check=False,
         capture_output=True,
         text=True,
+        timeout=30,
     )
     assert completed.returncode == expected_code, completed.stderr
     return json.loads(completed.stdout)

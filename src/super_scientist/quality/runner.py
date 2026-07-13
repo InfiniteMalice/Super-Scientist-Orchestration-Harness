@@ -6,6 +6,8 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from glob import glob
+from pathlib import Path
+from shutil import rmtree
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,10 @@ def _report_not_run(checks: tuple[QualityCheck, ...], reporter: QualityReporter)
 def run_quality_gate(reporter: QualityReporter | None = None) -> int:
     for index, check in enumerate(CHECKS):
         argv = check.argv
+        if check.name == "build":
+            distribution_directory = Path("dist")
+            if distribution_directory.exists():
+                rmtree(distribution_directory)
         if check.name == "package":
             distributions = tuple(sorted(glob("dist/*")))
             if not distributions:

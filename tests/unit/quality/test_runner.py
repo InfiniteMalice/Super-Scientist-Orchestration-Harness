@@ -1,5 +1,6 @@
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -88,6 +89,35 @@ def test_runner_expands_distributions_in_sorted_order(
 
     assert runner.run_quality_gate() == 0
     assert calls[-1] == (*CHECKS[-1].argv[:-1], "dist/a.tar.gz", "dist/z.whl")
+
+
+def test_runner_removes_stale_distributions_before_build(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    distribution_directory = tmp_path / "dist"
+    distribution_directory.mkdir()
+    (distribution_directory / "stale.whl").write_bytes(b"stale")
+    calls: list[tuple[str, ...]] = []
+
+    def pass_check(
+        argv: tuple[str, ...],
+        *,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        assert check is False
+        if argv == CHECKS[-2].argv:
+            assert not distribution_directory.exists()
+            distribution_directory.mkdir()
+            (distribution_directory / "current.whl").write_bytes(b"current")
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(runner.subprocess, "run", pass_check)
+
+    assert runner.run_quality_gate() == 0
+    assert calls[-1] == (*CHECKS[-1].argv[:-1], str(Path("dist") / "current.whl"))
 
 
 def test_runner_fails_when_no_distribution_exists(
