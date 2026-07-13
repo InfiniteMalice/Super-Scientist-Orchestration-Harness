@@ -6,6 +6,59 @@ proposal admission, SQLite-backed transactions, content-addressed local artifact
 active governance-policy hash, a tamper-evident audit chain, and a stable local CLI.
 It does not claim to establish scientific truth.
 
+## Why This Exists
+
+Automated scientific work needs more than a capable model. It needs a durable place to
+store evidence, a controlled path from proposal to committed state, and a way to tell
+the difference between "a model said this" and "the system admitted this under known
+rules."
+
+This repository is the beginning of that harness. Its core rule is:
+
+> Models, tools, and humans may propose. The harness owns committed evidence, claim
+> state, validation, provenance, governance policy, audit history, and rollback
+> boundaries.
+
+Use this repo when you want to build or inspect the foundation for a research workflow
+where scientific claims are decomposed into typed records, linked to exact evidence
+spans, admitted by deterministic checks where possible, and rejected with durable reasons
+when they do not satisfy the current policy. The first slice is intentionally local and
+model-free so the integrity boundary can be tested before adding orchestration,
+providers, memory, experiments, or training.
+
+Do not use it as a finished autonomous scientist, a truth oracle, a benchmark
+reproduction, or a generic agent framework. It is a small kernel for trustworthy
+research state, not a claim that automation can replace scientific judgment.
+
+## Design Philosophy
+
+- **Proposal is not commitment.** Model output, CLI input, and tool output are treated
+  as untrusted proposals until admitted.
+- **Evidence stays external and inspectable.** Raw evidence bytes are content-addressed;
+  summaries and claims never replace the source artifact.
+- **State changes are transactional.** Accepted and rejected proposals are recorded with
+  policy attribution, idempotency handling, and a tamper-evident audit chain.
+- **Authority is separated.** A proposer cannot approve its own proposal, and agreement
+  from the same model family or adapter is not treated as independent validation.
+- **Governance changes are protected.** The current slice rejects policy replacement
+  rather than silently weakening the active rules.
+- **Learning is quarantined.** Future QLoRA or harness-evolution work must remain
+  procedural, evaluable, reversible, and unable to rewrite its own admission criteria.
+- **Claims remain conditional.** Passing implemented checks means a proposal satisfied
+  declared constraints. It does not mean the underlying scientific proposition is true.
+
+## What You Can Do Today
+
+- Initialize a local kernel workspace.
+- Add local evidence through the CLI and have its bytes rehashed before admission.
+- Propose atomic claims and inspect claim history.
+- Exercise deterministic admission failures such as self-approval, missing evidence,
+  illegal claim transitions, and idempotency conflicts.
+- Verify the audit chain, stored policy, projections, and artifact bytes.
+- Run the repository quality gate that CI uses.
+
+See `docs/examples/kernel-vertical-slice.md` for the deterministic offline walk-through.
+
 ## Install
 
 Python 3.12 or newer is required. A core installation has no model SDK, GPU, training,
@@ -94,6 +147,36 @@ scientist-harness quality-gate
 
 There are no command, path, selection, skip, or threshold options. `--json` changes only
 reporting and records every fixed check and result.
+
+## Sources And Attribution
+
+The architecture is a project-specific synthesis. It is **inspired by** cited research
+and development-governance systems, but no cited system is marked as reproduced, and no
+source repository compatibility is claimed without tests.
+
+Source metadata, versions consulted, repository commits where available, limitations,
+and adoption status are recorded in
+[docs/sources/source-register.yaml](docs/sources/source-register.yaml). The narrative
+mapping from source ideas to project components is in
+[docs/research-inspirations.md](docs/research-inspirations.md).
+Use those files as the source of truth for attribution.
+
+The implemented kernel slice most directly adapts these ideas:
+
+| Source | What this repo adapts | Boundary |
+| --- | --- | --- |
+| [S02] SciConBench and SciConHarness | Atomic scientific conclusion framing and evidence-linked factual checks | This repo does not import benchmark content or reproduce SciConHarness. |
+| [S07] HarnessBridge | Raw-record-preserving projected views and typed observation/action boundaries | This repo uses deterministic projections, not learned controllers. |
+| [S12] Mnemosyne | Untrusted proposals, deterministic admission, append-only transitions, and effective-state projection | Transaction validity is not scientific truth. |
+| [S19] Superpowers | Development workflow discipline: brainstorm, design, plan, TDD, review, verification | It governs development practice, not research conclusions. |
+| [S20] RepoQualityGate | Spec-first and quality-gated development discipline | The local quality command is this repo's independent implementation. |
+
+The wider roadmap is informed by sources such as ATLAS for competing hypotheses [S01],
+HORMA for source-linked memory [S04], EurekAgent for permissions and budgets [S05],
+AgentBeats for agent-neutral evaluation [S06], HIPIF for plan hierarchies [S08],
+Socratic agents for falsification pressure [S09], QLoRA for optional procedural adapter
+training [S18], and others listed in the register. These are roadmap inspirations unless
+the implementation docs explicitly say otherwise.
 
 ## Roadmap
 
