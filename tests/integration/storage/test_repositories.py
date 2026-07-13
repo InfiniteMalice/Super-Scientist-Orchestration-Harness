@@ -327,12 +327,15 @@ def test_transaction_repository_round_trips_other_strict_proposal_variants(
             repository_fixture.now,
         )
 
-    assert tuple(
-        repository_fixture.repositories.transactions.get_by_idempotency_key(
-            proposal.idempotency_key
-        ).proposal
-        for proposal in proposals
-    ) == proposals
+    assert (
+        tuple(
+            repository_fixture.repositories.transactions.get_by_idempotency_key(
+                proposal.idempotency_key
+            ).proposal
+            for proposal in proposals
+        )
+        == proposals
+    )
 
 
 def test_policy_and_audit_repositories_round_trip(
@@ -497,6 +500,52 @@ def test_claim_repository_rejects_redundant_version_and_head_identity_corruption
 
     with pytest.raises(ValueError, match="storage integrity"):
         repository_fixture.repositories.claims.get_head(first.claim_id)
+
+
+def test_claim_repository_rejects_stale_head_projection(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    first = repository_fixture.claim("claim-1", version=1, status="PROPOSED")
+    second = repository_fixture.claim("claim-1", version=2, status="EVIDENCE_LINKED")
+    repository_fixture.repositories.claims.add_version(first)
+    repository_fixture.repositories.claims.add_version(second)
+    repository_fixture.connection.execute(
+        update(claim_heads)
+        .where(claim_heads.c.claim_id == first.claim_id)
+        .values(
+            claim_version_id="claim-1:1",
+            version=1,
+            status=ClaimStatus.PROPOSED.value,
+        )
+    )
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.claims.get_head(first.claim_id)
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.claims.list_heads()
+
+
+def test_claim_repository_rejects_gapped_history(
+    repository_fixture: RepositoryFixture,
+) -> None:
+    first = repository_fixture.claim("claim-1", version=1, status="PROPOSED")
+    third = repository_fixture.claim("claim-1", version=3, status="EVIDENCE_LINKED")
+    repository_fixture.repositories.claims.add_version(first)
+    record_json = third.model_dump_json()
+    repository_fixture.connection.execute(
+        insert(claim_versions).values(
+            claim_version_id="claim-1:3",
+            claim_id=third.claim_id,
+            version=third.version,
+            status=third.status.value,
+            record_json=record_json,
+            content_hash=sha256_hex(record_json.encode("utf-8")),
+            created_at=third.created_at.isoformat(),
+        )
+    )
+
+    with pytest.raises(ValueError, match="storage integrity"):
+        repository_fixture.repositories.claims.history(first.claim_id)
 
 
 @pytest.mark.parametrize("column", ("version", "status", "content_hash", "created_at"))
