@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "super-scientist-orchestration-harness"
 version = "0.1.0"
 description = "Transactional orchestration foundation for auditable scientific research"
+readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [{ name = "InfiniteMalice" }]
@@ -23,7 +24,7 @@ dev = [
   "hypothesis>=6,<7",
   "mypy>=1.11,<2",
   "pip-audit>=2.7,<3",
-  "pytest>=8,<9",
+  "pytest>=9.0.3,<10",
   "pytest-cov>=5,<7",
   "ruff>=0.9,<1",
   "twine>=5,<7",

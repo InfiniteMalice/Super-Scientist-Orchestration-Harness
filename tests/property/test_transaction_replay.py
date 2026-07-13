@@ -66,6 +66,7 @@ def test_replaying_a_submission_is_stable(content: bytes) -> None:
                 ingestion_actor_id=actor.actor_id,
             ),
         )
+
         def uow_factory() -> DatabaseUnitOfWork:
             return DatabaseUnitOfWork(engine)
 

@@ -27,9 +27,7 @@ class ActorIdentity(BaseModel):
 
     @model_validator(mode="after")
     def require_model_identity(self) -> ActorIdentity:
-        if self.kind is ActorKind.MODEL and (
-            self.provider_id is None or self.model_id is None
-        ):
+        if self.kind is ActorKind.MODEL and (self.provider_id is None or self.model_id is None):
             raise ValueError("model actors require provider_id and model_id")
         return self
 

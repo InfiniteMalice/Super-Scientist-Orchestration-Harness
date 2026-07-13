@@ -1,0 +1,64 @@
+# Super Scientist Orchestration Harness
+
+The project is currently an **epistemic-kernel vertical slice**, not a complete
+scientific research system. It provides typed evidence and claim records, deterministic
+proposal admission, SQLite-backed transactions, content-addressed local artifacts, an
+active governance-policy hash, a tamper-evident audit chain, and a stable local CLI.
+It does not claim to establish scientific truth.
+
+## Install
+
+Python 3.12 or newer is required. A core installation has no model SDK, GPU, training,
+or paid API dependency:
+
+```bash
+python -m venv .venv
+python -m pip install .
+```
+
+Install the development tools only when running tests or the repository quality gate:
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+## Minimal CLI Use
+
+Initialize a local kernel workspace and verify its empty audit chain:
+
+```bash
+scientist-harness init --root .kernel --json
+scientist-harness audit verify --root .kernel --json
+```
+
+The second command reports `valid: true` and `checked_events: 0`. See
+`docs/examples/kernel-vertical-slice.md` for the deterministic offline evidence and
+claim example.
+
+## Security Boundaries
+
+The kernel runtime has no model, network, or arbitrary shell authority. Retrieved or
+local evidence content remains untrusted data. Artifact paths are content-derived and
+must remain beneath a private local artifact root; static traversal, symlink, and
+Windows reparse-point escapes fail closed. Audit, policy, projection, and artifact
+integrity errors stop the affected operation. See `SECURITY.md` for the threat boundary
+and residual local-filesystem risks.
+
+The quality command is a development operation, separate from scientific runtime
+authority. It executes only the eight source-controlled checks in its fixed registry:
+
+```bash
+scientist-harness quality-gate
+```
+
+There are no command, path, selection, skip, or threshold options. `--json` changes only
+reporting and records every fixed check and result.
+
+## Roadmap
+
+Later subsystems may add hypotheses, experiments, orchestration, source-linked memory,
+complete research runs, provider integrations, and separately governed model or
+training support. None of those capabilities is available in this kernel slice.
+
+The implemented architecture, governance, claim lifecycle, and security limits are
+documented in `ARCHITECTURE.md`, `GOVERNANCE.md`, `CLAIM_LEDGER.md`, and `SECURITY.md`.

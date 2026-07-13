@@ -187,7 +187,7 @@ def init_command(
         if active is not None and active.policy_hash != snapshot.policy_hash:
             raise CliBoundaryError(
                 "POLICY_CHANGE_REJECTED",
-                "changing an initialized governance policy requires the approval workflow"
+                "changing an initialized governance policy requires the approval workflow",
             )
         policies.add_and_activate(snapshot, clock.now())
     emit(
@@ -214,11 +214,17 @@ def evidence_add(
     runtime = build_runtime(root)
     data = file.read_bytes()
     artifact = runtime.artifacts.put(data, media_type)
-    intent_key = f"evidence:{sha256_hex(canonical_json_bytes({
-        'source': source,
-        'content_hash': artifact.sha256,
-        'media_type': artifact.media_type,
-    }))}"
+    intent_key = f"evidence:{
+        sha256_hex(
+            canonical_json_bytes(
+                {
+                    'source': source,
+                    'content_hash': artifact.sha256,
+                    'media_type': artifact.media_type,
+                }
+            )
+        )
+    }"
     evidence_id = _intent_identifier("ev", intent_key)
 
     def create_proposal() -> AddEvidence:
@@ -297,13 +303,19 @@ def claim_propose(
     json_output: JsonOutput = False,
 ) -> None:
     runtime = build_runtime(root)
-    intent_key = f"claim:{sha256_hex(canonical_json_bytes({
-        'proposition': proposition,
-        'scope': scope,
-        'system': system,
-        'modality': modality,
-        'self_approve': self_approve,
-    }))}"
+    intent_key = f"claim:{
+        sha256_hex(
+            canonical_json_bytes(
+                {
+                    'proposition': proposition,
+                    'scope': scope,
+                    'system': system,
+                    'modality': modality,
+                    'self_approve': self_approve,
+                }
+            )
+        )
+    }"
     claim_id = _intent_identifier("claim", intent_key)
 
     def create_proposal() -> ProposeClaim:

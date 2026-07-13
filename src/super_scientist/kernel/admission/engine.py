@@ -204,10 +204,7 @@ def _mapping_entity_ids_match(context: AdmissionContext) -> bool:
     return all(
         mapping_key == evidence.evidence_id
         for mapping_key, evidence in context.evidence_by_id.items()
-    ) and all(
-        mapping_key == claim.claim_id
-        for mapping_key, claim in context.claim_by_id.items()
-    )
+    ) and all(mapping_key == claim.claim_id for mapping_key, claim in context.claim_by_id.items())
 
 
 def _required_checks_pass(

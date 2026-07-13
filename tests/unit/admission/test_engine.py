@@ -36,9 +36,7 @@ def _policy(
 ) -> PolicySnapshot:
     return PolicySnapshot(
         policy_hash="a" * 64,
-        policy=GovernancePolicy(
-            required_claim_checks=required_claim_checks
-        ),
+        policy=GovernancePolicy(required_claim_checks=required_claim_checks),
     )
 
 
@@ -112,9 +110,7 @@ def test_proposer_cannot_approve_own_claim() -> None:
         proposal_id="proposal-1",
         idempotency_key="key-1",
         proposer=_actor("same"),
-        approval=Approval(
-            approver=_actor("same"), approved_at=datetime(2026, 7, 12, tzinfo=UTC)
-        ),
+        approval=Approval(approver=_actor("same"), approved_at=datetime(2026, 7, 12, tzinfo=UTC)),
         claim=_claim("same"),
     )
 

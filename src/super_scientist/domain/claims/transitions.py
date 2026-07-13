@@ -5,9 +5,7 @@ from pydantic import BaseModel, ConfigDict
 
 from super_scientist.domain.claims.models import ClaimStatus
 
-TERMINAL: frozenset[ClaimStatus] = frozenset(
-    {ClaimStatus.SUPERSEDED, ClaimStatus.WITHDRAWN}
-)
+TERMINAL: frozenset[ClaimStatus] = frozenset({ClaimStatus.SUPERSEDED, ClaimStatus.WITHDRAWN})
 ALLOWED: Mapping[ClaimStatus, frozenset[ClaimStatus]] = MappingProxyType(
     {
         ClaimStatus.PROPOSED: frozenset(
