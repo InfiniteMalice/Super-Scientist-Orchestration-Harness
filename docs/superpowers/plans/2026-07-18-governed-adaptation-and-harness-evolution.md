@@ -41,10 +41,12 @@
 | `src/super_scientist/application/transactions/contracts.py` | Generic handler protocol and capability types; no storage implementation |
 | `src/super_scientist/application/transactions/coordinator.py` | Shared atomic submission, replay, policy, projection, transaction, and audit flow |
 | `src/super_scientist/application/transactions/router.py` | Fixed proposal-type-to-handler registry; no dynamic imports |
+| `src/super_scientist/application/transactions/governance.py` | Measurement-backed V1-to-V2 policy-transition handler |
 | `src/super_scientist/application/kernel_service.py` | Backward-compatible facade over the coordinator |
 | `src/super_scientist/config/models.py` | Immutable V1/V2 governance policy union and runtime settings |
 | `src/super_scientist/config/loader.py` | Version-specific policy parsing and exact canonical hashing |
-| `src/super_scientist/domain/improvement/models.py` | Change classifications, budgets, trajectories, measurements, evaluator audits |
+| `src/super_scientist/domain/improvement/classification.py` | Stable adaptation classification enums shared by policy and measurements |
+| `src/super_scientist/domain/improvement/models.py` | Budgets, trajectories, measurements, assessment provenance, evaluator audits |
 | `src/super_scientist/domain/research_runs/models.py` | Research-run definitions and lifecycle events |
 | `src/super_scientist/domain/configurations/models.py` | Model/scaffold/prompt/memory/tool/control configuration versions and diffs |
 | `src/super_scientist/domain/progress/models.py` | Plans, subtasks, validation events, budgets, checkpoints, completion decisions |
@@ -189,24 +191,23 @@ git add src/super_scientist/application/transactions src/super_scientist/applica
 git commit -m "refactor: extract shared transaction coordinator"
 ```
 
-### Task 2: Preserve Governance V1 and Add an Explicit V2 Transition
+### Task 2: Preserve Governance V1 and Add Exact V2 Policy Contracts
 
 **Files:**
 - Modify: `src/super_scientist/config/models.py:13`
 - Modify: `src/super_scientist/config/loader.py`
-- Modify: `src/super_scientist/kernel/transactions/models.py:23`
-- Create: `src/super_scientist/application/transactions/governance.py`
+- Create: `src/super_scientist/domain/improvement/__init__.py`
+- Create: `src/super_scientist/domain/improvement/classification.py`
 - Modify: `src/super_scientist/providers/storage/repositories.py:726`
 - Modify: `src/super_scientist/application/workspace_integrity.py`
 - Test: `tests/unit/config/test_policy_versions.py`
-- Test: `tests/integration/application/test_governance_transition.py`
-- Test: `tests/property/test_audit_chain.py`
+- Test: `tests/integration/storage/test_policy_versions.py`
 
 **Interfaces:**
 - Consumes: exact V1 canonical JSON and policy hash behavior.
-- Produces: `GovernancePolicyV1`, `GovernancePolicyV2`, `AdaptationRequirement`, discriminated `PolicyDocument`, version-aware `PolicySnapshot`, and `ProposeGovernancePolicyTransition`.
+- Produces: classification enums, `GovernancePolicyV1`, `GovernancePolicyV2`, `AdaptationRequirement`, discriminated `PolicyDocument`, and version-aware `PolicySnapshot`. Task 4 consumes these contracts to implement measurement-backed transition admission after migration 0002 exists.
 
-- [ ] **Step 1: Write V1 hash and bootstrap-transition failures first**
+- [ ] **Step 1: Write exact V1/V2 hashing and mixed-history failures first**
 
 ```python
 def test_v1_policy_hash_is_unchanged(v1_policy_json: dict[str, object]) -> None:
@@ -215,23 +216,24 @@ def test_v1_policy_hash_is_unchanged(v1_policy_json: dict[str, object]) -> None:
     assert legacy.policy_hash == "26269abd13de9d63206eb6fe0465deb5b5ef5f99602a9d4ad89ea710cff3e7d9"
 
 
-def test_v2_cannot_authorize_its_own_transition(transition_fixture: TransitionFixture) -> None:
-    decision = transition_fixture.submit_without_independent_human()
-    assert decision.accepted is False
-    assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+def test_v2_policy_hash_uses_its_exact_payload(v2_policy: GovernancePolicyV2) -> None:
+    expected = sha256_hex(canonical_json_bytes(v2_policy.model_dump(mode="json")))
+    assert policy_hash(v2_policy) == expected
+    assert policy_hash(v2_policy) != "26269abd13de9d63206eb6fe0465deb5b5ef5f99602a9d4ad89ea710cff3e7d9"
 
 
-def test_mixed_policy_history_verifies(transition_fixture: TransitionFixture) -> None:
-    transition_fixture.submit_with_independent_human()
-    assert transition_fixture.verify_workspace().valid is True
-    assert [item.policy.schema_version for item in transition_fixture.policies()] == [1, 2]
+def test_policy_repository_decodes_mixed_history(policy_repository: PolicyRepository) -> None:
+    policy_repository.add_and_activate(v1_snapshot(), utc_timestamp(1))
+    policy_repository.add_and_activate(v2_snapshot(), utc_timestamp(2))
+    assert [item.policy.schema_version for item in policy_repository.list_all()] == [1, 2]
+    assert policy_repository.get_active() == v2_snapshot()
 ```
 
 - [ ] **Step 2: Run the policy tests and observe the missing V2 contracts**
 
-Run: `python -m pytest tests/unit/config/test_policy_versions.py tests/integration/application/test_governance_transition.py -v`
+Run: `python -m pytest tests/unit/config/test_policy_versions.py tests/integration/storage/test_policy_versions.py -v`
 
-Expected: FAIL because `GovernancePolicyV2` and the transition proposal do not exist.
+Expected: FAIL because the classification module, `GovernancePolicyV2`, and mixed-version decoder do not exist.
 
 - [ ] **Step 3: Implement exact versioned policy contracts**
 
@@ -265,21 +267,27 @@ class GovernancePolicyV2(BaseModel):
 
 
 PolicyDocument = Annotated[GovernancePolicyV1 | GovernancePolicyV2, Field(discriminator="schema_version")]
+
+
+class PolicySnapshot(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    policy_hash: Sha256Hex
+    policy: PolicyDocument
 ```
 
-Keep V1 validators and serialization byte-equivalent to the current `GovernancePolicy`. Hash the exact validated version, never an upcast model. The transition handler must apply the non-configurable constitutional rule: independent human approval, non-closed loop, complete measurement, prior/candidate hashes, compatibility check, and rollback hash. Append the new snapshot and update the active pointer in the same coordinator transaction; attribute the audit event to V1 and record both hashes.
+Define all exact `ChangeTarget`, `LoopClosure`, `PersistenceScope`, `VerificationLevel`, `ExternalGrounding`, and `ImprovementSignal` enum values from design section 11 in `domain/improvement/classification.py`; Task 4 imports them rather than redefining them. Keep V1 validators and serialization byte-equivalent to the current `GovernancePolicy`. Hash each exact validated version, never an upcast model. Repository and workspace verification select the decoder by stored `schema_version`, reject unknown versions/fields/hash mismatches, and preserve historical V1 hashes. Default `init` continues to create V1; this task does not activate V2 or implement transition admission.
 
-- [ ] **Step 4: Test V1, V2, rollback, tampering, and mixed history**
+- [ ] **Step 4: Test V1, V2, tampering, unknown versions, and mixed history**
 
-Run: `python -m pytest tests/unit/config tests/integration/application/test_governance_transition.py tests/property/test_audit_chain.py tests/integration/application/test_workspace_integrity.py -v`
+Run: `python -m pytest tests/unit/config tests/integration/storage/test_policy_versions.py tests/integration/application/test_workspace_integrity.py tests/integration/cli/test_kernel_cli.py -v`
 
-Expected: PASS; default `init` still creates V1 and no migration silently activates V2.
+Expected: PASS; exact V1 hash/CLI initialization remain unchanged, mixed immutable V1/V2 rows decode and verify, and no operation silently activates V2.
 
 - [ ] **Step 5: Commit the policy boundary**
 
 ```bash
-git add src/super_scientist/config src/super_scientist/kernel/transactions/models.py src/super_scientist/application/transactions/governance.py src/super_scientist/providers/storage/repositories.py src/super_scientist/application/workspace_integrity.py tests/unit/config tests/integration/application/test_governance_transition.py tests/property/test_audit_chain.py
-git commit -m "feat: add governed policy version transition"
+git add src/super_scientist/config src/super_scientist/domain/improvement src/super_scientist/providers/storage/repositories.py src/super_scientist/application/workspace_integrity.py tests/unit/config/test_policy_versions.py tests/integration/storage/test_policy_versions.py
+git commit -m "feat: add versioned governance policy contracts"
 ```
 
 ### Task 3: Add the Governed Adaptation Foundation Migration
@@ -372,7 +380,7 @@ git commit -m "feat: add adaptation foundation storage"
 ### Task 4: Implement Research Runs, Configuration Separation, Measurements, and Evaluator Succession
 
 **Files:**
-- Create: `src/super_scientist/domain/improvement/__init__.py`
+- Modify: `src/super_scientist/domain/improvement/__init__.py`
 - Create: `src/super_scientist/domain/improvement/models.py`
 - Create: `src/super_scientist/domain/research_runs/__init__.py`
 - Create: `src/super_scientist/domain/research_runs/models.py`
@@ -383,6 +391,8 @@ git commit -m "feat: add adaptation foundation storage"
 - Create: `src/super_scientist/application/improvement/service.py`
 - Create: `src/super_scientist/application/research_runs/service.py`
 - Create: `src/super_scientist/application/transactions/adaptation.py`
+- Create: `src/super_scientist/application/transactions/governance.py`
+- Modify: `src/super_scientist/kernel/transactions/models.py:23`
 - Modify: `docs/sources/source-register.yaml`
 - Modify: `docs/research-inspirations.md`
 - Create: `docs/governed-adaptation.md`
@@ -390,13 +400,14 @@ git commit -m "feat: add adaptation foundation storage"
 - Test: `tests/unit/evaluators/test_succession.py`
 - Test: `tests/unit/docs/test_source_register.py`
 - Test: `tests/integration/application/test_adaptation_foundation.py`
+- Test: `tests/integration/application/test_governance_transition.py`
 - Test: `tests/adversarial/test_adaptation_authority.py`
 
 **Interfaces:**
-- Consumes: V2 policy, coordinator handler contracts, 0002 repositories, `ActorIdentity`, and `are_independent`.
-- Produces: strict classification enums, `ResearchRun`, `ResearchRunEvent`, configuration version/diff models, `AssessmentProvenance`, `EvaluatorAuditRecord`, `SelfImprovementMeasurementRecord`, `EvaluatorVersion`, `EvaluatorSuccessionDecision`, and focused proposal handlers.
+- Consumes: Task 2 classification/V1/V2 contracts, coordinator handler contracts, 0002 repositories, `ActorIdentity`, and `are_independent`.
+- Produces: `ResearchRun`, `ResearchRunEvent`, configuration version/diff models, `AssessmentProvenance`, `EvaluatorAuditRecord`, `SelfImprovementMeasurementRecord`, `EvaluatorVersion`, `EvaluatorSuccessionDecision`, focused adaptation handlers, and measurement-backed `ProposeGovernancePolicyTransition` admission.
 
-- [ ] **Step 1: Write exhaustive classification and authority tests**
+- [ ] **Step 1: Write exhaustive measurement, transition, and authority tests**
 
 ```python
 @pytest.mark.parametrize("target", tuple(ChangeTarget))
@@ -447,6 +458,20 @@ def test_fake_trainer_returns_metadata_without_model_runtime(fake_trainer: FakeT
     assert candidate.promoted is False
 
 
+def test_v2_cannot_authorize_its_own_transition(transition_fixture: TransitionFixture) -> None:
+    decision = transition_fixture.submit_without_independent_human()
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+
+
+def test_governance_transition_requires_passed_measurement_and_evaluator_audit(
+    transition_fixture: TransitionFixture,
+) -> None:
+    decision = transition_fixture.submit_with_failed_evaluator_audit()
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+
+
 def test_s21_through_s29_have_complete_non_reproduction_metadata() -> None:
     text = Path("docs/sources/source-register.yaml").read_text(encoding="utf-8")
     blocks = {
@@ -473,9 +498,9 @@ def test_s21_through_s29_have_complete_non_reproduction_metadata() -> None:
 
 - [ ] **Step 2: Run the domain and adversarial tests**
 
-Run: `python -m pytest tests/unit/improvement tests/unit/evaluators tests/unit/docs/test_source_register.py tests/adversarial/test_adaptation_authority.py -v`
+Run: `python -m pytest tests/unit/improvement tests/unit/evaluators tests/unit/docs/test_source_register.py tests/integration/application/test_governance_transition.py tests/adversarial/test_adaptation_authority.py -v`
 
-Expected: FAIL because the domain packages and rejection codes are absent.
+Expected: FAIL because measurement, evaluator-audit, research-run, configuration, evaluator-succession, transition proposal, and adaptation rejection contracts are absent.
 
 - [ ] **Step 3: Implement strict records and monotonic persistence rules**
 
@@ -521,16 +546,18 @@ class AdapterCandidateMetadata(BaseModel):
 
 No live model or training SDK enters the package. `EvaluatorAuditRecord` must reject an auditor equal or non-independent to evaluator, proposer, or candidate producer. `SelfImprovementMeasurementRecord` requires stable `change_id`, full `m_0..m_T` trajectory, separate budgets, failures, regressions, rollback target, and passed `evaluator_audit_id` for durable persistence. Evaluator promotion requires protected/external results, human review, canary result, predecessor rollback target, and an accepted independent audit; it updates only the evaluator-head projection.
 
+Implement `ProposeGovernancePolicyTransition` only now that 0002 measurement/audit repositories exist. Its handler runs under the prior active policy and applies the non-configurable constitutional rule: independent human approval, non-closed-loop classification, complete accepted measurement, passed independent evaluator audit, prior/candidate hashes, compatibility validation, and rollback hash. An accepted transition appends the V2 snapshot and updates the active-policy projection atomically; its audit event remains attributed to V1 and records both hashes. Rollback is another governed transition. No V2 field or candidate policy may authorize its own activation.
+
 - [ ] **Step 4: Verify foundation behavior through the coordinator**
 
-Run: `python -m pytest tests/unit/improvement tests/unit/evaluators tests/unit/docs/test_source_register.py tests/integration/application/test_adaptation_foundation.py tests/adversarial/test_adaptation_authority.py -v`
+Run: `python -m pytest tests/unit/improvement tests/unit/evaluators tests/unit/docs/test_source_register.py tests/integration/application/test_adaptation_foundation.py tests/integration/application/test_governance_transition.py tests/property/test_audit_chain.py tests/adversarial/test_adaptation_authority.py -v`
 
-Expected: PASS; rejected operations are durable and audited, while unexpected faults roll back.
+Expected: PASS; rejected operations and transition attempts are durable and audited, an accepted V1-to-V2 transition preserves mixed history, and unexpected faults roll back.
 
 - [ ] **Step 5: Commit the Phase A domain**
 
 ```bash
-git add src/super_scientist/domain/improvement src/super_scientist/domain/research_runs src/super_scientist/domain/configurations src/super_scientist/domain/evaluators src/super_scientist/application/improvement src/super_scientist/application/research_runs src/super_scientist/application/transactions/adaptation.py docs/sources/source-register.yaml docs/research-inspirations.md docs/governed-adaptation.md tests/unit/improvement tests/unit/evaluators tests/unit/docs/test_source_register.py tests/integration/application/test_adaptation_foundation.py tests/adversarial/test_adaptation_authority.py
+git add src/super_scientist/domain/improvement src/super_scientist/domain/research_runs src/super_scientist/domain/configurations src/super_scientist/domain/evaluators src/super_scientist/application/improvement src/super_scientist/application/research_runs src/super_scientist/application/transactions/adaptation.py src/super_scientist/application/transactions/governance.py src/super_scientist/kernel/transactions/models.py docs/sources/source-register.yaml docs/research-inspirations.md docs/governed-adaptation.md tests/unit/improvement tests/unit/evaluators tests/unit/docs/test_source_register.py tests/integration/application/test_adaptation_foundation.py tests/integration/application/test_governance_transition.py tests/property/test_audit_chain.py tests/adversarial/test_adaptation_authority.py
 git commit -m "feat: govern adaptation measurements and evaluator succession"
 ```
 
