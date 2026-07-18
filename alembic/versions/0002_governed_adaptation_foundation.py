@@ -59,6 +59,7 @@ def upgrade() -> None:
         sa.Column("content_hash", sa.String(length=64), nullable=False),
         sa.Column("created_at", sa.String(length=40), nullable=False),
         sa.ForeignKeyConstraint(["run_id"], ["research_runs.run_id"]),
+        sa.UniqueConstraint("run_id", "run_event_id", name="uq_research_run_event_run"),
         _content_hash_constraint("ck_research_run_events_content_hash"),
     )
     op.create_table(
@@ -134,7 +135,10 @@ def upgrade() -> None:
         "research_run_heads",
         sa.Column("run_id", sa.String(length=128), primary_key=True),
         sa.Column("run_event_id", sa.String(length=160), nullable=False),
-        sa.ForeignKeyConstraint(["run_event_id"], ["research_run_events.run_event_id"]),
+        sa.ForeignKeyConstraint(
+            ["run_id", "run_event_id"],
+            ["research_run_events.run_id", "research_run_events.run_event_id"],
+        ),
     )
     op.create_table(
         "evaluator_heads",

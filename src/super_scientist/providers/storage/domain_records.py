@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 
 from pydantic import BaseModel, TypeAdapter
 from sqlalchemy import Connection, Table, insert, select
@@ -8,9 +9,15 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from super_scientist.domain.primitives import UtcTimestamp, canonical_json_bytes, sha256_hex
 from super_scientist.providers.storage.repositories import StorageIntegrityError
-from super_scientist.providers.storage.schema import evaluator_heads, research_run_heads
+from super_scientist.providers.storage.schema import (
+    evaluator_heads,
+    research_run_events,
+    research_run_heads,
+)
 
 TIMESTAMP_ADAPTER: TypeAdapter[UtcTimestamp] = TypeAdapter(UtcTimestamp)
+
+__all__ = ["EvaluatorHeadRepository", "ResearchRunHeadRepository"]
 
 
 def _require_integrity(condition: bool, detail: str) -> None:
@@ -18,7 +25,7 @@ def _require_integrity(condition: bool, detail: str) -> None:
         raise StorageIntegrityError(f"storage integrity error: {detail}")
 
 
-class AppendOnlyRecordRepository[RecordT: BaseModel]:
+class _AppendOnlyRecordRepository[RecordT: BaseModel]:
     """Stores one source-controlled Pydantic record type in one fixed authoritative table."""
 
     def __init__(
@@ -68,7 +75,7 @@ class AppendOnlyRecordRepository[RecordT: BaseModel]:
     def add(self, record_id: str, record: RecordT, created_at: UtcTimestamp) -> None:
         _require_integrity(isinstance(record_id, str), "record identifier must be a string")
         try:
-            validated = self._model_type.model_validate(record.model_dump(mode="json"))
+            validated = self._model_type.model_validate(record.model_dump(mode="python"))
             validated_created_at = TIMESTAMP_ADAPTER.validate_python(created_at)
         except (TypeError, ValueError) as error:
             raise StorageIntegrityError(
@@ -95,10 +102,16 @@ class AppendOnlyRecordRepository[RecordT: BaseModel]:
         try:
             record_json = _stored_string(row, "record_json")
             content_hash = _stored_string(row, "content_hash")
-            _stored_string(row, "created_at")
             record = self._model_type.model_validate_json(record_json)
         except (TypeError, ValueError) as error:
             raise StorageIntegrityError("storage integrity error: invalid record JSON") from error
+        created_at = _stored_string(row, "created_at")
+        try:
+            TIMESTAMP_ADAPTER.validate_python(datetime.fromisoformat(created_at))
+        except (TypeError, ValueError) as error:
+            raise StorageIntegrityError(
+                "storage integrity error: invalid created_at timestamp"
+            ) from error
         stored_identifier = _stored_string(row, self._identifier_field)
         _require_integrity(
             getattr(record, self._identifier_field) == stored_identifier,
@@ -126,6 +139,15 @@ class ResearchRunHeadRepository:
         ).scalar_one_or_none()
 
     def set(self, run_id: str, run_event_id: str) -> None:
+        event_run_id = self._connection.execute(
+            select(research_run_events.c.run_id).where(
+                research_run_events.c.run_event_id == run_event_id
+            )
+        ).scalar_one_or_none()
+        _require_integrity(
+            event_run_id == run_id,
+            "run_event_id does not belong to run_id",
+        )
         statement = sqlite_insert(research_run_heads).values(
             run_id=run_id,
             run_event_id=run_event_id,

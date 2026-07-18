@@ -2,6 +2,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     MetaData,
     String,
@@ -108,6 +109,7 @@ research_run_events = Table(
     Column("record_json", Text, nullable=False),
     Column("content_hash", String(64), nullable=False),
     Column("created_at", String(40), nullable=False),
+    UniqueConstraint("run_id", "run_event_id", name="uq_research_run_event_run"),
     _content_hash_constraint("ck_research_run_events_content_hash"),
 )
 
@@ -206,11 +208,10 @@ research_run_heads = Table(
     "research_run_heads",
     metadata,
     Column("run_id", String(128), primary_key=True),
-    Column(
-        "run_event_id",
-        String(160),
-        ForeignKey("research_run_events.run_event_id"),
-        nullable=False,
+    Column("run_event_id", String(160), nullable=False),
+    ForeignKeyConstraint(
+        ["run_id", "run_event_id"],
+        ["research_run_events.run_id", "research_run_events.run_event_id"],
     ),
 )
 

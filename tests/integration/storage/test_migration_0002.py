@@ -38,7 +38,10 @@ EXPECTED_FOREIGN_KEYS = {
     "evaluator_collapse_records": {
         "evaluator_version_id": ("evaluator_versions", "evaluator_version_id"),
     },
-    "research_run_heads": {"run_event_id": ("research_run_events", "run_event_id")},
+    "research_run_heads": {
+        "run_id": ("research_run_events", "run_id"),
+        "run_event_id": ("research_run_events", "run_event_id"),
+    },
     "evaluator_heads": {"evaluator_version_id": ("evaluator_versions", "evaluator_version_id")},
 }
 
@@ -73,7 +76,10 @@ def test_0002_downgrades_to_0001(database_url: str) -> None:
     _upgrade_to(database_url, "0002_governed_adaptation_foundation")
     _downgrade_to(database_url, "0001_epistemic_kernel")
 
-    assert not (AUTHORITATIVE_0002_TABLES & _table_names(database_url))
+    assert not (
+        (AUTHORITATIVE_0002_TABLES | {"research_run_heads", "evaluator_heads"})
+        & _table_names(database_url)
+    )
     assert _revision(database_url) == "0001_epistemic_kernel"
 
 
@@ -86,11 +92,13 @@ def test_new_foreign_keys_are_declared_and_enforced(database_url: str) -> None:
             inspector = inspect(connection)
             for table_name, expected in EXPECTED_FOREIGN_KEYS.items():
                 actual = {
-                    foreign_key["constrained_columns"][0]: (
-                        foreign_key["referred_table"],
-                        foreign_key["referred_columns"][0],
-                    )
+                    column: (foreign_key["referred_table"], referred_column)
                     for foreign_key in inspector.get_foreign_keys(table_name)
+                    for column, referred_column in zip(
+                        foreign_key["constrained_columns"],
+                        foreign_key["referred_columns"],
+                        strict=True,
+                    )
                 }
                 assert actual == expected
 
@@ -103,6 +111,44 @@ def test_new_foreign_keys_are_declared_and_enforced(database_url: str) -> None:
                 ),
                 {"digest": "a" * 64, "created_at": "2026-07-18T00:00:00+00:00"},
             )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_research_run_head_cannot_reference_an_event_from_another_run(database_url: str) -> None:
+    upgrade_database(database_url)
+    engine = create_database_engine(database_url)
+    try:
+        with engine.begin() as connection:
+            for run_id in ("run-1", "run-2"):
+                connection.execute(
+                    text(
+                        "INSERT INTO research_runs "
+                        "(run_id, record_json, content_hash, created_at) "
+                        "VALUES (:run_id, '{}', :digest, :created_at)"
+                    ),
+                    {
+                        "run_id": run_id,
+                        "digest": "a" * 64,
+                        "created_at": "2026-07-18T00:00:00+00:00",
+                    },
+                )
+            connection.execute(
+                text(
+                    "INSERT INTO research_run_events "
+                    "(run_event_id, run_id, record_json, content_hash, created_at) "
+                    "VALUES ('event-2', 'run-2', '{}', :digest, :created_at)"
+                ),
+                {"digest": "a" * 64, "created_at": "2026-07-18T00:00:00+00:00"},
+            )
+            with pytest.raises(IntegrityError):
+                connection.execute(
+                    text(
+                        "INSERT INTO research_run_heads (run_id, run_event_id) "
+                        "VALUES ('run-1', 'event-2')"
+                    )
+                )
     finally:
         engine.dispose()
 
