@@ -315,6 +315,36 @@ combined development-governance workflow are project-specific decisions.
 - Open validation: keep the repository quality command independently specified and
   record only the local skill hash and result.
 
+### S21-S29 - Governed adaptation and harness evolution
+
+- **S21** supplies vocabulary for bounded adaptation, loop closure, grounding,
+  verification hierarchy, collapse, and governance measurement. SSOH adapts the
+  classification but treats the survey's observations as contingent, not formal laws.
+- **S22** separates foundation-model configuration, scaffold configuration, and
+  execution state. SSOH persists metadata only and adds its own strict version,
+  rollback, and admission contracts; the surveyed systems are not reproduced.
+- **S23** motivates dense long-horizon diagnostics. SSOH retains complete trajectories
+  and failed attempts while refusing to equate partial progress with final success.
+- **S24** motivates source-first natural evidence trails and separated validation
+  stages. In SSOH a trail remains evidence, not proof.
+- **S25** identifies vocabulary and verifier gaps. Representational primitives remain
+  deferred and quarantined until independently checked under source-controlled rules.
+- **S26** motivates matched search/inference budgets, protected transfer, and causal
+  attribution. The unlicensed repository code is not reused.
+- **S27** inspires retained feedback and pre-submission rule review. SSOH's conflict,
+  redundancy, independent-review, and consolidation design is original synthesis.
+- **S28** motivates behavior-centric navigation and progressive disclosure. SSOH uses
+  a deterministic, rebuildable, non-authoritative source index and does not reproduce
+  the paper's LLM-assisted generation system.
+- **S29** is architectural inspiration only for a generic
+  hypothesis-model-checker-revision-admission loop. Its public results are
+  self-reported; no source code, benchmark-specific logic, or hidden task assumptions
+  enter SSOH.
+
+All nine sources have `reproduction_status: not_reproduced` in the source register.
+Their exact consulted versions, repository commits, licenses, evidence boundaries, and
+limitations are recorded there.
+
 ## Architecture Attribution Matrix
 
 | Project capability | Primary inspiration | Project-specific adaptation |
@@ -339,6 +369,14 @@ combined development-governance workflow are project-specific decisions.
 | Quantized adapter learning | S18 | Procedural learning with promotion and rollback |
 | Software-development discipline | S19 | Required development-governance workflow |
 | Repository admission gate | S20 | Exact local skill followed; project command independently defined |
+| Governed adaptation classification | S21, S22 | Typed persistence and authority rules with complete measurements |
+| Dense progress diagnostics | S23 | Full trajectory retained; final validation remains separate |
+| Natural evidence trails | S24 | Source-first append-only graph with independent checks |
+| Representational primitives | S25 | Deferred source-controlled quarantine |
+| Fair harness evaluation | S26 | Matched budgets, protected transfer, and explicit confounds |
+| Behavioral-rule retention | S27 | Independent review and governed consolidation |
+| Behavior-to-code handbook | S28 | Deterministic rebuildable source projection |
+| Hypothesis/checker loop | S29 | Domain-neutral contracts with independently specified safety boundaries |
 
 ## Language Rules
 

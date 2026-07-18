@@ -5,8 +5,13 @@ from dataclasses import dataclass
 from typing import Protocol, cast
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
+from sqlalchemy import Connection
 
 from super_scientist.application.evidence_verification import verify_artifact_binding
+from super_scientist.application.transactions.adaptation import (
+    adaptation_capabilities,
+    fixed_adaptation_handlers,
+)
 from super_scientist.application.transactions.contracts import (
     HandlerReadCapability,
     HandlerWriteCapability,
@@ -32,6 +37,7 @@ from super_scientist.kernel.transactions.models import (
     ProposalAttempt,
     ProposalKind,
     ProposeClaim,
+    ProposeGovernancePolicyTransition,
     RejectionCode,
     TransactionDecision,
     TransitionClaim,
@@ -137,13 +143,17 @@ class TransactionCoordinator:
         self._clock = clock
         self._artifact_store = artifact_store
         self._engine = AdmissionEngine()
-        self._router = ProposalRouter(
+        compatibility_handlers = tuple(
             (
                 proposal_type,
                 _CompatibilityProposalHandler(self._engine, proposal_type),
             )
             for proposal_type in ("add_evidence", "propose_claim", "transition_claim")
         )
+        adaptation_handlers = tuple(
+            (handler.proposal_type, handler) for handler in fixed_adaptation_handlers()
+        )
+        self._router = ProposalRouter((*compatibility_handlers, *adaptation_handlers))
 
     @property
     def router(self) -> ProposalRouter:
@@ -156,7 +166,8 @@ class TransactionCoordinator:
         with self._uow_factory() as uow:
             repositories = uow.repositories()
             require_workspace_integrity(repositories, self._artifact_store)
-            return self._submit_locked(normalized, repositories)
+            connection = _active_connection(uow.connection)
+            return self._submit_locked(normalized, repositories, connection)
 
     def submit_intent(
         self,
@@ -222,6 +233,7 @@ class TransactionCoordinator:
             return self._submit_locked(
                 normalized,
                 repositories,
+                _active_connection(uow.connection),
                 intent_fingerprint=_attempt_fingerprint(attempt),
             )
 
@@ -229,6 +241,7 @@ class TransactionCoordinator:
         self,
         proposal: Proposal,
         repositories: RepositorySet,
+        connection: Connection,
         *,
         intent_fingerprint: str | None = None,
     ) -> TransactionDecision:
@@ -319,8 +332,10 @@ class TransactionCoordinator:
                 )
                 return decision
 
-        reads = _CompatibilityReadCapability(repositories, stored_policy)
+        reads: HandlerReadCapability
+        writes: HandlerWriteCapability
         if isinstance(admitted_proposal, InvalidProposal):
+            reads = _CompatibilityReadCapability(repositories, stored_policy)
             compatibility_handler = _CompatibilityProposalHandler(
                 self._engine,
                 "invalid_proposal",
@@ -329,6 +344,17 @@ class TransactionCoordinator:
             decision = self._engine.decide(admitted_proposal, context)
         else:
             handler = self._router.resolve(admitted_proposal.proposal_type)
+            if isinstance(admitted_proposal, (AddEvidence, ProposeClaim, TransitionClaim)):
+                reads = _CompatibilityReadCapability(repositories, stored_policy)
+                writes = _CompatibilityWriteCapability(repositories)
+            else:
+                capabilities = adaptation_capabilities(
+                    admitted_proposal,
+                    connection,
+                    stored_policy,
+                )
+                reads = capabilities
+                writes = capabilities
             decision = handler.decide(
                 admitted_proposal,
                 handler.build_context(admitted_proposal, reads),
@@ -337,7 +363,7 @@ class TransactionCoordinator:
                 handler.project(
                     admitted_proposal,
                     decision,
-                    _CompatibilityWriteCapability(repositories),
+                    writes,
                 )
         repositories.transactions.add(
             proposal,
@@ -394,6 +420,10 @@ class TransactionCoordinator:
             payload["configured_policy_hash"] = self._active_policy.policy_hash
         if intent_fingerprint is not None:
             payload["intent_fingerprint"] = intent_fingerprint
+        if isinstance(proposal, ProposeGovernancePolicyTransition):
+            payload["prior_policy_hash"] = proposal.prior_policy_hash
+            payload["candidate_policy_hash"] = proposal.candidate_policy_snapshot.policy_hash
+            payload["rollback_policy_hash"] = proposal.rollback_policy_hash
         event = append_event(
             previous,
             "transaction_decision",
@@ -522,3 +552,9 @@ def _raw_proposal_field(value: object, field: str) -> object:
         return getattr(value, field, None)
     except Exception:
         return None
+
+
+def _active_connection(connection: Connection | None) -> Connection:
+    if connection is None or connection.closed:
+        raise RuntimeError("unit of work is not active")
+    return connection

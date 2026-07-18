@@ -557,3 +557,248 @@ sources:
     notes:
       - not vendored or represented as a runtime dependency
       - the repository quality command is an independent project implementation
+
+  - id: S21
+    title: "Recursive Self-Improvement in AI: From Bounded Self-Refinement to Autonomous Research Loops"
+    authors:
+      - "Mingguang Chen"
+      - "Licheng Wang"
+      - "Bo Qu"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2607.07663"
+    version_consulted: v1
+    accessed_at: "2026-07-18"
+    repository: null
+    license: "CC BY 4.0"
+    source_proposal: "A taxonomy of update targets and loop closure, with grounding and verification hierarchies."
+    source_evidence: "A survey of 1,250 arXiv papers; its taxonomy and observations are not universal formal laws."
+    project_adaptation: "Typed change classification, fail-closed loop authority, evaluator audit, and governance-grade measurement."
+    project_original_synthesis: "Atomic measurement-backed policy transition and source-controlled constitutional prohibitions."
+    adoption_status: adapted
+    reproduction_status: not_reproduced
+    limitations:
+      - survey observations do not prove safe recursive self-improvement
+      - verification categories remain mechanism- and assumption-relative
+    notes:
+      - no source code was imported
+
+  - id: S22
+    title: "Self-Improvements in Modern Agentic Systems: A Survey"
+    authors:
+      - "Zhe Ren"
+      - "Yimeng Chen"
+      - "Dandan Guo"
+      - "Guowei Rong"
+      - "Tonghui Li"
+      - "R. B. Xiong"
+      - "Qingfeng Lan"
+      - "Wenyi Wang"
+      - "Li Nanbo"
+      - "Yibo Yang"
+      - "Mingchen Zhuge"
+      - "Jürgen Schmidhuber"
+    year: 2026
+    source_type: paper_and_companion_repository
+    canonical_locator: "https://arxiv.org/abs/2607.13104"
+    version_consulted: "v1; companion repository commit 06a48f9beddeb0ff711a3f63be857e3e95709923"
+    accessed_at: "2026-07-18"
+    repository: "selfimproving-agent/Awesome-Self-Improving-Agents@06a48f9beddeb0ff711a3f63be857e3e95709923"
+    license: "MIT (companion repository)"
+    source_proposal: "Represent an agent as a foundation model plus a scaffold and classify update targets and signals."
+    source_evidence: "Survey organization and cited systems; classifications do not establish safe autonomous promotion."
+    project_adaptation: "Persistent model/scaffold/prompt/memory/tool/control metadata separated from transient execution state."
+    project_original_synthesis: "Strict configuration-version records, deterministic metadata-only fake training, and governed promotion."
+    adoption_status: adapted
+    reproduction_status: not_reproduced
+    limitations:
+      - the survey does not validate this project's persistence or authority rules
+      - no model-training runtime or surveyed implementation is imported
+
+  - id: S23
+    title: "Long-Horizon-Terminal-Bench: Testing the Limits of Agents on Long-Horizon Terminal Tasks with Dense Reward-Based Grading"
+    authors:
+      - "Zongxia Li"
+      - "Zhongzhi Li"
+      - "Yucheng Shi"
+      - "Ruhan Wang"
+      - "Junyao Yang"
+      - "Zhichao Liu"
+      - "Xiyang Wu"
+      - "Anhao Li"
+      - "Yue Yu"
+      - "Ninghao Liu"
+      - "Lichao Sun"
+      - "Haotao Mi"
+      - "Leowei Liang"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2607.08964"
+    version_consulted: v2
+    accessed_at: "2026-07-18"
+    repository: null
+    license: "CC BY 4.0"
+    source_proposal: "Use dense intermediate grading to diagnose long-horizon terminal-task progress."
+    source_evidence: "Reported evaluation on 46 benchmark tasks and 15 models."
+    project_adaptation: "Retain full m_0 through m_T trajectories, partial diagnostics, budgets, failures, and regressions."
+    project_original_synthesis: "Partial progress is non-authoritative and cannot replace final independent validation."
+    adoption_status: adapted
+    reproduction_status: not_reproduced
+    limitations:
+      - partial reward is not final correctness
+      - benchmark results do not establish transfer to scientific research
+
+  - id: S24
+    title: "WILDTRACE: Benchmarking Natural Evidence Trails in Long-Context Reasoning"
+    authors:
+      - "Zixin Chen"
+      - "Peng Liu"
+      - "Haobo Li"
+      - "Rui Sheng"
+      - "Jianhong Tu"
+      - "Xiaodong Deng"
+      - "Fei Huang"
+      - "Kashun Shum"
+      - "Dayiheng Liu"
+      - "Huamin Qu"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2607.09328"
+    version_consulted: v1
+    accessed_at: "2026-07-18"
+    repository: null
+    license: "arXiv non-exclusive distribution license"
+    source_proposal: "Construct source-internal evidence trails before questions and validate them in separated stages."
+    source_evidence: "A benchmark of 481 tasks over 214 naturally occurring long-form sources."
+    project_adaptation: "Source-first, versioned evidence trails with separate checker provenance."
+    project_original_synthesis: "Trail records remain auditable evidence structures, never proofs or admission authority by coherence alone."
+    adoption_status: adapted
+    reproduction_status: not_reproduced
+    limitations:
+      - a coherent evidence trail is not a proof
+      - benchmark construction does not validate arbitrary project sources
+
+  - id: S25
+    title: "Beyond Fixed Representations: The Vocabulary and Verifier Gaps in Open-Ended AI"
+    authors:
+      - "Yuan Cao"
+      - "Haiqian Yang"
+    year: 2026
+    source_type: position_paper
+    canonical_locator: "https://arxiv.org/abs/2607.09560"
+    version_consulted: v1
+    accessed_at: "2026-07-18"
+    repository: null
+    license: "arXiv non-exclusive distribution license"
+    source_proposal: "Distinguish vocabulary and verifier gaps and consider reusable representational primitives."
+    source_evidence: "Conceptual argument and research directions rather than an established evaluated architecture."
+    project_adaptation: "A future quarantined vocabulary for primitive proposals and explicit verifier limitations."
+    project_original_synthesis: "Source-controlled quarantine, dependency checks, and independent admission for primitive evolution."
+    adoption_status: deferred
+    reproduction_status: not_reproduced
+    limitations:
+      - conceptual position paper without a reproduced system
+      - useful novelty cannot be inferred from self-description
+
+  - id: S26
+    title: "Rethinking the Evaluation of Harness Evolution for Agents"
+    authors:
+      - "Yike Wang"
+      - "Huaisheng Zhu"
+      - "Zhengyu Hu"
+      - "Yige Yuan"
+      - "Zhengyu Chen"
+      - "Shakti Senthil"
+      - "Hannaneh Hajishirzi"
+      - "Yulia Tsvetkov"
+      - "Pradeep Dasigi"
+      - "Teng Xiao"
+    year: 2026
+    source_type: paper_and_code_repository
+    canonical_locator: "https://arxiv.org/abs/2607.12227"
+    version_consulted: "v1; code repository commit ffd1ba1c2c3e31099264f630b9ed44aec63a86a7"
+    accessed_at: "2026-07-18"
+    repository: "rethinking-harness-evolution/code@ffd1ba1c2c3e31099264f630b9ed44aec63a86a7"
+    license: "CC BY 4.0 (paper); no repository license file"
+    source_proposal: "Compare harness evolution with search baselines under matched feedback and inference budgets and held-out transfer."
+    source_evidence: "Reported Terminal-Bench 2.1 comparisons using matched-budget baselines and held-out tasks."
+    project_adaptation: "Separate execution/search/evaluation/judging/human budgets and protected transfer evaluation."
+    project_original_synthesis: "Append-only campaign authority, confound records, and measurement-bound governance decisions."
+    adoption_status: adapted
+    reproduction_status: not_reproduced
+    limitations:
+      - causal attribution remains conditional on matched protocols and recorded confounds
+      - unlicensed repository code is unavailable for reuse and was not imported
+
+  - id: S27
+    title: "Self-Improving AI Coding Agents Through Accumulated Behavioral Rules: A Closed-Loop Framework"
+    authors:
+      - "Aditya Aggarwal"
+      - "Nahid Farhady Ghalaty"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2607.13091"
+    version_consulted: v1
+    accessed_at: "2026-07-18"
+    repository: null
+    license: "arXiv non-exclusive distribution license"
+    source_proposal: "Accumulate retained human-review feedback as persistent behavioral rules and run pre-submission self-review."
+    source_evidence: "Reported observations from 11 working sessions; evidence is limited and project-specific."
+    project_adaptation: "Versioned rule proposals, retained feedback, pre-submission review, and regression links."
+    project_original_synthesis: "Conflict, redundancy, reviewer independence, consolidation, and canonical-head governance."
+    adoption_status: inspired
+    reproduction_status: not_reproduced
+    limitations:
+      - limited observational evidence does not establish general effectiveness
+      - this project's rule governance and reviewer design are original synthesis
+
+  - id: S28
+    title: "Harness Handbook: Making Evolving Agent Harnesses Readable, Navigable, and Editable"
+    authors:
+      - "Ruhan Wang"
+      - "Yucheng Shi"
+      - "Zongxia Li"
+      - "Zhongzhi Li"
+      - "Yue Yu"
+      - "Junyao Yang"
+      - "Kishan Panaganti"
+      - "Haitao Mi"
+      - "Dongruo Zhou"
+      - "Leowei Liang"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2607.13285"
+    version_consulted: v1
+    accessed_at: "2026-07-18"
+    repository: null
+    license: "CC BY 4.0"
+    source_proposal: "Represent harness behavior separately from files and use progressive disclosure for behavior localization."
+    source_evidence: "Reported planning and localization evaluation on modification requests across two open-source harnesses."
+    project_adaptation: "Deterministic behavior-to-code handbook indexes with source validation and stale-mapping checks."
+    project_original_synthesis: "The handbook is a rebuildable non-authoritative projection governed by source and rule histories."
+    adoption_status: adapted
+    reproduction_status: not_reproduced
+    limitations:
+      - this project does not reproduce the LLM-assisted handbook generation system
+      - localization quality does not establish behavioral correctness
+
+  - id: S29
+    title: "AggyAI public benchmark site"
+    authors:
+      - "AggyAI contributors"
+    year: 2026
+    source_type: public_github_pages_repository
+    canonical_locator: "https://aggyai.com/"
+    version_consulted: "official GitHub Pages repository commit d907a3c18ac97fe6bf7b0bbe43ba938acb023b72"
+    accessed_at: "2026-07-18"
+    repository: "official GitHub Pages repository@d907a3c18ac97fe6bf7b0bbe43ba938acb023b72"
+    license: "no license file"
+    source_proposal: "Public benchmark descriptions suggest a hypothesis-model-checker-revision-admission research loop."
+    source_evidence: "Public-set results are self-reported and were not independently verified; there is no peer-reviewed paper."
+    project_adaptation: "Architectural inspiration only for a domain-neutral typed loop."
+    project_original_synthesis: "All task assumptions, checkers, authority boundaries, and safe execution constraints are independently specified."
+    adoption_status: inspired
+    reproduction_status: not_reproduced
+    limitations:
+      - no peer-reviewed paper and no independent verification of public results
+      - no source code, benchmark-specific implementation, or hidden task assumptions are imported

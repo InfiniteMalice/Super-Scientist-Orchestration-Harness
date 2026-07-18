@@ -42,6 +42,18 @@ _STORAGE_ITEMS_KEY = "items"
 _STORAGE_ENUMS: dict[str, type[Enum]] = {
     enum_type.__name__: enum_type for enum_type in (ActorKind, ClaimStatus, VerificationState)
 }
+_STRICT_JSON_PROPOSAL_TYPES = frozenset(
+    {
+        "create_research_run",
+        "append_research_run_event",
+        "record_configuration_version",
+        "record_evaluator_audit",
+        "record_self_improvement_measurement",
+        "propose_evaluator_version",
+        "decide_evaluator_succession",
+        "propose_governance_policy_transition",
+    }
+)
 
 
 class StorageIntegrityError(ValueError):
@@ -244,7 +256,14 @@ def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
             if raw_intent_fingerprint is None
             else SHA256_ADAPTER.validate_python(raw_intent_fingerprint)
         )
-        proposal = PROPOSAL_ADAPTER.validate_python(_load_storage_json(proposal_json))
+        raw_proposal = json.loads(proposal_json)
+        if (
+            isinstance(raw_proposal, dict)
+            and raw_proposal.get("proposal_type") in _STRICT_JSON_PROPOSAL_TYPES
+        ):
+            proposal = PROPOSAL_ADAPTER.validate_json(proposal_json)
+        else:
+            proposal = PROPOSAL_ADAPTER.validate_python(_decode_storage_value(raw_proposal))
         decision = TransactionDecision.model_validate_json(decision_json)
         _validated_timestamp(datetime.fromisoformat(created_at))
     except (TypeError, ValueError) as error:
@@ -637,7 +656,14 @@ class TransactionRepository:
     ) -> None:
         dumped_proposal = proposal.model_dump(mode="python", warnings="none")
         validated_proposal = PROPOSAL_ADAPTER.validate_python(dumped_proposal)
-        proposal_json = _storage_json(validated_proposal.model_dump(mode="python", warnings="none"))
+        if validated_proposal.proposal_type in _STRICT_JSON_PROPOSAL_TYPES:
+            proposal_json = canonical_json_bytes(
+                validated_proposal.model_dump(mode="json", warnings="none")
+            ).decode("utf-8")
+        else:
+            proposal_json = _storage_json(
+                validated_proposal.model_dump(mode="python", warnings="none")
+            )
         decision_json = _validated_model_json(TransactionDecision, decision)
         validated_decision = TransactionDecision.model_validate_json(decision_json)
         validated_occurred_at = _validated_timestamp(occurred_at)

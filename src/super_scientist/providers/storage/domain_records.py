@@ -7,17 +7,46 @@ from pydantic import BaseModel, TypeAdapter
 from sqlalchemy import Connection, Table, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from super_scientist.domain.configurations.models import ConfigurationVersion
+from super_scientist.domain.evaluators.models import (
+    EvaluatorCollapseRecord,
+    EvaluatorSuccessionDecision,
+    EvaluatorVersion,
+)
+from super_scientist.domain.improvement.models import (
+    EvaluatorAuditRecord,
+    SelfImprovementMeasurementRecord,
+)
 from super_scientist.domain.primitives import UtcTimestamp, canonical_json_bytes, sha256_hex
+from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 from super_scientist.providers.storage.repositories import StorageIntegrityError
 from super_scientist.providers.storage.schema import (
+    configuration_versions,
+    evaluator_audits,
+    evaluator_collapse_records,
     evaluator_heads,
+    evaluator_succession_decisions,
+    evaluator_versions,
     research_run_events,
     research_run_heads,
+    research_runs,
+    self_improvement_measurements,
 )
 
 TIMESTAMP_ADAPTER: TypeAdapter[UtcTimestamp] = TypeAdapter(UtcTimestamp)
 
-__all__ = ["EvaluatorHeadRepository", "ResearchRunHeadRepository"]
+__all__ = [
+    "ConfigurationVersionRepository",
+    "EvaluatorAuditRepository",
+    "EvaluatorCollapseRepository",
+    "EvaluatorHeadRepository",
+    "EvaluatorSuccessionRepository",
+    "EvaluatorVersionRepository",
+    "ResearchRunEventRepository",
+    "ResearchRunHeadRepository",
+    "ResearchRunRepository",
+    "SelfImprovementMeasurementRepository",
+]
 
 
 def _require_integrity(condition: bool, detail: str) -> None:
@@ -127,6 +156,99 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
                 f"{column_name} does not match record_json",
             )
         return record
+
+
+class ResearchRunRepository(_AppendOnlyRecordRepository[ResearchRun]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=research_runs,
+            model_type=ResearchRun,
+            identifier_field="run_id",
+        )
+
+
+class ResearchRunEventRepository(_AppendOnlyRecordRepository[ResearchRunEvent]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=research_run_events,
+            model_type=ResearchRunEvent,
+            identifier_field="run_event_id",
+            relationship_fields={"run_id": "run_id"},
+        )
+
+
+class ConfigurationVersionRepository(_AppendOnlyRecordRepository[ConfigurationVersion]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=configuration_versions,
+            model_type=ConfigurationVersion,
+            identifier_field="configuration_version_id",
+        )
+
+
+class SelfImprovementMeasurementRepository(
+    _AppendOnlyRecordRepository[SelfImprovementMeasurementRecord]
+):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=self_improvement_measurements,
+            model_type=SelfImprovementMeasurementRecord,
+            identifier_field="measurement_id",
+            relationship_fields={
+                "run_id": "run_id",
+                "evaluator_audit_id": "evaluator_audit_id",
+            },
+        )
+
+
+class EvaluatorAuditRepository(_AppendOnlyRecordRepository[EvaluatorAuditRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=evaluator_audits,
+            model_type=EvaluatorAuditRecord,
+            identifier_field="evaluator_audit_id",
+        )
+
+
+class EvaluatorVersionRepository(_AppendOnlyRecordRepository[EvaluatorVersion]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=evaluator_versions,
+            model_type=EvaluatorVersion,
+            identifier_field="evaluator_version_id",
+        )
+
+
+class EvaluatorSuccessionRepository(_AppendOnlyRecordRepository[EvaluatorSuccessionDecision]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=evaluator_succession_decisions,
+            model_type=EvaluatorSuccessionDecision,
+            identifier_field="evaluator_succession_decision_id",
+            relationship_fields={
+                "predecessor_evaluator_version_id": "predecessor_evaluator_version_id",
+                "candidate_evaluator_version_id": "candidate_evaluator_version_id",
+                "evaluator_audit_id": "evaluator_audit_id",
+            },
+        )
+
+
+class EvaluatorCollapseRepository(_AppendOnlyRecordRepository[EvaluatorCollapseRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=evaluator_collapse_records,
+            model_type=EvaluatorCollapseRecord,
+            identifier_field="evaluator_collapse_record_id",
+            relationship_fields={"evaluator_version_id": "evaluator_version_id"},
+        )
 
 
 class ResearchRunHeadRepository:

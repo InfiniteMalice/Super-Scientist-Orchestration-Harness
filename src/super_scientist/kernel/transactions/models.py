@@ -7,17 +7,41 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
+from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim
+from super_scientist.domain.configurations.models import ConfigurationVersion
+from super_scientist.domain.evaluators.models import (
+    EvaluatorSuccessionDecision,
+    EvaluatorVersion,
+)
 from super_scientist.domain.evidence.models import EvidenceRecord
 from super_scientist.domain.identity import ActorIdentity
+from super_scientist.domain.improvement.models import (
+    ChangeClassification,
+    EvaluatorAuditRecord,
+    SelfImprovementMeasurementRecord,
+)
 from super_scientist.domain.primitives import (
     NonBlankText,
     Sha256Hex,
     StableIdentifier,
     UtcTimestamp,
 )
+from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 
-type ProposalKind = Literal["add_evidence", "propose_claim", "transition_claim"]
+type ProposalKind = Literal[
+    "add_evidence",
+    "propose_claim",
+    "transition_claim",
+    "create_research_run",
+    "append_research_run_event",
+    "record_configuration_version",
+    "record_evaluator_audit",
+    "record_self_improvement_measurement",
+    "propose_evaluator_version",
+    "decide_evaluator_succession",
+    "propose_governance_policy_transition",
+]
 
 
 class RejectionCode(StrEnum):
@@ -32,6 +56,20 @@ class RejectionCode(StrEnum):
     PERMISSION_DENIED = "PERMISSION_DENIED"
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
     POLICY_HASH_MISMATCH = "POLICY_HASH_MISMATCH"
+    MISSING_ENTITY = "MISSING_ENTITY"
+    INVALID_LINEAGE = "INVALID_LINEAGE"
+    INSUFFICIENT_GROUNDING = "INSUFFICIENT_GROUNDING"
+    PROHIBITED_CLOSED_LOOP = "PROHIBITED_CLOSED_LOOP"
+    UNMATCHED_BUDGETS = "UNMATCHED_BUDGETS"
+    PROTECTED_DATA_ACCESS = "PROTECTED_DATA_ACCESS"
+    STALE_HANDBOOK_MAPPING = "STALE_HANDBOOK_MAPPING"
+    INVALID_DEPENDENCY = "INVALID_DEPENDENCY"
+    FALSE_FINISH = "FALSE_FINISH"
+    CIRCULAR_EVALUATOR_APPROVAL = "CIRCULAR_EVALUATOR_APPROVAL"
+    BENCHMARK_SPECIFIC_ADMISSION = "BENCHMARK_SPECIFIC_ADMISSION"
+    DUPLICATE_RULE = "DUPLICATE_RULE"
+    UNRESOLVED_RULE_CONFLICT = "UNRESOLVED_RULE_CONFLICT"
+    EXPERIMENTAL_PRIMITIVE_QUARANTINED = "EXPERIMENTAL_PRIMITIVE_QUARANTINED"
 
 
 class Approval(BaseModel):
@@ -79,6 +117,59 @@ class TransitionClaim(ProposalBase):
     next_claim: AtomicClaim
 
 
+class CreateResearchRun(ProposalBase):
+    proposal_type: Literal["create_research_run"] = "create_research_run"
+    run: ResearchRun
+
+
+class AppendResearchRunEvent(ProposalBase):
+    proposal_type: Literal["append_research_run_event"] = "append_research_run_event"
+    event: ResearchRunEvent
+
+
+class RecordConfigurationVersion(ProposalBase):
+    proposal_type: Literal["record_configuration_version"] = "record_configuration_version"
+    configuration_version: ConfigurationVersion
+    classification: ChangeClassification
+
+
+class RecordEvaluatorAudit(ProposalBase):
+    proposal_type: Literal["record_evaluator_audit"] = "record_evaluator_audit"
+    evaluator_audit: EvaluatorAuditRecord
+
+
+class RecordSelfImprovementMeasurement(ProposalBase):
+    proposal_type: Literal["record_self_improvement_measurement"] = (
+        "record_self_improvement_measurement"
+    )
+    measurement: SelfImprovementMeasurementRecord
+
+
+class ProposeEvaluatorVersion(ProposalBase):
+    proposal_type: Literal["propose_evaluator_version"] = "propose_evaluator_version"
+    evaluator_version: EvaluatorVersion
+    classification: ChangeClassification
+
+
+class DecideEvaluatorSuccession(ProposalBase):
+    proposal_type: Literal["decide_evaluator_succession"] = "decide_evaluator_succession"
+    succession_decision: EvaluatorSuccessionDecision
+    classification: ChangeClassification
+
+
+class ProposeGovernancePolicyTransition(ProposalBase):
+    proposal_type: Literal["propose_governance_policy_transition"] = (
+        "propose_governance_policy_transition"
+    )
+    research_run: ResearchRun
+    evaluator_audit: EvaluatorAuditRecord
+    measurement: SelfImprovementMeasurementRecord
+    candidate_policy_snapshot: PolicySnapshot
+    prior_policy_hash: Sha256Hex
+    rollback_policy_hash: Sha256Hex
+    classification: ChangeClassification
+
+
 class InvalidProposal(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
@@ -91,7 +182,18 @@ class InvalidProposal(BaseModel):
 
 
 Proposal = Annotated[
-    AddEvidence | ProposeClaim | TransitionClaim | InvalidProposal,
+    AddEvidence
+    | ProposeClaim
+    | TransitionClaim
+    | CreateResearchRun
+    | AppendResearchRunEvent
+    | RecordConfigurationVersion
+    | RecordEvaluatorAudit
+    | RecordSelfImprovementMeasurement
+    | ProposeEvaluatorVersion
+    | DecideEvaluatorSuccession
+    | ProposeGovernancePolicyTransition
+    | InvalidProposal,
     Field(discriminator="proposal_type"),
 ]
 
