@@ -13,9 +13,12 @@ from super_scientist.domain.evaluators.models import (
 )
 from super_scientist.domain.identity import ActorIdentity, ActorKind, are_independent
 from super_scientist.domain.improvement.classification import (
+    ChangeTarget,
     ExternalGrounding,
     LoopClosure,
+    PersistenceScope,
     VerificationLevel,
+    is_authoritative_verification,
 )
 from super_scientist.domain.improvement.models import (
     AssessmentOutcome,
@@ -299,6 +302,12 @@ class RecordEvaluatorAuditHandler:
         if rejection is not None:
             return rejection
         audit = proposal.evaluator_audit
+        if not is_authoritative_verification(audit.auditor_category):
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+                "evaluator audit category is not authoritative evidence",
+            )
         if context.existing is not None:
             return _rejected(
                 proposal.proposal_id,
@@ -375,7 +384,11 @@ class RecordSelfImprovementMeasurementHandler:
                 "measurement research run does not exist",
             )
         audit = context.evaluator_audit
-        if audit is None or audit.result is not AssessmentOutcome.PASSED:
+        if (
+            audit is None
+            or audit.result is not AssessmentOutcome.PASSED
+            or not is_authoritative_verification(audit.auditor_category)
+        ):
             return _rejected(
                 proposal.proposal_id,
                 RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
@@ -458,26 +471,37 @@ class ProposeEvaluatorVersionHandler:
         context: _EvaluatorVersionContext,
     ) -> TransactionDecision:
         record = proposal.evaluator_version
+        classification_rejection = _evaluator_policy_classification_rejection(
+            proposal.proposal_id,
+            proposal.classification,
+        )
+        if classification_rejection is not None:
+            return classification_rejection
         is_root = record.predecessor_evaluator_version_id is None
-        candidate_measurement_present = any(
-            measurement.decision is MeasurementDecision.ACCEPTED
-            and measurement.evaluator == record.evaluator
-            and measurement.evaluator_version == record.evaluator_version_id
-            and measurement.governing_policy_hash == record.governing_policy_hash
+        candidate_measurements = tuple(
+            measurement
             for measurement in context.candidate_measurements
+            if _measurement_binds_evaluator_candidate(
+                measurement,
+                record,
+                context.active_policy.policy_hash,
+                proposal.classification,
+            )
+        )
+        candidate_measurement_present = bool(candidate_measurements)
+        linked_audits = tuple(
+            audit
+            for measurement in candidate_measurements
+            for audit in context.evaluator_audits
+            if (
+                _audit_matches_measurement(audit, measurement)
+                and audit.candidate_producer == record.candidate_producer
+            )
         )
         passed_measurement = any(
-            measurement.decision is MeasurementDecision.ACCEPTED
-            and measurement.evaluator == record.evaluator
-            and measurement.evaluator_version == record.evaluator_version_id
-            and measurement.governing_policy_hash == record.governing_policy_hash
-            and any(
-                _audit_matches_measurement(audit, measurement)
-                and audit.result is AssessmentOutcome.PASSED
-                and audit.candidate_producer == record.candidate_producer
-                for audit in context.evaluator_audits
-            )
-            for measurement in context.candidate_measurements
+            audit.result is AssessmentOutcome.PASSED
+            and is_authoritative_verification(audit.auditor_category)
+            for audit in linked_audits
         )
         rejection = _adaptation_requirement_rejection(
             proposal.proposal_id,
@@ -490,6 +514,14 @@ class ProposeEvaluatorVersionHandler:
         )
         if rejection is not None:
             return rejection
+        if not passed_measurement and any(
+            audit.result is AssessmentOutcome.PASSED for audit in linked_audits
+        ):
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+                "candidate evaluator audit category is not authoritative evidence",
+            )
         if context.existing is not None:
             return _rejected(
                 proposal.proposal_id,
@@ -556,6 +588,12 @@ class DecideEvaluatorSuccessionHandler:
         context: _SuccessionContext,
     ) -> TransactionDecision:
         record = proposal.succession_decision
+        classification_rejection = _evaluator_policy_classification_rejection(
+            proposal.proposal_id,
+            proposal.classification,
+        )
+        if classification_rejection is not None:
+            return classification_rejection
         rejection = _adaptation_requirement_rejection(
             proposal.proposal_id,
             proposal.proposer,
@@ -597,13 +635,21 @@ class DecideEvaluatorSuccessionHandler:
                 "candidate lineage does not preserve predecessor rollback",
             )
         audit = context.evaluator_audit
+        if audit is not None and not is_authoritative_verification(audit.auditor_category):
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+                "succession audit category is not authoritative evidence",
+            )
         if (
             audit is None
             or audit.result is not AssessmentOutcome.PASSED
             or audit.evaluator != context.candidate.evaluator
             or audit.evaluator_version != context.candidate.evaluator_version_id
             or audit.candidate_producer != context.candidate.candidate_producer
-            or audit.governing_policy_hash != record.governing_policy_hash
+            or audit.governing_policy_hash != context.active_policy.policy_hash
+            or context.candidate.governing_policy_hash != context.active_policy.policy_hash
+            or record.governing_policy_hash != context.active_policy.policy_hash
             or record.evaluator_audit_result is not audit.result
         ):
             return _rejected(
@@ -748,6 +794,41 @@ def _adaptation_requirement_rejection(
             proposal_id, RejectionCode.INVALID_LINEAGE, "rollback target required by active policy"
         )
     return None
+
+
+def _evaluator_policy_classification_rejection(
+    proposal_id: str,
+    classification: ChangeClassification,
+) -> TransactionDecision | None:
+    if _is_evaluator_policy_classification(classification):
+        return None
+    return _rejected(
+        proposal_id,
+        RejectionCode.PERMISSION_DENIED,
+        "evaluator proposals require fixed evaluator-policy classification",
+    )
+
+
+def _is_evaluator_policy_classification(classification: ChangeClassification) -> bool:
+    return (
+        classification.target is ChangeTarget.EVALUATOR
+        and classification.persistence is PersistenceScope.EVALUATOR_POLICY
+    )
+
+
+def _measurement_binds_evaluator_candidate(
+    measurement: SelfImprovementMeasurementRecord,
+    candidate: EvaluatorVersion,
+    active_policy_hash: str,
+    proposal_classification: ChangeClassification,
+) -> bool:
+    return (
+        measurement.decision is MeasurementDecision.ACCEPTED
+        and measurement.classification == proposal_classification
+        and measurement.evaluator == candidate.evaluator
+        and measurement.evaluator_version == candidate.evaluator_version_id
+        and measurement.governing_policy_hash == active_policy_hash
+    )
 
 
 def _support_record_authority_rejection(

@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from super_scientist.domain.identity import ActorIdentity, ActorKind, are_independent
 from super_scientist.domain.improvement.classification import (
     ExternalGrounding,
-    VerificationLevel,
+    is_authoritative_verification,
 )
 from super_scientist.domain.improvement.models import (
     ActorRelationship,
@@ -63,17 +63,6 @@ class EvaluationStage(StrEnum):
     CANARY = "CANARY"
 
 
-_INDEPENDENT_EVIDENCE_CATEGORIES = frozenset(
-    {
-        VerificationLevel.FORMAL_VERIFIER,
-        VerificationLevel.EXECUTION_FEEDBACK,
-        VerificationLevel.EXTERNAL_EMPIRICAL_MEASUREMENT,
-        VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK,
-        VerificationLevel.INDEPENDENT_LEARNED_JUDGE,
-    }
-)
-
-
 class EvaluationResult(_StrictFrozenModel):
     evaluation_id: StableIdentifier
     candidate_evaluator_version_id: StableIdentifier
@@ -91,7 +80,7 @@ class EvaluationResult(_StrictFrozenModel):
         provenance_passed = self.provenance.result is AssessmentOutcome.PASSED
         if self.passed != provenance_passed:
             raise ValueError("evaluation result must match assessment provenance")
-        if self.provenance.category not in _INDEPENDENT_EVIDENCE_CATEGORIES:
+        if not is_authoritative_verification(self.provenance.category):
             raise ValueError("evaluation result uses a prohibited verification category")
         if self.provenance.proposer_relationship is not ActorRelationship.INDEPENDENT:
             raise ValueError("evaluation reviewer must declare an independent relationship")

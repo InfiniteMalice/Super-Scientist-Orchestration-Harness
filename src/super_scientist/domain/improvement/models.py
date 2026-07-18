@@ -13,6 +13,7 @@ from super_scientist.domain.improvement.classification import (
     LoopClosure,
     PersistenceScope,
     VerificationLevel,
+    is_authoritative_verification,
 )
 from super_scientist.domain.primitives import (
     NonBlankText,
@@ -113,6 +114,8 @@ class EvaluatorAuditRecord(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_independent_auditor(self) -> EvaluatorAuditRecord:
+        if not is_authoritative_verification(self.auditor_category):
+            raise ValueError("evaluator audit requires an authoritative verification category")
         actors = (self.evaluator, self.proposer, self.candidate_producer)
         relationships = (
             self.auditor_to_evaluator,

@@ -13,6 +13,7 @@ from sqlalchemy import Engine, Table, update
 from super_scientist.application.improvement.service import (
     DecideEvaluatorSuccessionHandler,
     ProposeEvaluatorVersionHandler,
+    RecordEvaluatorAuditHandler,
     RecordSelfImprovementMeasurementHandler,
 )
 from super_scientist.application.transactions.coordinator import TransactionCoordinator
@@ -608,6 +609,282 @@ def test_v2_handlers_project_complete_measurement_and_govern_evaluator_successio
     engine.dispose()
 
 
+@pytest.mark.integration
+@pytest.mark.parametrize("evaluator_requirement", ("missing", "stricter"))
+def test_evaluator_version_cannot_borrow_permissive_unrelated_requirement(
+    tmp_path: Path,
+    evaluator_requirement: str,
+) -> None:
+    policy = _evaluator_authority_policy(evaluator_requirement)
+    coordinator, uow_factory, engine = _coordinator(tmp_path, policy)
+    candidate = _evaluator_version(f"{evaluator_requirement}-root", None).model_copy(
+        update={"governing_policy_hash": policy.policy_hash}
+    )
+    proposal = ProposeEvaluatorVersion(
+        proposal_id=f"{evaluator_requirement}-classification-bypass",
+        idempotency_key=f"{evaluator_requirement}-classification-bypass-key",
+        proposer=candidate.candidate_producer,
+        approval=Approval(approver=_human_actor("version-approver"), approved_at=NOW),
+        evaluator_version=candidate,
+        classification=_classification(ChangeTarget.PROMPT),
+    )
+
+    decision = coordinator.submit(proposal)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.PERMISSION_DENIED
+    with uow_factory() as unit_of_work:
+        assert unit_of_work.connection is not None
+        assert EvaluatorVersionRepository(unit_of_work.connection).list_all() == ()
+    engine.dispose()
+
+
+@pytest.mark.parametrize("classification_mismatch", ("semantic", "verification"))
+def test_evaluator_version_requires_exact_classification_on_linked_measurement(
+    classification_mismatch: str,
+) -> None:
+    policy = _phase_a_policy()
+    predecessor = _evaluator_version("evaluator-v1", None).model_copy(
+        update={"governing_policy_hash": policy.policy_hash}
+    )
+    candidate = _evaluator_version("evaluator-v2", predecessor.evaluator_version_id).model_copy(
+        update={"governing_policy_hash": policy.policy_hash}
+    )
+    measurement_classification = _classification(ChangeTarget.EVALUATOR)
+    if classification_mismatch == "semantic":
+        measurement_classification = _classification(ChangeTarget.PROMPT)
+    else:
+        measurement_classification = measurement_classification.model_copy(
+            update={"verification_level": VerificationLevel.FORMAL_VERIFIER}
+        )
+    measurement = _measurement().model_copy(
+        update={
+            "classification": measurement_classification,
+            "evaluator": candidate.evaluator,
+            "evaluator_version": candidate.evaluator_version_id,
+            "baseline_version_id": predecessor.evaluator_version_id,
+            "candidate_version_id": candidate.evaluator_version_id,
+            "governing_policy_hash": policy.policy_hash,
+        }
+    )
+    audit = _audit().model_copy(
+        update={
+            "evaluator": candidate.evaluator,
+            "evaluator_version": candidate.evaluator_version_id,
+            "proposer": measurement.proposer,
+            "candidate_producer": candidate.candidate_producer,
+            "governing_policy_hash": policy.policy_hash,
+        }
+    )
+    proposal = ProposeEvaluatorVersion(
+        proposal_id="measurement-classification-bypass",
+        idempotency_key="measurement-classification-bypass-key",
+        proposer=candidate.candidate_producer,
+        approval=Approval(approver=_human_actor("version-approver"), approved_at=NOW),
+        evaluator_version=candidate,
+        classification=_classification(ChangeTarget.EVALUATOR),
+    )
+    capabilities = _LineageReadCapabilities(
+        policy=policy,
+        audit=audit,
+        measurement=measurement,
+        versions=(predecessor,),
+    )
+    handler = ProposeEvaluatorVersionHandler()
+
+    decision = handler.decide(proposal, handler.build_context(proposal, capabilities))
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+
+
+def test_evaluator_succession_cannot_borrow_permissive_unrelated_requirement() -> None:
+    policy = _evaluator_authority_policy("stricter")
+    predecessor = _evaluator_version("evaluator-v1", None).model_copy(
+        update={"governing_policy_hash": policy.policy_hash}
+    )
+    candidate = _evaluator_version("evaluator-v2", predecessor.evaluator_version_id).model_copy(
+        update={"governing_policy_hash": policy.policy_hash}
+    )
+    audit = _audit().model_copy(
+        update={
+            "evaluator": candidate.evaluator,
+            "evaluator_version": candidate.evaluator_version_id,
+            "governing_policy_hash": policy.policy_hash,
+        }
+    )
+    succession = _succession(
+        candidate_evaluator=candidate.evaluator,
+        governing_policy_hash=policy.policy_hash,
+    )
+    proposal = DecideEvaluatorSuccession(
+        proposal_id="succession-classification-bypass",
+        idempotency_key="succession-classification-bypass-key",
+        proposer=succession.decision_authority,
+        approval=Approval(approver=_human_actor("succession-approver"), approved_at=NOW),
+        succession_decision=succession,
+        classification=_classification(ChangeTarget.PROMPT),
+    )
+    capabilities = _LineageReadCapabilities(
+        policy=policy,
+        audit=audit,
+        versions=(predecessor, candidate),
+        active_head_id=predecessor.evaluator_version_id,
+    )
+    handler = DecideEvaluatorSuccessionHandler()
+
+    decision = handler.decide(proposal, handler.build_context(proposal, capabilities))
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.PERMISSION_DENIED
+
+
+@pytest.mark.integration
+def test_actual_audit_recording_rejects_weak_confidence_category(tmp_path: Path) -> None:
+    policy = _phase_a_policy()
+    coordinator, uow_factory, engine = _coordinator(tmp_path, policy)
+    weak_audit = _audit().model_copy(
+        update={
+            "auditor_category": VerificationLevel.MODEL_CONFIDENCE,
+            "governing_policy_hash": policy.policy_hash,
+        }
+    )
+    strong_audit = weak_audit.model_copy(
+        update={"auditor_category": VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK}
+    )
+    strong_proposal = RecordEvaluatorAudit(
+        proposal_id="weak-audit-recording",
+        idempotency_key="weak-audit-recording-key",
+        proposer=weak_audit.auditor,
+        approval=Approval(approver=_human_actor("audit-approver"), approved_at=NOW),
+        evaluator_audit=strong_audit,
+    )
+    proposal = strong_proposal.model_copy(update={"evaluator_audit": weak_audit})
+    handler = RecordEvaluatorAuditHandler()
+    context = handler.build_context(
+        strong_proposal,
+        _LineageReadCapabilities(policy=policy),
+    )
+
+    handler_decision = handler.decide(proposal, context)
+
+    decision = coordinator.submit(proposal)
+
+    assert handler_decision.accepted is False
+    assert handler_decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    with uow_factory() as unit_of_work:
+        assert unit_of_work.connection is not None
+        assert EvaluatorAuditRepository(unit_of_work.connection).list_all() == ()
+        repositories = unit_of_work.repositories()
+        assert len(repositories.transactions.list_all()) == 1
+        assert len(repositories.audit.list_all()) == 1
+    engine.dispose()
+
+
+def test_evaluator_version_admission_rejects_weak_passed_audit() -> None:
+    policy = _phase_a_policy()
+    predecessor = _evaluator_version("evaluator-v1", None).model_copy(
+        update={"governing_policy_hash": policy.policy_hash}
+    )
+    candidate = _evaluator_version("evaluator-v2", predecessor.evaluator_version_id).model_copy(
+        update={"governing_policy_hash": policy.policy_hash}
+    )
+    measurement = _measurement().model_copy(
+        update={
+            "classification": _classification(ChangeTarget.EVALUATOR),
+            "evaluator": candidate.evaluator,
+            "evaluator_version": candidate.evaluator_version_id,
+            "baseline_version_id": predecessor.evaluator_version_id,
+            "candidate_version_id": candidate.evaluator_version_id,
+            "governing_policy_hash": policy.policy_hash,
+        }
+    )
+    weak_audit = _audit().model_copy(
+        update={
+            "auditor_category": VerificationLevel.MODEL_CONFIDENCE,
+            "evaluator": candidate.evaluator,
+            "evaluator_version": candidate.evaluator_version_id,
+            "proposer": measurement.proposer,
+            "candidate_producer": candidate.candidate_producer,
+            "governing_policy_hash": policy.policy_hash,
+        }
+    )
+    proposal = ProposeEvaluatorVersion(
+        proposal_id="weak-version-audit",
+        idempotency_key="weak-version-audit-key",
+        proposer=candidate.candidate_producer,
+        approval=Approval(approver=_human_actor("version-approver"), approved_at=NOW),
+        evaluator_version=candidate,
+        classification=_classification(ChangeTarget.EVALUATOR),
+    )
+    capabilities = _LineageReadCapabilities(
+        policy=policy,
+        audit=weak_audit.model_copy(
+            update={"auditor_category": VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK}
+        ),
+        measurement=measurement,
+        versions=(predecessor,),
+    )
+    handler = ProposeEvaluatorVersionHandler()
+    context = handler.build_context(proposal, capabilities).model_copy(
+        update={"evaluator_audits": (weak_audit,)}
+    )
+
+    decision = handler.decide(proposal, context)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+
+
+def test_evaluator_succession_admission_rejects_weak_passed_audit() -> None:
+    policy = _phase_a_policy()
+    predecessor = _evaluator_version("evaluator-v1", None).model_copy(
+        update={"governing_policy_hash": policy.policy_hash}
+    )
+    candidate = _evaluator_version("evaluator-v2", predecessor.evaluator_version_id).model_copy(
+        update={"governing_policy_hash": policy.policy_hash}
+    )
+    weak_audit = _audit().model_copy(
+        update={
+            "auditor_category": VerificationLevel.MODEL_CONFIDENCE,
+            "evaluator": candidate.evaluator,
+            "evaluator_version": candidate.evaluator_version_id,
+            "governing_policy_hash": policy.policy_hash,
+        }
+    )
+    succession = _succession(
+        candidate_evaluator=candidate.evaluator,
+        governing_policy_hash=policy.policy_hash,
+    )
+    proposal = DecideEvaluatorSuccession(
+        proposal_id="weak-succession-audit",
+        idempotency_key="weak-succession-audit-key",
+        proposer=succession.decision_authority,
+        approval=Approval(approver=_human_actor("succession-approver"), approved_at=NOW),
+        succession_decision=succession,
+        classification=_classification(ChangeTarget.EVALUATOR),
+    )
+    capabilities = _LineageReadCapabilities(
+        policy=policy,
+        audit=weak_audit.model_copy(
+            update={"auditor_category": VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK}
+        ),
+        versions=(predecessor, candidate),
+        active_head_id=predecessor.evaluator_version_id,
+    )
+    handler = DecideEvaluatorSuccessionHandler()
+    context = handler.build_context(proposal, capabilities).model_copy(
+        update={"evaluator_audit": weak_audit}
+    )
+
+    decision = handler.decide(proposal, context)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+
+
 def test_measurement_rejects_passed_audit_for_different_evaluator_lineage() -> None:
     policy = _phase_a_policy()
     authority = _human_actor("measurement-authority")
@@ -1181,6 +1458,41 @@ def _phase_a_policy() -> PolicySnapshot:
             required_claim_checks=("source_exists",),
             human_approval_for=frozenset({"governance_change"}),
             adaptation_requirements=requirements,
+        )
+    )
+
+
+def _evaluator_authority_policy(evaluator_requirement: str) -> PolicySnapshot:
+    requirements = [
+        AdaptationRequirement(
+            change_target=ChangeTarget.PROMPT,
+            persistence=PersistenceScope.PERSISTENT_SKILL,
+            minimum_verification=VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK,
+            permitted_grounding=frozenset({ExternalGrounding.CONTROLLED_EXPERIMENT}),
+            required_approver_kind=ActorKind.HUMAN,
+            protected_evaluation_required=False,
+            rollback_required=False,
+        )
+    ]
+    if evaluator_requirement == "stricter":
+        requirements.append(
+            AdaptationRequirement(
+                change_target=ChangeTarget.EVALUATOR,
+                persistence=PersistenceScope.EVALUATOR_POLICY,
+                minimum_verification=VerificationLevel.FORMAL_VERIFIER,
+                permitted_grounding=frozenset({ExternalGrounding.CONTROLLED_EXPERIMENT}),
+                required_approver_kind=ActorKind.HUMAN,
+                protected_evaluation_required=True,
+                rollback_required=True,
+            )
+        )
+    elif evaluator_requirement != "missing":
+        raise ValueError(f"unsupported evaluator requirement fixture: {evaluator_requirement}")
+    return _snapshot(
+        GovernancePolicyV2(
+            required_claim_checks=("source_exists",),
+            human_approval_for=frozenset({"governance_change"}),
+            adaptation_requirements=tuple(requirements),
         )
     )
 

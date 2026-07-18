@@ -8,6 +8,9 @@ import pytest
 from sqlalchemy import Engine, update
 
 from super_scientist.application.transactions.coordinator import TransactionCoordinator
+from super_scientist.application.transactions.governance import (
+    ProposeGovernancePolicyTransitionHandler,
+)
 from super_scientist.application.workspace_integrity import verify_workspace
 from super_scientist.config.loader import policy_hash
 from super_scientist.config.models import (
@@ -99,6 +102,32 @@ def test_governance_transition_requires_passed_independent_evaluator_audit(
 
     assert decision.accepted is False
     assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+    _assert_rejected_transition_is_durable_without_projection(runtime)
+    runtime.engine.dispose()
+
+
+def test_governance_transition_rejects_weak_passed_evaluator_audit(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    proposal = _transition(runtime.prior, runtime.candidate, "weak-confidence-audit")
+    weak_audit = proposal.evaluator_audit.model_copy(
+        update={"auditor_category": VerificationLevel.MODEL_CONFIDENCE}
+    )
+    weak_proposal = proposal.model_copy(update={"evaluator_audit": weak_audit})
+    handler = ProposeGovernancePolicyTransitionHandler()
+    context = handler.build_context(
+        proposal,
+        _TransitionReadCapabilities(runtime.prior),
+    )
+
+    handler_decision = handler.decide(weak_proposal, context)
+    decision = runtime.coordinator.submit(weak_proposal)
+
+    assert handler_decision.accepted is False
+    assert handler_decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
     _assert_rejected_transition_is_durable_without_projection(runtime)
     runtime.engine.dispose()
 
@@ -361,6 +390,34 @@ class _Runtime:
         self.artifact_store = artifact_store
         self.prior = prior
         self.candidate = candidate
+
+
+class _TransitionReadCapabilities:
+    def __init__(self, active_policy: PolicySnapshot) -> None:
+        self._active_policy = active_policy
+
+    def policy_snapshot(self) -> PolicySnapshot:
+        return self._active_policy
+
+    def get_policy(self, policy_hash_value: str) -> PolicySnapshot | None:
+        if policy_hash_value == self._active_policy.policy_hash:
+            return self._active_policy
+        return None
+
+    def get_run(self, run_id: str) -> ResearchRun | None:
+        del run_id
+        return None
+
+    def get_evaluator_audit(self, evaluator_audit_id: str) -> EvaluatorAuditRecord | None:
+        del evaluator_audit_id
+        return None
+
+    def get_measurement(
+        self,
+        measurement_id: str,
+    ) -> SelfImprovementMeasurementRecord | None:
+        del measurement_id
+        return None
 
 
 def _runtime(

@@ -51,6 +51,21 @@ class VerificationLevel(StrEnum):
     MODEL_LIKELIHOOD = "MODEL_LIKELIHOOD"
 
 
+AUTHORITATIVE_VERIFICATION_LEVELS: frozenset[VerificationLevel] = frozenset(
+    {
+        VerificationLevel.FORMAL_VERIFIER,
+        VerificationLevel.EXECUTION_FEEDBACK,
+        VerificationLevel.EXTERNAL_EMPIRICAL_MEASUREMENT,
+        VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK,
+        VerificationLevel.INDEPENDENT_LEARNED_JUDGE,
+    }
+)
+
+
+def is_authoritative_verification(level: VerificationLevel) -> bool:
+    return level in AUTHORITATIVE_VERIFICATION_LEVELS
+
+
 class ExternalGrounding(StrEnum):
     HUMAN_JUDGMENT = "HUMAN_JUDGMENT"
     PRIMARY_SOURCE = "PRIMARY_SOURCE"

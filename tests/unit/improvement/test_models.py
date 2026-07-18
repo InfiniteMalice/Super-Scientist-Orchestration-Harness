@@ -105,6 +105,28 @@ def test_evaluator_audit_recomputes_independence() -> None:
     assert audit.result is AssessmentOutcome.PASSED
 
 
+@pytest.mark.parametrize(
+    "weak_category",
+    (
+        VerificationLevel.RUBRIC_JUDGE,
+        VerificationLevel.CROSS_MODEL_AGREEMENT,
+        VerificationLevel.SELF_CRITIQUE,
+        VerificationLevel.SELF_CONSISTENCY,
+        VerificationLevel.MODEL_CONFIDENCE,
+        VerificationLevel.MODEL_LIKELIHOOD,
+    ),
+)
+def test_evaluator_audit_rejects_every_non_authoritative_category(
+    weak_category: VerificationLevel,
+) -> None:
+    audit = _audit(auditor=_actor("auditor"), evaluator=_actor("evaluator", ActorKind.MODEL))
+    payload = audit.model_dump(mode="python")
+    payload["auditor_category"] = weak_category
+
+    with pytest.raises(ValidationError, match="authoritative verification category"):
+        EvaluatorAuditRecord.model_validate(payload)
+
+
 def test_measurement_requires_complete_m0_through_mt_trajectory() -> None:
     with pytest.raises(ValidationError, match="m_0 through m_T"):
         _measurement(trajectory=(_trajectory_point(0),))

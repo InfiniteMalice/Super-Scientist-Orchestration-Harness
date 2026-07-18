@@ -32,7 +32,10 @@ agreement, and correlated reviewers do not become evidence.
 
 An evaluator audit recomputes identity independence. An evaluator, proposer, or candidate
 producer cannot audit the evaluator when identities are equal, model configurations are
-shared, organizational dependence is declared, or independence is unknown.
+shared, organizational dependence is declared, or independence is unknown. Audit authority
+is limited to formal verification, execution feedback, external empirical measurement,
+independent deterministic checks, and independent learned judges; every other retained
+`VerificationLevel` remains serializable but cannot authorize an evaluator audit.
 
 ## Constitutional policy transition
 
@@ -66,7 +69,11 @@ another governed proposal under the then-active policy, never a direct pointer u
 Evaluator versions, thresholds, audit evidence, and succession decisions are append-only.
 There is no automatic promotion. A candidate requires protected and external evaluation,
 passed independent audit, human review, canary result, and its predecessor as rollback
-target. Each gate result names its candidate evaluator version, stage, governing policy,
+target. Evaluator-version and succession proposals always use the fixed `EVALUATOR` plus
+`EVALUATOR_POLICY` semantic classification; caller-selected unrelated requirements cannot
+authorize them. A non-root candidate's accepted measurement must exactly match the proposal
+classification and active policy, while its audit, version, and succession decision bind that
+same active policy. Each gate result names its candidate evaluator version, stage, governing policy,
 evidence, and assessment provenance. Gate identifiers and reviewers are distinct, weak
 model-confidence categories are prohibited, reviewers are independent of the evaluator,
 change proposer, and candidate producer, and gate evidence must be present in the bound

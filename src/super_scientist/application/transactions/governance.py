@@ -18,6 +18,7 @@ from super_scientist.domain.improvement.classification import (
     LoopClosure,
     PersistenceScope,
     VerificationLevel,
+    is_authoritative_verification,
 )
 from super_scientist.domain.improvement.models import (
     AssessmentOutcome,
@@ -411,7 +412,9 @@ def _measurement_rejection(
             RejectionCode.POLICY_HASH_MISMATCH,
             "bootstrap run, audit, and measurement must be governed by the prior policy",
         )
-    if audit.result is not AssessmentOutcome.PASSED:
+    if audit.result is not AssessmentOutcome.PASSED or not is_authoritative_verification(
+        audit.auditor_category
+    ):
         return _rejected(
             proposal,
             RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
