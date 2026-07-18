@@ -33,6 +33,7 @@ class FixedClock:
 @dataclass(frozen=True)
 class Runtime:
     service: KernelService
+    coordinator: TransactionCoordinator
     uow_factory: Callable[[], DatabaseUnitOfWork]
     artifact_store: FileArtifactStore
     actor: ActorIdentity
@@ -87,8 +88,10 @@ def runtime(tmp_path: Path) -> Iterator[Runtime]:
 
     with uow_factory() as unit_of_work:
         unit_of_work.repositories().policies.add_and_activate(policy, NOW)
+    coordinator = TransactionCoordinator(uow_factory, policy, FixedClock(), artifact_store)
     yield Runtime(
         service=KernelService(uow_factory, policy, FixedClock(), artifact_store),
+        coordinator=coordinator,
         uow_factory=uow_factory,
         artifact_store=artifact_store,
         actor=actor,
@@ -100,11 +103,22 @@ def runtime(tmp_path: Path) -> Iterator[Runtime]:
 def test_coordinator_preserves_one_decision_and_audit_event_per_new_attempt(
     runtime: Runtime,
 ) -> None:
-    decision = runtime.service.submit(runtime.add_evidence_proposal("proposal-1", "key-1"))
+    assert not hasattr(runtime.service, "coordinator")
 
-    assert isinstance(runtime.service.coordinator, TransactionCoordinator)
+    decision = runtime.coordinator.submit(runtime.add_evidence_proposal("proposal-1", "key-1"))
+
     assert decision.accepted is True
     assert runtime.transaction_and_audit_counts() == (1, 1)
+
+
+@pytest.mark.integration
+def test_compatibility_router_declares_the_resolved_proposal_type(runtime: Runtime) -> None:
+    proposal_types = ("add_evidence", "propose_claim", "transition_claim")
+
+    assert tuple(
+        runtime.coordinator.router.resolve(proposal_type).proposal_type
+        for proposal_type in proposal_types
+    ) == proposal_types
 
 
 @pytest.mark.integration

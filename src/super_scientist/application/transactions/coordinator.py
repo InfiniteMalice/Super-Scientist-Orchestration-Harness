@@ -82,10 +82,9 @@ class _CompatibilityWriteCapability:
 class _CompatibilityProposalHandler:
     """Characterized v0.1 evidence and claim admission behind the fixed router."""
 
-    proposal_type = "add_evidence"
-
-    def __init__(self, engine: AdmissionEngine) -> None:
+    def __init__(self, engine: AdmissionEngine, proposal_type: str) -> None:
         self._engine = engine
+        self.proposal_type = proposal_type
 
     def build_context(
         self,
@@ -138,13 +137,12 @@ class TransactionCoordinator:
         self._clock = clock
         self._artifact_store = artifact_store
         self._engine = AdmissionEngine()
-        compatibility_handler = _CompatibilityProposalHandler(self._engine)
         self._router = ProposalRouter(
             (
-                ("add_evidence", compatibility_handler),
-                ("propose_claim", compatibility_handler),
-                ("transition_claim", compatibility_handler),
+                proposal_type,
+                _CompatibilityProposalHandler(self._engine, proposal_type),
             )
+            for proposal_type in ("add_evidence", "propose_claim", "transition_claim")
         )
 
     @property
@@ -323,7 +321,10 @@ class TransactionCoordinator:
 
         reads = _CompatibilityReadCapability(repositories, stored_policy)
         if isinstance(admitted_proposal, InvalidProposal):
-            compatibility_handler = _CompatibilityProposalHandler(self._engine)
+            compatibility_handler = _CompatibilityProposalHandler(
+                self._engine,
+                "invalid_proposal",
+            )
             context = compatibility_handler.build_context(admitted_proposal, reads)
             decision = self._engine.decide(admitted_proposal, context)
         else:

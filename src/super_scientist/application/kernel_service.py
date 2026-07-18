@@ -47,10 +47,6 @@ class KernelService:
             artifact_store,
         )
 
-    @property
-    def coordinator(self) -> TransactionCoordinator:
-        return self._coordinator
-
     def submit(self, proposal: object) -> TransactionDecision:
         return self._coordinator.submit(proposal)
 
