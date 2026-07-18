@@ -575,7 +575,7 @@ git commit -m "feat: govern adaptation measurements and evaluator succession"
 
 **Interfaces:**
 - Consumes: 0002 schema and append-only repository base.
-- Produces: repositories for progress plans/subtasks/events/budgets/checkpoints/completion decisions and trail versions/nodes/relations/checks/assessments/report bindings, plus progress/trail head projections.
+- Produces: normalized append-only storage for progress plans/subtasks/events/budgets/checkpoints/completion decisions and trail versions/nodes/relations/checks/assessments/report bindings, plus fixed progress/trail head repositories. Tasks 6 and 7 add the public strict model-bound record repositories after their domain models exist.
 
 - [ ] **Step 1: Define migration assertions before schema code**
 
@@ -608,7 +608,7 @@ Run: `python -m pytest tests/integration/storage/test_migration_0003.py tests/pr
 
 Expected: FAIL because revision 0003 and its tables are absent.
 
-- [ ] **Step 3: Implement migration and repositories**
+- [ ] **Step 3: Implement migration, private storage bindings, and fixed head repositories**
 
 Give each trail node and relation a composite uniqueness constraint on `(trail_version_id, node_id)` or `(trail_version_id, relation_id)`. Store dependency edges in immutable subtask JSON while also materializing `(plan_version_id, subtask_id)` uniqueness. Use append-only triggers on all authoritative tables and constrained mutable heads:
 
@@ -630,7 +630,7 @@ evidence_trail_heads = Table(
 )
 ```
 
-Repository decoders must reject unknown fields, mismatched stored IDs, invalid content hashes, dangling relationships, and corrupt JSON.
+Keep the existing generic append-only record engine private. Task 5 may add only fixed public repositories for `progress_heads` and `evidence_trail_heads`; no public constructor or factory accepts a table, model, identifier, relationship mapping, decoder, or SQL fragment. Raw-storage and head tests reject mismatched IDs, invalid content hashes, dangling relationships, and corrupt JSON. Tasks 6 and 7 bind the exact strict domain models and add unknown-field decoder tests through fixed record repositories.
 
 - [ ] **Step 4: Verify 0001-to-0003 and clean-to-0003 paths**
 
@@ -653,6 +653,7 @@ git commit -m "feat: add progress and evidence trail storage"
 - Create: `src/super_scientist/domain/progress/calculations.py`
 - Create: `src/super_scientist/application/progress/service.py`
 - Create: `src/super_scientist/application/transactions/progress.py`
+- Modify: `src/super_scientist/providers/storage/domain_records.py`
 - Create: `docs/long-horizon-execution.md`
 - Test: `tests/unit/progress/test_calculations.py`
 - Test: `tests/property/test_progress_dependencies.py`
@@ -660,8 +661,8 @@ git commit -m "feat: add progress and evidence trail storage"
 - Test: `tests/adversarial/test_false_finish.py`
 
 **Interfaces:**
-- Consumes: research-run repositories, V2 policy, `AssessmentProvenance`, `ActorIdentity`, and coordinator contracts.
-- Produces: `ProgressPlan`, `ProgressSubtask`, `ProgressValidationEvent`, `BudgetAllocation`, `RunCheckpoint`, `CompletionProposal`, `CompletionDecision`, `calculate_progress()`, and `detect_false_finish()`.
+- Consumes: research-run repositories, V2 policy, `AssessmentProvenance`, `ActorIdentity`, coordinator contracts, and private 0003 progress storage bindings.
+- Produces: `ProgressPlan`, `ProgressSubtask`, `ProgressValidationEvent`, `BudgetAllocation`, `RunCheckpoint`, `CompletionProposal`, `CompletionDecision`, `calculate_progress()`, `detect_false_finish()`, and fixed `ProgressPlanRepository`, `ProgressSubtaskRepository`, `ProgressEventRepository`, `RunBudgetRepository`, `RunCheckpointRepository`, and `CompletionDecisionRepository` wrappers. Each public repository accepts only an active `Connection` and binds its exact table, strict model, identifier, and relationships internally.
 
 - [ ] **Step 1: Write dependency, independence, and non-authority tests**
 
@@ -742,14 +743,15 @@ git commit -m "feat: add independently validated progress ledger"
 - Create: `src/super_scientist/application/trails/service.py`
 - Create: `src/super_scientist/application/transactions/trails.py`
 - Modify: `src/super_scientist/application/evidence_verification.py`
+- Modify: `src/super_scientist/providers/storage/domain_records.py`
 - Create: `docs/evidence-trails.md`
 - Test: `tests/unit/evidence_trails/test_validation.py`
 - Test: `tests/property/test_evidence_trail_graphs.py`
 - Test: `tests/integration/application/test_trail_service.py`
 
 **Interfaces:**
-- Consumes: immutable `EvidenceRecord`, artifact verification, atomic claim IDs, assessment provenance, and 0003 trail repositories.
-- Produces: `EvidenceTrailVersion`, `EvidenceTrailNode`, `EvidenceTrailRelation`, `TrailCheckResult`, `TrailAssessment`, `ReportSentenceBinding`, and `validate_trail()`.
+- Consumes: immutable `EvidenceRecord`, artifact verification, atomic claim IDs, assessment provenance, and private 0003 trail storage bindings.
+- Produces: `EvidenceTrailVersion`, `EvidenceTrailNode`, `EvidenceTrailRelation`, `TrailCheckResult`, `TrailAssessment`, `ReportSentenceBinding`, `validate_trail()`, and fixed `EvidenceTrailVersionRepository`, `EvidenceTrailNodeRepository`, `EvidenceTrailRelationRepository`, `EvidenceTrailCheckRepository`, `EvidenceTrailAssessmentRepository`, and `ReportSentenceBindingRepository` wrappers. Each public repository accepts only an active `Connection` and binds its exact table, strict model, identifier, and relationships internally.
 
 - [ ] **Step 1: Write source fidelity, contradiction, and causality tests**
 
