@@ -10,7 +10,7 @@ from sqlalchemy import Connection, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from super_scientist.config.loader import policy_hash
-from super_scientist.config.models import GovernancePolicy, PolicySnapshot
+from super_scientist.config.models import PolicyDocument, PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
 from super_scientist.domain.evidence.models import EvidenceRecord, VerificationState
 from super_scientist.domain.identity import ActorKind
@@ -36,6 +36,7 @@ from super_scientist.providers.storage.schema import (
 PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
 TIMESTAMP_ADAPTER: TypeAdapter[UtcTimestamp] = TypeAdapter(UtcTimestamp)
 SHA256_ADAPTER: TypeAdapter[Sha256Hex] = TypeAdapter(Sha256Hex)
+POLICY_DOCUMENT_ADAPTER: TypeAdapter[PolicyDocument] = TypeAdapter(PolicyDocument)
 _STORAGE_TYPE_KEY = "__super_scientist_storage_type__"
 _STORAGE_ITEMS_KEY = "items"
 _STORAGE_ENUMS: dict[str, type[Enum]] = {
@@ -308,7 +309,7 @@ def _decode_policy_row(
     policy_json = _stored_str(row, "policy_json")
     created_at = _stored_str(row, "created_at")
     try:
-        policy = GovernancePolicy.model_validate_json(policy_json)
+        policy = POLICY_DOCUMENT_ADAPTER.validate_json(policy_json)
         _validated_timestamp(datetime.fromisoformat(created_at))
     except (TypeError, ValueError) as error:
         raise StorageIntegrityError(
