@@ -63,7 +63,7 @@
 | `src/super_scientist/domain/harness_eval/models.py` | Campaigns, partitions, budgets, observations, metrics, confounds, decisions |
 | `src/super_scientist/application/harness_eval/capabilities.py` | Candidate, coordinator, evaluator, gateway, decision, and auditor interfaces |
 | `src/super_scientist/application/harness_eval/service.py` | Matched-budget campaign and admission logic |
-| `src/super_scientist/providers/storage/domain_records.py` | Focused append-only repositories and mutable head projections for new domains |
+| `src/super_scientist/providers/storage/domain_records.py` | Private append-only engine, fixed model-bound domain repositories, and mutable head projections |
 | `src/super_scientist/providers/storage/protected_evaluation.py` | Separate protected database/artifact store and result gateway |
 | `src/super_scientist/providers/storage/schema.py` | SQLAlchemy metadata for all released tables |
 | `src/super_scientist/application/workspace_integrity.py` | Mixed-policy, append-only-history, projection, artifact, and protected-hash reconciliation |
@@ -302,7 +302,7 @@ git commit -m "feat: add versioned governance policy contracts"
 
 **Interfaces:**
 - Consumes: migration `0001_epistemic_kernel` and `DatabaseUnitOfWork`.
-- Produces: append-only repositories for research runs/events, configuration versions, measurements, evaluator audits/versions/succession/collapse records, plus constrained run/evaluator head projections.
+- Produces: the eight authoritative storage tables, a private reusable append-only engine, and constrained public run/evaluator head projections. Task 4 adds the eight fixed public model-bound repositories after their strict record classes exist.
 
 - [ ] **Step 1: Write migration shape, foreign-key, and trigger tests**
 
@@ -353,16 +353,16 @@ def enable_sqlite_foreign_keys(dbapi_connection: DBAPIConnection, _: ConnectionR
     cursor.close()
 ```
 
-Implement focused repositories with the same strict encode/decode and hash-recompute behavior as existing repositories:
+Implement the private repository engine with the same strict encode/decode and hash-recompute behavior as existing repositories. It is excluded from `__all__`; no public constructor or factory accepts a table, model, identifier, relationship mapping, SQL fragment, or decoder:
 
 ```python
-class AppendOnlyRecordRepository[RecordT: BaseModel]:
+class _AppendOnlyRecordRepository[RecordT: BaseModel]:
     def get(self, record_id: str) -> RecordT | None: ...
     def list_all(self) -> tuple[RecordT, ...]: ...
     def add(self, record_id: str, record: RecordT, created_at: UtcTimestamp) -> None: ...
 ```
 
-Construction requires a fixed table, model type, and identifier field supplied by trusted source code; callers cannot select a table or model dynamically.
+Task 4 constructs fixed public wrappers in this module, each binding one trusted table, exact strict model type, identifier field, and relationship mapping. Callers can never select a table or model dynamically.
 
 - [ ] **Step 4: Verify clean, upgrade, downgrade, append-only, and foreign-key behavior**
 
@@ -393,6 +393,7 @@ git commit -m "feat: add adaptation foundation storage"
 - Create: `src/super_scientist/application/transactions/adaptation.py`
 - Create: `src/super_scientist/application/transactions/governance.py`
 - Modify: `src/super_scientist/kernel/transactions/models.py:23`
+- Modify: `src/super_scientist/providers/storage/domain_records.py`
 - Modify: `docs/sources/source-register.yaml`
 - Modify: `docs/research-inspirations.md`
 - Create: `docs/governed-adaptation.md`
@@ -405,7 +406,7 @@ git commit -m "feat: add adaptation foundation storage"
 
 **Interfaces:**
 - Consumes: Task 2 classification/V1/V2 contracts, coordinator handler contracts, 0002 repositories, `ActorIdentity`, and `are_independent`.
-- Produces: `ResearchRun`, `ResearchRunEvent`, configuration version/diff models, `AssessmentProvenance`, `EvaluatorAuditRecord`, `SelfImprovementMeasurementRecord`, `EvaluatorVersion`, `EvaluatorSuccessionDecision`, focused adaptation handlers, and measurement-backed `ProposeGovernancePolicyTransition` admission.
+- Produces: `ResearchRun`, `ResearchRunEvent`, configuration version/diff models, `AssessmentProvenance`, `EvaluatorAuditRecord`, `SelfImprovementMeasurementRecord`, `EvaluatorVersion`, `EvaluatorSuccessionDecision`; fixed `ResearchRunRepository`, `ResearchRunEventRepository`, `ConfigurationVersionRepository`, `SelfImprovementMeasurementRepository`, `EvaluatorAuditRepository`, `EvaluatorVersionRepository`, `EvaluatorSuccessionRepository`, and `EvaluatorCollapseRepository`; focused adaptation handlers; and measurement-backed `ProposeGovernancePolicyTransition` admission.
 
 - [ ] **Step 1: Write exhaustive measurement, transition, and authority tests**
 
@@ -546,6 +547,8 @@ class AdapterCandidateMetadata(BaseModel):
 
 No live model or training SDK enters the package. `EvaluatorAuditRecord` must reject an auditor equal or non-independent to evaluator, proposer, or candidate producer. `SelfImprovementMeasurementRecord` requires stable `change_id`, full `m_0..m_T` trajectory, separate budgets, failures, regressions, rollback target, and passed `evaluator_audit_id` for durable persistence. Evaluator promotion requires protected/external results, human review, canary result, predecessor rollback target, and an accepted independent audit; it updates only the evaluator-head projection.
 
+In `providers/storage/domain_records.py`, add the eight named public repositories listed in this task's Interfaces block. Each constructor accepts only an active SQLAlchemy `Connection` and internally fixes its table, exact strict model, identifier field, and relationship mapping before delegating to `_AppendOnlyRecordRepository`. Add them to `__all__`; do not expose the private engine or any generic binding factory.
+
 Implement `ProposeGovernancePolicyTransition` only now that 0002 measurement/audit repositories exist. Its handler runs under the prior active policy and applies the non-configurable constitutional rule: independent human approval, non-closed-loop classification, complete accepted measurement, passed independent evaluator audit, prior/candidate hashes, compatibility validation, and rollback hash. An accepted transition appends the V2 snapshot and updates the active-policy projection atomically; its audit event remains attributed to V1 and records both hashes. Rollback is another governed transition. No V2 field or candidate policy may authorize its own activation.
 
 - [ ] **Step 4: Verify foundation behavior through the coordinator**
@@ -557,7 +560,7 @@ Expected: PASS; rejected operations and transition attempts are durable and audi
 - [ ] **Step 5: Commit the Phase A domain**
 
 ```bash
-git add src/super_scientist/domain/improvement src/super_scientist/domain/research_runs src/super_scientist/domain/configurations src/super_scientist/domain/evaluators src/super_scientist/application/improvement src/super_scientist/application/research_runs src/super_scientist/application/transactions/adaptation.py src/super_scientist/application/transactions/governance.py src/super_scientist/kernel/transactions/models.py docs/sources/source-register.yaml docs/research-inspirations.md docs/governed-adaptation.md tests/unit/improvement tests/unit/evaluators tests/unit/docs/test_source_register.py tests/integration/application/test_adaptation_foundation.py tests/integration/application/test_governance_transition.py tests/property/test_audit_chain.py tests/adversarial/test_adaptation_authority.py
+git add src/super_scientist/domain/improvement src/super_scientist/domain/research_runs src/super_scientist/domain/configurations src/super_scientist/domain/evaluators src/super_scientist/application/improvement src/super_scientist/application/research_runs src/super_scientist/application/transactions/adaptation.py src/super_scientist/application/transactions/governance.py src/super_scientist/kernel/transactions/models.py src/super_scientist/providers/storage/domain_records.py docs/sources/source-register.yaml docs/research-inspirations.md docs/governed-adaptation.md tests/unit/improvement tests/unit/evaluators tests/unit/docs/test_source_register.py tests/integration/application/test_adaptation_foundation.py tests/integration/application/test_governance_transition.py tests/property/test_audit_chain.py tests/adversarial/test_adaptation_authority.py
 git commit -m "feat: govern adaptation measurements and evaluator succession"
 ```
 
