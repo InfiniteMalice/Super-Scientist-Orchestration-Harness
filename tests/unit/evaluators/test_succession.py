@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from super_scientist.domain.evaluators.models import (
     CollapseMetrics,
     EvaluationResult,
+    EvaluationStage,
     EvaluatorCollapseRecord,
     EvaluatorSuccessionDecision,
     EvaluatorThreshold,
@@ -33,7 +34,7 @@ def test_durable_evaluator_promotion_requires_all_succession_gates() -> None:
 
     assert decision.accepted is True
     assert decision.predecessor_rollback_target_id == decision.predecessor_evaluator_version_id
-    assert decision.protected_evaluation.protected is True
+    assert decision.protected_evaluation.stage is EvaluationStage.PROTECTED
     assert decision.external_evaluation.grounding is ExternalGrounding.EXTERNAL_BENCHMARK
 
 
@@ -67,6 +68,102 @@ def test_candidate_cannot_authorize_its_own_promotion() -> None:
     payload["decision_authority"] = _model_actor("candidate-evaluator")
 
     with pytest.raises(ValidationError, match="candidate cannot authorize"):
+        EvaluatorSuccessionDecision.model_validate(payload)
+
+
+def test_succession_rejects_prohibited_confidence_as_gate_evidence() -> None:
+    payload = _decision().model_dump(mode="python")
+    protected = payload["protected_evaluation"]
+    assert isinstance(protected, dict)
+    provenance = protected["provenance"]
+    assert isinstance(provenance, dict)
+    provenance["category"] = VerificationLevel.MODEL_CONFIDENCE
+
+    with pytest.raises(ValidationError, match="verification category"):
+        EvaluatorSuccessionDecision.model_validate(payload)
+
+
+def test_succession_rejects_reused_evaluation_result() -> None:
+    payload = _decision().model_dump(mode="python")
+    protected = payload["protected_evaluation"]
+    assert isinstance(protected, dict)
+    reused = dict(protected)
+    reused["stage"] = EvaluationStage.EXTERNAL
+    payload["external_evaluation"] = reused
+
+    with pytest.raises(ValidationError, match="unique evaluation result"):
+        EvaluatorSuccessionDecision.model_validate(payload)
+
+
+def test_succession_rejects_gate_reviewers_with_shared_model_configuration() -> None:
+    payload = _decision().model_dump(mode="python")
+    protected = payload["protected_evaluation"]
+    external = payload["external_evaluation"]
+    assert isinstance(protected, dict)
+    assert isinstance(external, dict)
+    protected_provenance = protected["provenance"]
+    external_provenance = external["provenance"]
+    assert isinstance(protected_provenance, dict)
+    assert isinstance(external_provenance, dict)
+    protected_actor = protected_provenance["actor"]
+    assert isinstance(protected_actor, dict)
+    external_provenance["actor"] = {**protected_actor, "actor_id": "correlated-reviewer"}
+
+    with pytest.raises(ValidationError, match="distinct independent reviewer"):
+        EvaluatorSuccessionDecision.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "reviewer_field", ["candidate_evaluator", "change_proposer", "candidate_producer"]
+)
+def test_succession_gate_reviewer_must_be_independent_of_change_actors(
+    reviewer_field: str,
+) -> None:
+    payload = _decision().model_dump(mode="python")
+    external = payload["external_evaluation"]
+    assert isinstance(external, dict)
+    provenance = external["provenance"]
+    assert isinstance(provenance, dict)
+    provenance["actor"] = payload[reviewer_field]
+
+    with pytest.raises(ValidationError, match="reviewers must be independent"):
+        EvaluatorSuccessionDecision.model_validate(payload)
+
+
+def test_evaluation_result_binds_evidence_policy_candidate_and_stage() -> None:
+    payload = _evaluation(
+        "protected",
+        stage=EvaluationStage.PROTECTED,
+    ).model_dump(mode="python")
+    payload["evidence_ids"] = ("unrelated-evidence",)
+
+    with pytest.raises(ValidationError, match="evidence IDs must match"):
+        EvaluationResult.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("binding", "message"),
+    (
+        ("candidate", "wrong candidate version"),
+        ("policy", "wrong policy"),
+        ("stage", "wrong stage"),
+    ),
+)
+def test_succession_rejects_gate_binding_mismatch(binding: str, message: str) -> None:
+    payload = _decision().model_dump(mode="python")
+    external = payload["external_evaluation"]
+    assert isinstance(external, dict)
+    if binding == "candidate":
+        external["candidate_evaluator_version_id"] = "unrelated-candidate"
+    elif binding == "policy":
+        external["governing_policy_hash"] = "b" * 64
+        provenance = external["provenance"]
+        assert isinstance(provenance, dict)
+        provenance["governing_policy_hash"] = "b" * 64
+    else:
+        external["stage"] = EvaluationStage.CANARY
+
+    with pytest.raises(ValidationError, match=message):
         EvaluatorSuccessionDecision.model_validate(payload)
 
 
@@ -106,12 +203,14 @@ def _decision() -> EvaluatorSuccessionDecision:
         predecessor_evaluator_version_id="evaluator-v1",
         candidate_evaluator_version_id="evaluator-v2",
         candidate_evaluator=_model_actor("candidate-evaluator"),
+        candidate_producer=_model_actor("candidate-producer"),
+        change_proposer=_model_actor("change-proposer"),
         evaluator_audit_id="audit-1",
         evaluator_audit_result=AssessmentOutcome.PASSED,
-        protected_evaluation=_evaluation("protected", protected=True),
-        external_evaluation=_evaluation("external", protected=False),
-        human_review=_provenance("human-review", human=True),
-        canary_evaluation=_evaluation("canary", protected=False),
+        protected_evaluation=_evaluation("protected", stage=EvaluationStage.PROTECTED),
+        external_evaluation=_evaluation("external", stage=EvaluationStage.EXTERNAL),
+        human_review=_evaluation("human-review", stage=EvaluationStage.HUMAN_REVIEW, human=True),
+        canary_evaluation=_evaluation("canary", stage=EvaluationStage.CANARY),
         predecessor_rollback_target_id="evaluator-v1",
         accepted=True,
         rationale=("all independent gates passed",),
@@ -121,21 +220,39 @@ def _decision() -> EvaluatorSuccessionDecision:
     )
 
 
-def _evaluation(identifier: str, *, protected: bool) -> EvaluationResult:
+def _evaluation(
+    identifier: str,
+    *,
+    stage: EvaluationStage,
+    human: bool = False,
+) -> EvaluationResult:
+    evidence_id = f"{identifier}-evidence"
     return EvaluationResult(
         evaluation_id=identifier,
-        provenance=_provenance(f"{identifier}-actor"),
+        candidate_evaluator_version_id="evaluator-v2",
+        stage=stage,
+        provenance=_provenance(f"{identifier}-actor", human=human, evidence_id=evidence_id),
         grounding=(
-            ExternalGrounding.INDEPENDENT_TEST_SUITE
-            if protected
-            else ExternalGrounding.EXTERNAL_BENCHMARK
+            ExternalGrounding.HUMAN_JUDGMENT
+            if human
+            else (
+                ExternalGrounding.INDEPENDENT_TEST_SUITE
+                if stage is EvaluationStage.PROTECTED
+                else ExternalGrounding.EXTERNAL_BENCHMARK
+            )
         ),
-        protected=protected,
+        evidence_ids=(evidence_id,),
         passed=True,
+        governing_policy_hash=HASH,
     )
 
 
-def _provenance(identifier: str, *, human: bool = False) -> AssessmentProvenance:
+def _provenance(
+    identifier: str,
+    *,
+    human: bool = False,
+    evidence_id: str = "evidence-1",
+) -> AssessmentProvenance:
     actor = _human_actor(identifier) if human else _model_actor(identifier)
     return AssessmentProvenance(
         actor=actor,
@@ -148,7 +265,7 @@ def _provenance(identifier: str, *, human: bool = False) -> AssessmentProvenance
         deterministic_or_learned="HUMAN" if human else "DETERMINISTIC",
         proposer_relationship=ActorRelationship.INDEPENDENT,
         assumptions=("fixture assumptions",),
-        evidence_ids=("evidence-1",),
+        evidence_ids=(evidence_id,),
         checks_run=("check-1",),
         limitations=("fixture coverage",),
         result=AssessmentOutcome.PASSED,

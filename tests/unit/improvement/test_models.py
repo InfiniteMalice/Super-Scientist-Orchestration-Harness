@@ -39,7 +39,9 @@ from super_scientist.domain.improvement.models import (
     PerformanceTrajectoryPoint,
     ResourceBudget,
     ResourceUsage,
+    ResourceUsageBreakdown,
     SelfImprovementMeasurementRecord,
+    TrajectoryObservation,
 )
 from super_scientist.kernel.transactions.models import (
     AppendResearchRunEvent,
@@ -117,11 +119,72 @@ def test_measurement_requires_complete_m0_through_mt_trajectory() -> None:
 
 
 def test_measurement_rejects_best_only_or_unpartitioned_change_summaries() -> None:
-    with pytest.raises(ValidationError, match="partition attempted changes"):
+    with pytest.raises(ValidationError, match="trajectory history"):
         _measurement(rejected_changes=())
 
-    with pytest.raises(ValidationError, match="consecutive"):
+    with pytest.raises(ValidationError, match="exactly m_0 through m_T"):
         _measurement(trajectory=(_trajectory_point(0), _trajectory_point(2)))
+
+
+def test_measurement_rejects_best_and_final_summary_that_omits_intermediate_steps() -> None:
+    payload = _measurement().model_dump(mode="python")
+    final_point = _trajectory_point(3)
+    payload.update(
+        {
+            "expected_final_index": 3,
+            "trajectory": (_trajectory_point(0), final_point),
+            "peak_observation": _observation(final_point),
+            "final_observation": _observation(final_point),
+            "attempted_changes": ("candidate-0", "candidate-3"),
+            "admitted_changes": ("candidate-0",),
+            "rejected_changes": ("candidate-3",),
+            "regressions": ("baseline miss",),
+            "rollback_events": ("rollback-drill-3",),
+            "usage_by_category": _usage_breakdown(execution=_usage(2)),
+            "usage": _usage(2),
+        }
+    )
+
+    with pytest.raises(ValidationError, match="exactly m_0 through m_T"):
+        SelfImprovementMeasurementRecord.model_validate(payload)
+
+
+def test_measurement_reconciles_point_category_and_aggregate_usage() -> None:
+    payload = _measurement().model_dump(mode="python")
+    payload["usage"] = _usage(1)
+
+    with pytest.raises(ValidationError, match="aggregate usage"):
+        SelfImprovementMeasurementRecord.model_validate(payload)
+
+    point_payload = _trajectory_point(0).model_dump(mode="python")
+    point_payload["usage"] = _zero_usage()
+    with pytest.raises(ValidationError, match="point aggregate usage"):
+        PerformanceTrajectoryPoint.model_validate(point_payload)
+
+
+def test_measurement_binds_peak_final_change_grounding_and_full_history() -> None:
+    payload = _measurement().model_dump(mode="python")
+    final_observation = payload["final_observation"]
+    assert isinstance(final_observation, dict)
+    final_observation["step_index"] = 0
+    with pytest.raises(ValidationError, match="final observation"):
+        SelfImprovementMeasurementRecord.model_validate(payload)
+
+    payload = _measurement().model_dump(mode="python")
+    trajectory = payload["trajectory"]
+    assert isinstance(trajectory, tuple)
+    first = trajectory[0]
+    assert isinstance(first, dict)
+    first["change_id"] = "unrelated-change"
+    with pytest.raises(ValidationError, match="change and grounding"):
+        SelfImprovementMeasurementRecord.model_validate(payload)
+
+    payload = _measurement().model_dump(mode="python")
+    classification = payload["classification"]
+    assert isinstance(classification, dict)
+    classification["grounding"] = ExternalGrounding.PRIMARY_SOURCE
+    with pytest.raises(ValidationError, match="change and grounding"):
+        SelfImprovementMeasurementRecord.model_validate(payload)
 
 
 def test_new_rejection_codes_are_appended_with_stable_values() -> None:
@@ -305,8 +368,16 @@ def _audit(
 def _measurement(
     *,
     trajectory: tuple[PerformanceTrajectoryPoint, ...] | None = None,
-    rejected_changes: tuple[str, ...] = ("change-rejected",),
+    rejected_changes: tuple[str, ...] | None = None,
 ) -> SelfImprovementMeasurementRecord:
+    points = trajectory or (_trajectory_point(0), _trajectory_point(1))
+    attempted = tuple(change_id for point in points for change_id in point.attempted_change_ids)
+    admitted = tuple(change_id for point in points for change_id in point.admitted_change_ids)
+    rejected = tuple(change_id for point in points for change_id in point.rejected_change_ids)
+    regressions = tuple(regression for point in points for regression in point.regressions)
+    rollbacks = tuple(rollback_id for point in points for rollback_id in point.rollback_event_ids)
+    aggregate_usage = _usage(len(points))
+    final_point = points[-1]
     return SelfImprovementMeasurementRecord(
         measurement_id="measurement-1",
         change_id="change-1",
@@ -328,25 +399,22 @@ def _measurement(
         candidate_version_id="policy-v2",
         protected_metrics=(_metric("protected-accuracy", 0.8, protected=True),),
         countermetrics=(_metric("failure-rate", 0.1, protected=False),),
-        trajectory=trajectory or (_trajectory_point(0), _trajectory_point(1)),
-        attempted_changes=("change-admitted", "change-rejected"),
-        admitted_changes=("change-admitted",),
-        rejected_changes=rejected_changes,
-        regressions=("countermetric degraded on slice-2",),
-        rollback_events=("rollback-drill-1",),
+        expected_final_index=final_point.step_index,
+        trajectory=points,
+        peak_observation=_observation(final_point),
+        final_observation=_observation(final_point),
+        attempted_changes=attempted,
+        admitted_changes=admitted,
+        rejected_changes=rejected if rejected_changes is None else rejected_changes,
+        regressions=regressions,
+        rollback_events=rollbacks,
         execution_budget=_budget(10),
         search_budget=_budget(20),
         evaluation_budget=_budget(30),
         judging_budget=_budget(40),
         human_budget=_budget(50),
-        usage=ResourceUsage(
-            cost_usd=1.0,
-            compute_units=2.0,
-            tokens=100,
-            elapsed_seconds=3.0,
-            tool_calls=4,
-            human_interventions=1,
-        ),
+        usage_by_category=_usage_breakdown(execution=aggregate_usage),
+        usage=aggregate_usage,
         failures=("one failed candidate retained",),
         rollback_target_id="policy-v1",
         evaluator_audit_id="audit-1",
@@ -368,22 +436,62 @@ def _metric(metric_id: str, value: float, *, protected: bool) -> MetricObservati
 
 
 def _trajectory_point(step_index: int) -> PerformanceTrajectoryPoint:
+    usage = _usage()
     return PerformanceTrajectoryPoint(
         step_index=step_index,
+        change_id="change-1",
+        grounding=(ExternalGrounding.CONTROLLED_EXPERIMENT,),
         metrics=(_metric("accuracy", 0.5 + step_index / 10, protected=False),),
         attempted_change_ids=(f"candidate-{step_index}",),
-        admitted_change_ids=(f"candidate-{step_index}",) if step_index else (),
-        rejected_change_ids=() if step_index else (f"candidate-{step_index}",),
+        admitted_change_ids=(f"candidate-{step_index}",) if step_index == 0 else (),
+        rejected_change_ids=() if step_index == 0 else (f"candidate-{step_index}",),
         regressions=() if step_index else ("baseline miss",),
-        rollback_event_ids=(),
-        usage=ResourceUsage(
-            cost_usd=0.1,
-            compute_units=0.2,
-            tokens=10,
-            elapsed_seconds=0.3,
-            tool_calls=1,
-            human_interventions=0,
-        ),
+        rollback_event_ids=() if step_index == 0 else (f"rollback-drill-{step_index}",),
+        usage_by_category=_usage_breakdown(execution=usage),
+        usage=usage,
+    )
+
+
+def _observation(point: PerformanceTrajectoryPoint) -> TrajectoryObservation:
+    return TrajectoryObservation(step_index=point.step_index, metrics=point.metrics)
+
+
+def _usage(multiplier: int = 1) -> ResourceUsage:
+    return ResourceUsage(
+        cost_usd=0.1 * multiplier,
+        compute_units=0.2 * multiplier,
+        tokens=multiplier,
+        elapsed_seconds=0.3 * multiplier,
+        tool_calls=multiplier,
+        human_interventions=0,
+    )
+
+
+def _zero_usage() -> ResourceUsage:
+    return ResourceUsage(
+        cost_usd=0.0,
+        compute_units=0.0,
+        tokens=0,
+        elapsed_seconds=0.0,
+        tool_calls=0,
+        human_interventions=0,
+    )
+
+
+def _usage_breakdown(
+    *,
+    execution: ResourceUsage | None = None,
+    search: ResourceUsage | None = None,
+    evaluation: ResourceUsage | None = None,
+    judging: ResourceUsage | None = None,
+    human: ResourceUsage | None = None,
+) -> ResourceUsageBreakdown:
+    return ResourceUsageBreakdown(
+        execution=execution or _zero_usage(),
+        search=search or _zero_usage(),
+        evaluation=evaluation or _zero_usage(),
+        judging=judging or _zero_usage(),
+        human=human or _zero_usage(),
     )
 
 

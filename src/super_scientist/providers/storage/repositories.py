@@ -23,13 +23,24 @@ from super_scientist.domain.primitives import (
 from super_scientist.kernel.audit.chain import append_event, verify_chain
 from super_scientist.kernel.audit.models import AuditEvent
 from super_scientist.kernel.transactions.models import Proposal, TransactionDecision
+from super_scientist.providers.storage.integrity_records import AdaptationIntegritySnapshot
 from super_scientist.providers.storage.schema import (
     audit_events,
     claim_heads,
     claim_versions,
+    configuration_versions,
+    evaluator_audits,
+    evaluator_collapse_records,
+    evaluator_heads,
+    evaluator_succession_decisions,
+    evaluator_versions,
     evidence_records,
     governance_policies,
     governance_state,
+    research_run_events,
+    research_run_heads,
+    research_runs,
+    self_improvement_measurements,
     transactions,
 )
 
@@ -870,6 +881,35 @@ class RepositorySet:
         self.audit = AuditRepository(connection)
         self.policies = PolicyRepository(connection)
 
+    def adaptation_integrity_snapshot(self) -> AdaptationIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            ConfigurationVersionRepository,
+            EvaluatorAuditRepository,
+            EvaluatorCollapseRepository,
+            EvaluatorHeadRepository,
+            EvaluatorSuccessionRepository,
+            EvaluatorVersionRepository,
+            ResearchRunEventRepository,
+            ResearchRunHeadRepository,
+            ResearchRunRepository,
+            SelfImprovementMeasurementRepository,
+        )
+
+        return AdaptationIntegritySnapshot(
+            research_runs=ResearchRunRepository(self._connection).list_all(),
+            research_run_events=ResearchRunEventRepository(self._connection).list_all(),
+            configuration_versions=ConfigurationVersionRepository(self._connection).list_all(),
+            evaluator_audits=EvaluatorAuditRepository(self._connection).list_all(),
+            measurements=SelfImprovementMeasurementRepository(self._connection).list_all(),
+            evaluator_versions=EvaluatorVersionRepository(self._connection).list_all(),
+            evaluator_succession_decisions=EvaluatorSuccessionRepository(
+                self._connection
+            ).list_all(),
+            evaluator_collapse_records=EvaluatorCollapseRepository(self._connection).list_all(),
+            research_run_heads=ResearchRunHeadRepository(self._connection).list_all(),
+            evaluator_head=EvaluatorHeadRepository(self._connection).get(),
+        )
+
     def has_durable_state(self) -> bool:
         tables = (
             governance_policies,
@@ -879,6 +919,16 @@ class RepositorySet:
             claim_heads,
             transactions,
             audit_events,
+            research_runs,
+            research_run_events,
+            configuration_versions,
+            self_improvement_measurements,
+            evaluator_audits,
+            evaluator_versions,
+            evaluator_succession_decisions,
+            evaluator_collapse_records,
+            research_run_heads,
+            evaluator_heads,
         )
         return any(
             self._connection.execute(select(table).limit(1)).first() is not None for table in tables

@@ -23,6 +23,7 @@ from super_scientist.domain.improvement.models import (
     EvaluatorAuditRecord,
     MeasurementDecision,
     SelfImprovementMeasurementRecord,
+    usage_within_budget,
 )
 from super_scientist.domain.research_runs.models import ResearchRun
 from super_scientist.kernel.admission.engine import AdmissionEngine
@@ -407,7 +408,7 @@ class RecordSelfImprovementMeasurementHandler:
                 RejectionCode.POLICY_HASH_MISMATCH,
                 "measurement must name the active policy",
             )
-        if not _usage_within_declared_budgets(measurement):
+        if not _usage_within_declared_budgets(measurement, context.run):
             return _rejected(
                 proposal.proposal_id,
                 RejectionCode.UNMATCHED_BUDGETS,
@@ -610,6 +611,32 @@ class DecideEvaluatorSuccessionHandler:
                 RejectionCode.CIRCULAR_EVALUATOR_APPROVAL,
                 "candidate lacks a passed independent evaluator audit",
             )
+        if (
+            record.candidate_producer != context.candidate.candidate_producer
+            or record.change_proposer != audit.proposer
+        ):
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.INVALID_LINEAGE,
+                "succession decision does not bind the audited proposer and candidate producer",
+            )
+        gate_evidence_ids = {
+            evidence_id
+            for gate in (
+                record.protected_evaluation,
+                record.external_evaluation,
+                record.human_review,
+                record.canary_evaluation,
+            )
+            if gate is not None
+            for evidence_id in gate.evidence_ids
+        }
+        if not gate_evidence_ids or not gate_evidence_ids.issubset(audit.evidence_ids):
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.INVALID_LINEAGE,
+                "succession gate evidence is unrelated to the independent evaluator audit",
+            )
         if record.candidate_evaluator != context.candidate.evaluator:
             return _rejected(
                 proposal.proposal_id,
@@ -766,25 +793,40 @@ def _verification_rank(level: VerificationLevel) -> int:
     return ranks[level]
 
 
-def _usage_within_declared_budgets(measurement: SelfImprovementMeasurementRecord) -> bool:
-    budgets = (
-        measurement.execution_budget,
-        measurement.search_budget,
-        measurement.evaluation_budget,
-        measurement.judging_budget,
-        measurement.human_budget,
+def _usage_within_declared_budgets(
+    measurement: SelfImprovementMeasurementRecord,
+    run: ResearchRun,
+) -> bool:
+    allocations = (
+        (
+            measurement.usage_by_category.execution,
+            measurement.execution_budget,
+            run.budget_allocation.execution,
+        ),
+        (
+            measurement.usage_by_category.search,
+            measurement.search_budget,
+            run.budget_allocation.search,
+        ),
+        (
+            measurement.usage_by_category.evaluation,
+            measurement.evaluation_budget,
+            run.budget_allocation.evaluation,
+        ),
+        (
+            measurement.usage_by_category.judging,
+            measurement.judging_budget,
+            run.budget_allocation.judging,
+        ),
+        (
+            measurement.usage_by_category.human,
+            measurement.human_budget,
+            run.budget_allocation.human,
+        ),
     )
-    usage = measurement.usage
     return all(
-        getattr(usage, field) <= sum(getattr(budget, field) for budget in budgets)
-        for field in (
-            "cost_usd",
-            "compute_units",
-            "tokens",
-            "elapsed_seconds",
-            "tool_calls",
-            "human_interventions",
-        )
+        usage_within_budget(usage, measurement_budget) and usage_within_budget(usage, run_budget)
+        for usage, measurement_budget, run_budget in allocations
     )
 
 

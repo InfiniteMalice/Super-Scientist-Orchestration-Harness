@@ -134,6 +134,11 @@ class MetricObservation(_StrictFrozenModel):
     external: bool
 
 
+class TrajectoryObservation(_StrictFrozenModel):
+    step_index: int = Field(strict=True, ge=0)
+    metrics: tuple[MetricObservation, ...] = Field(min_length=1)
+
+
 class ResourceBudget(_StrictFrozenModel):
     cost_usd: float = Field(strict=True, ge=0.0, allow_inf_nan=False)
     compute_units: float = Field(strict=True, ge=0.0, allow_inf_nan=False)
@@ -152,14 +157,28 @@ class ResourceUsage(_StrictFrozenModel):
     human_interventions: int = Field(strict=True, ge=0)
 
 
+class ResourceUsageBreakdown(_StrictFrozenModel):
+    execution: ResourceUsage
+    search: ResourceUsage
+    evaluation: ResourceUsage
+    judging: ResourceUsage
+    human: ResourceUsage
+
+    def aggregate(self) -> ResourceUsage:
+        return _sum_usage((self.execution, self.search, self.evaluation, self.judging, self.human))
+
+
 class PerformanceTrajectoryPoint(_StrictFrozenModel):
     step_index: int = Field(strict=True, ge=0)
+    change_id: StableIdentifier
+    grounding: tuple[ExternalGrounding, ...] = Field(min_length=1)
     metrics: tuple[MetricObservation, ...] = Field(min_length=1)
     attempted_change_ids: tuple[StableIdentifier, ...]
     admitted_change_ids: tuple[StableIdentifier, ...]
     rejected_change_ids: tuple[StableIdentifier, ...]
     regressions: tuple[NonBlankText, ...]
     rollback_event_ids: tuple[StableIdentifier, ...]
+    usage_by_category: ResourceUsageBreakdown
     usage: ResourceUsage
 
     @model_validator(mode="after")
@@ -169,6 +188,10 @@ class PerformanceTrajectoryPoint(_StrictFrozenModel):
             *self.rejected_change_ids,
         ):
             raise ValueError("admitted and rejected changes must partition attempted changes")
+        if self.usage != self.usage_by_category.aggregate():
+            raise ValueError("point aggregate usage must equal its per-category usage")
+        if ExternalGrounding.NONE in self.grounding:
+            raise ValueError("trajectory points require external grounding")
         return self
 
 
@@ -187,7 +210,10 @@ class SelfImprovementMeasurementRecord(_StrictFrozenModel):
     candidate_version_id: StableIdentifier
     protected_metrics: tuple[MetricObservation, ...] = Field(min_length=1)
     countermetrics: tuple[MetricObservation, ...] = Field(min_length=1)
+    expected_final_index: int = Field(strict=True, ge=0)
     trajectory: tuple[PerformanceTrajectoryPoint, ...]
+    peak_observation: TrajectoryObservation
+    final_observation: TrajectoryObservation
     attempted_changes: tuple[StableIdentifier, ...] = Field(min_length=1)
     admitted_changes: tuple[StableIdentifier, ...]
     rejected_changes: tuple[StableIdentifier, ...]
@@ -198,6 +224,7 @@ class SelfImprovementMeasurementRecord(_StrictFrozenModel):
     evaluation_budget: ResourceBudget
     judging_budget: ResourceBudget
     human_budget: ResourceBudget
+    usage_by_category: ResourceUsageBreakdown
     usage: ResourceUsage
     failures: tuple[NonBlankText, ...]
     rollback_target_id: StableIdentifier
@@ -211,14 +238,99 @@ class SelfImprovementMeasurementRecord(_StrictFrozenModel):
     def require_complete_measurement(self) -> SelfImprovementMeasurementRecord:
         if len(self.trajectory) < 2 or self.trajectory[0].step_index != 0:
             raise ValueError("measurement must retain complete m_0 through m_T trajectory")
+        if len(self.trajectory) != self.expected_final_index + 1:
+            raise ValueError("measurement must retain exactly m_0 through m_T")
         if tuple(point.step_index for point in self.trajectory) != tuple(
-            range(len(self.trajectory))
+            range(self.expected_final_index + 1)
         ):
             raise ValueError("trajectory step indexes must be consecutive from m_0")
-        if self.attempted_changes != (*self.admitted_changes, *self.rejected_changes):
-            raise ValueError("admitted and rejected changes must partition attempted changes")
+        if self.classification.grounding not in self.grounding or any(
+            point.change_id != self.change_id or point.grounding != self.grounding
+            for point in self.trajectory
+        ):
+            raise ValueError("trajectory points must bind the measurement change and grounding")
+        final_point = self.trajectory[-1]
+        if (
+            self.final_observation.step_index != self.expected_final_index
+            or self.final_observation.metrics != final_point.metrics
+        ):
+            raise ValueError("final observation must exactly bind m_T")
+        if not _observation_matches_trajectory(self.peak_observation, self.trajectory):
+            raise ValueError("peak observation must exactly bind one retained trajectory point")
+        attempted = tuple(
+            change_id for point in self.trajectory for change_id in point.attempted_change_ids
+        )
+        admitted = tuple(
+            change_id for point in self.trajectory for change_id in point.admitted_change_ids
+        )
+        rejected = tuple(
+            change_id for point in self.trajectory for change_id in point.rejected_change_ids
+        )
+        regressions = tuple(
+            regression for point in self.trajectory for regression in point.regressions
+        )
+        rollback_events = tuple(
+            rollback_id for point in self.trajectory for rollback_id in point.rollback_event_ids
+        )
+        if (
+            self.attempted_changes != attempted
+            or self.admitted_changes != admitted
+            or self.rejected_changes != rejected
+            or self.regressions != regressions
+            or self.rollback_events != rollback_events
+        ):
+            raise ValueError("measurement aggregates must equal the complete trajectory history")
+        if len(set(attempted)) != len(attempted):
+            raise ValueError("trajectory attempted-change history must not reuse identifiers")
+        for category in _RESOURCE_CATEGORIES:
+            recorded = getattr(self.usage_by_category, category)
+            trajectory_total = _sum_usage(
+                tuple(getattr(point.usage_by_category, category) for point in self.trajectory)
+            )
+            if recorded != trajectory_total:
+                raise ValueError(
+                    "measurement per-category usage must equal the complete trajectory usage"
+                )
+        if self.usage != self.usage_by_category.aggregate() or self.usage != _sum_usage(
+            tuple(point.usage for point in self.trajectory)
+        ):
+            raise ValueError("measurement aggregate usage must equal reconciled trajectory usage")
         if ExternalGrounding.NONE in self.grounding:
             raise ValueError("durable measurements require external grounding")
         if not all(metric.protected and metric.external for metric in self.protected_metrics):
             raise ValueError("protected metrics must come from protected external evaluation")
         return self
+
+
+_RESOURCE_CATEGORIES = ("execution", "search", "evaluation", "judging", "human")
+_RESOURCE_FIELDS = (
+    "cost_usd",
+    "compute_units",
+    "tokens",
+    "elapsed_seconds",
+    "tool_calls",
+    "human_interventions",
+)
+
+
+def _sum_usage(usages: tuple[ResourceUsage, ...]) -> ResourceUsage:
+    values: dict[str, float | int] = {}
+    for field_name in _RESOURCE_FIELDS:
+        values[field_name] = sum(getattr(usage, field_name) for usage in usages)
+    return ResourceUsage.model_validate(values)
+
+
+def _observation_matches_trajectory(
+    observation: TrajectoryObservation,
+    trajectory: tuple[PerformanceTrajectoryPoint, ...],
+) -> bool:
+    return any(
+        observation.step_index == point.step_index and observation.metrics == point.metrics
+        for point in trajectory
+    )
+
+
+def usage_within_budget(usage: ResourceUsage, budget: ResourceBudget) -> bool:
+    return all(
+        getattr(usage, field_name) <= getattr(budget, field_name) for field_name in _RESOURCE_FIELDS
+    )

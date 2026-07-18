@@ -21,9 +21,14 @@ import, `eval`, or `exec` authority.
 candidate, protected metrics and countermetrics, full `m_0` through `m_T` trajectory,
 attempted/admitted/rejected changes, failures, regressions, rollback events, separate
 execution/search/evaluation/judging/human budgets, actual resource use, evaluator audit,
-decision, and human authority. Best-only and final-only summaries are invalid durable
-evidence. Confidence, likelihood, self-consistency, textual agreement, and correlated
-reviewers do not become evidence.
+decision, and human authority. `T` is explicit and authoritative. Peak and final
+observations must identify exact retained trajectory points, and every point binds the
+same change and grounding. Aggregate change, regression, rollback, and resource histories
+must exactly reconcile with all points. Resource use is retained per category at both the
+point and record levels; no category can borrow another category's measurement budget or
+dedicated run allocation. Best-only, final-only, omitted-intermediate, and under-reported
+summaries are invalid durable evidence. Confidence, likelihood, self-consistency, textual
+agreement, and correlated reviewers do not become evidence.
 
 An evaluator audit recomputes identity independence. An evaluator, proposer, or candidate
 producer cannot audit the evaluator when identities are equal, model configurations are
@@ -37,6 +42,11 @@ source-controlled constitutional rule requires an independent human approval, a
 non-closed-loop governance classification, a dedicated research run, a passed independent
 evaluator audit, a complete accepted protected measurement, exact prior/candidate hashes,
 compatibility checks, and an existing rollback policy.
+
+After bootstrap, every V2-to-V2 transition and V2-to-V1 rollback must satisfy both the
+source-controlled constitutional floor and the matching requirement in the active V2
+policy. Candidate requirements are checked only for constitutional compatibility; the
+candidate never grants authority for its own installation.
 
 The coordinator's single database transaction projects in foreign-key-safe order:
 
@@ -56,8 +66,24 @@ another governed proposal under the then-active policy, never a direct pointer u
 Evaluator versions, thresholds, audit evidence, and succession decisions are append-only.
 There is no automatic promotion. A candidate requires protected and external evaluation,
 passed independent audit, human review, canary result, and its predecessor as rollback
-target. Proposing a version does not update the evaluator head; only an accepted succession
-decision changes that rebuildable projection.
+target. Each gate result names its candidate evaluator version, stage, governing policy,
+evidence, and assessment provenance. Gate identifiers and reviewers are distinct, weak
+model-confidence categories are prohibited, reviewers are independent of the evaluator,
+change proposer, and candidate producer, and gate evidence must be present in the bound
+independent audit. Proposing a version does not update the evaluator head; only an accepted
+succession decision changes that rebuildable projection.
+
+## Workspace reconstruction
+
+Before any proposal mutation, whole-workspace verification replays accepted audited
+transactions and compares the result with all eight governed-adaptation record tables.
+Rejected proposals produce no authoritative projection. Research-run heads are derived
+from accepted event order. The evaluator head may be empty or identify the unique root
+before the first succession; after that it is derived exactly from accepted succession
+decisions. Accepted governance transitions likewise derive the registered policy chain and
+active-policy pointer, while their audit payload must exactly bind prior, candidate, and
+rollback hashes. The replay boundary is a fixed typed read-only storage snapshot and does
+not broaden any proposal handler's repository authority.
 
 ## Source and reproduction boundary
 

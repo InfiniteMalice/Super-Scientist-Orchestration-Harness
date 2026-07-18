@@ -260,6 +260,21 @@ class ResearchRunHeadRepository:
             select(research_run_heads.c.run_event_id).where(research_run_heads.c.run_id == run_id)
         ).scalar_one_or_none()
 
+    def list_all(self) -> tuple[tuple[str, str], ...]:
+        rows = self._connection.execute(
+            select(
+                research_run_heads.c.run_id,
+                research_run_heads.c.run_event_id,
+            ).order_by(research_run_heads.c.run_id)
+        ).mappings()
+        return tuple(
+            (
+                _stored_string(dict(row), "run_id"),
+                _stored_string(dict(row), "run_event_id"),
+            )
+            for row in rows
+        )
+
     def set(self, run_id: str, run_event_id: str) -> None:
         event_run_id = self._connection.execute(
             select(research_run_events.c.run_id).where(
@@ -287,9 +302,30 @@ class EvaluatorHeadRepository:
         self._connection = connection
 
     def get(self) -> str | None:
-        return self._connection.execute(
-            select(evaluator_heads.c.evaluator_version_id)
-        ).scalar_one_or_none()
+        rows = tuple(
+            self._connection.execute(
+                select(
+                    evaluator_heads.c.singleton_id,
+                    evaluator_heads.c.evaluator_version_id,
+                )
+            ).mappings()
+        )
+        if not rows:
+            return None
+        _require_integrity(len(rows) == 1, "evaluator head must contain one singleton row")
+        row = rows[0]
+        _require_integrity(row["singleton_id"] == 1, "evaluator head singleton_id must equal 1")
+        evaluator_version_id = _stored_string(dict(row), "evaluator_version_id")
+        _require_integrity(
+            self._connection.execute(
+                select(evaluator_versions.c.evaluator_version_id).where(
+                    evaluator_versions.c.evaluator_version_id == evaluator_version_id
+                )
+            ).scalar_one_or_none()
+            == evaluator_version_id,
+            "evaluator head references a missing evaluator version",
+        )
+        return evaluator_version_id
 
     def set(self, evaluator_version_id: str) -> None:
         statement = sqlite_insert(evaluator_heads).values(

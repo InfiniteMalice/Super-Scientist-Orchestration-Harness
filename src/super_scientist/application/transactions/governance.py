@@ -24,6 +24,7 @@ from super_scientist.domain.improvement.models import (
     EvaluatorAuditRecord,
     MeasurementDecision,
     SelfImprovementMeasurementRecord,
+    usage_within_budget,
 )
 from super_scientist.domain.research_runs.models import ResearchRun
 from super_scientist.kernel.admission.engine import AdmissionEngine
@@ -102,6 +103,12 @@ class ProposeGovernancePolicyTransitionHandler:
                 RejectionCode.POLICY_HASH_MISMATCH,
                 "transition prior hash must be the stored active policy",
             )
+        active_requirement_rejection = _active_policy_requirement_rejection(
+            proposal,
+            context,
+        )
+        if active_requirement_rejection is not None:
+            return active_requirement_rejection
         if context.rollback_policy is None:
             return _rejected(
                 proposal,
@@ -241,6 +248,71 @@ def _constitutional_classification_rejection(
     return None
 
 
+def _active_policy_requirement_rejection(
+    proposal: ProposeGovernancePolicyTransition,
+    context: _GovernanceTransitionContext,
+) -> TransactionDecision | None:
+    policy = context.active_policy.policy
+    if isinstance(policy, GovernancePolicyV1):
+        return None
+    classification = proposal.classification
+    requirement = next(
+        (
+            item
+            for item in policy.adaptation_requirements
+            if item.change_target is classification.target
+            and item.persistence is classification.persistence
+        ),
+        None,
+    )
+    if requirement is None:
+        return _rejected(
+            proposal,
+            RejectionCode.PERMISSION_DENIED,
+            "active policy has no matching governance-transition requirement",
+        )
+    if _verification_rank(classification.verification_level) < _verification_rank(
+        requirement.minimum_verification
+    ):
+        return _rejected(
+            proposal,
+            RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+            "transition does not meet the active policy verification requirement",
+        )
+    if classification.grounding not in requirement.permitted_grounding:
+        return _rejected(
+            proposal,
+            RejectionCode.INSUFFICIENT_GROUNDING,
+            "transition grounding is not permitted by the active policy",
+        )
+    approval = proposal.approval
+    if approval is None or approval.approver.kind is not requirement.required_approver_kind:
+        return _rejected(
+            proposal,
+            RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+            "transition approver kind does not satisfy the active policy",
+        )
+    if requirement.protected_evaluation_required and (
+        not proposal.measurement.protected_metrics
+        or not all(metric.protected for metric in proposal.measurement.protected_metrics)
+    ):
+        return _rejected(
+            proposal,
+            RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+            "transition lacks the protected evaluation required by the active policy",
+        )
+    if requirement.rollback_required and (
+        context.rollback_policy is None
+        or proposal.measurement.rollback_target_id != proposal.rollback_policy_hash
+    ):
+        return _rejected(
+            proposal,
+            RejectionCode.INVALID_LINEAGE,
+            "transition lacks the rollback lineage required by the active policy",
+        )
+    return None
+
+
 def _candidate_compatibility_rejection(
     proposal: ProposeGovernancePolicyTransition,
     context: _GovernanceTransitionContext,
@@ -302,6 +374,23 @@ def _candidate_compatibility_rejection(
             "stored candidate policy does not match proposal snapshot",
         )
     return None
+
+
+def _verification_rank(level: VerificationLevel) -> int:
+    ranks = {
+        VerificationLevel.MODEL_LIKELIHOOD: 0,
+        VerificationLevel.MODEL_CONFIDENCE: 0,
+        VerificationLevel.SELF_CONSISTENCY: 0,
+        VerificationLevel.SELF_CRITIQUE: 1,
+        VerificationLevel.CROSS_MODEL_AGREEMENT: 1,
+        VerificationLevel.RUBRIC_JUDGE: 2,
+        VerificationLevel.INDEPENDENT_LEARNED_JUDGE: 3,
+        VerificationLevel.EXECUTION_FEEDBACK: 4,
+        VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK: 5,
+        VerificationLevel.EXTERNAL_EMPIRICAL_MEASUREMENT: 6,
+        VerificationLevel.FORMAL_VERIFIER: 7,
+    }
+    return ranks[level]
 
 
 def _measurement_rejection(
@@ -369,7 +458,7 @@ def _measurement_rejection(
             RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
             "governance transition requires protected external metrics",
         )
-    if not _usage_within_budgets(measurement):
+    if not _usage_within_budgets(measurement, run):
         return _rejected(
             proposal,
             RejectionCode.UNMATCHED_BUDGETS,
@@ -378,24 +467,40 @@ def _measurement_rejection(
     return None
 
 
-def _usage_within_budgets(measurement: SelfImprovementMeasurementRecord) -> bool:
-    budgets = (
-        measurement.execution_budget,
-        measurement.search_budget,
-        measurement.evaluation_budget,
-        measurement.judging_budget,
-        measurement.human_budget,
+def _usage_within_budgets(
+    measurement: SelfImprovementMeasurementRecord,
+    run: ResearchRun,
+) -> bool:
+    allocations = (
+        (
+            measurement.usage_by_category.execution,
+            measurement.execution_budget,
+            run.budget_allocation.execution,
+        ),
+        (
+            measurement.usage_by_category.search,
+            measurement.search_budget,
+            run.budget_allocation.search,
+        ),
+        (
+            measurement.usage_by_category.evaluation,
+            measurement.evaluation_budget,
+            run.budget_allocation.evaluation,
+        ),
+        (
+            measurement.usage_by_category.judging,
+            measurement.judging_budget,
+            run.budget_allocation.judging,
+        ),
+        (
+            measurement.usage_by_category.human,
+            measurement.human_budget,
+            run.budget_allocation.human,
+        ),
     )
     return all(
-        getattr(measurement.usage, field) <= sum(getattr(budget, field) for budget in budgets)
-        for field in (
-            "cost_usd",
-            "compute_units",
-            "tokens",
-            "elapsed_seconds",
-            "tool_calls",
-            "human_interventions",
-        )
+        usage_within_budget(usage, measurement_budget) and usage_within_budget(usage, run_budget)
+        for usage, measurement_budget, run_budget in allocations
     )
 
 

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from inspect import signature
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
+from sqlalchemy import Engine, Table, update
 
 from super_scientist.application.improvement.service import (
     DecideEvaluatorSuccessionHandler,
@@ -14,6 +16,7 @@ from super_scientist.application.improvement.service import (
     RecordSelfImprovementMeasurementHandler,
 )
 from super_scientist.application.transactions.coordinator import TransactionCoordinator
+from super_scientist.application.workspace_integrity import verify_workspace
 from super_scientist.config.loader import policy_hash
 from super_scientist.config.models import (
     AdaptationRequirement,
@@ -34,6 +37,7 @@ from super_scientist.domain.configurations.models import (
 from super_scientist.domain.evaluators.models import (
     CollapseMetrics,
     EvaluationResult,
+    EvaluationStage,
     EvaluatorCollapseRecord,
     EvaluatorSuccessionDecision,
     EvaluatorThreshold,
@@ -59,14 +63,18 @@ from super_scientist.domain.improvement.models import (
     PerformanceTrajectoryPoint,
     ResourceBudget,
     ResourceUsage,
+    ResourceUsageBreakdown,
     SelfImprovementMeasurementRecord,
+    TrajectoryObservation,
 )
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.domain.research_runs.models import (
     ResearchRun,
     ResearchRunEvent,
     ResearchRunEventType,
     RunBudgetAllocation,
 )
+from super_scientist.kernel.audit.models import AuditVerification
 from super_scientist.kernel.transactions.models import (
     AppendResearchRunEvent,
     Approval,
@@ -94,6 +102,15 @@ from super_scientist.providers.storage.domain_records import (
     ResearchRunEventRepository,
     ResearchRunRepository,
     SelfImprovementMeasurementRepository,
+)
+from super_scientist.providers.storage.schema import (
+    configuration_versions,
+    evaluator_audits,
+    evaluator_succession_decisions,
+    evaluator_versions,
+    research_run_events,
+    research_runs,
+    self_improvement_measurements,
 )
 
 NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
@@ -357,6 +374,100 @@ def test_fixed_router_declares_all_phase_a_adaptation_handlers(tmp_path: Path) -
     engine.dispose()
 
 
+def test_workspace_integrity_rejects_untransactional_task4_record(tmp_path: Path) -> None:
+    policy = _phase_a_policy()
+    _, uow_factory, engine = _coordinator(tmp_path, policy)
+    run = _run().model_copy(update={"active_governance_policy_hash": policy.policy_hash})
+    with uow_factory() as unit_of_work:
+        assert unit_of_work.connection is not None
+        ResearchRunRepository(unit_of_work.connection).add(run.run_id, run, run.created_at)
+
+    with uow_factory() as unit_of_work:
+        result = verify_workspace(
+            unit_of_work.repositories(),
+            FileArtifactStore(tmp_path / "artifacts-2"),
+        )
+
+    assert result.valid is False
+    assert "research run" in (result.reason or "")
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("record_kind", "reason_fragment"),
+    (
+        ("research_run", "research run"),
+        ("research_run_event", "research run event"),
+        ("configuration", "configuration"),
+        ("evaluator_audit", "evaluator audit"),
+        ("measurement", "measurement"),
+        ("evaluator_version", "evaluator version"),
+        ("evaluator_succession", "evaluator succession"),
+        ("evaluator_collapse", "evaluator collapse"),
+    ),
+)
+def test_workspace_integrity_reconstructs_all_eight_task4_record_classes(
+    tmp_path: Path,
+    record_kind: str,
+    reason_fragment: str,
+) -> None:
+    fixture = _complete_adaptation_workspace(tmp_path)
+    if record_kind == "evaluator_collapse":
+        collapse = _collapse().model_copy(
+            update={"governing_policy_hash": fixture.policy.policy_hash}
+        )
+        with fixture.uow_factory() as unit_of_work:
+            assert unit_of_work.connection is not None
+            EvaluatorCollapseRepository(unit_of_work.connection).add(
+                collapse.evaluator_collapse_record_id,
+                collapse,
+                collapse.measured_at,
+            )
+    else:
+        table, identifier_column, identifier, tampered = _tamper_target(
+            fixture,
+            record_kind,
+        )
+        _rewrite_authoritative_record(
+            fixture,
+            table,
+            identifier_column,
+            identifier,
+            tampered,
+        )
+
+    result = _verify_adaptation_fixture(fixture)
+
+    assert result.valid is False
+    assert reason_fragment in (result.reason or "")
+    fixture.engine.dispose()
+
+
+@pytest.mark.parametrize("head_kind", ("research_run", "evaluator"))
+def test_workspace_integrity_reconstructs_both_task4_heads(
+    tmp_path: Path,
+    head_kind: str,
+) -> None:
+    fixture = _complete_adaptation_workspace(tmp_path)
+    with fixture.uow_factory() as unit_of_work:
+        assert unit_of_work.connection is not None
+        if head_kind == "research_run":
+            domain_records.ResearchRunHeadRepository(unit_of_work.connection).set(
+                fixture.run.run_id,
+                fixture.first_event.run_event_id,
+            )
+        else:
+            domain_records.EvaluatorHeadRepository(unit_of_work.connection).set(
+                fixture.predecessor.evaluator_version_id
+            )
+
+    result = _verify_adaptation_fixture(fixture)
+
+    assert result.valid is False
+    assert "head" in (result.reason or "")
+    fixture.engine.dispose()
+
+
 @pytest.mark.integration
 def test_v2_handlers_project_complete_measurement_and_govern_evaluator_succession(
     tmp_path: Path,
@@ -397,11 +508,9 @@ def test_v2_handlers_project_complete_measurement_and_govern_evaluator_successio
             "governing_policy_hash": policy.policy_hash,
         }
     )
-    succession = _succession().model_copy(
-        update={
-            "candidate_evaluator": candidate.evaluator,
-            "governing_policy_hash": policy.policy_hash,
-        }
+    succession = _succession(
+        candidate_evaluator=candidate.evaluator,
+        governing_policy_hash=policy.policy_hash,
     )
 
     proposals = (
@@ -537,6 +646,44 @@ def test_measurement_rejects_passed_audit_for_different_evaluator_lineage() -> N
     assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
 
 
+@pytest.mark.parametrize("overspend_scope", ("measurement", "run"))
+def test_measurement_rejects_category_cross_subsidy_and_run_overspend(
+    overspend_scope: str,
+) -> None:
+    policy = _phase_a_policy()
+    authority = _human_actor(f"{overspend_scope}-budget-authority")
+    measurement = _measurement().model_copy(
+        update={
+            "classification": _classification(ChangeTarget.EVALUATOR),
+            "decision_authority": authority,
+            "governing_policy_hash": policy.policy_hash,
+            **({"search_budget": _budget(0)} if overspend_scope == "measurement" else {}),
+        }
+    )
+    audit = _audit().model_copy(update={"governing_policy_hash": policy.policy_hash})
+    run = _run().model_copy(update={"active_governance_policy_hash": policy.policy_hash})
+    if overspend_scope == "run":
+        run = run.model_copy(
+            update={
+                "budget_allocation": run.budget_allocation.model_copy(update={"search": _budget(0)})
+            }
+        )
+    proposal = RecordSelfImprovementMeasurement(
+        proposal_id=f"{overspend_scope}-budget-overspend",
+        idempotency_key=f"{overspend_scope}-budget-overspend-key",
+        proposer=measurement.proposer,
+        approval=Approval(approver=authority, approved_at=NOW),
+        measurement=measurement,
+    )
+    capabilities = _LineageReadCapabilities(policy=policy, run=run, audit=audit)
+    handler = RecordSelfImprovementMeasurementHandler()
+
+    decision = handler.decide(proposal, handler.build_context(proposal, capabilities))
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.UNMATCHED_BUDGETS
+
+
 def test_evaluator_version_rejects_audit_for_different_candidate_producer() -> None:
     policy = _phase_a_policy()
     predecessor = _evaluator_version("evaluator-v1", None).model_copy(
@@ -602,11 +749,9 @@ def test_evaluator_succession_rejects_audit_for_different_candidate_producer() -
             "governing_policy_hash": policy.policy_hash,
         }
     )
-    succession = _succession().model_copy(
-        update={
-            "candidate_evaluator": candidate.evaluator,
-            "governing_policy_hash": policy.policy_hash,
-        }
+    succession = _succession(
+        candidate_evaluator=candidate.evaluator,
+        governing_policy_hash=policy.policy_hash,
     )
     proposal = DecideEvaluatorSuccession(
         proposal_id="unrelated-succession-audit",
@@ -628,6 +773,61 @@ def test_evaluator_succession_rejects_audit_for_different_candidate_producer() -
 
     assert decision.accepted is False
     assert decision.reasons[0].code is RejectionCode.CIRCULAR_EVALUATOR_APPROVAL
+
+
+def test_evaluator_succession_rejects_gate_evidence_unrelated_to_audit() -> None:
+    policy = _phase_a_policy()
+    predecessor = _evaluator_version("evaluator-v1", None).model_copy(
+        update={"governing_policy_hash": policy.policy_hash}
+    )
+    candidate = _evaluator_version("evaluator-v2", predecessor.evaluator_version_id).model_copy(
+        update={"governing_policy_hash": policy.policy_hash}
+    )
+    audit = _audit().model_copy(
+        update={
+            "evaluator": candidate.evaluator,
+            "evaluator_version": candidate.evaluator_version_id,
+            "governing_policy_hash": policy.policy_hash,
+        }
+    )
+    succession = _succession(
+        candidate_evaluator=candidate.evaluator,
+        governing_policy_hash=policy.policy_hash,
+    )
+    external = succession.external_evaluation
+    assert external is not None
+    unrelated_evidence = ("unrelated-gate-evidence",)
+    unrelated_external = EvaluationResult.model_validate(
+        external.model_copy(
+            update={
+                "evidence_ids": unrelated_evidence,
+                "provenance": external.provenance.model_copy(
+                    update={"evidence_ids": unrelated_evidence}
+                ),
+            }
+        ).model_dump(mode="python")
+    )
+    succession = succession.model_copy(update={"external_evaluation": unrelated_external})
+    proposal = DecideEvaluatorSuccession(
+        proposal_id="unrelated-gate-evidence",
+        idempotency_key="unrelated-gate-evidence-key",
+        proposer=succession.decision_authority,
+        approval=Approval(approver=_human_actor("succession-approver"), approved_at=NOW),
+        succession_decision=succession,
+        classification=_classification(ChangeTarget.EVALUATOR),
+    )
+    capabilities = _LineageReadCapabilities(
+        policy=policy,
+        audit=audit,
+        versions=(predecessor, candidate),
+        active_head_id=predecessor.evaluator_version_id,
+    )
+    handler = DecideEvaluatorSuccessionHandler()
+
+    decision = handler.decide(proposal, handler.build_context(proposal, capabilities))
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
 
 
 @dataclass(frozen=True)
@@ -695,6 +895,251 @@ class _LineageReadCapabilities:
 class _FixedClock:
     def now(self) -> datetime:
         return NOW
+
+
+@dataclass(frozen=True)
+class _CompleteAdaptationFixture:
+    engine: Engine
+    uow_factory: Callable[[], DatabaseUnitOfWork]
+    artifacts: FileArtifactStore
+    policy: PolicySnapshot
+    run: ResearchRun
+    first_event: ResearchRunEvent
+    last_event: ResearchRunEvent
+    configuration: ConfigurationVersion
+    audit: EvaluatorAuditRecord
+    measurement: SelfImprovementMeasurementRecord
+    predecessor: EvaluatorVersion
+    candidate: EvaluatorVersion
+    succession: EvaluatorSuccessionDecision
+
+
+def _complete_adaptation_workspace(tmp_path: Path) -> _CompleteAdaptationFixture:
+    policy = _phase_a_policy()
+    coordinator, uow_factory, engine = _coordinator(tmp_path, policy)
+    assert isinstance(engine, Engine)
+    artifacts = FileArtifactStore(tmp_path / "artifacts-2")
+    approval = Approval(approver=_human_actor("fixture-approver"), approved_at=NOW)
+    run_proposer = _human_actor("fixture-run-proposer")
+    run = _run().model_copy(
+        update={
+            "creator": run_proposer,
+            "active_governance_policy_hash": policy.policy_hash,
+        }
+    )
+    first_event_proposal = _event_proposal(
+        "fixture-start",
+        run_proposer,
+        approval,
+        run,
+        sequence=1,
+        event_type=ResearchRunEventType.STARTED,
+    )
+    last_event_proposal = _event_proposal(
+        "fixture-pause",
+        run_proposer,
+        approval,
+        run,
+        sequence=2,
+        event_type=ResearchRunEventType.PAUSED,
+    )
+    configuration = _configuration().model_copy(
+        update={"governing_policy_hash": policy.policy_hash}
+    )
+    predecessor = _evaluator_version("evaluator-v1", None).model_copy(
+        update={"governing_policy_hash": policy.policy_hash}
+    )
+    candidate = _evaluator_version("evaluator-v2", predecessor.evaluator_version_id).model_copy(
+        update={"governing_policy_hash": policy.policy_hash}
+    )
+    audit = _audit().model_copy(
+        update={
+            "evaluator": candidate.evaluator,
+            "evaluator_version": candidate.evaluator_version_id,
+            "governing_policy_hash": policy.policy_hash,
+        }
+    )
+    measurement = _measurement().model_copy(
+        update={
+            "classification": _classification(ChangeTarget.EVALUATOR),
+            "evaluator": candidate.evaluator,
+            "evaluator_version": candidate.evaluator_version_id,
+            "baseline_version_id": predecessor.evaluator_version_id,
+            "candidate_version_id": candidate.evaluator_version_id,
+            "governing_policy_hash": policy.policy_hash,
+        }
+    )
+    succession = _succession(
+        candidate_evaluator=candidate.evaluator,
+        governing_policy_hash=policy.policy_hash,
+    )
+    proposals = (
+        CreateResearchRun(
+            proposal_id="fixture-run",
+            idempotency_key="fixture-run-key",
+            proposer=run_proposer,
+            approval=approval,
+            run=run,
+        ),
+        first_event_proposal,
+        last_event_proposal,
+        RecordConfigurationVersion(
+            proposal_id="fixture-configuration",
+            idempotency_key="fixture-configuration-key",
+            proposer=configuration.created_by,
+            approval=approval,
+            configuration_version=configuration,
+            classification=_classification(ChangeTarget.PROMPT),
+        ),
+        ProposeEvaluatorVersion(
+            proposal_id="fixture-evaluator-v1",
+            idempotency_key="fixture-evaluator-v1-key",
+            proposer=predecessor.candidate_producer,
+            approval=approval,
+            evaluator_version=predecessor,
+            classification=_classification(ChangeTarget.EVALUATOR),
+        ),
+        RecordEvaluatorAudit(
+            proposal_id="fixture-audit",
+            idempotency_key="fixture-audit-key",
+            proposer=audit.auditor,
+            approval=approval,
+            evaluator_audit=audit,
+        ),
+        RecordSelfImprovementMeasurement(
+            proposal_id="fixture-measurement",
+            idempotency_key="fixture-measurement-key",
+            proposer=measurement.proposer,
+            approval=Approval(
+                approver=measurement.decision_authority,
+                approved_at=NOW,
+            ),
+            measurement=measurement,
+        ),
+        ProposeEvaluatorVersion(
+            proposal_id="fixture-evaluator-v2",
+            idempotency_key="fixture-evaluator-v2-key",
+            proposer=candidate.candidate_producer,
+            approval=approval,
+            evaluator_version=candidate,
+            classification=_classification(ChangeTarget.EVALUATOR),
+        ),
+    )
+    for proposal in proposals:
+        decision = coordinator.submit(proposal)
+        assert decision.accepted, decision
+    with uow_factory() as unit_of_work:
+        assert unit_of_work.connection is not None
+        domain_records.EvaluatorHeadRepository(unit_of_work.connection).set(
+            predecessor.evaluator_version_id
+        )
+    succession_proposal = DecideEvaluatorSuccession(
+        proposal_id="fixture-succession",
+        idempotency_key="fixture-succession-key",
+        proposer=succession.decision_authority,
+        approval=approval,
+        succession_decision=succession,
+        classification=_classification(ChangeTarget.EVALUATOR),
+    )
+    decision = coordinator.submit(succession_proposal)
+    assert decision.accepted, decision
+    fixture = _CompleteAdaptationFixture(
+        engine=engine,
+        uow_factory=uow_factory,
+        artifacts=artifacts,
+        policy=policy,
+        run=run,
+        first_event=first_event_proposal.event,
+        last_event=last_event_proposal.event,
+        configuration=configuration,
+        audit=audit,
+        measurement=measurement,
+        predecessor=predecessor,
+        candidate=candidate,
+        succession=succession,
+    )
+    verification = _verify_adaptation_fixture(fixture)
+    assert verification.valid, verification.reason
+    return fixture
+
+
+def _verify_adaptation_fixture(fixture: _CompleteAdaptationFixture) -> AuditVerification:
+    with fixture.uow_factory() as unit_of_work:
+        return verify_workspace(unit_of_work.repositories(), fixture.artifacts)
+
+
+def _tamper_target(
+    fixture: _CompleteAdaptationFixture,
+    record_kind: str,
+) -> tuple[Table, str, str, BaseModel]:
+    targets: dict[str, tuple[Table, str, str, BaseModel]] = {
+        "research_run": (
+            research_runs,
+            "run_id",
+            fixture.run.run_id,
+            fixture.run.model_copy(update={"charter": "tampered research charter"}),
+        ),
+        "research_run_event": (
+            research_run_events,
+            "run_event_id",
+            fixture.last_event.run_event_id,
+            fixture.last_event.model_copy(update={"detail": "tampered event detail"}),
+        ),
+        "configuration": (
+            configuration_versions,
+            "configuration_version_id",
+            fixture.configuration.configuration_version_id,
+            fixture.configuration.model_copy(
+                update={"created_at": fixture.configuration.created_at + timedelta(seconds=1)}
+            ),
+        ),
+        "evaluator_audit": (
+            evaluator_audits,
+            "evaluator_audit_id",
+            fixture.audit.evaluator_audit_id,
+            fixture.audit.model_copy(update={"limitations": ("tampered audit",)}),
+        ),
+        "measurement": (
+            self_improvement_measurements,
+            "measurement_id",
+            fixture.measurement.measurement_id,
+            fixture.measurement.model_copy(update={"failures": ("tampered failure",)}),
+        ),
+        "evaluator_version": (
+            evaluator_versions,
+            "evaluator_version_id",
+            fixture.candidate.evaluator_version_id,
+            fixture.candidate.model_copy(update={"benchmark_version_ids": ("tampered-benchmark",)}),
+        ),
+        "evaluator_succession": (
+            evaluator_succession_decisions,
+            "evaluator_succession_decision_id",
+            fixture.succession.evaluator_succession_decision_id,
+            fixture.succession.model_copy(update={"rationale": ("tampered rationale",)}),
+        ),
+    }
+    return targets[record_kind]
+
+
+def _rewrite_authoritative_record(
+    fixture: _CompleteAdaptationFixture,
+    table: Table,
+    identifier_column: str,
+    identifier: str,
+    record: BaseModel,
+) -> None:
+    record_json = canonical_json_bytes(record.model_dump(mode="json")).decode("utf-8")
+    with fixture.uow_factory() as unit_of_work:
+        assert unit_of_work.connection is not None
+        unit_of_work.connection.exec_driver_sql(f"DROP TRIGGER {table.name}_no_update")
+        unit_of_work.connection.execute(
+            update(table)
+            .where(table.c[identifier_column] == identifier)
+            .values(
+                record_json=record_json,
+                content_hash=sha256_hex(record_json.encode("utf-8")),
+            )
+        )
 
 
 def _snapshot(policy: GovernancePolicy | GovernancePolicyV2) -> PolicySnapshot:
@@ -905,7 +1350,12 @@ def _audit() -> EvaluatorAuditRecord:
         auditor_to_proposer=ActorRelationship.INDEPENDENT,
         auditor_to_candidate_producer=ActorRelationship.INDEPENDENT,
         independence_enforced=True,
-        evidence_ids=("evidence-1",),
+        evidence_ids=(
+            "protected-eval-evidence",
+            "external-eval-evidence",
+            "human-review-evidence",
+            "canary-evidence",
+        ),
         checks_run=("audit-check",),
         assumptions=("identity metadata is accurate",),
         limitations=("fixture coverage",),
@@ -916,6 +1366,7 @@ def _audit() -> EvaluatorAuditRecord:
 
 
 def _measurement() -> SelfImprovementMeasurementRecord:
+    trajectory = (_trajectory(0), _trajectory(1))
     return SelfImprovementMeasurementRecord(
         measurement_id="measurement-1",
         change_id="change-1",
@@ -937,7 +1388,10 @@ def _measurement() -> SelfImprovementMeasurementRecord:
         candidate_version_id="policy-v2",
         protected_metrics=(_metric("protected", True),),
         countermetrics=(_metric("countermetric", False),),
-        trajectory=(_trajectory(0), _trajectory(1)),
+        expected_final_index=1,
+        trajectory=trajectory,
+        peak_observation=_observation(trajectory[1]),
+        final_observation=_observation(trajectory[1]),
         attempted_changes=("accepted-change", "rejected-change"),
         admitted_changes=("accepted-change",),
         rejected_changes=("rejected-change",),
@@ -948,7 +1402,11 @@ def _measurement() -> SelfImprovementMeasurementRecord:
         evaluation_budget=_budget(30),
         judging_budget=_budget(40),
         human_budget=_budget(50),
-        usage=_usage(),
+        usage_by_category=_usage_breakdown(
+            execution=_usage(),
+            search=_usage(),
+        ),
+        usage=_usage(2),
         failures=("retained failed experiment",),
         rollback_target_id="policy-v1",
         evaluator_audit_id="audit-1",
@@ -981,24 +1439,51 @@ def _evaluator_version(identifier: str, predecessor: str | None) -> EvaluatorVer
     )
 
 
-def _succession() -> EvaluatorSuccessionDecision:
+def _succession(
+    *,
+    candidate_evaluator: ActorIdentity | None = None,
+    governing_policy_hash: str = HASH,
+) -> EvaluatorSuccessionDecision:
     return EvaluatorSuccessionDecision(
         evaluator_succession_decision_id="succession-1",
         predecessor_evaluator_version_id="evaluator-v1",
         candidate_evaluator_version_id="evaluator-v2",
-        candidate_evaluator=_model_actor("candidate-evaluator"),
+        candidate_evaluator=(
+            _model_actor("candidate-evaluator")
+            if candidate_evaluator is None
+            else candidate_evaluator
+        ),
+        candidate_producer=_model_actor("producer"),
+        change_proposer=_model_actor("proposer"),
         evaluator_audit_id="audit-1",
         evaluator_audit_result=AssessmentOutcome.PASSED,
-        protected_evaluation=_evaluation("protected-eval", True),
-        external_evaluation=_evaluation("external-eval", False),
-        human_review=_provenance("human-review", human=True),
-        canary_evaluation=_evaluation("canary", False),
+        protected_evaluation=_evaluation(
+            "protected-eval",
+            EvaluationStage.PROTECTED,
+            governing_policy_hash,
+        ),
+        external_evaluation=_evaluation(
+            "external-eval",
+            EvaluationStage.EXTERNAL,
+            governing_policy_hash,
+        ),
+        human_review=_evaluation(
+            "human-review",
+            EvaluationStage.HUMAN_REVIEW,
+            governing_policy_hash,
+            human=True,
+        ),
+        canary_evaluation=_evaluation(
+            "canary",
+            EvaluationStage.CANARY,
+            governing_policy_hash,
+        ),
         predecessor_rollback_target_id="evaluator-v1",
         accepted=True,
         rationale=("all gates passed",),
         decision_authority=_human_actor("promotion-authority"),
         decided_at=NOW,
-        governing_policy_hash=HASH,
+        governing_policy_hash=governing_policy_hash,
     )
 
 
@@ -1014,7 +1499,13 @@ def _collapse() -> EvaluatorCollapseRecord:
     )
 
 
-def _provenance(identifier: str, *, human: bool = False) -> AssessmentProvenance:
+def _provenance(
+    identifier: str,
+    *,
+    human: bool = False,
+    evidence_id: str = "evidence-1",
+    governing_policy_hash: str = HASH,
+) -> AssessmentProvenance:
     return AssessmentProvenance(
         actor=_human_actor(identifier) if human else _model_actor(identifier),
         actor_version=f"{identifier}-v1",
@@ -1022,22 +1513,39 @@ def _provenance(identifier: str, *, human: bool = False) -> AssessmentProvenance
         deterministic_or_learned="HUMAN" if human else "DETERMINISTIC",
         proposer_relationship=ActorRelationship.INDEPENDENT,
         assumptions=("fixture assumptions",),
-        evidence_ids=("evidence-1",),
+        evidence_ids=(evidence_id,),
         checks_run=("check-1",),
         limitations=("fixture coverage",),
         result=AssessmentOutcome.PASSED,
         assessed_at=NOW,
-        governing_policy_hash=HASH,
+        governing_policy_hash=governing_policy_hash,
     )
 
 
-def _evaluation(identifier: str, protected: bool) -> EvaluationResult:
+def _evaluation(
+    identifier: str,
+    stage: EvaluationStage,
+    governing_policy_hash: str,
+    *,
+    human: bool = False,
+) -> EvaluationResult:
+    evidence_id = f"{identifier}-evidence"
     return EvaluationResult(
         evaluation_id=identifier,
-        provenance=_provenance(identifier),
-        grounding=ExternalGrounding.INDEPENDENT_TEST_SUITE,
-        protected=protected,
+        candidate_evaluator_version_id="evaluator-v2",
+        stage=stage,
+        provenance=_provenance(
+            identifier,
+            human=human,
+            evidence_id=evidence_id,
+            governing_policy_hash=governing_policy_hash,
+        ),
+        grounding=(
+            ExternalGrounding.HUMAN_JUDGMENT if human else ExternalGrounding.INDEPENDENT_TEST_SUITE
+        ),
+        evidence_ids=(evidence_id,),
         passed=True,
+        governing_policy_hash=governing_policy_hash,
     )
 
 
@@ -1052,16 +1560,28 @@ def _metric(identifier: str, protected: bool) -> MetricObservation:
 
 
 def _trajectory(index: int) -> PerformanceTrajectoryPoint:
+    candidate_id = "accepted-change" if index == 0 else "rejected-change"
+    usage = _usage()
     return PerformanceTrajectoryPoint(
         step_index=index,
+        change_id="change-1",
+        grounding=(ExternalGrounding.CONTROLLED_EXPERIMENT,),
         metrics=(_metric(f"trajectory-{index}", False),),
-        attempted_change_ids=(f"attempt-{index}",),
-        admitted_change_ids=(f"attempt-{index}",),
-        rejected_change_ids=(),
-        regressions=(),
-        rollback_event_ids=(),
-        usage=_usage(),
+        attempted_change_ids=(candidate_id,),
+        admitted_change_ids=(candidate_id,) if index == 0 else (),
+        rejected_change_ids=() if index == 0 else (candidate_id,),
+        regressions=("retained regression",) if index == 0 else (),
+        rollback_event_ids=() if index == 0 else ("rollback-drill",),
+        usage_by_category=_usage_breakdown(
+            execution=usage if index == 0 else None,
+            search=usage if index == 1 else None,
+        ),
+        usage=usage,
     )
+
+
+def _observation(point: PerformanceTrajectoryPoint) -> TrajectoryObservation:
+    return TrajectoryObservation(step_index=point.step_index, metrics=point.metrics)
 
 
 def _budget(value: int) -> ResourceBudget:
@@ -1075,14 +1595,32 @@ def _budget(value: int) -> ResourceBudget:
     )
 
 
-def _usage() -> ResourceUsage:
+def _usage(multiplier: int = 1) -> ResourceUsage:
     return ResourceUsage(
-        cost_usd=1.0,
-        compute_units=1.0,
-        tokens=1,
-        elapsed_seconds=1.0,
-        tool_calls=1,
-        human_interventions=1,
+        cost_usd=float(multiplier),
+        compute_units=float(multiplier),
+        tokens=multiplier,
+        elapsed_seconds=float(multiplier),
+        tool_calls=multiplier,
+        human_interventions=multiplier,
+    )
+
+
+def _zero_usage() -> ResourceUsage:
+    return _usage(0)
+
+
+def _usage_breakdown(
+    *,
+    execution: ResourceUsage | None = None,
+    search: ResourceUsage | None = None,
+) -> ResourceUsageBreakdown:
+    return ResourceUsageBreakdown(
+        execution=execution or _zero_usage(),
+        search=search or _zero_usage(),
+        evaluation=_zero_usage(),
+        judging=_zero_usage(),
+        human=_zero_usage(),
     )
 
 
