@@ -18,6 +18,7 @@ AUTHORITATIVE_TABLES = (
     "rule_consolidation_decisions",
     "rule_regression_cases",
     "behavioral_rule_version_incidents",
+    "behavioral_rule_version_supersessions",
     "reviewer_assessment_rule_versions",
     "reviewer_assessment_incidents",
     "rule_consolidation_assessments",
@@ -109,7 +110,12 @@ def upgrade() -> None:
     op.create_table(
         "rule_consolidation_decisions",
         sa.Column("consolidation_decision_id", sa.String(length=192), primary_key=True),
+        sa.Column("resulting_rule_version_id", sa.String(length=192), nullable=True),
         *_record_columns(),
+        sa.ForeignKeyConstraint(
+            ["resulting_rule_version_id"],
+            ["behavioral_rule_versions.rule_version_id"],
+        ),
         _content_hash_constraint("ck_rule_consolidation_decisions_content_hash"),
     )
     op.create_table(
@@ -137,6 +143,25 @@ def upgrade() -> None:
             "rule_version_id",
             "incident_id",
             "behavioral_rule_version_incidents",
+        ),
+    )
+    op.create_table(
+        "behavioral_rule_version_supersessions",
+        sa.Column("rule_version_id", sa.String(length=192), primary_key=True),
+        sa.Column("position", sa.Integer(), primary_key=True),
+        sa.Column("predecessor_rule_version_id", sa.String(length=192), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["rule_version_id"],
+            ["behavioral_rule_versions.rule_version_id"],
+        ),
+        sa.ForeignKeyConstraint(
+            ["predecessor_rule_version_id"],
+            ["behavioral_rule_versions.rule_version_id"],
+        ),
+        *_ordered_reference_constraints(
+            "rule_version_id",
+            "predecessor_rule_version_id",
+            "behavioral_rule_version_supersessions",
         ),
     )
     op.create_table(
@@ -255,6 +280,7 @@ def downgrade() -> None:
     op.drop_table("rule_consolidation_assessments")
     op.drop_table("reviewer_assessment_incidents")
     op.drop_table("reviewer_assessment_rule_versions")
+    op.drop_table("behavioral_rule_version_supersessions")
     op.drop_table("behavioral_rule_version_incidents")
     op.drop_table("rule_regression_cases")
     op.drop_table("rule_consolidation_decisions")

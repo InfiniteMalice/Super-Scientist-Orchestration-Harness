@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
 from super_scientist.domain.identity import ActorIdentity
 from super_scientist.domain.improvement.models import AssessmentProvenance
@@ -241,6 +241,18 @@ class RuleConsolidationDecision(_StrictFrozenModel):
     ) -> tuple[str, ...]:
         field_name = getattr(info, "field_name", "references")
         return _require_unique(value, str(field_name))
+
+    @model_validator(mode="after")
+    def require_result_for_rule_producing_action(self) -> Self:
+        result_is_required = self.action not in {
+            RuleAction.REJECT,
+            RuleAction.ESCALATE_TO_HUMAN,
+        }
+        if result_is_required and self.resulting_rule_version_id is None:
+            raise ValueError("resulting_rule_version_id is required for a rule-producing action")
+        if not result_is_required and self.resulting_rule_version_id is not None:
+            raise ValueError("resulting_rule_version_id must be null for a non-producing action")
+        return self
 
 
 class RuleRegressionCase(_StrictFrozenModel):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -54,6 +54,7 @@ from super_scientist.providers.storage.repositories import StorageIntegrityError
 from super_scientist.providers.storage.schema import (
     behavioral_rule_heads,
     behavioral_rule_version_incidents,
+    behavioral_rule_version_supersessions,
     behavioral_rule_versions,
     completion_decisions,
     configuration_versions,
@@ -147,6 +148,7 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
         identifier_field: str,
         relationship_fields: Mapping[str, str] | None = None,
         relationship_types: Mapping[str, _RelationshipStorageType] | None = None,
+        nullable_relationship_fields: Collection[str] | None = None,
     ) -> None:
         _require_integrity(
             bool(model_type.model_config.get("frozen")),
@@ -158,6 +160,7 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
         self._model_type = model_type
         self._identifier_field = identifier_field
         self._relationship_fields = dict(relationship_fields or {})
+        self._nullable_relationship_fields = frozenset(nullable_relationship_fields or ())
         requested_relationship_types = dict(relationship_types or {})
         _require_integrity(
             set(self._relationship_fields).issubset(table.c.keys()),
@@ -170,6 +173,17 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
         _require_integrity(
             set(requested_relationship_types).issubset(self._relationship_fields),
             "unknown typed relationship column",
+        )
+        _require_integrity(
+            self._nullable_relationship_fields.issubset(self._relationship_fields),
+            "unknown nullable relationship column",
+        )
+        _require_integrity(
+            all(
+                self._table.c[column_name].nullable
+                for column_name in self._nullable_relationship_fields
+            ),
+            "nullable relationship column must permit null",
         )
         _require_integrity(
             all(
@@ -224,6 +238,7 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
                 getattr(validated, field_name),
                 field_name,
                 self._relationship_types[column_name],
+                nullable=column_name in self._nullable_relationship_fields,
             )
         self._connection.execute(insert(self._table).values(**values))
 
@@ -259,9 +274,16 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
                 getattr(record, field_name),
                 field_name,
                 storage_type,
+                nullable=column_name in self._nullable_relationship_fields,
             )
             _require_integrity(
-                record_value == _stored_relationship_value(row, column_name, storage_type),
+                record_value
+                == _stored_relationship_value(
+                    row,
+                    column_name,
+                    storage_type,
+                    nullable=column_name in self._nullable_relationship_fields,
+                ),
                 f"{column_name} does not match record_json",
             )
         _require_integrity(record_json == canonical_record_json, "record_json must be canonical")
@@ -291,6 +313,7 @@ class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
         reference_bindings: tuple[_OrderedReferenceBinding, ...],
         relationship_fields: Mapping[str, str] | None = None,
         relationship_types: Mapping[str, _RelationshipStorageType] | None = None,
+        nullable_relationship_fields: Collection[str] | None = None,
     ) -> None:
         super().__init__(
             connection,
@@ -299,6 +322,7 @@ class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
             identifier_field=identifier_field,
             relationship_fields=relationship_fields,
             relationship_types=relationship_types,
+            nullable_relationship_fields=nullable_relationship_fields,
         )
         _require_integrity(bool(reference_bindings), "referenced repository needs bindings")
         for binding in reference_bindings:
@@ -348,16 +372,22 @@ class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
         for binding in self._reference_bindings:
             expected = _canonical_reference_tuple(record, binding.record_field)
             stored_rows = self._connection.execute(
-                select(binding.table.c[binding.reference_column])
+                select(
+                    binding.table.c.position,
+                    binding.table.c[binding.reference_column],
+                )
                 .where(binding.table.c[binding.owner_column] == owner_id)
                 .order_by(binding.table.c.position)
             ).mappings()
             actual = tuple(
-                _stored_string(dict(stored_row), binding.reference_column)
+                (
+                    _stored_integer(dict(stored_row), "position"),
+                    _stored_string(dict(stored_row), binding.reference_column),
+                )
                 for stored_row in stored_rows
             )
             _require_integrity(
-                actual == expected,
+                actual == tuple(enumerate(expected)),
                 f"{binding.record_field} materialization does not match exact canonical references",
             )
         return record
@@ -406,6 +436,12 @@ class BehavioralRuleVersionRepository(_ReferencedAppendOnlyRecordRepository[Beha
                     record_field="source_incident_ids",
                     reference_column="incident_id",
                 ),
+                _OrderedReferenceBinding(
+                    table=behavioral_rule_version_supersessions,
+                    owner_column="rule_version_id",
+                    record_field="supersedes_rule_version_ids",
+                    reference_column="predecessor_rule_version_id",
+                ),
             ),
         )
 
@@ -443,6 +479,10 @@ class RuleConsolidationDecisionRepository(
             table=rule_consolidation_decisions,
             model_type=RuleConsolidationDecision,
             identifier_field="consolidation_decision_id",
+            relationship_fields={
+                "resulting_rule_version_id": "resulting_rule_version_id",
+            },
+            nullable_relationship_fields={"resulting_rule_version_id"},
             reference_bindings=(
                 _OrderedReferenceBinding(
                     table=rule_consolidation_assessments,
@@ -1140,7 +1180,12 @@ def _validated_relationship_value(
     value: object,
     field_name: str,
     storage_type: _RelationshipStorageType,
-) -> str | int:
+    *,
+    nullable: bool = False,
+) -> str | int | None:
+    if value is None:
+        _require_integrity(nullable, f"{field_name} must not be null")
+        return None
     if storage_type is str:
         if not isinstance(value, str):
             raise StorageIntegrityError(f"storage integrity error: {field_name} must be a string")
@@ -1154,7 +1199,12 @@ def _stored_relationship_value(
     row: Mapping[str, object],
     column_name: str,
     storage_type: _RelationshipStorageType,
-) -> str | int:
+    *,
+    nullable: bool = False,
+) -> str | int | None:
+    if row[column_name] is None:
+        _require_integrity(nullable, f"{column_name} must not be null")
+        return None
     if storage_type is str:
         return _stored_string(row, column_name)
     return _stored_integer(row, column_name)

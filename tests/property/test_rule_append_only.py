@@ -56,6 +56,7 @@ AUTHORITATIVE_0004_TABLES = {
     "rule_consolidation_decisions",
     "rule_regression_cases",
     "behavioral_rule_version_incidents",
+    "behavioral_rule_version_supersessions",
     "reviewer_assessment_rule_versions",
     "reviewer_assessment_incidents",
     "rule_consolidation_assessments",
@@ -87,13 +88,26 @@ def test_rule_repositories_round_trip_history_and_exact_reference_order(
 ) -> None:
     engine, connection = _connection(tmp_path, "round-trip.db")
     records = _records()
+    rejection = records.decision.model_copy(
+        update={
+            "consolidation_decision_id": "decision-2",
+            "resulting_rule_version_id": None,
+            "action": RuleAction.REJECT,
+        }
+    )
     try:
         _add_records(connection, records)
+        RuleConsolidationDecisionRepository(connection).add(
+            rejection.consolidation_decision_id,
+            rejection,
+            rejection.decided_at,
+        )
 
         assert RuleIncidentRepository(connection).list_all() == records.incidents
         assert BehavioralRuleVersionRepository(connection).get("rule-1-v1") == records.rule
         assert ReviewerAssessmentRepository(connection).get("assessment-1") == records.assessment
         assert RuleConsolidationDecisionRepository(connection).get("decision-1") == records.decision
+        assert RuleConsolidationDecisionRepository(connection).get("decision-2") == rejection
         assert RuleRegressionCaseRepository(connection).get("regression-1") == records.regression
 
         assert _ordered_references(
@@ -117,6 +131,57 @@ def test_rule_repositories_round_trip_history_and_exact_reference_order(
             "decision-1",
             "incident_id",
         ) == ("incident-2", "incident-1")
+        assert (
+            connection.execute(
+                select(schema.rule_consolidation_decisions.c.resulting_rule_version_id).where(
+                    schema.rule_consolidation_decisions.c.consolidation_decision_id == "decision-1"
+                )
+            ).scalar_one()
+            == "rule-1-v1"
+        )
+        assert (
+            connection.execute(
+                select(schema.rule_consolidation_decisions.c.resulting_rule_version_id).where(
+                    schema.rule_consolidation_decisions.c.consolidation_decision_id == "decision-2"
+                )
+            ).scalar_one()
+            is None
+        )
+    finally:
+        connection.rollback()
+        connection.close()
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_rule_version_supersessions_round_trip_in_canonical_order(
+    tmp_path: Path,
+) -> None:
+    engine, connection = _connection(tmp_path, "supersession-order.db")
+    records = _records()
+    predecessor_one, predecessor_two, successor, _ = _lineage_rules(records.rule)
+    try:
+        for incident in records.incidents:
+            RuleIncidentRepository(connection).add(
+                incident.incident_id,
+                incident,
+                incident.recorded_at,
+            )
+        repository = BehavioralRuleVersionRepository(connection)
+        for rule in (predecessor_one, predecessor_two, successor):
+            repository.add(rule.rule_version_id, rule, rule.created_at)
+
+        assert repository.get(successor.rule_version_id) == successor
+        assert (
+            _ordered_references(
+                connection,
+                schema.behavioral_rule_version_supersessions,
+                "rule_version_id",
+                successor.rule_version_id,
+                "predecessor_rule_version_id",
+            )
+            == successor.supersedes_rule_version_ids
+        )
     finally:
         connection.rollback()
         connection.close()
@@ -127,7 +192,18 @@ def test_rule_repositories_round_trip_history_and_exact_reference_order(
 def test_every_rule_history_and_reference_table_is_append_only(tmp_path: Path) -> None:
     engine, connection = _connection(tmp_path, "append-only.db")
     try:
-        _add_records(connection, _records())
+        records = _records()
+        _add_records(connection, records)
+        predecessor_one, predecessor_two, successor, _ = _lineage_rules(records.rule)
+        successor = successor.model_copy(
+            update={
+                "rule_version_id": "rule-1-v2",
+                "semantic_version": "1.1.0",
+            }
+        )
+        repository = BehavioralRuleVersionRepository(connection)
+        for rule in (predecessor_one, predecessor_two, successor):
+            repository.add(rule.rule_version_id, rule, rule.created_at)
         for table_name in sorted(AUTHORITATIVE_0004_TABLES):
             with pytest.raises(IntegrityError, match="append-only table"):
                 connection.execute(text(f"UPDATE {table_name} SET rowid = rowid"))
@@ -194,6 +270,70 @@ def test_repositories_reject_missing_incident_and_assessment_references(
 
 
 @pytest.mark.integration
+def test_rule_repository_rejects_missing_superseded_rule_version(tmp_path: Path) -> None:
+    engine, connection = _connection(tmp_path, "missing-supersession.db")
+    records = _records()
+    successor = records.rule.model_copy(
+        update={"supersedes_rule_version_ids": ("missing-rule-version",)}
+    )
+    try:
+        for incident in records.incidents:
+            RuleIncidentRepository(connection).add(
+                incident.incident_id,
+                incident,
+                incident.recorded_at,
+            )
+        with pytest.raises(IntegrityError):
+            BehavioralRuleVersionRepository(connection).add(
+                successor.rule_version_id,
+                successor,
+                successor.created_at,
+            )
+    finally:
+        connection.rollback()
+        connection.close()
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_decision_repository_rejects_missing_resulting_rule_version(
+    tmp_path: Path,
+) -> None:
+    engine, connection = _connection(tmp_path, "missing-result.db")
+    records = _records()
+    decision = records.decision.model_copy(
+        update={"resulting_rule_version_id": "missing-rule-version"}
+    )
+    try:
+        for incident in records.incidents:
+            RuleIncidentRepository(connection).add(
+                incident.incident_id,
+                incident,
+                incident.recorded_at,
+            )
+        BehavioralRuleVersionRepository(connection).add(
+            records.rule.rule_version_id,
+            records.rule,
+            records.rule.created_at,
+        )
+        ReviewerAssessmentRepository(connection).add(
+            records.assessment.assessment_id,
+            records.assessment,
+            records.assessment.provenance.assessed_at,
+        )
+        with pytest.raises(IntegrityError):
+            RuleConsolidationDecisionRepository(connection).add(
+                decision.consolidation_decision_id,
+                decision,
+                decision.decided_at,
+            )
+    finally:
+        connection.rollback()
+        connection.close()
+        engine.dispose()
+
+
+@pytest.mark.integration
 def test_decoder_rejects_materialized_reference_drift(tmp_path: Path) -> None:
     database_path = tmp_path / "reference-drift.db"
     engine, connection = _connection_for_path(database_path)
@@ -225,6 +365,91 @@ def test_decoder_rejects_materialized_reference_drift(tmp_path: Path) -> None:
     try:
         with pytest.raises(StorageIntegrityError, match="exact canonical references"):
             RuleConsolidationDecisionRepository(connection).get("decision-1")
+    finally:
+        connection.close()
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_decoder_rejects_resulting_rule_version_drift(tmp_path: Path) -> None:
+    database_path = tmp_path / "resulting-rule-drift.db"
+    engine, connection = _connection_for_path(database_path)
+    records = _records()
+    _, _, _, spare = _lineage_rules(records.rule)
+    try:
+        _add_records(connection, records)
+        BehavioralRuleVersionRepository(connection).add(
+            spare.rule_version_id,
+            spare,
+            spare.created_at,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+        engine.dispose()
+
+    with sqlite3.connect(database_path) as raw_connection:
+        raw_connection.execute("DROP TRIGGER rule_consolidation_decisions_no_update")
+        raw_connection.execute(
+            "UPDATE rule_consolidation_decisions "
+            "SET resulting_rule_version_id = 'rule-spare-v1' "
+            "WHERE consolidation_decision_id = 'decision-1'"
+        )
+
+    engine = create_database_engine(f"sqlite:///{database_path.as_posix()}")
+    connection = engine.connect()
+    try:
+        with pytest.raises(StorageIntegrityError, match="does not match record_json"):
+            RuleConsolidationDecisionRepository(connection).get("decision-1")
+    finally:
+        connection.close()
+        engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "tamper_sql",
+    (
+        "UPDATE behavioral_rule_version_supersessions "
+        "SET predecessor_rule_version_id = 'rule-spare-v1' "
+        "WHERE rule_version_id = 'rule-1-v1' AND position = 0",
+        "UPDATE behavioral_rule_version_supersessions SET position = 2 "
+        "WHERE rule_version_id = 'rule-1-v1' AND position = 1",
+    ),
+    ids=("reference", "position-gap"),
+)
+def test_decoder_rejects_supersession_reference_drift(
+    tmp_path: Path,
+    tamper_sql: str,
+) -> None:
+    database_path = tmp_path / "supersession-drift.db"
+    engine, connection = _connection_for_path(database_path)
+    records = _records()
+    predecessor_one, predecessor_two, successor, spare = _lineage_rules(records.rule)
+    try:
+        for incident in records.incidents:
+            RuleIncidentRepository(connection).add(
+                incident.incident_id,
+                incident,
+                incident.recorded_at,
+            )
+        repository = BehavioralRuleVersionRepository(connection)
+        for rule in (predecessor_one, predecessor_two, spare, successor):
+            repository.add(rule.rule_version_id, rule, rule.created_at)
+        connection.commit()
+    finally:
+        connection.close()
+        engine.dispose()
+
+    with sqlite3.connect(database_path) as raw_connection:
+        raw_connection.execute("DROP TRIGGER behavioral_rule_version_supersessions_no_update")
+        raw_connection.execute(tamper_sql)
+
+    engine = create_database_engine(f"sqlite:///{database_path.as_posix()}")
+    connection = engine.connect()
+    try:
+        with pytest.raises(StorageIntegrityError, match="exact canonical references"):
+            BehavioralRuleVersionRepository(connection).get(successor.rule_version_id)
     finally:
         connection.close()
         engine.dispose()
@@ -284,6 +509,18 @@ def test_rule_models_reject_duplicate_or_non_semantic_references() -> None:
         RuleConsolidationDecision.model_validate(
             records.decision.model_dump(mode="python")
             | {"consumed_assessment_ids": ("assessment-1", "assessment-1")}
+        )
+
+
+def test_decision_model_requires_result_only_for_rule_producing_actions() -> None:
+    decision = _records().decision
+    with pytest.raises(ValidationError, match="resulting_rule_version_id"):
+        RuleConsolidationDecision.model_validate(
+            decision.model_dump(mode="python") | {"resulting_rule_version_id": None}
+        )
+    with pytest.raises(ValidationError, match="resulting_rule_version_id"):
+        RuleConsolidationDecision.model_validate(
+            decision.model_dump(mode="python") | {"action": RuleAction.REJECT}
         )
 
 
@@ -445,6 +682,45 @@ def _records() -> _RuleRecords:
         governing_policy_hash=POLICY_HASH,
     )
     return _RuleRecords(incidents, rule, assessment, decision, regression)
+
+
+def _lineage_rules(
+    successor_template: BehavioralRuleVersion,
+) -> tuple[
+    BehavioralRuleVersion,
+    BehavioralRuleVersion,
+    BehavioralRuleVersion,
+    BehavioralRuleVersion,
+]:
+    predecessor_one = successor_template.model_copy(
+        update={
+            "rule_version_id": "rule-1-v0",
+            "semantic_version": "0.9.0",
+            "status": RuleStatus.SUPERSEDED,
+        }
+    )
+    predecessor_two = successor_template.model_copy(
+        update={
+            "rule_version_id": "rule-legacy-v1",
+            "rule_id": "rule-legacy",
+            "status": RuleStatus.SUPERSEDED,
+        }
+    )
+    successor = successor_template.model_copy(
+        update={
+            "supersedes_rule_version_ids": (
+                predecessor_two.rule_version_id,
+                predecessor_one.rule_version_id,
+            )
+        }
+    )
+    spare = successor_template.model_copy(
+        update={
+            "rule_version_id": "rule-spare-v1",
+            "rule_id": "rule-spare",
+        }
+    )
+    return predecessor_one, predecessor_two, successor, spare
 
 
 def _add_records(connection: Connection, records: _RuleRecords) -> None:

@@ -8,10 +8,7 @@ from sqlalchemy import Connection, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from alembic import command
-from super_scientist.providers.storage.database import (
-    create_database_engine,
-    upgrade_database,
-)
+from super_scientist.providers.storage.database import create_database_engine
 
 REVISION = "0004_behavioral_rules"
 
@@ -25,6 +22,7 @@ AUTHORITATIVE_0004_TABLES = {
 
 REFERENCE_0004_TABLES = {
     "behavioral_rule_version_incidents",
+    "behavioral_rule_version_supersessions",
     "reviewer_assessment_rule_versions",
     "reviewer_assessment_incidents",
     "rule_consolidation_assessments",
@@ -41,6 +39,7 @@ EXPECTED_PRIMARY_KEYS = {
     "rule_consolidation_decisions": ("consolidation_decision_id",),
     "rule_regression_cases": ("regression_case_id",),
     "behavioral_rule_version_incidents": ("rule_version_id", "position"),
+    "behavioral_rule_version_supersessions": ("rule_version_id", "position"),
     "reviewer_assessment_rule_versions": ("assessment_id", "position"),
     "reviewer_assessment_incidents": ("assessment_id", "position"),
     "rule_consolidation_assessments": ("consolidation_decision_id", "position"),
@@ -50,6 +49,14 @@ EXPECTED_PRIMARY_KEYS = {
 }
 
 EXPECTED_FOREIGN_KEYS = {
+    "behavioral_rule_version_supersessions": {
+        (("rule_version_id",), "behavioral_rule_versions", ("rule_version_id",)),
+        (
+            ("predecessor_rule_version_id",),
+            "behavioral_rule_versions",
+            ("rule_version_id",),
+        ),
+    },
     "behavioral_rule_version_incidents": {
         (("rule_version_id",), "behavioral_rule_versions", ("rule_version_id",)),
         (("incident_id",), "rule_incidents", ("incident_id",)),
@@ -69,6 +76,13 @@ EXPECTED_FOREIGN_KEYS = {
             ("consolidation_decision_id",),
         ),
         (("assessment_id",), "reviewer_assessments", ("assessment_id",)),
+    },
+    "rule_consolidation_decisions": {
+        (
+            ("resulting_rule_version_id",),
+            "behavioral_rule_versions",
+            ("rule_version_id",),
+        ),
     },
     "rule_consolidation_incidents": {
         (
@@ -102,7 +116,7 @@ def database_url(tmp_path: Path) -> str:
 
 @pytest.mark.integration
 def test_clean_upgrade_creates_behavioral_rule_storage(database_url: str) -> None:
-    upgrade_database(database_url)
+    _upgrade_to(database_url, REVISION)
 
     assert _table_names(database_url) >= (
         AUTHORITATIVE_0004_TABLES | REFERENCE_0004_TABLES | PROJECTION_0004_TABLES
@@ -144,7 +158,7 @@ def test_genuine_0001_database_upgrades_to_0004_without_changing_legacy_rows(
 
 
 @pytest.mark.integration
-def test_0003_database_upgrades_to_0004_without_changing_trail_rows(
+def test_0003_database_upgrades_to_0004_without_changing_progress_and_trail_rows(
     database_url: str,
 ) -> None:
     _upgrade_to(database_url, "0003_progress_and_evidence_trails")
@@ -152,6 +166,24 @@ def test_0003_database_upgrades_to_0004_without_changing_trail_rows(
     try:
         with engine.begin() as connection:
             _insert_record(connection, "research_runs", "run_id", "'existing-run'")
+            _insert_record(
+                connection,
+                "progress_plans",
+                "plan_version_id, run_id",
+                "'existing-plan', 'existing-run'",
+            )
+            _insert_record(
+                connection,
+                "claim_versions",
+                "claim_version_id, claim_id, version, status",
+                "'existing-claim-v1', 'existing-claim', 1, 'DRAFT'",
+            )
+            _insert_record(
+                connection,
+                "evidence_trail_versions",
+                "trail_version_id, trail_id, claim_version_id, version",
+                "'existing-trail-v1', 'existing-trail', 'existing-claim-v1', 1",
+            )
     finally:
         engine.dispose()
 
@@ -163,6 +195,16 @@ def test_0003_database_upgrades_to_0004_without_changing_trail_rows(
             assert (
                 connection.execute(text("SELECT run_id FROM research_runs")).scalar_one()
                 == "existing-run"
+            )
+            assert (
+                connection.execute(text("SELECT plan_version_id FROM progress_plans")).scalar_one()
+                == "existing-plan"
+            )
+            assert (
+                connection.execute(
+                    text("SELECT trail_version_id FROM evidence_trail_versions")
+                ).scalar_one()
+                == "existing-trail-v1"
             )
     finally:
         engine.dispose()
@@ -199,7 +241,11 @@ def test_0004_declares_keys_hash_checks_and_normalized_reference_positions(
             for table_name in AUTHORITATIVE_0004_TABLES:
                 columns = {column["name"]: column for column in inspector.get_columns(table_name)}
                 assert {"record_json", "content_hash", "created_at"} <= columns.keys()
-                assert all(columns[name]["nullable"] is False for name in columns)
+                required_columns = set(columns)
+                if table_name == "rule_consolidation_decisions":
+                    required_columns.remove("resulting_rule_version_id")
+                    assert columns["resulting_rule_version_id"]["nullable"] is True
+                assert all(columns[name]["nullable"] is False for name in required_columns)
                 checks = " ".join(
                     str(check["sqltext"]) for check in inspector.get_check_constraints(table_name)
                 )
@@ -272,10 +318,20 @@ def test_0004_rejects_orphan_incident_assessment_and_regression_references(
     try:
         with engine.begin() as connection:
             _seed_rule_history(connection)
+            with pytest.raises(IntegrityError):
+                _insert_record(
+                    connection,
+                    "rule_consolidation_decisions",
+                    "consolidation_decision_id, resulting_rule_version_id",
+                    "'orphan-result-decision', 'missing-rule-version'",
+                )
             orphan_statements = (
                 "INSERT INTO behavioral_rule_version_incidents "
                 "(rule_version_id, position, incident_id) "
                 "VALUES ('rule-1-v1', 1, 'missing-incident')",
+                "INSERT INTO behavioral_rule_version_supersessions "
+                "(rule_version_id, position, predecessor_rule_version_id) "
+                "VALUES ('rule-1-v1', 0, 'missing-rule-version')",
                 "INSERT INTO rule_consolidation_assessments "
                 "(consolidation_decision_id, position, assessment_id) "
                 "VALUES ('decision-1', 1, 'missing-assessment')",

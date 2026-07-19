@@ -534,6 +534,12 @@ rule_consolidation_decisions = Table(
     "rule_consolidation_decisions",
     metadata,
     Column("consolidation_decision_id", String(192), primary_key=True),
+    Column(
+        "resulting_rule_version_id",
+        String(192),
+        ForeignKey("behavioral_rule_versions.rule_version_id"),
+        nullable=True,
+    ),
     Column("record_json", Text, nullable=False),
     Column("content_hash", String(64), nullable=False),
     Column("created_at", String(40), nullable=False),
@@ -577,6 +583,33 @@ behavioral_rule_version_incidents = Table(
         "rule_version_id",
         "incident_id",
         name="uq_behavioral_rule_version_incidents_reference",
+    ),
+)
+
+behavioral_rule_version_supersessions = Table(
+    "behavioral_rule_version_supersessions",
+    metadata,
+    Column(
+        "rule_version_id",
+        String(192),
+        ForeignKey("behavioral_rule_versions.rule_version_id"),
+        primary_key=True,
+    ),
+    Column("position", Integer, primary_key=True),
+    Column(
+        "predecessor_rule_version_id",
+        String(192),
+        ForeignKey("behavioral_rule_versions.rule_version_id"),
+        nullable=False,
+    ),
+    CheckConstraint(
+        "position >= 0",
+        name="ck_behavioral_rule_version_supersessions_position",
+    ),
+    UniqueConstraint(
+        "rule_version_id",
+        "predecessor_rule_version_id",
+        name="uq_behavioral_rule_version_supersessions_reference",
     ),
 )
 
