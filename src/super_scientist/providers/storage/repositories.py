@@ -23,11 +23,15 @@ from super_scientist.domain.primitives import (
 from super_scientist.kernel.audit.chain import append_event, verify_chain
 from super_scientist.kernel.audit.models import AuditEvent
 from super_scientist.kernel.transactions.models import Proposal, TransactionDecision
-from super_scientist.providers.storage.integrity_records import AdaptationIntegritySnapshot
+from super_scientist.providers.storage.integrity_records import (
+    AdaptationIntegritySnapshot,
+    ProgressIntegritySnapshot,
+)
 from super_scientist.providers.storage.schema import (
     audit_events,
     claim_heads,
     claim_versions,
+    completion_decisions,
     configuration_versions,
     evaluator_audits,
     evaluator_collapse_records,
@@ -37,9 +41,15 @@ from super_scientist.providers.storage.schema import (
     evidence_records,
     governance_policies,
     governance_state,
+    progress_events,
+    progress_heads,
+    progress_plans,
+    progress_subtasks,
     research_run_events,
     research_run_heads,
     research_runs,
+    run_budgets,
+    run_checkpoints,
     self_improvement_measurements,
     transactions,
 )
@@ -63,6 +73,11 @@ _STRICT_JSON_PROPOSAL_TYPES = frozenset(
         "propose_evaluator_version",
         "decide_evaluator_succession",
         "propose_governance_policy_transition",
+        "record_progress_plan",
+        "append_progress_event",
+        "record_run_budget",
+        "record_run_checkpoint",
+        "decide_completion",
     }
 )
 
@@ -910,6 +925,27 @@ class RepositorySet:
             evaluator_head=EvaluatorHeadRepository(self._connection).get(),
         )
 
+    def progress_integrity_snapshot(self) -> ProgressIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            CompletionDecisionRepository,
+            ProgressEventRepository,
+            ProgressHeadRepository,
+            ProgressPlanRepository,
+            ProgressSubtaskRepository,
+            RunBudgetRepository,
+            RunCheckpointRepository,
+        )
+
+        return ProgressIntegritySnapshot(
+            plans=ProgressPlanRepository(self._connection).list_all(),
+            subtasks=ProgressSubtaskRepository(self._connection).list_all(),
+            events=ProgressEventRepository(self._connection).list_all(),
+            budgets=RunBudgetRepository(self._connection).list_all(),
+            checkpoints=RunCheckpointRepository(self._connection).list_all(),
+            completion_decisions=CompletionDecisionRepository(self._connection).list_all(),
+            heads=ProgressHeadRepository(self._connection).list_all(),
+        )
+
     def has_durable_state(self) -> bool:
         tables = (
             governance_policies,
@@ -929,6 +965,13 @@ class RepositorySet:
             evaluator_collapse_records,
             research_run_heads,
             evaluator_heads,
+            progress_plans,
+            progress_subtasks,
+            progress_events,
+            run_budgets,
+            run_checkpoints,
+            completion_decisions,
+            progress_heads,
         )
         return any(
             self._connection.execute(select(table).limit(1)).first() is not None for table in tables

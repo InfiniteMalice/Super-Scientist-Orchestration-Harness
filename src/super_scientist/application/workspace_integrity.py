@@ -21,6 +21,15 @@ from super_scientist.domain.improvement.models import (
     SelfImprovementMeasurementRecord,
 )
 from super_scientist.domain.primitives import Sha256Hex, canonical_json_bytes
+from super_scientist.domain.progress.calculations import calculate_progress
+from super_scientist.domain.progress.models import (
+    BudgetAllocation,
+    CompletionDecision,
+    ProgressPlan,
+    ProgressSubtask,
+    ProgressValidationEvent,
+    RunCheckpoint,
+)
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 from super_scientist.evaluation.claim_drift.deterministic import run_deterministic_checks
 from super_scientist.evaluation.claim_drift.models import CheckOutcome
@@ -31,8 +40,10 @@ from super_scientist.kernel.audit.models import (
 )
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
+    AppendProgressEvent,
     AppendResearchRunEvent,
     CreateResearchRun,
+    DecideCompletion,
     DecideEvaluatorSuccession,
     Proposal,
     ProposeClaim,
@@ -40,12 +51,18 @@ from super_scientist.kernel.transactions.models import (
     ProposeGovernancePolicyTransition,
     RecordConfigurationVersion,
     RecordEvaluatorAudit,
+    RecordProgressPlan,
+    RecordRunBudget,
+    RecordRunCheckpoint,
     RecordSelfImprovementMeasurement,
     TransactionDecision,
     TransitionClaim,
 )
 from super_scientist.providers.storage.artifacts import ArtifactStore
-from super_scientist.providers.storage.integrity_records import AdaptationIntegritySnapshot
+from super_scientist.providers.storage.integrity_records import (
+    AdaptationIntegritySnapshot,
+    ProgressIntegritySnapshot,
+)
 from super_scientist.providers.storage.repositories import (
     RepositorySet,
     StorageIntegrityError,
@@ -77,6 +94,7 @@ def verify_workspace(
         evidence = repositories.evidence.list_all()
         heads = repositories.claims.list_heads()
         adaptation = repositories.adaptation_integrity_snapshot()
+        progress = repositories.progress_integrity_snapshot()
         transactions = repositories.transactions.list_all()
         events = repositories.audit.list_all()
         _require(
@@ -91,6 +109,7 @@ def verify_workspace(
             evidence,
             heads,
             adaptation,
+            progress,
             policies,
             active_policy,
         )
@@ -237,6 +256,7 @@ def _require_projection_consistency(
     evidence: tuple[EvidenceRecord, ...],
     heads: tuple[AtomicClaim, ...],
     adaptation: AdaptationIntegritySnapshot,
+    progress: ProgressIntegritySnapshot,
     policies: tuple[PolicySnapshot, ...],
     active_policy: PolicySnapshot | None,
 ) -> None:
@@ -251,6 +271,13 @@ def _require_projection_consistency(
     expected_succession_decisions: dict[str, EvaluatorSuccessionDecision] = {}
     expected_run_heads: dict[str, str] = {}
     expected_evaluator_head: str | None = None
+    expected_progress_plans: dict[str, ProgressPlan] = {}
+    expected_progress_subtasks: dict[str, ProgressSubtask] = {}
+    expected_progress_events: dict[str, ProgressValidationEvent] = {}
+    expected_budgets: dict[str, BudgetAllocation] = {}
+    expected_checkpoints: dict[str, RunCheckpoint] = {}
+    expected_completion_decisions: dict[str, CompletionDecision] = {}
+    expected_progress_heads: dict[str, tuple[str, str]] = {}
     accepted_evaluator_succession = False
     transitions: list[tuple[ProposeGovernancePolicyTransition, str]] = []
     for audit_record in audit_records:
@@ -300,6 +327,165 @@ def _require_projection_consistency(
                 "research run event projection",
             )
             expected_run_heads[proposal.event.run_id] = proposal.event.run_event_id
+        elif isinstance(proposal, RecordProgressPlan):
+            plan = proposal.plan
+            _require_governing_hash(
+                plan.governing_policy_hash,
+                audit_record.governing_policy_hash,
+                "progress plan",
+            )
+            _require(plan.run_id in expected_runs, "progress plan transaction precedes its run")
+            prior_versions = tuple(
+                item.version
+                for item in expected_progress_plans.values()
+                if item.run_id == plan.run_id
+            )
+            _require(
+                plan.version == max(prior_versions, default=0) + 1,
+                "progress plan does not continue replay-derived run history",
+            )
+            calculate_progress(plan, ())
+            _add_unique(
+                expected_progress_plans,
+                plan.plan_version_id,
+                plan,
+                "progress plan projection",
+            )
+            for subtask in plan.subtasks:
+                _require(
+                    subtask.plan_version_id == plan.plan_version_id,
+                    "progress subtask does not belong to its enclosing plan",
+                )
+                _add_unique(
+                    expected_progress_subtasks,
+                    subtask.subtask_id,
+                    subtask,
+                    "progress subtask projection",
+                )
+        elif isinstance(proposal, AppendProgressEvent):
+            event = proposal.event
+            _require_governing_hash(
+                event.governing_policy_hash,
+                audit_record.governing_policy_hash,
+                "progress event",
+            )
+            progress_plan = expected_progress_plans.get(event.plan_version_id)
+            progress_subtask = expected_progress_subtasks.get(event.subtask_id)
+            _require(
+                event.run_id in expected_runs
+                and progress_plan is not None
+                and progress_plan.run_id == event.run_id,
+                "progress event references an unprojected run or plan",
+            )
+            _require(
+                progress_subtask is not None
+                and progress_subtask.plan_version_id == event.plan_version_id,
+                "progress event subtask does not belong to its plan",
+            )
+            _add_unique(
+                expected_progress_events,
+                event.event_id,
+                event,
+                "progress event projection",
+            )
+            expected_progress_heads[event.run_id] = (
+                event.plan_version_id,
+                event.event_id,
+            )
+        elif isinstance(proposal, RecordRunBudget):
+            budget = proposal.budget
+            _require_governing_hash(
+                budget.governing_policy_hash,
+                audit_record.governing_policy_hash,
+                "run budget",
+            )
+            budget_plan = expected_progress_plans.get(budget.plan_version_id)
+            _require(
+                budget.run_id in expected_runs
+                and budget_plan is not None
+                and budget_plan.run_id == budget.run_id,
+                "run budget references an unprojected run or plan",
+            )
+            _add_unique(
+                expected_budgets,
+                budget.budget_id,
+                budget,
+                "run budget projection",
+            )
+        elif isinstance(proposal, RecordRunCheckpoint):
+            checkpoint = proposal.checkpoint
+            _require_governing_hash(
+                checkpoint.governing_policy_hash,
+                audit_record.governing_policy_hash,
+                "run checkpoint",
+            )
+            checkpoint_plan = expected_progress_plans.get(checkpoint.plan_version_id)
+            _require(
+                checkpoint.run_id in expected_runs
+                and checkpoint_plan is not None
+                and checkpoint_plan.run_id == checkpoint.run_id,
+                "run checkpoint references an unprojected run or plan",
+            )
+            if checkpoint_plan is None:  # pragma: no cover - narrowed by fail-closed check above
+                raise StorageIntegrityError("run checkpoint plan is unavailable")
+            summary = calculate_progress(
+                checkpoint_plan,
+                tuple(
+                    event
+                    for event in expected_progress_events.values()
+                    if event.plan_version_id == checkpoint.plan_version_id
+                ),
+            )
+            _require(
+                checkpoint.validated_subtask_ids == summary.validated_subtask_ids,
+                "run checkpoint does not match replay-derived progress",
+            )
+            _add_unique(
+                expected_checkpoints,
+                checkpoint.checkpoint_id,
+                checkpoint,
+                "run checkpoint projection",
+            )
+        elif isinstance(proposal, DecideCompletion):
+            completion = proposal.completion_proposal
+            decision = proposal.completion_decision
+            _require_governing_hash(
+                completion.governing_policy_hash,
+                audit_record.governing_policy_hash,
+                "completion proposal",
+            )
+            _require_governing_hash(
+                decision.governing_policy_hash,
+                audit_record.governing_policy_hash,
+                "completion decision",
+            )
+            completion_plan = expected_progress_plans.get(completion.plan_version_id)
+            _require(
+                completion.run_id in expected_runs
+                and completion_plan is not None
+                and completion_plan.run_id == completion.run_id,
+                "completion references an unprojected run or plan",
+            )
+            _require(
+                any(
+                    budget.run_id == completion.run_id
+                    and budget.plan_version_id == completion.plan_version_id
+                    for budget in expected_budgets.values()
+                ),
+                "completion transaction precedes its run budget",
+            )
+            _require(
+                decision.run_id == completion.run_id
+                and decision.plan_version_id == completion.plan_version_id
+                and decision.completion_proposal_id == completion.completion_proposal_id,
+                "completion decision is not bound to its completion proposal",
+            )
+            _add_unique(
+                expected_completion_decisions,
+                decision.completion_decision_id,
+                decision,
+                "completion decision projection",
+            )
         elif isinstance(proposal, RecordConfigurationVersion):
             configuration = proposal.configuration_version
             _require_governing_hash(
@@ -478,6 +664,39 @@ def _require_projection_consistency(
     _require(
         dict(adaptation.research_run_heads) == expected_run_heads,
         "research run heads do not match accepted event transactions",
+    )
+    _require(
+        {record.plan_version_id: record for record in progress.plans} == expected_progress_plans,
+        "progress plan projections do not match accepted transactions",
+    )
+    _require(
+        {record.subtask_id: record for record in progress.subtasks} == expected_progress_subtasks,
+        "progress subtask projections do not match accepted transactions",
+    )
+    _require(
+        {record.event_id: record for record in progress.events} == expected_progress_events,
+        "progress event projections do not match accepted transactions",
+    )
+    _require(
+        {record.budget_id: record for record in progress.budgets} == expected_budgets,
+        "run budget projections do not match accepted transactions",
+    )
+    _require(
+        {record.checkpoint_id: record for record in progress.checkpoints} == expected_checkpoints,
+        "run checkpoint projections do not match accepted transactions",
+    )
+    _require(
+        {record.completion_decision_id: record for record in progress.completion_decisions}
+        == expected_completion_decisions,
+        "completion decision projections do not match accepted transactions",
+    )
+    _require(
+        {
+            run_id: (plan_version_id, event_id)
+            for run_id, plan_version_id, event_id in progress.heads
+        }
+        == expected_progress_heads,
+        "progress heads do not match accepted event transactions",
     )
     if accepted_evaluator_succession:
         _require(

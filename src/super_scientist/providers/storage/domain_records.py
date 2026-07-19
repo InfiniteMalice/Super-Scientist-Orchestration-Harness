@@ -18,9 +18,18 @@ from super_scientist.domain.improvement.models import (
     SelfImprovementMeasurementRecord,
 )
 from super_scientist.domain.primitives import UtcTimestamp, canonical_json_bytes, sha256_hex
+from super_scientist.domain.progress.models import (
+    BudgetAllocation,
+    CompletionDecision,
+    ProgressPlan,
+    ProgressSubtask,
+    ProgressValidationEvent,
+    RunCheckpoint,
+)
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 from super_scientist.providers.storage.repositories import StorageIntegrityError
 from super_scientist.providers.storage.schema import (
+    completion_decisions,
     configuration_versions,
     evaluator_audits,
     evaluator_collapse_records,
@@ -32,9 +41,12 @@ from super_scientist.providers.storage.schema import (
     progress_events,
     progress_heads,
     progress_plans,
+    progress_subtasks,
     research_run_events,
     research_run_heads,
     research_runs,
+    run_budgets,
+    run_checkpoints,
     self_improvement_measurements,
 )
 
@@ -43,6 +55,7 @@ TIMESTAMP_ADAPTER: TypeAdapter[UtcTimestamp] = TypeAdapter(UtcTimestamp)
 type _RelationshipStorageType = type[str] | type[int]
 
 __all__ = [
+    "CompletionDecisionRepository",
     "ConfigurationVersionRepository",
     "EvaluatorAuditRepository",
     "EvaluatorCollapseRepository",
@@ -50,10 +63,15 @@ __all__ = [
     "EvaluatorSuccessionRepository",
     "EvaluatorVersionRepository",
     "EvidenceTrailHeadRepository",
+    "ProgressEventRepository",
     "ProgressHeadRepository",
+    "ProgressPlanRepository",
+    "ProgressSubtaskRepository",
     "ResearchRunEventRepository",
     "ResearchRunHeadRepository",
     "ResearchRunRepository",
+    "RunBudgetRepository",
+    "RunCheckpointRepository",
     "SelfImprovementMeasurementRepository",
 ]
 
@@ -286,6 +304,85 @@ class EvaluatorCollapseRepository(_AppendOnlyRecordRepository[EvaluatorCollapseR
             model_type=EvaluatorCollapseRecord,
             identifier_field="evaluator_collapse_record_id",
             relationship_fields={"evaluator_version_id": "evaluator_version_id"},
+        )
+
+
+class ProgressPlanRepository(_AppendOnlyRecordRepository[ProgressPlan]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=progress_plans,
+            model_type=ProgressPlan,
+            identifier_field="plan_version_id",
+            relationship_fields={"run_id": "run_id"},
+        )
+
+
+class ProgressSubtaskRepository(_AppendOnlyRecordRepository[ProgressSubtask]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=progress_subtasks,
+            model_type=ProgressSubtask,
+            identifier_field="subtask_id",
+            relationship_fields={"plan_version_id": "plan_version_id"},
+        )
+
+
+class ProgressEventRepository(_AppendOnlyRecordRepository[ProgressValidationEvent]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=progress_events,
+            model_type=ProgressValidationEvent,
+            identifier_field="event_id",
+            relationship_fields={
+                "run_id": "run_id",
+                "plan_version_id": "plan_version_id",
+                "subtask_id": "subtask_id",
+            },
+        )
+
+
+class RunBudgetRepository(_AppendOnlyRecordRepository[BudgetAllocation]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=run_budgets,
+            model_type=BudgetAllocation,
+            identifier_field="budget_id",
+            relationship_fields={
+                "run_id": "run_id",
+                "plan_version_id": "plan_version_id",
+            },
+        )
+
+
+class RunCheckpointRepository(_AppendOnlyRecordRepository[RunCheckpoint]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=run_checkpoints,
+            model_type=RunCheckpoint,
+            identifier_field="checkpoint_id",
+            relationship_fields={
+                "run_id": "run_id",
+                "plan_version_id": "plan_version_id",
+            },
+        )
+
+
+class CompletionDecisionRepository(_AppendOnlyRecordRepository[CompletionDecision]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=completion_decisions,
+            model_type=CompletionDecision,
+            identifier_field="completion_decision_id",
+            relationship_fields={
+                "run_id": "run_id",
+                "plan_version_id": "plan_version_id",
+            },
         )
 
 

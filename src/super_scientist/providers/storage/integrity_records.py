@@ -12,6 +12,14 @@ from super_scientist.domain.improvement.models import (
     EvaluatorAuditRecord,
     SelfImprovementMeasurementRecord,
 )
+from super_scientist.domain.progress.models import (
+    BudgetAllocation,
+    CompletionDecision,
+    ProgressPlan,
+    ProgressSubtask,
+    ProgressValidationEvent,
+    RunCheckpoint,
+)
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 
 
@@ -29,3 +37,16 @@ class AdaptationIntegritySnapshot:
     evaluator_collapse_records: tuple[EvaluatorCollapseRecord, ...]
     research_run_heads: tuple[tuple[str, str], ...]
     evaluator_head: str | None
+
+
+@dataclass(frozen=True)
+class ProgressIntegritySnapshot:
+    """Fixed read-only progress storage view used only for transaction replay."""
+
+    plans: tuple[ProgressPlan, ...]
+    subtasks: tuple[ProgressSubtask, ...]
+    events: tuple[ProgressValidationEvent, ...]
+    budgets: tuple[BudgetAllocation, ...]
+    checkpoints: tuple[RunCheckpoint, ...]
+    completion_decisions: tuple[CompletionDecision, ...]
+    heads: tuple[tuple[str, str, str], ...]

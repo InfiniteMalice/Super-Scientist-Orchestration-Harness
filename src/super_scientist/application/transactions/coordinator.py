@@ -16,6 +16,10 @@ from super_scientist.application.transactions.contracts import (
     HandlerReadCapability,
     HandlerWriteCapability,
 )
+from super_scientist.application.transactions.progress import (
+    fixed_progress_handlers,
+    progress_capabilities,
+)
 from super_scientist.application.transactions.router import ProposalRouter
 from super_scientist.application.workspace_integrity import require_workspace_integrity
 from super_scientist.config.models import PolicySnapshot
@@ -32,12 +36,17 @@ from super_scientist.kernel.admission.engine import AdmissionContext, AdmissionE
 from super_scientist.kernel.audit.chain import append_event
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
+    AppendProgressEvent,
+    DecideCompletion,
     InvalidProposal,
     Proposal,
     ProposalAttempt,
     ProposalKind,
     ProposeClaim,
     ProposeGovernancePolicyTransition,
+    RecordProgressPlan,
+    RecordRunBudget,
+    RecordRunCheckpoint,
     RejectionCode,
     TransactionDecision,
     TransitionClaim,
@@ -153,7 +162,12 @@ class TransactionCoordinator:
         adaptation_handlers = tuple(
             (handler.proposal_type, handler) for handler in fixed_adaptation_handlers()
         )
-        self._router = ProposalRouter((*compatibility_handlers, *adaptation_handlers))
+        progress_handlers = tuple(
+            (handler.proposal_type, handler) for handler in fixed_progress_handlers()
+        )
+        self._router = ProposalRouter(
+            (*compatibility_handlers, *adaptation_handlers, *progress_handlers)
+        )
 
     @property
     def router(self) -> ProposalRouter:
@@ -347,14 +361,31 @@ class TransactionCoordinator:
             if isinstance(admitted_proposal, (AddEvidence, ProposeClaim, TransitionClaim)):
                 reads = _CompatibilityReadCapability(repositories, stored_policy)
                 writes = _CompatibilityWriteCapability(repositories)
-            else:
-                capabilities = adaptation_capabilities(
+            elif isinstance(
+                admitted_proposal,
+                (
+                    RecordProgressPlan,
+                    AppendProgressEvent,
+                    RecordRunBudget,
+                    RecordRunCheckpoint,
+                    DecideCompletion,
+                ),
+            ):
+                progress_io = progress_capabilities(
                     admitted_proposal,
                     connection,
                     stored_policy,
                 )
-                reads = capabilities
-                writes = capabilities
+                reads = progress_io
+                writes = progress_io
+            else:
+                adaptation_io = adaptation_capabilities(
+                    admitted_proposal,
+                    connection,
+                    stored_policy,
+                )
+                reads = adaptation_io
+                writes = adaptation_io
             decision = handler.decide(
                 admitted_proposal,
                 handler.build_context(admitted_proposal, reads),

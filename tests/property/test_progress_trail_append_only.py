@@ -91,20 +91,23 @@ def test_runtime_schema_declares_only_fixed_0003_storage_tables() -> None:
     )
 
 
-def test_task_5_public_surface_exposes_only_fixed_head_repositories() -> None:
-    expected = {"ProgressHeadRepository", "EvidenceTrailHeadRepository"}
-    assert expected <= set(domain_records.__all__)
-    for repository_name in expected:
-        repository_type = getattr(domain_records, repository_name)
-        assert tuple(python_inspect.signature(repository_type).parameters) == ("connection",)
-
-    deferred_record_repositories = {
+def test_public_surface_exposes_fixed_progress_record_and_head_repositories() -> None:
+    expected = {
         "ProgressPlanRepository",
         "ProgressSubtaskRepository",
         "ProgressEventRepository",
         "RunBudgetRepository",
         "RunCheckpointRepository",
         "CompletionDecisionRepository",
+        "ProgressHeadRepository",
+        "EvidenceTrailHeadRepository",
+    }
+    assert expected <= set(domain_records.__all__)
+    for repository_name in expected:
+        repository_type = getattr(domain_records, repository_name)
+        assert tuple(python_inspect.signature(repository_type).parameters) == ("connection",)
+
+    deferred_record_repositories = {
         "EvidenceTrailVersionRepository",
         "EvidenceTrailNodeRepository",
         "EvidenceTrailRelationRepository",

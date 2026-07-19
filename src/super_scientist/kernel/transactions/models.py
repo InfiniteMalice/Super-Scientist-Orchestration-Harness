@@ -27,6 +27,14 @@ from super_scientist.domain.primitives import (
     StableIdentifier,
     UtcTimestamp,
 )
+from super_scientist.domain.progress.models import (
+    BudgetAllocation,
+    CompletionDecision,
+    CompletionProposal,
+    ProgressPlan,
+    ProgressValidationEvent,
+    RunCheckpoint,
+)
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 
 type ProposalKind = Literal[
@@ -41,6 +49,11 @@ type ProposalKind = Literal[
     "propose_evaluator_version",
     "decide_evaluator_succession",
     "propose_governance_policy_transition",
+    "record_progress_plan",
+    "append_progress_event",
+    "record_run_budget",
+    "record_run_checkpoint",
+    "decide_completion",
 ]
 
 
@@ -170,6 +183,32 @@ class ProposeGovernancePolicyTransition(ProposalBase):
     classification: ChangeClassification
 
 
+class RecordProgressPlan(ProposalBase):
+    proposal_type: Literal["record_progress_plan"] = "record_progress_plan"
+    plan: ProgressPlan
+
+
+class AppendProgressEvent(ProposalBase):
+    proposal_type: Literal["append_progress_event"] = "append_progress_event"
+    event: ProgressValidationEvent
+
+
+class RecordRunBudget(ProposalBase):
+    proposal_type: Literal["record_run_budget"] = "record_run_budget"
+    budget: BudgetAllocation
+
+
+class RecordRunCheckpoint(ProposalBase):
+    proposal_type: Literal["record_run_checkpoint"] = "record_run_checkpoint"
+    checkpoint: RunCheckpoint
+
+
+class DecideCompletion(ProposalBase):
+    proposal_type: Literal["decide_completion"] = "decide_completion"
+    completion_proposal: CompletionProposal
+    completion_decision: CompletionDecision
+
+
 class InvalidProposal(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
@@ -193,6 +232,11 @@ Proposal = Annotated[
     | ProposeEvaluatorVersion
     | DecideEvaluatorSuccession
     | ProposeGovernancePolicyTransition
+    | RecordProgressPlan
+    | AppendProgressEvent
+    | RecordRunBudget
+    | RecordRunCheckpoint
+    | DecideCompletion
     | InvalidProposal,
     Field(discriminator="proposal_type"),
 ]
