@@ -227,3 +227,256 @@ evaluator_heads = Table(
     ),
     CheckConstraint("singleton_id = 1", name="ck_evaluator_heads_singleton"),
 )
+
+progress_plans = Table(
+    "progress_plans",
+    metadata,
+    Column("plan_version_id", String(160), primary_key=True),
+    Column("run_id", String(128), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(["run_id"], ["research_runs.run_id"]),
+    UniqueConstraint("run_id", "plan_version_id", name="uq_progress_plan_run"),
+    _content_hash_constraint("ck_progress_plans_content_hash"),
+)
+
+progress_subtasks = Table(
+    "progress_subtasks",
+    metadata,
+    Column("subtask_id", String(160), primary_key=True),
+    Column("plan_version_id", String(160), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(["plan_version_id"], ["progress_plans.plan_version_id"]),
+    UniqueConstraint("plan_version_id", "subtask_id", name="uq_progress_subtask_plan"),
+    _content_hash_constraint("ck_progress_subtasks_content_hash"),
+)
+
+progress_events = Table(
+    "progress_events",
+    metadata,
+    Column("event_id", String(160), primary_key=True),
+    Column("run_id", String(128), nullable=False),
+    Column("plan_version_id", String(160), nullable=False),
+    Column("subtask_id", String(160), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["run_id", "plan_version_id"],
+        ["progress_plans.run_id", "progress_plans.plan_version_id"],
+    ),
+    ForeignKeyConstraint(
+        ["plan_version_id", "subtask_id"],
+        ["progress_subtasks.plan_version_id", "progress_subtasks.subtask_id"],
+    ),
+    UniqueConstraint("plan_version_id", "event_id", name="uq_progress_event_plan"),
+    _content_hash_constraint("ck_progress_events_content_hash"),
+)
+
+run_budgets = Table(
+    "run_budgets",
+    metadata,
+    Column("budget_id", String(160), primary_key=True),
+    Column("run_id", String(128), nullable=False),
+    Column("plan_version_id", String(160), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["run_id", "plan_version_id"],
+        ["progress_plans.run_id", "progress_plans.plan_version_id"],
+    ),
+    _content_hash_constraint("ck_run_budgets_content_hash"),
+)
+
+run_checkpoints = Table(
+    "run_checkpoints",
+    metadata,
+    Column("checkpoint_id", String(160), primary_key=True),
+    Column("run_id", String(128), nullable=False),
+    Column("plan_version_id", String(160), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["run_id", "plan_version_id"],
+        ["progress_plans.run_id", "progress_plans.plan_version_id"],
+    ),
+    _content_hash_constraint("ck_run_checkpoints_content_hash"),
+)
+
+completion_decisions = Table(
+    "completion_decisions",
+    metadata,
+    Column("completion_decision_id", String(160), primary_key=True),
+    Column("run_id", String(128), nullable=False),
+    Column("plan_version_id", String(160), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["run_id", "plan_version_id"],
+        ["progress_plans.run_id", "progress_plans.plan_version_id"],
+    ),
+    _content_hash_constraint("ck_completion_decisions_content_hash"),
+)
+
+evidence_trail_versions = Table(
+    "evidence_trail_versions",
+    metadata,
+    Column("trail_version_id", String(160), primary_key=True),
+    Column("trail_id", String(128), nullable=False),
+    Column("claim_version_id", String(160), nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(["claim_version_id"], ["claim_versions.claim_version_id"]),
+    UniqueConstraint("trail_id", "version", name="uq_evidence_trail_version"),
+    UniqueConstraint(
+        "trail_id",
+        "trail_version_id",
+        "version",
+        name="uq_evidence_trail_head_target",
+    ),
+    UniqueConstraint(
+        "trail_version_id",
+        "claim_version_id",
+        name="uq_evidence_trail_claim",
+    ),
+    CheckConstraint("version >= 1", name="ck_evidence_trail_versions_version"),
+    _content_hash_constraint("ck_evidence_trail_versions_content_hash"),
+)
+
+evidence_trail_nodes = Table(
+    "evidence_trail_nodes",
+    metadata,
+    Column("node_id", String(160), primary_key=True),
+    Column("trail_version_id", String(160), nullable=False),
+    Column("evidence_id", String(128), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["trail_version_id"],
+        ["evidence_trail_versions.trail_version_id"],
+    ),
+    ForeignKeyConstraint(["evidence_id"], ["evidence_records.evidence_id"]),
+    UniqueConstraint("trail_version_id", "node_id", name="uq_evidence_trail_node"),
+    _content_hash_constraint("ck_evidence_trail_nodes_content_hash"),
+)
+
+evidence_trail_relations = Table(
+    "evidence_trail_relations",
+    metadata,
+    Column("relation_id", String(160), primary_key=True),
+    Column("trail_version_id", String(160), nullable=False),
+    Column("source_node_id", String(160), nullable=False),
+    Column("target_node_id", String(160), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["trail_version_id"],
+        ["evidence_trail_versions.trail_version_id"],
+    ),
+    ForeignKeyConstraint(
+        ["trail_version_id", "source_node_id"],
+        ["evidence_trail_nodes.trail_version_id", "evidence_trail_nodes.node_id"],
+    ),
+    ForeignKeyConstraint(
+        ["trail_version_id", "target_node_id"],
+        ["evidence_trail_nodes.trail_version_id", "evidence_trail_nodes.node_id"],
+    ),
+    UniqueConstraint(
+        "trail_version_id",
+        "relation_id",
+        name="uq_evidence_trail_relation",
+    ),
+    _content_hash_constraint("ck_evidence_trail_relations_content_hash"),
+)
+
+evidence_trail_checks = Table(
+    "evidence_trail_checks",
+    metadata,
+    Column("check_id", String(160), primary_key=True),
+    Column("trail_version_id", String(160), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["trail_version_id"],
+        ["evidence_trail_versions.trail_version_id"],
+    ),
+    _content_hash_constraint("ck_evidence_trail_checks_content_hash"),
+)
+
+evidence_trail_assessments = Table(
+    "evidence_trail_assessments",
+    metadata,
+    Column("assessment_id", String(160), primary_key=True),
+    Column("trail_version_id", String(160), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["trail_version_id"],
+        ["evidence_trail_versions.trail_version_id"],
+    ),
+    _content_hash_constraint("ck_evidence_trail_assessments_content_hash"),
+)
+
+report_sentence_bindings = Table(
+    "report_sentence_bindings",
+    metadata,
+    Column("binding_id", String(160), primary_key=True),
+    Column("trail_version_id", String(160), nullable=False),
+    Column("claim_version_id", String(160), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["trail_version_id", "claim_version_id"],
+        [
+            "evidence_trail_versions.trail_version_id",
+            "evidence_trail_versions.claim_version_id",
+        ],
+    ),
+    _content_hash_constraint("ck_report_sentence_bindings_content_hash"),
+)
+
+progress_heads = Table(
+    "progress_heads",
+    metadata,
+    Column("run_id", String(128), primary_key=True),
+    Column("plan_version_id", String(160), nullable=False),
+    Column("last_event_id", String(160), nullable=False),
+    ForeignKeyConstraint(
+        ["run_id", "plan_version_id"],
+        ["progress_plans.run_id", "progress_plans.plan_version_id"],
+    ),
+    ForeignKeyConstraint(
+        ["plan_version_id", "last_event_id"],
+        ["progress_events.plan_version_id", "progress_events.event_id"],
+    ),
+)
+
+evidence_trail_heads = Table(
+    "evidence_trail_heads",
+    metadata,
+    Column("trail_id", String(128), primary_key=True),
+    Column("trail_version_id", String(160), nullable=False),
+    Column("version", Integer, nullable=False),
+    ForeignKeyConstraint(
+        ["trail_id", "trail_version_id", "version"],
+        [
+            "evidence_trail_versions.trail_id",
+            "evidence_trail_versions.trail_version_id",
+            "evidence_trail_versions.version",
+        ],
+    ),
+    CheckConstraint("version >= 1", name="ck_evidence_trail_heads_version"),
+)

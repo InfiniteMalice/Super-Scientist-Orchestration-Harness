@@ -53,7 +53,7 @@ def database_url(tmp_path: Path) -> str:
 
 @pytest.mark.integration
 def test_clean_upgrade_creates_governed_adaptation_foundation(database_url: str) -> None:
-    upgrade_database(database_url)
+    _upgrade_to(database_url, "0002_governed_adaptation_foundation")
 
     table_names = _table_names(database_url)
     assert table_names >= AUTHORITATIVE_0002_TABLES

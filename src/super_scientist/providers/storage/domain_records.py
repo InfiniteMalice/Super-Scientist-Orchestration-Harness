@@ -27,6 +27,11 @@ from super_scientist.providers.storage.schema import (
     evaluator_heads,
     evaluator_succession_decisions,
     evaluator_versions,
+    evidence_trail_heads,
+    evidence_trail_versions,
+    progress_events,
+    progress_heads,
+    progress_plans,
     research_run_events,
     research_run_heads,
     research_runs,
@@ -42,6 +47,8 @@ __all__ = [
     "EvaluatorHeadRepository",
     "EvaluatorSuccessionRepository",
     "EvaluatorVersionRepository",
+    "EvidenceTrailHeadRepository",
+    "ProgressHeadRepository",
     "ResearchRunEventRepository",
     "ResearchRunHeadRepository",
     "ResearchRunRepository",
@@ -340,8 +347,177 @@ class EvaluatorHeadRepository:
         )
 
 
+class ProgressHeadRepository:
+    def __init__(self, connection: Connection) -> None:
+        self._connection = connection
+
+    def get(self, run_id: str) -> tuple[str, str] | None:
+        row = (
+            self._connection.execute(
+                select(
+                    progress_heads.c.run_id,
+                    progress_heads.c.plan_version_id,
+                    progress_heads.c.last_event_id,
+                ).where(progress_heads.c.run_id == run_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return None if row is None else self._decode_row(dict(row))
+
+    def list_all(self) -> tuple[tuple[str, str, str], ...]:
+        rows = self._connection.execute(
+            select(
+                progress_heads.c.run_id,
+                progress_heads.c.plan_version_id,
+                progress_heads.c.last_event_id,
+            ).order_by(progress_heads.c.run_id)
+        ).mappings()
+        heads: list[tuple[str, str, str]] = []
+        for row in rows:
+            stored_row = dict(row)
+            run_id = _stored_string(stored_row, "run_id")
+            plan_version_id, last_event_id = self._decode_row(stored_row)
+            heads.append((run_id, plan_version_id, last_event_id))
+        return tuple(heads)
+
+    def set(self, run_id: str, plan_version_id: str, last_event_id: str) -> None:
+        plan_run_id = self._connection.execute(
+            select(progress_plans.c.run_id).where(
+                progress_plans.c.plan_version_id == plan_version_id
+            )
+        ).scalar_one_or_none()
+        _require_integrity(plan_run_id == run_id, "plan_version_id does not belong to run_id")
+        event_relationship = self._connection.execute(
+            select(progress_events.c.run_id, progress_events.c.plan_version_id).where(
+                progress_events.c.event_id == last_event_id
+            )
+        ).one_or_none()
+        _require_integrity(event_relationship is not None, "last_event_id does not exist")
+        _require_integrity(
+            event_relationship == (run_id, plan_version_id),
+            "last_event_id does not belong to run_id and plan_version_id",
+        )
+        statement = sqlite_insert(progress_heads).values(
+            run_id=run_id,
+            plan_version_id=plan_version_id,
+            last_event_id=last_event_id,
+        )
+        self._connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=[progress_heads.c.run_id],
+                set_={
+                    "plan_version_id": plan_version_id,
+                    "last_event_id": last_event_id,
+                },
+            )
+        )
+
+    def _decode_row(self, row: Mapping[str, object]) -> tuple[str, str]:
+        run_id = _stored_string(row, "run_id")
+        plan_version_id = _stored_string(row, "plan_version_id")
+        last_event_id = _stored_string(row, "last_event_id")
+        plan_run_id = self._connection.execute(
+            select(progress_plans.c.run_id).where(
+                progress_plans.c.plan_version_id == plan_version_id
+            )
+        ).scalar_one_or_none()
+        _require_integrity(plan_run_id == run_id, "progress head references an incoherent plan")
+        event_relationship = self._connection.execute(
+            select(progress_events.c.run_id, progress_events.c.plan_version_id).where(
+                progress_events.c.event_id == last_event_id
+            )
+        ).one_or_none()
+        _require_integrity(
+            event_relationship == (run_id, plan_version_id),
+            "progress head references an incoherent event",
+        )
+        return plan_version_id, last_event_id
+
+
+class EvidenceTrailHeadRepository:
+    def __init__(self, connection: Connection) -> None:
+        self._connection = connection
+
+    def get(self, trail_id: str) -> tuple[str, int] | None:
+        row = (
+            self._connection.execute(
+                select(
+                    evidence_trail_heads.c.trail_id,
+                    evidence_trail_heads.c.trail_version_id,
+                    evidence_trail_heads.c.version,
+                ).where(evidence_trail_heads.c.trail_id == trail_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return None if row is None else self._decode_row(dict(row))
+
+    def list_all(self) -> tuple[tuple[str, str, int], ...]:
+        rows = self._connection.execute(
+            select(
+                evidence_trail_heads.c.trail_id,
+                evidence_trail_heads.c.trail_version_id,
+                evidence_trail_heads.c.version,
+            ).order_by(evidence_trail_heads.c.trail_id)
+        ).mappings()
+        heads: list[tuple[str, str, int]] = []
+        for row in rows:
+            stored_row = dict(row)
+            trail_id = _stored_string(stored_row, "trail_id")
+            trail_version_id, version = self._decode_row(stored_row)
+            heads.append((trail_id, trail_version_id, version))
+        return tuple(heads)
+
+    def set(self, trail_id: str, trail_version_id: str, version: int) -> None:
+        stored_identity = self._connection.execute(
+            select(
+                evidence_trail_versions.c.trail_id,
+                evidence_trail_versions.c.version,
+            ).where(evidence_trail_versions.c.trail_version_id == trail_version_id)
+        ).one_or_none()
+        _require_integrity(
+            stored_identity == (trail_id, version),
+            "trail_version_id does not match trail_id and version",
+        )
+        statement = sqlite_insert(evidence_trail_heads).values(
+            trail_id=trail_id,
+            trail_version_id=trail_version_id,
+            version=version,
+        )
+        self._connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=[evidence_trail_heads.c.trail_id],
+                set_={"trail_version_id": trail_version_id, "version": version},
+            )
+        )
+
+    def _decode_row(self, row: Mapping[str, object]) -> tuple[str, int]:
+        trail_id = _stored_string(row, "trail_id")
+        trail_version_id = _stored_string(row, "trail_version_id")
+        version = _stored_integer(row, "version")
+        stored_identity = self._connection.execute(
+            select(
+                evidence_trail_versions.c.trail_id,
+                evidence_trail_versions.c.version,
+            ).where(evidence_trail_versions.c.trail_version_id == trail_version_id)
+        ).one_or_none()
+        _require_integrity(
+            stored_identity == (trail_id, version),
+            "evidence trail head references an incoherent version",
+        )
+        return trail_version_id, version
+
+
 def _stored_string(row: Mapping[str, object], column_name: str) -> str:
     value = row[column_name]
     if not isinstance(value, str):
         raise StorageIntegrityError(f"storage integrity error: {column_name} must be a string")
+    return value
+
+
+def _stored_integer(row: Mapping[str, object], column_name: str) -> int:
+    value = row[column_name]
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise StorageIntegrityError(f"storage integrity error: {column_name} must be an integer")
     return value
