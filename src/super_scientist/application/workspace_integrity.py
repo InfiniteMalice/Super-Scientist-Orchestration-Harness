@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pydantic import TypeAdapter
 from sqlalchemy.exc import SQLAlchemyError
 
-from super_scientist.application.evidence_verification import verify_artifact_binding
+from super_scientist.application.evidence_verification import (
+    verified_artifact_bytes,
+    verify_artifact_binding,
+)
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
 from super_scientist.domain.configurations.models import ConfigurationVersion
@@ -16,6 +19,22 @@ from super_scientist.domain.evaluators.models import (
     EvaluatorVersion,
 )
 from super_scientist.domain.evidence.models import EvidenceRecord, VerificationState
+from super_scientist.domain.evidence_trails.models import (
+    EvidenceTrailNode,
+    EvidenceTrailRelation,
+    EvidenceTrailSnapshot,
+    EvidenceTrailVersion,
+    ReportSentenceBinding,
+    RetainedEvidenceSource,
+    TrailAssessment,
+    TrailCheckResult,
+    TrailOutcome,
+    TrailValidationInputs,
+)
+from super_scientist.domain.evidence_trails.validation import (
+    validate_report_binding,
+    validate_trail,
+)
 from super_scientist.domain.improvement.classification import is_authoritative_verification
 from super_scientist.domain.improvement.models import (
     ActorRelationship,
@@ -58,6 +77,7 @@ from super_scientist.kernel.transactions.models import (
     AddEvidence,
     AppendProgressEvent,
     AppendResearchRunEvent,
+    BindReportSentence,
     CreateResearchRun,
     DecideCompletion,
     DecideEvaluatorSuccession,
@@ -67,6 +87,7 @@ from super_scientist.kernel.transactions.models import (
     ProposeGovernancePolicyTransition,
     RecordConfigurationVersion,
     RecordEvaluatorAudit,
+    RecordEvidenceTrailVersion,
     RecordProgressPlan,
     RecordRunBudget,
     RecordRunCheckpoint,
@@ -78,6 +99,7 @@ from super_scientist.providers.storage.artifacts import ArtifactStore
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
     ProgressIntegritySnapshot,
+    TrailIntegritySnapshot,
 )
 from super_scientist.providers.storage.repositories import (
     RepositorySet,
@@ -111,6 +133,7 @@ def verify_workspace(
         heads = repositories.claims.list_heads()
         adaptation = repositories.adaptation_integrity_snapshot()
         progress = repositories.progress_integrity_snapshot()
+        trails = repositories.trail_integrity_snapshot()
         transactions = repositories.transactions.list_all()
         events = repositories.audit.list_all()
         _require(
@@ -126,8 +149,10 @@ def verify_workspace(
             heads,
             adaptation,
             progress,
+            trails,
             policies,
             active_policy,
+            artifact_store,
         )
         _require_artifact_consistency(evidence, artifact_store)
         _require_claim_evidence_consistency(repositories, heads, evidence)
@@ -273,8 +298,10 @@ def _require_projection_consistency(
     heads: tuple[AtomicClaim, ...],
     adaptation: AdaptationIntegritySnapshot,
     progress: ProgressIntegritySnapshot,
+    trails: TrailIntegritySnapshot,
     policies: tuple[PolicySnapshot, ...],
     active_policy: PolicySnapshot | None,
+    artifact_store: ArtifactStore,
 ) -> None:
     expected_evidence: dict[str, EvidenceRecord] = {}
     expected_claims: dict[tuple[str, int], AtomicClaim] = {}
@@ -294,6 +321,13 @@ def _require_projection_consistency(
     expected_checkpoints: dict[str, RunCheckpoint] = {}
     expected_completion_decisions: dict[str, CompletionDecision] = {}
     expected_progress_heads: dict[str, tuple[str, str]] = {}
+    expected_trail_versions: dict[str, EvidenceTrailVersion] = {}
+    expected_trail_nodes: dict[str, EvidenceTrailNode] = {}
+    expected_trail_relations: dict[str, EvidenceTrailRelation] = {}
+    expected_trail_checks: dict[str, TrailCheckResult] = {}
+    expected_trail_assessments: dict[str, TrailAssessment] = {}
+    expected_report_bindings: dict[str, ReportSentenceBinding] = {}
+    expected_trail_heads: dict[str, tuple[str, int]] = {}
     accepted_evaluator_succession = False
     transitions: list[tuple[ProposeGovernancePolicyTransition, str]] = []
     for audit_record in audit_records:
@@ -653,6 +687,114 @@ def _require_projection_consistency(
                 decision,
                 "completion decision projection",
             )
+        elif isinstance(proposal, RecordEvidenceTrailVersion):
+            version = proposal.trail_version
+            _require_governing_hash(
+                version.governing_policy_hash,
+                audit_record.governing_policy_hash,
+                "evidence trail version",
+            )
+            trail_head = expected_trail_heads.get(version.trail_id)
+            if trail_head is None:
+                _require(
+                    version.version == 1 and version.parent_trail_version_id is None,
+                    "evidence trail history must begin at version 1",
+                )
+            else:
+                _require(
+                    version.version == trail_head[1] + 1
+                    and version.parent_trail_version_id == trail_head[0],
+                    "evidence trail version does not continue its replay-derived head",
+                )
+                parent = expected_trail_versions.get(trail_head[0])
+                _require(
+                    parent is not None
+                    and parent.trail_id == version.trail_id
+                    and parent.claim_version_id == version.claim_version_id,
+                    "evidence trail version reparented or changed its retained claim",
+                )
+            snapshot = proposal.snapshot()
+            validation_inputs = _trail_validation_inputs(
+                snapshot,
+                expected_claims,
+                expected_evidence,
+                artifact_store,
+            )
+            validation = validate_trail(snapshot, validation_inputs)
+            _require(
+                validation.outcome is version.status
+                and validation.outcome is not TrailOutcome.INVALID_TRAIL,
+                "evidence trail transaction fails semantic replay validation",
+            )
+            _add_unique(
+                expected_trail_versions,
+                version.trail_version_id,
+                version,
+                "evidence trail version projection",
+            )
+            for node in proposal.nodes:
+                _add_unique(
+                    expected_trail_nodes,
+                    node.node_id,
+                    node,
+                    "evidence trail node projection",
+                )
+            for relation in proposal.relations:
+                _add_unique(
+                    expected_trail_relations,
+                    relation.relation_id,
+                    relation,
+                    "evidence trail relation projection",
+                )
+            for check in proposal.checks:
+                _add_unique(
+                    expected_trail_checks,
+                    check.check_id,
+                    check,
+                    "evidence trail check projection",
+                )
+            for assessment in proposal.assessments:
+                _add_unique(
+                    expected_trail_assessments,
+                    assessment.assessment_id,
+                    assessment,
+                    "evidence trail assessment projection",
+                )
+            expected_trail_heads[version.trail_id] = (
+                version.trail_version_id,
+                version.version,
+            )
+        elif isinstance(proposal, BindReportSentence):
+            binding = proposal.binding
+            _require_governing_hash(
+                binding.governing_policy_hash,
+                audit_record.governing_policy_hash,
+                "report sentence binding",
+            )
+            snapshot = _expected_trail_snapshot(
+                binding.trail_version_id,
+                expected_trail_versions,
+                expected_trail_nodes,
+                expected_trail_relations,
+                expected_trail_checks,
+                expected_trail_assessments,
+            )
+            validation_inputs = _trail_validation_inputs(
+                snapshot,
+                expected_claims,
+                expected_evidence,
+                artifact_store,
+            )
+            _require(
+                not validate_report_binding(binding, snapshot, validation_inputs),
+                "report sentence binding fails semantic replay validation",
+            )
+            _add_unique(
+                expected_report_bindings,
+                binding.binding_id,
+                binding,
+                "report sentence binding projection",
+            )
         elif isinstance(proposal, RecordConfigurationVersion):
             configuration = proposal.configuration_version
             _require_governing_hash(
@@ -865,6 +1007,42 @@ def _require_projection_consistency(
         == expected_progress_heads,
         "progress heads do not match accepted event transactions",
     )
+    _require(
+        {record.trail_version_id: record for record in trails.versions}
+        == expected_trail_versions,
+        "evidence trail version projections do not match accepted transactions",
+    )
+    _require(
+        {record.node_id: record for record in trails.nodes} == expected_trail_nodes,
+        "evidence trail node projections do not match accepted transactions",
+    )
+    _require(
+        {record.relation_id: record for record in trails.relations}
+        == expected_trail_relations,
+        "evidence trail relation projections do not match accepted transactions",
+    )
+    _require(
+        {record.check_id: record for record in trails.checks} == expected_trail_checks,
+        "evidence trail check projections do not match accepted transactions",
+    )
+    _require(
+        {record.assessment_id: record for record in trails.assessments}
+        == expected_trail_assessments,
+        "evidence trail assessment projections do not match accepted transactions",
+    )
+    _require(
+        {record.binding_id: record for record in trails.bindings}
+        == expected_report_bindings,
+        "report sentence binding projections do not match accepted transactions",
+    )
+    _require(
+        {
+            trail_id: (trail_version_id, version)
+            for trail_id, trail_version_id, version in trails.heads
+        }
+        == expected_trail_heads,
+        "evidence trail heads do not match accepted transactions",
+    )
     if accepted_evaluator_succession:
         _require(
             adaptation.evaluator_head == expected_evaluator_head,
@@ -887,6 +1065,79 @@ def _require_projection_consistency(
         policies,
         active_policy,
         tuple(transitions),
+    )
+
+
+def _expected_trail_snapshot(
+    trail_version_id: str,
+    versions: dict[str, EvidenceTrailVersion],
+    nodes: dict[str, EvidenceTrailNode],
+    relations: dict[str, EvidenceTrailRelation],
+    checks: dict[str, TrailCheckResult],
+    assessments: dict[str, TrailAssessment],
+) -> EvidenceTrailSnapshot:
+    version = versions.get(trail_version_id)
+    _require(version is not None, "report binding references an unprojected trail version")
+    if version is None:  # pragma: no cover - narrowed by the fail-closed check above
+        raise StorageIntegrityError("report binding trail version is unavailable")
+    return EvidenceTrailSnapshot(
+        version=version,
+        nodes=tuple(item for item in nodes.values() if item.trail_version_id == trail_version_id),
+        relations=tuple(
+            item for item in relations.values() if item.trail_version_id == trail_version_id
+        ),
+        checks=tuple(
+            item for item in checks.values() if item.trail_version_id == trail_version_id
+        ),
+        assessments=tuple(
+            item for item in assessments.values() if item.trail_version_id == trail_version_id
+        ),
+    )
+
+
+def _trail_validation_inputs(
+    snapshot: EvidenceTrailSnapshot,
+    claims: dict[tuple[str, int], AtomicClaim],
+    evidence: dict[str, EvidenceRecord],
+    artifact_store: ArtifactStore,
+) -> TrailValidationInputs:
+    version = snapshot.version
+    matching_claims = tuple(
+        claim
+        for claim in claims.values()
+        if f"{claim.claim_id}:{claim.version}" == version.claim_version_id
+    )
+    _require(
+        len(matching_claims) == 1,
+        "evidence trail references an unprojected or ambiguous claim version",
+    )
+    retained_sources: list[RetainedEvidenceSource] = []
+    for source_id in version.source_ids:
+        evidence_ids = {
+            node.evidence_id for node in snapshot.nodes if node.source_id == source_id
+        }
+        _require(
+            len(evidence_ids) == 1,
+            "evidence trail source must resolve to exactly one retained evidence record",
+        )
+        evidence_id = next(iter(evidence_ids))
+        retained_evidence = evidence.get(evidence_id)
+        _require(
+            retained_evidence is not None,
+            "evidence trail references an unprojected evidence record",
+        )
+        if retained_evidence is None:  # pragma: no cover - fail-closed narrowing
+            raise StorageIntegrityError("evidence trail retained evidence is unavailable")
+        retained_sources.append(
+            RetainedEvidenceSource(
+                source_id=source_id,
+                evidence=retained_evidence,
+                artifact_bytes=verified_artifact_bytes(retained_evidence, artifact_store),
+            )
+        )
+    return TrailValidationInputs(
+        claim=matching_claims[0],
+        sources=tuple(retained_sources),
     )
 
 

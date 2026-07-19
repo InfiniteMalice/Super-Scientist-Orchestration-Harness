@@ -107,7 +107,7 @@ def test_public_surface_exposes_fixed_progress_record_and_head_repositories() ->
         repository_type = getattr(domain_records, repository_name)
         assert tuple(python_inspect.signature(repository_type).parameters) == ("connection",)
 
-    deferred_record_repositories = {
+    trail_record_repositories = {
         "EvidenceTrailVersionRepository",
         "EvidenceTrailNodeRepository",
         "EvidenceTrailRelationRepository",
@@ -115,8 +115,10 @@ def test_public_surface_exposes_fixed_progress_record_and_head_repositories() ->
         "EvidenceTrailAssessmentRepository",
         "ReportSentenceBindingRepository",
     }
-    assert deferred_record_repositories.isdisjoint(domain_records.__all__)
-    assert all(not hasattr(domain_records, name) for name in deferred_record_repositories)
+    assert trail_record_repositories <= set(domain_records.__all__)
+    for repository_name in trail_record_repositories:
+        repository_type = getattr(domain_records, repository_name)
+        assert tuple(python_inspect.signature(repository_type).parameters) == ("connection",)
 
 
 @pytest.mark.property
@@ -467,6 +469,7 @@ def test_evidence_trail_head_repository_rejects_non_integer_version_without_muta
         with engine.begin() as writer:
             _seed_trail_versions(writer)
 
+        repository.set("trail-1", "trail-version-1", 1)
         repository.set("trail-1", "trail-version-2", 2)
         with pytest.raises(StorageIntegrityError, match="version must be an integer"):
             repository.set("trail-1", "trail-version-1", invalid_version)

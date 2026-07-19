@@ -13,6 +13,14 @@ from super_scientist.domain.evaluators.models import (
     EvaluatorSuccessionDecision,
     EvaluatorVersion,
 )
+from super_scientist.domain.evidence_trails.models import (
+    EvidenceTrailNode,
+    EvidenceTrailRelation,
+    EvidenceTrailVersion,
+    ReportSentenceBinding,
+    TrailAssessment,
+    TrailCheckResult,
+)
 from super_scientist.domain.improvement.models import (
     EvaluatorAuditRecord,
     SelfImprovementMeasurementRecord,
@@ -36,12 +44,17 @@ from super_scientist.providers.storage.schema import (
     evaluator_heads,
     evaluator_succession_decisions,
     evaluator_versions,
+    evidence_trail_assessments,
+    evidence_trail_checks,
     evidence_trail_heads,
+    evidence_trail_nodes,
+    evidence_trail_relations,
     evidence_trail_versions,
     progress_events,
     progress_heads,
     progress_plans,
     progress_subtasks,
+    report_sentence_bindings,
     research_run_events,
     research_run_heads,
     research_runs,
@@ -62,11 +75,17 @@ __all__ = [
     "EvaluatorHeadRepository",
     "EvaluatorSuccessionRepository",
     "EvaluatorVersionRepository",
+    "EvidenceTrailAssessmentRepository",
+    "EvidenceTrailCheckRepository",
     "EvidenceTrailHeadRepository",
+    "EvidenceTrailNodeRepository",
+    "EvidenceTrailRelationRepository",
+    "EvidenceTrailVersionRepository",
     "ProgressEventRepository",
     "ProgressHeadRepository",
     "ProgressPlanRepository",
     "ProgressSubtaskRepository",
+    "ReportSentenceBindingRepository",
     "ResearchRunEventRepository",
     "ResearchRunHeadRepository",
     "ResearchRunRepository",
@@ -386,6 +405,89 @@ class CompletionDecisionRepository(_AppendOnlyRecordRepository[CompletionDecisio
         )
 
 
+class EvidenceTrailVersionRepository(_AppendOnlyRecordRepository[EvidenceTrailVersion]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=evidence_trail_versions,
+            model_type=EvidenceTrailVersion,
+            identifier_field="trail_version_id",
+            relationship_fields={
+                "trail_id": "trail_id",
+                "claim_version_id": "claim_version_id",
+                "version": "version",
+            },
+            relationship_types={"version": int},
+        )
+
+
+class EvidenceTrailNodeRepository(_AppendOnlyRecordRepository[EvidenceTrailNode]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=evidence_trail_nodes,
+            model_type=EvidenceTrailNode,
+            identifier_field="node_id",
+            relationship_fields={
+                "trail_version_id": "trail_version_id",
+                "evidence_id": "evidence_id",
+            },
+        )
+
+
+class EvidenceTrailRelationRepository(_AppendOnlyRecordRepository[EvidenceTrailRelation]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=evidence_trail_relations,
+            model_type=EvidenceTrailRelation,
+            identifier_field="relation_id",
+            relationship_fields={
+                "trail_version_id": "trail_version_id",
+                "source_node_id": "source_node_id",
+                "target_node_id": "target_node_id",
+            },
+        )
+
+
+class EvidenceTrailCheckRepository(_AppendOnlyRecordRepository[TrailCheckResult]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=evidence_trail_checks,
+            model_type=TrailCheckResult,
+            identifier_field="check_id",
+            relationship_fields={"trail_version_id": "trail_version_id"},
+        )
+
+
+class EvidenceTrailAssessmentRepository(_AppendOnlyRecordRepository[TrailAssessment]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=evidence_trail_assessments,
+            model_type=TrailAssessment,
+            identifier_field="assessment_id",
+            relationship_fields={"trail_version_id": "trail_version_id"},
+        )
+
+
+class ReportSentenceBindingRepository(
+    _AppendOnlyRecordRepository[ReportSentenceBinding]
+):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=report_sentence_bindings,
+            model_type=ReportSentenceBinding,
+            identifier_field="binding_id",
+            relationship_fields={
+                "trail_version_id": "trail_version_id",
+                "claim_version_id": "claim_version_id",
+            },
+        )
+
+
 class ResearchRunHeadRepository:
     def __init__(self, connection: Connection) -> None:
         self._connection = connection
@@ -609,6 +711,19 @@ class EvidenceTrailHeadRepository:
             stored_identity == (trail_id, validated_version),
             "trail_version_id does not match trail_id and version",
         )
+        current = self.get(trail_id)
+        if current == (trail_version_id, validated_version):
+            return
+        if current is None:
+            _require_integrity(
+                validated_version == 1,
+                "evidence trail head must begin at version 1",
+            )
+        else:
+            _require_integrity(
+                validated_version == current[1] + 1,
+                "evidence trail head requires the exact successor of the current version",
+            )
         statement = sqlite_insert(evidence_trail_heads).values(
             trail_id=trail_id,
             trail_version_id=trail_version_id,

@@ -15,6 +15,15 @@ from super_scientist.domain.evaluators.models import (
     EvaluatorVersion,
 )
 from super_scientist.domain.evidence.models import EvidenceRecord
+from super_scientist.domain.evidence_trails.models import (
+    EvidenceTrailNode,
+    EvidenceTrailRelation,
+    EvidenceTrailSnapshot,
+    EvidenceTrailVersion,
+    ReportSentenceBinding,
+    TrailAssessment,
+    TrailCheckResult,
+)
 from super_scientist.domain.identity import ActorIdentity
 from super_scientist.domain.improvement.models import (
     ChangeClassification,
@@ -54,6 +63,8 @@ type ProposalKind = Literal[
     "record_run_budget",
     "record_run_checkpoint",
     "decide_completion",
+    "record_evidence_trail_version",
+    "bind_report_sentence",
 ]
 
 
@@ -209,6 +220,31 @@ class DecideCompletion(ProposalBase):
     completion_decision: CompletionDecision
 
 
+class RecordEvidenceTrailVersion(ProposalBase):
+    proposal_type: Literal["record_evidence_trail_version"] = (
+        "record_evidence_trail_version"
+    )
+    trail_version: EvidenceTrailVersion
+    nodes: tuple[EvidenceTrailNode, ...] = Field(min_length=1)
+    relations: tuple[EvidenceTrailRelation, ...]
+    checks: tuple[TrailCheckResult, ...] = Field(min_length=1)
+    assessments: tuple[TrailAssessment, ...] = Field(min_length=1)
+
+    def snapshot(self) -> EvidenceTrailSnapshot:
+        return EvidenceTrailSnapshot(
+            version=self.trail_version,
+            nodes=self.nodes,
+            relations=self.relations,
+            checks=self.checks,
+            assessments=self.assessments,
+        )
+
+
+class BindReportSentence(ProposalBase):
+    proposal_type: Literal["bind_report_sentence"] = "bind_report_sentence"
+    binding: ReportSentenceBinding
+
+
 class InvalidProposal(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
@@ -237,6 +273,8 @@ Proposal = Annotated[
     | RecordRunBudget
     | RecordRunCheckpoint
     | DecideCompletion
+    | RecordEvidenceTrailVersion
+    | BindReportSentence
     | InvalidProposal,
     Field(discriminator="proposal_type"),
 ]

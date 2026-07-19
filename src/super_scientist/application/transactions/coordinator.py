@@ -21,6 +21,10 @@ from super_scientist.application.transactions.progress import (
     progress_capabilities,
 )
 from super_scientist.application.transactions.router import ProposalRouter
+from super_scientist.application.transactions.trails import (
+    fixed_trail_handlers,
+    trail_capabilities,
+)
 from super_scientist.application.workspace_integrity import require_workspace_integrity
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim
@@ -37,6 +41,7 @@ from super_scientist.kernel.audit.chain import append_event
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
     AppendProgressEvent,
+    BindReportSentence,
     DecideCompletion,
     InvalidProposal,
     Proposal,
@@ -44,6 +49,7 @@ from super_scientist.kernel.transactions.models import (
     ProposalKind,
     ProposeClaim,
     ProposeGovernancePolicyTransition,
+    RecordEvidenceTrailVersion,
     RecordProgressPlan,
     RecordRunBudget,
     RecordRunCheckpoint,
@@ -165,8 +171,11 @@ class TransactionCoordinator:
         progress_handlers = tuple(
             (handler.proposal_type, handler) for handler in fixed_progress_handlers()
         )
+        trail_handlers = tuple(
+            (handler.proposal_type, handler) for handler in fixed_trail_handlers()
+        )
         self._router = ProposalRouter(
-            (*compatibility_handlers, *adaptation_handlers, *progress_handlers)
+            (*compatibility_handlers, *adaptation_handlers, *progress_handlers, *trail_handlers)
         )
 
     @property
@@ -378,6 +387,18 @@ class TransactionCoordinator:
                 )
                 reads = progress_io
                 writes = progress_io
+            elif isinstance(
+                admitted_proposal,
+                (RecordEvidenceTrailVersion, BindReportSentence),
+            ):
+                trail_io = trail_capabilities(
+                    admitted_proposal,
+                    connection,
+                    stored_policy,
+                    self._artifact_store,
+                )
+                reads = trail_io
+                writes = trail_io
             else:
                 adaptation_io = adaptation_capabilities(
                     admitted_proposal,

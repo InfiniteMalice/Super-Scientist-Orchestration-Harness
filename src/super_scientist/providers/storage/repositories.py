@@ -26,6 +26,7 @@ from super_scientist.kernel.transactions.models import Proposal, TransactionDeci
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
     ProgressIntegritySnapshot,
+    TrailIntegritySnapshot,
 )
 from super_scientist.providers.storage.schema import (
     audit_events,
@@ -39,12 +40,19 @@ from super_scientist.providers.storage.schema import (
     evaluator_succession_decisions,
     evaluator_versions,
     evidence_records,
+    evidence_trail_assessments,
+    evidence_trail_checks,
+    evidence_trail_heads,
+    evidence_trail_nodes,
+    evidence_trail_relations,
+    evidence_trail_versions,
     governance_policies,
     governance_state,
     progress_events,
     progress_heads,
     progress_plans,
     progress_subtasks,
+    report_sentence_bindings,
     research_run_events,
     research_run_heads,
     research_runs,
@@ -78,6 +86,8 @@ _STRICT_JSON_PROPOSAL_TYPES = frozenset(
         "record_run_budget",
         "record_run_checkpoint",
         "decide_completion",
+        "record_evidence_trail_version",
+        "bind_report_sentence",
     }
 )
 
@@ -946,6 +956,27 @@ class RepositorySet:
             heads=ProgressHeadRepository(self._connection).list_all(),
         )
 
+    def trail_integrity_snapshot(self) -> TrailIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            EvidenceTrailAssessmentRepository,
+            EvidenceTrailCheckRepository,
+            EvidenceTrailHeadRepository,
+            EvidenceTrailNodeRepository,
+            EvidenceTrailRelationRepository,
+            EvidenceTrailVersionRepository,
+            ReportSentenceBindingRepository,
+        )
+
+        return TrailIntegritySnapshot(
+            versions=EvidenceTrailVersionRepository(self._connection).list_all(),
+            nodes=EvidenceTrailNodeRepository(self._connection).list_all(),
+            relations=EvidenceTrailRelationRepository(self._connection).list_all(),
+            checks=EvidenceTrailCheckRepository(self._connection).list_all(),
+            assessments=EvidenceTrailAssessmentRepository(self._connection).list_all(),
+            bindings=ReportSentenceBindingRepository(self._connection).list_all(),
+            heads=EvidenceTrailHeadRepository(self._connection).list_all(),
+        )
+
     def has_durable_state(self) -> bool:
         tables = (
             governance_policies,
@@ -972,6 +1003,13 @@ class RepositorySet:
             run_checkpoints,
             completion_decisions,
             progress_heads,
+            evidence_trail_versions,
+            evidence_trail_nodes,
+            evidence_trail_relations,
+            evidence_trail_checks,
+            evidence_trail_assessments,
+            report_sentence_bindings,
+            evidence_trail_heads,
         )
         return any(
             self._connection.execute(select(table).limit(1)).first() is not None for table in tables

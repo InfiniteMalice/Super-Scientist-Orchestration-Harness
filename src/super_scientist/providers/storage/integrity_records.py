@@ -8,6 +8,14 @@ from super_scientist.domain.evaluators.models import (
     EvaluatorSuccessionDecision,
     EvaluatorVersion,
 )
+from super_scientist.domain.evidence_trails.models import (
+    EvidenceTrailNode,
+    EvidenceTrailRelation,
+    EvidenceTrailVersion,
+    ReportSentenceBinding,
+    TrailAssessment,
+    TrailCheckResult,
+)
 from super_scientist.domain.improvement.models import (
     EvaluatorAuditRecord,
     SelfImprovementMeasurementRecord,
@@ -50,3 +58,16 @@ class ProgressIntegritySnapshot:
     checkpoints: tuple[RunCheckpoint, ...]
     completion_decisions: tuple[CompletionDecision, ...]
     heads: tuple[tuple[str, str, str], ...]
+
+
+@dataclass(frozen=True)
+class TrailIntegritySnapshot:
+    """Fixed read-only evidence-trail view used only for transaction replay."""
+
+    versions: tuple[EvidenceTrailVersion, ...]
+    nodes: tuple[EvidenceTrailNode, ...]
+    relations: tuple[EvidenceTrailRelation, ...]
+    checks: tuple[TrailCheckResult, ...]
+    assessments: tuple[TrailAssessment, ...]
+    bindings: tuple[ReportSentenceBinding, ...]
+    heads: tuple[tuple[str, str, int], ...]

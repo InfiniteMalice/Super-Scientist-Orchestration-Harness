@@ -46,6 +46,7 @@ from super_scientist.domain.improvement.models import (
 from super_scientist.kernel.transactions.models import (
     AppendProgressEvent,
     AppendResearchRunEvent,
+    BindReportSentence,
     CreateResearchRun,
     DecideCompletion,
     DecideEvaluatorSuccession,
@@ -55,6 +56,7 @@ from super_scientist.kernel.transactions.models import (
     ProposeGovernancePolicyTransition,
     RecordConfigurationVersion,
     RecordEvaluatorAudit,
+    RecordEvidenceTrailVersion,
     RecordProgressPlan,
     RecordRunBudget,
     RecordRunCheckpoint,
@@ -249,7 +251,7 @@ def test_new_rejection_codes_are_appended_with_stable_values() -> None:
     )
 
 
-def test_proposal_union_has_thirteen_fixed_additive_persistent_kinds() -> None:
+def test_proposal_union_has_fifteen_fixed_additive_persistent_kinds() -> None:
     proposal_types = (
         CreateResearchRun,
         AppendResearchRunEvent,
@@ -264,6 +266,8 @@ def test_proposal_union_has_thirteen_fixed_additive_persistent_kinds() -> None:
         RecordRunBudget,
         RecordRunCheckpoint,
         DecideCompletion,
+        RecordEvidenceTrailVersion,
+        BindReportSentence,
     )
     expected = (
         "create_research_run",
@@ -279,6 +283,8 @@ def test_proposal_union_has_thirteen_fixed_additive_persistent_kinds() -> None:
         "record_run_budget",
         "record_run_checkpoint",
         "decide_completion",
+        "record_evidence_trail_version",
+        "bind_report_sentence",
     )
     legacy = ("add_evidence", "propose_claim", "transition_claim")
 
