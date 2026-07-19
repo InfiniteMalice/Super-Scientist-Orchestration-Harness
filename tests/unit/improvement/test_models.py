@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+import super_scientist.kernel.transactions.models as transaction_models
 from super_scientist.domain.configurations.models import (
     AdapterTrainingRequest,
     AgentConfiguration,
@@ -251,7 +252,7 @@ def test_new_rejection_codes_are_appended_with_stable_values() -> None:
     )
 
 
-def test_proposal_union_has_fifteen_fixed_additive_persistent_kinds() -> None:
+def test_proposal_union_has_seventeen_fixed_additive_persistent_kinds() -> None:
     proposal_types = (
         CreateResearchRun,
         AppendResearchRunEvent,
@@ -266,6 +267,8 @@ def test_proposal_union_has_fifteen_fixed_additive_persistent_kinds() -> None:
         RecordRunBudget,
         RecordRunCheckpoint,
         DecideCompletion,
+        transaction_models.ProposeEvidenceTrailNodes,
+        transaction_models.ProposeEvidenceTrailRelations,
         RecordEvidenceTrailVersion,
         BindReportSentence,
     )
@@ -283,6 +286,8 @@ def test_proposal_union_has_fifteen_fixed_additive_persistent_kinds() -> None:
         "record_run_budget",
         "record_run_checkpoint",
         "decide_completion",
+        "propose_evidence_trail_nodes",
+        "propose_evidence_trail_relations",
         "record_evidence_trail_version",
         "bind_report_sentence",
     )

@@ -8,13 +8,18 @@ import pytest
 from super_scientist.domain import evidence_trails as trail_models
 from super_scientist.domain.evidence_trails import authority as trail_authority
 from super_scientist.domain.evidence_trails.models import (
+    AddEvidenceReceiptRef,
     AssessmentCategory,
     ClaimModality,
+    EvidenceTrailNodeStageReceiptRef,
+    EvidenceTrailRelationStageReceiptRef,
     EvidenceTrailSnapshot,
     ExactSourceSpan,
+    ProposeClaimReceiptRef,
     RelationType,
     ReportSentenceBinding,
     ReportSourceSpan,
+    SourceFirstProvenance,
     TrailAssessment,
     TrailCheckResult,
     TrailGeometry,
@@ -22,9 +27,50 @@ from super_scientist.domain.evidence_trails.models import (
     TrailOutcome,
 )
 from super_scientist.domain.evidence_trails.validation import validate_trail
-from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.improvement.models import AssessmentOutcome
-from tests.unit.evidence_trails.conftest import NOW, TrailFixture, with_fresh_source_first
+from tests.unit.evidence_trails.conftest import TrailFixture, with_fresh_source_first
+
+
+def _receipt_fields(proposal_id: str) -> dict[str, str]:
+    return {
+        "proposal_id": proposal_id,
+        "proposal_hash": "a" * 64,
+        "audit_event_id": f"audit-{proposal_id}",
+        "audit_event_hash": "b" * 64,
+    }
+
+
+def test_source_first_provenance_exposes_only_durable_receipt_references() -> None:
+    assert tuple(SourceFirstProvenance.model_fields) == (
+        "schema_version",
+        "source_receipts",
+        "node_stage_receipt",
+        "relation_stage_receipt",
+        "claim_stage_receipt",
+    )
+
+
+def test_source_first_provenance_builder_accepts_no_caller_chronology() -> None:
+    source = AddEvidenceReceiptRef(**_receipt_fields("proposal-source"))
+    node = EvidenceTrailNodeStageReceiptRef(**_receipt_fields("proposal-nodes"))
+    relation = EvidenceTrailRelationStageReceiptRef(
+        **_receipt_fields("proposal-relations")
+    )
+    claim = ProposeClaimReceiptRef(**_receipt_fields("proposal-claim"))
+
+    provenance = trail_authority.build_source_first_provenance(
+        source_receipts=(source,),
+        node_stage_receipt=node,
+        relation_stage_receipt=relation,
+        claim_stage_receipt=claim,
+    )
+
+    assert provenance == SourceFirstProvenance(
+        source_receipts=(source,),
+        node_stage_receipt=node,
+        relation_stage_receipt=relation,
+        claim_stage_receipt=claim,
+    )
 
 
 def _replace_assessment(
@@ -441,28 +487,7 @@ def test_mixed_primary_and_model_sources_fail_every_source_requirement(
 
 
 def _source_first_provenance(trail_fixture: TrailFixture) -> object:
-    return trail_authority.build_source_first_provenance(
-        sources=trail_fixture.inputs.sources,
-        claim=trail_fixture.inputs.claim,
-        nodes=trail_fixture.snapshot.nodes,
-        relations=trail_fixture.snapshot.relations,
-        builder=trail_fixture.snapshot.version.constructed_by,
-        source_actors=tuple(
-            ActorIdentity(
-                actor_id=source.evidence.ingestion_actor_id,
-                kind=ActorKind.HUMAN,
-                created_at=NOW - timedelta(hours=1),
-            )
-            for source in trail_fixture.inputs.sources
-        ),
-        claim_actor=ActorIdentity(
-            actor_id=trail_fixture.inputs.claim.created_by,
-            kind=ActorKind.HUMAN,
-            created_at=NOW - timedelta(hours=1),
-        ),
-        node_proposed_at=trail_fixture.inputs.claim.created_at - timedelta(minutes=2),
-        relation_proposed_at=trail_fixture.inputs.claim.created_at - timedelta(minutes=1),
-    )
+    return trail_fixture.snapshot.version.source_first_provenance
 
 
 def _with_source_first(
@@ -493,50 +518,6 @@ def test_exact_source_first_process_provenance_is_accepted(
     )
 
     assert result.outcome is TrailOutcome.SUFFICIENT
-
-
-@pytest.mark.parametrize("mutation", ("missing", "reordered", "fabricated", "conclusion_first"))
-def test_source_first_process_stages_are_exact_and_chronological(
-    trail_fixture: TrailFixture,
-    mutation: str,
-) -> None:
-    provenance = _source_first_provenance(trail_fixture)
-    if mutation == "missing":
-        provenance = provenance.model_copy(update={"source_events": ()})
-    elif mutation == "reordered":
-        provenance = provenance.model_copy(
-            update={
-                "node_event": provenance.relation_event,
-                "relation_event": provenance.node_event,
-            }
-        )
-    elif mutation == "fabricated":
-        provenance = provenance.model_copy(
-            update={
-                "node_event": provenance.node_event.model_copy(
-                    update={"subject_ids": ("fabricated-node",)}
-                )
-            }
-        )
-    else:
-        provenance = provenance.model_copy(
-            update={
-                "relation_event": provenance.relation_event.model_copy(
-                    update={
-                        "occurred_at": trail_fixture.inputs.claim.created_at
-                        + timedelta(minutes=1)
-                    }
-                )
-            }
-        )
-
-    result = validate_trail(
-        _with_source_first(trail_fixture, provenance),
-        trail_fixture.inputs,
-    )
-
-    assert result.outcome is TrailOutcome.INVALID_TRAIL
-    assert "SOURCE_FIRST_PROVENANCE_MISMATCH" in result.finding_codes
 
 
 def _two_source_fixture(fixture: TrailFixture) -> TrailFixture:
@@ -599,24 +580,14 @@ def _two_source_fixture(fixture: TrailFixture) -> TrailFixture:
     )
     inputs = fixture.inputs.model_copy(update={"sources": (first_source, second_source)})
     prior = fixture.snapshot.version.source_first_provenance
-    second_actor = prior.source_events[0].actor.model_copy(
-        update={
-            "actor_id": "ingestor-2",
-            "provider_id": "provider-ingestor-2",
-            "model_id": "ingestor-2",
-            "configuration_hash": "b" * 64,
-        }
+    second_receipt = AddEvidenceReceiptRef(
+        **_receipt_fields("proposal-source-2")
     )
     provenance = trail_authority.build_source_first_provenance(
-        sources=inputs.sources,
-        claim=inputs.claim,
-        nodes=nodes,
-        relations=relations,
-        builder=fixture.snapshot.version.constructed_by,
-        source_actors=(prior.source_events[0].actor, second_actor),
-        claim_actor=prior.claim_event.actor,
-        node_proposed_at=prior.node_event.occurred_at,
-        relation_proposed_at=prior.relation_event.occurred_at,
+        source_receipts=(*prior.source_receipts, second_receipt),
+        node_stage_receipt=prior.node_stage_receipt,
+        relation_stage_receipt=prior.relation_stage_receipt,
+        claim_stage_receipt=prior.claim_stage_receipt,
     )
     version = fixture.snapshot.version.model_copy(
         update={
@@ -634,6 +605,114 @@ def _two_source_fixture(fixture: TrailFixture) -> TrailFixture:
         }
     )
     return TrailFixture(snapshot=snapshot, inputs=inputs)
+
+
+def _identity_relation_fixture(
+    fixture: TrailFixture,
+    relation_type: RelationType,
+    *,
+    first_entity_id: object = "entity-shared",
+    second_entity_id: object = "entity-shared",
+    first_event_id: object = "event-shared",
+    second_event_id: object = "event-shared",
+) -> TrailFixture:
+    fixture = _two_source_fixture(fixture)
+    sources = []
+    for source, entity_id, event_id in zip(
+        fixture.inputs.sources,
+        (first_entity_id, second_entity_id),
+        (first_event_id, second_event_id),
+        strict=True,
+    ):
+        provenance: dict[str, object] = dict(source.evidence.provenance)
+        if entity_id is not None:
+            provenance["entity_id"] = entity_id
+        if event_id is not None:
+            provenance["event_id"] = event_id
+        sources.append(
+            source.model_copy(
+                update={
+                    "evidence": source.evidence.model_copy(
+                        update={"provenance": provenance}
+                    )
+                }
+            )
+        )
+    nodes = fixture.snapshot.nodes
+    if relation_type is RelationType.SAME_EVENT:
+        nodes = (
+            nodes[0],
+            nodes[1].model_copy(
+                update={"temporal_position": nodes[0].temporal_position}
+            ),
+        )
+    identity_relation = fixture.snapshot.relations[0].model_copy(
+        update={"relation_type": relation_type}
+    )
+    neutral_relation = fixture.snapshot.relations[1].model_copy(
+        update={"relation_type": RelationType.QUALIFIES}
+    )
+    relations = (identity_relation, neutral_relation)
+    version = fixture.snapshot.version.model_copy(
+        update={
+            "ordering_constraints": (),
+            "geometry": trail_authority.derive_geometry_from_graph(nodes, relations),
+        }
+    )
+    snapshot = fixture.snapshot.model_copy(
+        update={"version": version, "nodes": nodes, "relations": relations}
+    )
+    return TrailFixture(
+        snapshot=snapshot,
+        inputs=fixture.inputs.model_copy(update={"sources": tuple(sources)}),
+    )
+
+
+def test_same_entity_uses_typed_evidence_identity_not_content_hash(
+    trail_fixture: TrailFixture,
+) -> None:
+    fixture = _identity_relation_fixture(trail_fixture, RelationType.SAME_ENTITY)
+    assert fixture.snapshot.nodes[0].content_hash != fixture.snapshot.nodes[1].content_hash
+
+    result = validate_trail(fixture.snapshot, fixture.inputs)
+
+    assert result.outcome is TrailOutcome.SUFFICIENT
+
+
+def test_same_event_requires_event_identity_in_addition_to_equal_time(
+    trail_fixture: TrailFixture,
+) -> None:
+    fixture = _identity_relation_fixture(
+        trail_fixture,
+        RelationType.SAME_EVENT,
+        second_event_id="event-different",
+    )
+    assert (
+        fixture.snapshot.nodes[0].temporal_position
+        == fixture.snapshot.nodes[1].temporal_position
+    )
+
+    result = validate_trail(fixture.snapshot, fixture.inputs)
+
+    assert result.outcome is TrailOutcome.INVALID_TRAIL
+    assert "SAME_EVENT_IDENTITY_UNPROVEN" in result.finding_codes
+
+
+@pytest.mark.parametrize("malformed", (None, "", "   ", 7))
+def test_identity_relation_rejects_missing_or_malformed_exact_key(
+    trail_fixture: TrailFixture,
+    malformed: object,
+) -> None:
+    fixture = _identity_relation_fixture(
+        trail_fixture,
+        RelationType.SAME_ENTITY,
+        second_entity_id=malformed,
+    )
+
+    result = validate_trail(fixture.snapshot, fixture.inputs)
+
+    assert result.outcome is TrailOutcome.INVALID_TRAIL
+    assert "SAME_ENTITY_IDENTITY_UNPROVEN" in result.finding_codes
 
 
 def test_assessor_cannot_alias_claim_author(trail_fixture: TrailFixture) -> None:
@@ -684,12 +763,10 @@ def test_assessor_cannot_alias_second_ingestor(trail_fixture: TrailFixture) -> N
     assert "ASSESSMENT_NOT_INDEPENDENT" in result.finding_codes
 
 
-def test_assessor_cannot_share_source_stage_model_or_configuration(
+def test_assessor_cannot_share_builder_model_or_configuration(
     trail_fixture: TrailFixture,
 ) -> None:
-    stage_actor = (
-        trail_fixture.snapshot.version.source_first_provenance.source_events[0].actor
-    )
+    stage_actor = trail_fixture.snapshot.version.constructed_by
     snapshot = _replace_assessment(
         trail_fixture,
         AssessmentCategory.NECESSITY,

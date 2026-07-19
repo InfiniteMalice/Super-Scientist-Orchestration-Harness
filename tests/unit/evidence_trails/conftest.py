@@ -16,14 +16,18 @@ from super_scientist.domain.evidence_trails.authority import (
     trusted_check_id,
 )
 from super_scientist.domain.evidence_trails.models import (
+    AddEvidenceReceiptRef,
     AssessmentCategory,
     ClaimModality,
     ConstructionMethod,
     EvidenceTrailNode,
+    EvidenceTrailNodeStageReceiptRef,
     EvidenceTrailRelation,
+    EvidenceTrailRelationStageReceiptRef,
     EvidenceTrailSnapshot,
     EvidenceTrailVersion,
     ExactSourceSpan,
+    ProposeClaimReceiptRef,
     RelationType,
     RetainedEvidenceSource,
     StructuralLocation,
@@ -113,16 +117,16 @@ def with_fresh_source_first(
     snapshot: EvidenceTrailSnapshot,
 ) -> EvidenceTrailSnapshot:
     prior = fixture.snapshot.version.source_first_provenance
+    version_id = snapshot.version.trail_version_id
     provenance = build_source_first_provenance(
-        sources=fixture.inputs.sources,
-        claim=fixture.inputs.claim,
-        nodes=snapshot.nodes,
-        relations=snapshot.relations,
-        builder=snapshot.version.constructed_by,
-        source_actors=tuple(event.actor for event in prior.source_events),
-        claim_actor=prior.claim_event.actor,
-        node_proposed_at=prior.node_event.occurred_at,
-        relation_proposed_at=prior.relation_event.occurred_at,
+        source_receipts=prior.source_receipts,
+        node_stage_receipt=EvidenceTrailNodeStageReceiptRef(
+            **_receipt_fields(f"node-stage-{version_id}")
+        ),
+        relation_stage_receipt=EvidenceTrailRelationStageReceiptRef(
+            **_receipt_fields(f"relation-stage-{version_id}")
+        ),
+        claim_stage_receipt=prior.claim_stage_receipt,
     )
     return snapshot.model_copy(
         update={
@@ -286,15 +290,18 @@ def make_trail_fixture() -> TrailFixture:
         artifact_bytes=source_bytes,
     )
     source_first_provenance = build_source_first_provenance(
-        sources=(retained_source,),
-        claim=claim,
-        nodes=(required, supporting),
-        relations=relations,
-        builder=builder,
-        source_actors=(_actor("ingestor-1"),),
-        claim_actor=_actor("claim-author"),
-        node_proposed_at=NODE_PROPOSED_AT,
-        relation_proposed_at=RELATION_PROPOSED_AT,
+        source_receipts=(
+            AddEvidenceReceiptRef(**_receipt_fields("proposal-source")),
+        ),
+        node_stage_receipt=EvidenceTrailNodeStageReceiptRef(
+            **_receipt_fields("proposal-node-stage-1")
+        ),
+        relation_stage_receipt=EvidenceTrailRelationStageReceiptRef(
+            **_receipt_fields("proposal-relation-stage-1")
+        ),
+        claim_stage_receipt=ProposeClaimReceiptRef(
+            **_receipt_fields("proposal-claim")
+        ),
     )
     version = EvidenceTrailVersion(
         trail_version_id="trail-version-1",
@@ -337,3 +344,12 @@ def make_trail_fixture() -> TrailFixture:
         ),
     )
     return TrailFixture(snapshot=snapshot, inputs=inputs)
+
+
+def _receipt_fields(proposal_id: str) -> dict[str, str]:
+    return {
+        "proposal_id": proposal_id,
+        "proposal_hash": sha256_hex(f"proposal:{proposal_id}".encode()),
+        "audit_event_id": f"audit-{proposal_id}",
+        "audit_event_hash": sha256_hex(f"audit:{proposal_id}".encode()),
+    }

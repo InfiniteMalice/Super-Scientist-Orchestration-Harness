@@ -86,6 +86,8 @@ _STRICT_JSON_PROPOSAL_TYPES = frozenset(
         "record_run_budget",
         "record_run_checkpoint",
         "decide_completion",
+        "propose_evidence_trail_nodes",
+        "propose_evidence_trail_relations",
         "record_evidence_trail_version",
         "bind_report_sentence",
     }
@@ -301,7 +303,7 @@ def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
         else:
             proposal = PROPOSAL_ADAPTER.validate_python(_decode_storage_value(raw_proposal))
         decision = TransactionDecision.model_validate_json(decision_json)
-        _validated_timestamp(datetime.fromisoformat(created_at))
+        validated_created_at = _validated_timestamp(datetime.fromisoformat(created_at))
     except (TypeError, ValueError) as error:
         raise StorageIntegrityError(
             "storage integrity error: invalid transaction record"
@@ -327,6 +329,7 @@ def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
         proposal_hash=stored_hash,
         decision=decision,
         intent_fingerprint=intent_fingerprint,
+        created_at=validated_created_at,
     )
 
 
@@ -389,6 +392,7 @@ class StoredTransaction(BaseModel):
     proposal_hash: str
     decision: TransactionDecision
     intent_fingerprint: Sha256Hex | None = None
+    created_at: UtcTimestamp
 
 
 class EvidenceRepository:

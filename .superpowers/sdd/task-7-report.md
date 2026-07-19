@@ -99,3 +99,46 @@ keys, and exact report relevance.
 - Strict mypy: `mypy` — **success, 74 source files**.
 - `git diff --check` — **passed** (Git emitted only configured LF-to-CRLF notices).
 - Final complete suite: `pytest -q` — **1,050 passed, 3 skipped, 6 expected negative-test serialization warnings in 365.18s**.
+
+## Auditable evidence-trail stage follow-up
+
+The final review follow-up replaces caller-authored stage events and timestamps with exact
+accepted proposal/audit receipt references. It adds two fixed, no-projection stage proposals,
+reuses accepted `AddEvidence`, `ProposeClaim`, and `TransitionClaim` transactions, and verifies the
+same policy, approval, classification, actor-independence, chronology, and graph-content authority
+both live and during workspace replay. Successors now require a fresh contiguous claim transition;
+trail outcomes are derived, not drafted; and identity relations use typed legacy provenance keys.
+The legacy evidence/claim proposal JSON and hashes, migrations, dependencies, and generic authority
+surface remain unchanged.
+
+### RED to GREEN checkpoints
+
+- Baseline before this follow-up: **1,050 passed, 3 skipped, 6 warnings in 406.03s**.
+- Stage contracts and routing: initial **4 failed** in 5.29s, followed by negative stage-authority
+  cases; the complete cluster reached **11 passed** in 8.61s.
+- Receipt-only provenance: **2 failed, 99 deselected** before implementation, then
+  **2 passed, 99 deselected**. Caller-authored stage event IDs/timestamps are no longer accepted.
+- Durable successor lineage: **1 failed, 27 deselected** while replay retained the old claim, then
+  **1 passed, 27 deselected** in 4.42s with an accepted fresh `TransitionClaim` receipt.
+- Derived outcome/conflict semantics: **2 failed, 28 deselected**, then
+  **3 passed, 28 deselected** in 6.03s, including a durable successor with opposing evidence,
+  `CONTRADICTS`, and passed counterevidence deriving `CONFLICTED`.
+- Typed exact identity provenance: **2 failed, 6 passed, 95 deselected**, then
+  **8 passed, 95 deselected**.
+- Shared live/replay authority: **1 failed, 31 deselected** before fixed classification was shared,
+  then the classification/backdating/inactive-policy set passed **3 tests, 31 deselected** in
+  4.49s. Dependent approval, wrong classification, non-primary grounding, protected-evaluation,
+  rollback, and wrong historical-policy replay cases passed **6 tests, 34 deselected** in 5.77s.
+- Combined focused gate: **519 passed in 212.38s**.
+- The first full suite found one historical-policy regression: **1 failed, 1,073 passed,
+  3 skipped in 416.65s**. Workspace replay had incorrectly treated an extra registered, inactive
+  policy as corruption even when no transition activated it. The check was narrowed to reject only
+  audit events that actually use the wrong historically active policy; the exact regression plus
+  wrong-historical-policy replay test then passed **2 tests in 4.69s**.
+
+### Follow-up quality gates
+
+- Ruff: `ruff check src tests` — **all checks passed**.
+- Strict mypy: `mypy` — **success, 75 source files**.
+- `git diff --check` — **passed** (Git emitted only configured LF-to-CRLF notices).
+- Final complete suite: `pytest -q` — **1,074 passed, 3 skipped in 411.52s**.

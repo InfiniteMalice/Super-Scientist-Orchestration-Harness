@@ -16,7 +16,9 @@ from super_scientist.domain.evaluators.models import (
 )
 from super_scientist.domain.evidence.models import EvidenceRecord
 from super_scientist.domain.evidence_trails.models import (
+    AddEvidenceReceiptRef,
     EvidenceTrailNode,
+    EvidenceTrailNodeStageReceiptRef,
     EvidenceTrailRelation,
     EvidenceTrailSnapshot,
     EvidenceTrailVersion,
@@ -63,6 +65,8 @@ type ProposalKind = Literal[
     "record_run_budget",
     "record_run_checkpoint",
     "decide_completion",
+    "propose_evidence_trail_nodes",
+    "propose_evidence_trail_relations",
     "record_evidence_trail_version",
     "bind_report_sentence",
 ]
@@ -220,6 +224,30 @@ class DecideCompletion(ProposalBase):
     completion_decision: CompletionDecision
 
 
+class ProposeEvidenceTrailNodes(ProposalBase):
+    proposal_type: Literal["propose_evidence_trail_nodes"] = (
+        "propose_evidence_trail_nodes"
+    )
+    trail_id: StableIdentifier
+    trail_version_id: StableIdentifier
+    classification: ChangeClassification
+    source_receipts: tuple[AddEvidenceReceiptRef, ...] = Field(min_length=1)
+    nodes: tuple[EvidenceTrailNode, ...] = Field(min_length=1)
+
+
+class ProposeEvidenceTrailRelations(ProposalBase):
+    proposal_type: Literal["propose_evidence_trail_relations"] = (
+        "propose_evidence_trail_relations"
+    )
+    trail_id: StableIdentifier
+    trail_version_id: StableIdentifier
+    classification: ChangeClassification
+    node_stage_receipt: EvidenceTrailNodeStageReceiptRef
+    node_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    nodes_hash: Sha256Hex
+    relations: tuple[EvidenceTrailRelation, ...]
+
+
 class RecordEvidenceTrailVersion(ProposalBase):
     proposal_type: Literal["record_evidence_trail_version"] = (
         "record_evidence_trail_version"
@@ -273,6 +301,8 @@ Proposal = Annotated[
     | RecordRunBudget
     | RecordRunCheckpoint
     | DecideCompletion
+    | ProposeEvidenceTrailNodes
+    | ProposeEvidenceTrailRelations
     | RecordEvidenceTrailVersion
     | BindReportSentence
     | InvalidProposal,

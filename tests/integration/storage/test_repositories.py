@@ -229,6 +229,7 @@ def test_transaction_repository_round_trips_by_idempotency_key(
     )
     assert stored.proposal_hash != sha256_hex(proposal_json.encode("utf-8"))
     assert stored.decision == decision
+    assert stored.created_at == repository_fixture.now
     assert repository_fixture.repositories.transactions.list_all() == (stored,)
 
 

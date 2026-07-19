@@ -6,8 +6,14 @@ from pydantic import BaseModel
 from sqlalchemy import Connection
 
 from super_scientist.application.evidence_verification import verified_artifact_bytes
+from super_scientist.application.trails.receipts import (
+    AcceptedProposalReceipt,
+    AcceptedProposalReceiptReader,
+)
 from super_scientist.application.trails.service import (
     BindReportSentenceHandler,
+    ProposeEvidenceTrailNodesHandler,
+    ProposeEvidenceTrailRelationsHandler,
     RecordEvidenceTrailVersionHandler,
 )
 from super_scientist.application.transactions.contracts import ProposalHandler
@@ -22,10 +28,13 @@ from super_scientist.domain.evidence_trails.models import (
     RetainedEvidenceSource,
     TrailAssessment,
     TrailCheckResult,
+    TrailReceiptRef,
     TrailValidationInputs,
 )
 from super_scientist.kernel.transactions.models import (
     BindReportSentence,
+    ProposeEvidenceTrailNodes,
+    ProposeEvidenceTrailRelations,
     RecordEvidenceTrailVersion,
 )
 from super_scientist.providers.storage.artifacts import ArtifactStore
@@ -44,6 +53,29 @@ type FixedTrailHandler = ProposalHandler[BaseModel, BaseModel]
 
 
 @dataclass(frozen=True)
+class TrailStageCapabilities:
+    active_policy: PolicySnapshot
+    receipts: AcceptedProposalReceiptReader
+
+    def policy_snapshot(self) -> PolicySnapshot:
+        return self.active_policy
+
+    def resolve_receipt(
+        self,
+        reference: TrailReceiptRef,
+    ) -> AcceptedProposalReceipt | None:
+        return self.receipts.resolve(reference)
+
+    def append_authoritative(self, record: BaseModel) -> None:
+        del record
+        raise RuntimeError("evidence-trail stages have no projection write authority")
+
+    def update_projection(self, record: BaseModel) -> None:
+        del record
+        raise RuntimeError("evidence-trail stages have no projection write authority")
+
+
+@dataclass(frozen=True)
 class TrailCapabilities:
     active_policy: PolicySnapshot
     claims: ClaimRepository
@@ -56,6 +88,7 @@ class TrailCapabilities:
     assessments: EvidenceTrailAssessmentRepository
     bindings: ReportSentenceBindingRepository
     head: EvidenceTrailHeadRepository
+    receipts: AcceptedProposalReceiptReader
 
     def policy_snapshot(self) -> PolicySnapshot:
         return self.active_policy
@@ -87,14 +120,35 @@ class TrailCapabilities:
             for assessment in self.assessments.list_all()
             if assessment.trail_version_id == trail_version_id
         }
+        provenance = version.source_first_provenance
+        node_receipt = self.receipts.resolve(provenance.node_stage_receipt)
+        relation_receipt = self.receipts.resolve(provenance.relation_stage_receipt)
+        node_ids = (
+            tuple(node_records)
+            if node_receipt is None
+            or not isinstance(node_receipt.proposal, ProposeEvidenceTrailNodes)
+            else tuple(node.node_id for node in node_receipt.proposal.nodes)
+        )
+        relation_ids = (
+            tuple(relation_records)
+            if relation_receipt is None
+            or not isinstance(
+                relation_receipt.proposal,
+                ProposeEvidenceTrailRelations,
+            )
+            else tuple(
+                relation.relation_id
+                for relation in relation_receipt.proposal.relations
+            )
+        )
         return EvidenceTrailSnapshot(
             version=version,
             nodes=_ordered_records(
-                version.source_first_provenance.node_event.subject_ids,
+                node_ids,
                 node_records,
             ),
             relations=_ordered_records(
-                version.source_first_provenance.relation_event.subject_ids,
+                relation_ids,
                 relation_records,
             ),
             checks=_ordered_records(version.check_ids, check_records),
@@ -149,6 +203,12 @@ class TrailCapabilities:
 
     def get_binding(self, binding_id: str) -> ReportSentenceBinding | None:
         return self.bindings.get(binding_id)
+
+    def resolve_receipt(
+        self,
+        reference: TrailReceiptRef,
+    ) -> AcceptedProposalReceipt | None:
+        return self.receipts.resolve(reference)
 
     def append_authoritative(self, record: BaseModel) -> None:
         if isinstance(record, EvidenceTrailVersion):
@@ -208,6 +268,8 @@ def _ordered_records[RecordT](
 
 def fixed_trail_handlers() -> tuple[FixedTrailHandler, ...]:
     return (  # type: ignore[return-value]
+        ProposeEvidenceTrailNodesHandler(),
+        ProposeEvidenceTrailRelationsHandler(),
         RecordEvidenceTrailVersionHandler(),
         BindReportSentenceHandler(),
     )
@@ -218,7 +280,15 @@ def trail_capabilities(
     connection: Connection,
     active_policy: PolicySnapshot,
     artifact_store: ArtifactStore,
-) -> TrailCapabilities:
+) -> TrailCapabilities | TrailStageCapabilities:
+    if isinstance(
+        proposal,
+        (ProposeEvidenceTrailNodes, ProposeEvidenceTrailRelations),
+    ):
+        return TrailStageCapabilities(
+            active_policy=active_policy,
+            receipts=AcceptedProposalReceiptReader(connection),
+        )
     if not isinstance(proposal, (RecordEvidenceTrailVersion, BindReportSentence)):
         raise TypeError(f"no fixed evidence-trail capability for proposal: {type(proposal)!r}")
     return TrailCapabilities(
@@ -233,4 +303,5 @@ def trail_capabilities(
         assessments=EvidenceTrailAssessmentRepository(connection),
         bindings=ReportSentenceBindingRepository(connection),
         head=EvidenceTrailHeadRepository(connection),
+        receipts=AcceptedProposalReceiptReader(connection),
     )

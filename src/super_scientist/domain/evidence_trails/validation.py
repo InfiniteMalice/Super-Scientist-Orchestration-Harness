@@ -11,20 +11,18 @@ from super_scientist.domain.evidence_trails.authority import (
     RelationTemporalRule,
     canonical_evidence_ids,
     canonical_relation_evidence_ids,
-    claim_content_hash,
     derive_causal_positions,
     derive_geometry,
+    derive_trail_outcome,
     parse_external_grounding,
+    parse_identity_provenance,
     parse_source_structure,
-    relation_content_hash,
     required_assessment_scope,
     required_causal_support,
     required_contradiction_node_ids,
     required_opposing_report_node_ids,
     required_report_nodes,
     required_report_spans,
-    semantic_assessment_outcome,
-    source_first_event_id,
     trail_actors_are_independent,
     trusted_assessment_id,
     trusted_check_id,
@@ -37,8 +35,6 @@ from super_scientist.domain.evidence_trails.models import (
     RelationType,
     ReportSentenceBinding,
     RetainedEvidenceSource,
-    SourceFirstStageEvent,
-    SourceFirstStageKind,
     TrailAssessment,
     TrailCheckCategory,
     TrailNodeRole,
@@ -224,11 +220,6 @@ def validate_trail(
             TrailCheckCategory.GROUNDEDNESS,
             "SOURCE_FIRST_PROVENANCE_REQUIRED",
         )
-    elif not _source_first_provenance_matches(trail, retained, sources_by_id):
-        add(
-            TrailCheckCategory.GROUNDEDNESS,
-            "SOURCE_FIRST_PROVENANCE_MISMATCH",
-        )
 
     for node in trail.nodes:
         if node.trail_version_id != version.trail_version_id:
@@ -335,11 +326,41 @@ def validate_trail(
                 or source_node.temporal_position != target_node.temporal_position
             ):
                 add(TrailCheckCategory.TEMPORAL_ORDER, "SAME_EVENT_TIME_MISMATCH")
-        if (
-            schema.identity_rule is RelationIdentityRule.SAME_ENTITY
-            and source_node.content_hash != target_node.content_hash
-        ):
-            add(TrailCheckCategory.RELATION_SCHEMA, "SAME_ENTITY_IDENTITY_UNPROVEN")
+        if schema.identity_rule is not RelationIdentityRule.NONE:
+            source_record = sources_by_id.get(source_node.source_id)
+            target_record = sources_by_id.get(target_node.source_id)
+            identities = None
+            if (
+                source_record is not None
+                and target_record is not None
+                and source_record.evidence.evidence_id == source_node.evidence_id
+                and target_record.evidence.evidence_id == target_node.evidence_id
+            ):
+                try:
+                    identities = (
+                        parse_identity_provenance(source_record.evidence),
+                        parse_identity_provenance(target_record.evidence),
+                    )
+                except ValueError:
+                    identities = None
+            if schema.identity_rule is RelationIdentityRule.SAME_ENTITY and (
+                identities is None
+                or identities[0].entity_id is None
+                or identities[0].entity_id != identities[1].entity_id
+            ):
+                add(
+                    TrailCheckCategory.RELATION_SCHEMA,
+                    "SAME_ENTITY_IDENTITY_UNPROVEN",
+                )
+            if schema.identity_rule is RelationIdentityRule.SAME_EVENT and (
+                identities is None
+                or identities[0].event_id is None
+                or identities[0].event_id != identities[1].event_id
+            ):
+                add(
+                    TrailCheckCategory.RELATION_SCHEMA,
+                    "SAME_EVENT_IDENTITY_UNPROVEN",
+                )
         if schema.causal:
             causal_relations.append(relation)
             if (
@@ -428,20 +449,7 @@ def validate_trail(
     source_actor_ids = {
         source.evidence.ingestion_actor_id for source in sources_by_id.values()
     }
-    stage_actors = (
-        ()
-        if provenance is None
-        else (
-            *provenance.source_events,
-            provenance.node_event,
-            provenance.relation_event,
-            provenance.claim_event,
-        )
-    )
-    non_assessment_actors = (
-        version.constructed_by,
-        *(event.actor for event in stage_actors),
-    )
+    non_assessment_actors = (version.constructed_by,)
     assessments_by_category = {
         assessment.category: assessment for assessment in trail.assessments
     }
@@ -589,105 +597,9 @@ def _semantic_outcome(
     opposing_node_ids: tuple[str, ...],
     assessments_by_category: dict[AssessmentCategory, TrailAssessment],
 ) -> TrailOutcome:
-    outcomes = {
-        category: (
-            AssessmentOutcome.INCONCLUSIVE
-            if assessments_by_category.get(category) is None
-            else assessments_by_category[category].provenance.result
-        )
-        for category in AssessmentCategory
-    }
-    return semantic_assessment_outcome(outcomes, conflicted=bool(opposing_node_ids))
-
-
-def _source_first_provenance_matches(
-    trail: EvidenceTrailSnapshot,
-    retained: TrailValidationInputs,
-    sources_by_id: dict[str, RetainedEvidenceSource],
-) -> bool:
-    version = trail.version
-    provenance = version.source_first_provenance
-    if tuple(sources_by_id) != version.source_ids:
-        return False
-    if len(provenance.source_events) != len(version.source_ids):
-        return False
-    for event, source_id in zip(
-        provenance.source_events,
-        version.source_ids,
-        strict=True,
-    ):
-        source = sources_by_id.get(source_id)
-        if source is None:
-            return False
-        evidence = source.evidence
-        if (
-            event.stage is not SourceFirstStageKind.SOURCE_RETAINED
-            or event.subject_ids != (source_id, evidence.evidence_id)
-            or event.content_hashes != (evidence.artifact.sha256,)
-            or event.actor.actor_id != evidence.ingestion_actor_id
-            or event.occurred_at != evidence.retrieved_at
-            or not _source_first_event_id_matches(event)
-        ):
-            return False
-
-    node_event = provenance.node_event
-    if (
-        node_event.stage is not SourceFirstStageKind.NODES_PROPOSED
-        or node_event.subject_ids != tuple(node.node_id for node in trail.nodes)
-        or node_event.content_hashes != tuple(node.content_hash for node in trail.nodes)
-        or node_event.actor != version.constructed_by
-        or not _source_first_event_id_matches(node_event)
-    ):
-        return False
-    relation_event = provenance.relation_event
-    if (
-        relation_event.stage is not SourceFirstStageKind.RELATIONS_PROPOSED
-        or relation_event.subject_ids
-        != tuple(relation.relation_id for relation in trail.relations)
-        or relation_event.content_hashes
-        != tuple(relation_content_hash(relation) for relation in trail.relations)
-        or relation_event.actor != version.constructed_by
-        or not _source_first_event_id_matches(relation_event)
-    ):
-        return False
-    claim_event = provenance.claim_event
-    expected_claim_id = f"{retained.claim.claim_id}:{retained.claim.version}"
-    if (
-        claim_event.stage is not SourceFirstStageKind.CLAIM_FORMED
-        or claim_event.subject_ids != (expected_claim_id,)
-        or claim_event.content_hashes != (claim_content_hash(retained.claim),)
-        or claim_event.actor.actor_id != retained.claim.created_by
-        or claim_event.occurred_at != retained.claim.created_at
-        or not _source_first_event_id_matches(claim_event)
-    ):
-        return False
-
-    latest_source = max(event.occurred_at for event in provenance.source_events)
-    earliest_check = min(check.checked_at for check in trail.checks)
-    latest_check = max(check.checked_at for check in trail.checks)
-    earliest_assessment = min(
-        assessment.provenance.assessed_at for assessment in trail.assessments
-    )
-    latest_assessment = max(
-        assessment.provenance.assessed_at for assessment in trail.assessments
-    )
-    return (
-        latest_source < node_event.occurred_at
-        < relation_event.occurred_at
-        < claim_event.occurred_at
-        < earliest_check
-        and latest_check < earliest_assessment
-        and latest_assessment < version.created_at
-    )
-
-
-def _source_first_event_id_matches(event: SourceFirstStageEvent) -> bool:
-    return event.event_id == source_first_event_id(
-        stage=event.stage,
-        subject_ids=event.subject_ids,
-        content_hashes=event.content_hashes,
-        actor=event.actor,
-        occurred_at=event.occurred_at,
+    return derive_trail_outcome(
+        tuple(assessments_by_category.values()),
+        conflicted=bool(opposing_node_ids),
     )
 
 

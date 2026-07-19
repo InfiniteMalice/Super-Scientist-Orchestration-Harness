@@ -1,29 +1,29 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from super_scientist.domain.claims.models import AtomicClaim
 from super_scientist.domain.evidence.models import EvidenceRecord
 from super_scientist.domain.evidence_trails.models import (
+    AddEvidenceReceiptRef,
     AssessmentCategory,
     CausalSupport,
     ClaimModality,
+    ClaimStageReceiptRef,
     EvidenceTrailNode,
+    EvidenceTrailNodeStageReceiptRef,
     EvidenceTrailRelation,
+    EvidenceTrailRelationStageReceiptRef,
     EvidenceTrailSnapshot,
     RelationType,
     ReportSourceSpan,
-    RetainedEvidenceSource,
     SourceFirstProvenance,
-    SourceFirstStageEvent,
-    SourceFirstStageKind,
     StructuralLocation,
+    TrailAssessment,
     TrailGeometry,
     TrailNodeRole,
     TrailOutcome,
@@ -31,7 +31,7 @@ from super_scientist.domain.evidence_trails.models import (
 from super_scientist.domain.identity import ActorIdentity
 from super_scientist.domain.improvement.classification import ExternalGrounding
 from super_scientist.domain.improvement.models import AssessmentOutcome
-from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
+from super_scientist.domain.primitives import NonBlankText, canonical_json_bytes, sha256_hex
 
 TRUSTED_TRAIL_CHECKER_ID = "super-scientist-trail-validator"
 TRUSTED_TRAIL_CHECKER_VERSION = "2"
@@ -193,6 +193,30 @@ class TrailScope(BaseModel):
     node_ids: tuple[str, ...]
     relation_ids: tuple[str, ...]
     evidence_ids: tuple[str, ...]
+
+
+class EvidenceIdentityProvenance(BaseModel):
+    """Strict typed view of legacy string-only evidence identity provenance."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    entity_id: NonBlankText | None = None
+    event_id: NonBlankText | None = None
+
+
+def parse_identity_provenance(
+    evidence: EvidenceRecord,
+) -> EvidenceIdentityProvenance:
+    parsed: dict[str, str | None] = {}
+    for key in ("entity_id", "event_id"):
+        value = evidence.provenance.get(key)
+        if value is None:
+            parsed[key] = None
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"evidence provenance {key} must be a nonblank string")
+        parsed[key] = value.strip()
+    return EvidenceIdentityProvenance(**parsed)
 
 
 def canonical_evidence_ids(nodes: tuple[EvidenceTrailNode, ...]) -> tuple[str, ...]:
@@ -449,109 +473,26 @@ def trail_actors_are_independent(
     )
 
 
-def source_first_event_id(
-    *,
-    stage: SourceFirstStageKind,
-    subject_ids: tuple[str, ...],
-    content_hashes: tuple[str, ...],
-    actor: ActorIdentity,
-    occurred_at: datetime,
-) -> str:
-    payload = {
-        "schema_version": 1,
-        "stage": stage.value,
-        "subject_ids": subject_ids,
-        "content_hashes": content_hashes,
-        "actor": actor.model_dump(mode="json"),
-        "occurred_at": occurred_at.isoformat(),
-    }
-    return f"source-first:{stage.value.lower()}:{sha256_hex(canonical_json_bytes(payload))}"
-
-
-def relation_content_hash(relation: EvidenceTrailRelation) -> str:
-    return sha256_hex(canonical_json_bytes(relation.model_dump(mode="json")))
-
-
-def claim_content_hash(claim: AtomicClaim) -> str:
-    return sha256_hex(canonical_json_bytes(claim.model_dump(mode="json")))
-
-
-def _stage_event(
-    *,
-    stage: SourceFirstStageKind,
-    subject_ids: tuple[str, ...],
-    content_hashes: tuple[str, ...],
-    actor: ActorIdentity,
-    occurred_at: datetime,
-) -> SourceFirstStageEvent:
-    return SourceFirstStageEvent(
-        event_id=source_first_event_id(
-            stage=stage,
-            subject_ids=subject_ids,
-            content_hashes=content_hashes,
-            actor=actor,
-            occurred_at=occurred_at,
-        ),
-        stage=stage,
-        subject_ids=subject_ids,
-        content_hashes=content_hashes,
-        actor=actor,
-        occurred_at=occurred_at,
+def canonical_node_set_hash(nodes: tuple[EvidenceTrailNode, ...]) -> str:
+    return sha256_hex(
+        canonical_json_bytes(tuple(node.model_dump(mode="json") for node in nodes))
     )
 
 
 def build_source_first_provenance(
     *,
-    sources: tuple[RetainedEvidenceSource, ...],
-    claim: AtomicClaim,
-    nodes: tuple[EvidenceTrailNode, ...],
-    relations: tuple[EvidenceTrailRelation, ...],
-    builder: ActorIdentity,
-    source_actors: tuple[ActorIdentity, ...],
-    claim_actor: ActorIdentity,
-    node_proposed_at: datetime,
-    relation_proposed_at: datetime,
+    source_receipts: tuple[AddEvidenceReceiptRef, ...],
+    node_stage_receipt: EvidenceTrailNodeStageReceiptRef,
+    relation_stage_receipt: EvidenceTrailRelationStageReceiptRef,
+    claim_stage_receipt: ClaimStageReceiptRef,
 ) -> SourceFirstProvenance:
-    """Construct canonical stage records; validation still binds them to retained inputs."""
+    """Construct source-first provenance from accepted immutable receipt references."""
 
-    if len(source_actors) != len(sources):
-        raise ValueError("one full source actor is required for every retained source")
-    source_events = tuple(
-        _stage_event(
-            stage=SourceFirstStageKind.SOURCE_RETAINED,
-            subject_ids=(source.source_id, source.evidence.evidence_id),
-            content_hashes=(source.evidence.artifact.sha256,),
-            actor=actor,
-            occurred_at=source.evidence.retrieved_at,
-        )
-        for source, actor in zip(sources, source_actors, strict=True)
-    )
-    node_event = _stage_event(
-        stage=SourceFirstStageKind.NODES_PROPOSED,
-        subject_ids=tuple(node.node_id for node in nodes),
-        content_hashes=tuple(node.content_hash for node in nodes),
-        actor=builder,
-        occurred_at=node_proposed_at,
-    )
-    relation_event = _stage_event(
-        stage=SourceFirstStageKind.RELATIONS_PROPOSED,
-        subject_ids=tuple(relation.relation_id for relation in relations),
-        content_hashes=tuple(relation_content_hash(relation) for relation in relations),
-        actor=builder,
-        occurred_at=relation_proposed_at,
-    )
-    claim_event = _stage_event(
-        stage=SourceFirstStageKind.CLAIM_FORMED,
-        subject_ids=(f"{claim.claim_id}:{claim.version}",),
-        content_hashes=(claim_content_hash(claim),),
-        actor=claim_actor,
-        occurred_at=claim.created_at,
-    )
     return SourceFirstProvenance(
-        source_events=source_events,
-        node_event=node_event,
-        relation_event=relation_event,
-        claim_event=claim_event,
+        source_receipts=source_receipts,
+        node_stage_receipt=node_stage_receipt,
+        relation_stage_receipt=relation_stage_receipt,
+        claim_stage_receipt=claim_stage_receipt,
     )
 
 
@@ -677,3 +618,21 @@ def semantic_assessment_outcome(
     if TrailOutcome.PARTIALLY_SUPPORTING in mapped:
         return TrailOutcome.PARTIALLY_SUPPORTING
     return TrailOutcome.SUFFICIENT
+
+
+def derive_trail_outcome(
+    assessments: tuple[TrailAssessment, ...],
+    *,
+    conflicted: bool,
+) -> TrailOutcome:
+    """Derive a trail status from the complete exact assessment matrix."""
+
+    outcomes = {
+        assessment.category: assessment.provenance.result
+        for assessment in assessments
+    }
+    if set(outcomes) != set(AssessmentCategory) or len(assessments) != len(
+        AssessmentCategory
+    ):
+        return TrailOutcome.INVALID_TRAIL
+    return semantic_assessment_outcome(outcomes, conflicted=conflicted)

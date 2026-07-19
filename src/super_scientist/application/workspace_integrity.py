@@ -11,6 +11,15 @@ from super_scientist.application.evidence_verification import (
     verified_artifact_bytes,
     verify_artifact_binding,
 )
+from super_scientist.application.trails.receipts import (
+    AcceptedProposalReceipt,
+    accepted_proposal_receipts,
+)
+from super_scientist.application.trails.service import (
+    FIXED_TRAIL_CLASSIFICATION,
+    trail_authority_rejection,
+    trail_receipt_rejection,
+)
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
 from super_scientist.domain.configurations.models import ConfigurationVersion
@@ -19,6 +28,10 @@ from super_scientist.domain.evaluators.models import (
     EvaluatorVersion,
 )
 from super_scientist.domain.evidence.models import EvidenceRecord, VerificationState
+from super_scientist.domain.evidence_trails.authority import (
+    canonical_node_set_hash,
+    parse_external_grounding,
+)
 from super_scientist.domain.evidence_trails.models import (
     EvidenceTrailNode,
     EvidenceTrailRelation,
@@ -29,13 +42,18 @@ from super_scientist.domain.evidence_trails.models import (
     TrailAssessment,
     TrailCheckResult,
     TrailOutcome,
+    TrailReceiptRef,
     TrailValidationInputs,
 )
 from super_scientist.domain.evidence_trails.validation import (
     validate_report_binding,
     validate_trail,
 )
-from super_scientist.domain.improvement.classification import is_authoritative_verification
+from super_scientist.domain.identity import ActorIdentity
+from super_scientist.domain.improvement.classification import (
+    ExternalGrounding,
+    is_authoritative_verification,
+)
 from super_scientist.domain.improvement.models import (
     ActorRelationship,
     AssessmentOutcome,
@@ -84,6 +102,8 @@ from super_scientist.kernel.transactions.models import (
     Proposal,
     ProposeClaim,
     ProposeEvaluatorVersion,
+    ProposeEvidenceTrailNodes,
+    ProposeEvidenceTrailRelations,
     ProposeGovernancePolicyTransition,
     RecordConfigurationVersion,
     RecordEvaluatorAudit,
@@ -113,6 +133,7 @@ SHA256_ADAPTER: TypeAdapter[Sha256Hex] = TypeAdapter(Sha256Hex)
 
 @dataclass(frozen=True)
 class _ValidatedAuditRecord:
+    event: AuditEvent
     proposal: Proposal
     decision: TransactionDecision
     intent_fingerprint: str | None
@@ -153,6 +174,8 @@ def verify_workspace(
             policies,
             active_policy,
             artifact_store,
+            transactions,
+            events,
         )
         _require_artifact_consistency(evidence, artifact_store)
         _require_claim_evidence_consistency(repositories, heads, evidence)
@@ -232,6 +255,7 @@ def _validated_audit_records(
             )
         records.append(
             _ValidatedAuditRecord(
+                event=event,
                 proposal=proposal,
                 decision=decision,
                 intent_fingerprint=intent_fingerprint,
@@ -302,6 +326,8 @@ def _require_projection_consistency(
     policies: tuple[PolicySnapshot, ...],
     active_policy: PolicySnapshot | None,
     artifact_store: ArtifactStore,
+    transactions: tuple[StoredTransaction, ...],
+    events: tuple[AuditEvent, ...],
 ) -> None:
     expected_evidence: dict[str, EvidenceRecord] = {}
     expected_claims: dict[tuple[str, int], AtomicClaim] = {}
@@ -330,10 +356,22 @@ def _require_projection_consistency(
     expected_trail_heads: dict[str, tuple[str, int]] = {}
     accepted_evaluator_succession = False
     transitions: list[tuple[ProposeGovernancePolicyTransition, str]] = []
+    receipt_index = accepted_proposal_receipts(transactions, events)
+    policy_by_hash = {snapshot.policy_hash: snapshot for snapshot in policies}
+    _require_historical_policy_sequence(audit_records, policy_by_hash, active_policy)
+    transactions_by_id = {
+        transaction.proposal.proposal_id: transaction
+        for transaction in transactions
+    }
     for audit_record in audit_records:
         if not (audit_record.transaction_persisted and audit_record.decision.accepted):
             continue
         proposal = audit_record.proposal
+        transaction = transactions_by_id.get(proposal.proposal_id)
+        _require(transaction is not None, "accepted audit has no exact transaction")
+        if transaction is None:  # pragma: no cover - fail-closed narrowing
+            raise StorageIntegrityError("accepted audit transaction is unavailable")
+        historical_policy = policy_by_hash[audit_record.governing_policy_hash]
         if isinstance(proposal, AddEvidence):
             projected = proposal.evidence.model_copy(
                 update={"verification_state": VerificationState.HASH_VERIFIED}
@@ -687,6 +725,22 @@ def _require_projection_consistency(
                 decision,
                 "completion decision projection",
             )
+        elif isinstance(proposal, ProposeEvidenceTrailNodes):
+            _require_node_stage_replay(
+                proposal,
+                historical_policy,
+                receipt_index,
+                transaction,
+                audit_record.event.sequence,
+            )
+        elif isinstance(proposal, ProposeEvidenceTrailRelations):
+            _require_relation_stage_replay(
+                proposal,
+                historical_policy,
+                receipt_index,
+                transaction,
+                audit_record.event.sequence,
+            )
         elif isinstance(proposal, RecordEvidenceTrailVersion):
             version = proposal.trail_version
             _require_governing_hash(
@@ -707,11 +761,22 @@ def _require_projection_consistency(
                     "evidence trail version does not continue its replay-derived head",
                 )
                 parent = expected_trail_versions.get(trail_head[0])
+                child_claim = next(
+                    (
+                        claim
+                        for claim in expected_claims.values()
+                        if f"{claim.claim_id}:{claim.version}"
+                        == version.claim_version_id
+                    ),
+                    None,
+                )
                 _require(
                     parent is not None
                     and parent.trail_id == version.trail_id
-                    and parent.claim_version_id == version.claim_version_id,
-                    "evidence trail version reparented or changed its retained claim",
+                    and child_claim is not None
+                    and child_claim.parent_version_id
+                    == parent.claim_version_id,
+                    "evidence trail version reparented or broke claim lineage",
                 )
             snapshot = proposal.snapshot()
             validation_inputs = _trail_validation_inputs(
@@ -725,6 +790,66 @@ def _require_projection_consistency(
                 validation.outcome is version.status
                 and validation.outcome is not TrailOutcome.INVALID_TRAIL,
                 "evidence trail transaction fails semantic replay validation",
+            )
+            provenance = version.source_first_provenance
+            source_receipts = tuple(
+                _resolve_receipt(receipt_index, reference)
+                for reference in provenance.source_receipts
+            )
+            node_receipt = _resolve_receipt(
+                receipt_index,
+                provenance.node_stage_receipt,
+            )
+            relation_receipt = _resolve_receipt(
+                receipt_index,
+                provenance.relation_stage_receipt,
+            )
+            claim_receipt = _resolve_receipt(
+                receipt_index,
+                provenance.claim_stage_receipt,
+            )
+            prior_snapshot = (
+                None
+                if version.parent_trail_version_id is None
+                else _expected_trail_snapshot(
+                    version.parent_trail_version_id,
+                    expected_trail_versions,
+                    expected_trail_nodes,
+                    expected_trail_relations,
+                    expected_trail_checks,
+                    expected_trail_assessments,
+                )
+            )
+            receipt_rejection = trail_receipt_rejection(
+                proposal,
+                validation_inputs=validation_inputs,
+                prior_snapshot=prior_snapshot,
+                source_receipts=source_receipts,
+                node_stage_receipt=node_receipt,
+                relation_stage_receipt=relation_receipt,
+                claim_stage_receipt=claim_receipt,
+                final_transaction_key=(
+                    transaction.created_at,
+                    transaction.proposal.proposal_id,
+                ),
+                final_audit_sequence=audit_record.event.sequence,
+            )
+            _require(
+                receipt_rejection is None,
+                "evidence trail receipt replay validation failed",
+            )
+            authority_rejection = trail_authority_rejection(
+                proposal,
+                historical_policy,
+                trail=snapshot,
+                retained=validation_inputs,
+                authority_actors=_receipt_authority_actors(
+                    (*source_receipts, node_receipt, relation_receipt, claim_receipt)
+                ),
+            )
+            _require(
+                authority_rejection is None,
+                "evidence trail historical authority validation failed",
             )
             _add_unique(
                 expected_trail_versions,
@@ -788,6 +913,31 @@ def _require_projection_consistency(
             _require(
                 not validate_report_binding(binding, snapshot, validation_inputs),
                 "report sentence binding fails semantic replay validation",
+            )
+            provenance = snapshot.version.source_first_provenance
+            binding_receipts = (
+                *(
+                    _resolve_receipt(receipt_index, reference)
+                    for reference in provenance.source_receipts
+                ),
+                _resolve_receipt(receipt_index, provenance.node_stage_receipt),
+                _resolve_receipt(receipt_index, provenance.relation_stage_receipt),
+                _resolve_receipt(receipt_index, provenance.claim_stage_receipt),
+            )
+            _require(
+                all(receipt is not None for receipt in binding_receipts),
+                "report binding trail receipts do not resolve",
+            )
+            authority_rejection = trail_authority_rejection(
+                proposal,
+                historical_policy,
+                trail=snapshot,
+                retained=validation_inputs,
+                authority_actors=_receipt_authority_actors(binding_receipts),
+            )
+            _require(
+                authority_rejection is None,
+                "report binding historical authority validation failed",
             )
             _add_unique(
                 expected_report_bindings,
@@ -1141,6 +1291,187 @@ def _trail_validation_inputs(
     )
 
 
+def _resolve_receipt(
+    receipts: dict[str, AcceptedProposalReceipt],
+    reference: TrailReceiptRef,
+) -> AcceptedProposalReceipt | None:
+    receipt = receipts.get(reference.proposal_id)
+    return receipt if receipt is not None and receipt.reference == reference else None
+
+
+def _receipt_precedes(
+    receipt: AcceptedProposalReceipt,
+    transaction: StoredTransaction,
+    audit_sequence: int,
+) -> bool:
+    return (
+        (
+            receipt.transaction_created_at,
+            receipt.proposal.proposal_id,
+        )
+        < (transaction.created_at, transaction.proposal.proposal_id)
+        and receipt.audit_sequence < audit_sequence
+    )
+
+
+def _receipt_authority_actors(
+    receipts: tuple[AcceptedProposalReceipt | None, ...],
+) -> tuple[ActorIdentity, ...]:
+    return tuple(
+        receipt.proposal.proposer
+        for receipt in receipts
+        if receipt is not None
+    )
+
+
+def _require_node_stage_replay(
+    proposal: ProposeEvidenceTrailNodes,
+    policy: PolicySnapshot,
+    receipts: dict[str, AcceptedProposalReceipt],
+    transaction: StoredTransaction,
+    audit_sequence: int,
+) -> None:
+    source_receipts = tuple(
+        _resolve_receipt(receipts, reference)
+        for reference in proposal.source_receipts
+    )
+    _require(
+        all(receipt is not None for receipt in source_receipts),
+        "node stage source receipts do not resolve exactly",
+    )
+    resolved = tuple(
+        receipt for receipt in source_receipts if receipt is not None
+    )
+    source_proposals = tuple(
+        receipt.proposal
+        for receipt in resolved
+        if isinstance(receipt.proposal, AddEvidence)
+    )
+    source_pairs = tuple(
+        dict.fromkeys((node.source_id, node.evidence_id) for node in proposal.nodes)
+    )
+    _require(
+        proposal.classification == FIXED_TRAIL_CLASSIFICATION
+        and len(source_proposals) == len(resolved)
+        and len({receipt.reference.proposal_id for receipt in resolved})
+        == len(resolved)
+        and all(
+            receipt.governing_policy_hash == policy.policy_hash
+            and _receipt_precedes(receipt, transaction, audit_sequence)
+            for receipt in resolved
+        )
+        and len({node.node_id for node in proposal.nodes}) == len(proposal.nodes)
+        and tuple(evidence_id for _, evidence_id in source_pairs)
+        == tuple(item.evidence.evidence_id for item in source_proposals)
+        and all(
+            node.trail_version_id == proposal.trail_version_id
+            for node in proposal.nodes
+        )
+        and all(
+            parse_external_grounding(item.evidence)
+            is ExternalGrounding.PRIMARY_SOURCE
+            for item in source_proposals
+        ),
+        "node stage fails exact historical receipt and graph validation",
+    )
+    authority_rejection = trail_authority_rejection(
+        proposal,
+        policy,
+        authority_actors=tuple(item.proposer for item in source_proposals),
+        authority_actor_ids=frozenset(
+            item.evidence.ingestion_actor_id for item in source_proposals
+        ),
+    )
+    _require(
+        authority_rejection is None,
+        "node stage fails historical policy or approval authority",
+    )
+
+
+def _require_relation_stage_replay(
+    proposal: ProposeEvidenceTrailRelations,
+    policy: PolicySnapshot,
+    receipts: dict[str, AcceptedProposalReceipt],
+    transaction: StoredTransaction,
+    audit_sequence: int,
+) -> None:
+    node_receipt = _resolve_receipt(receipts, proposal.node_stage_receipt)
+    _require(
+        node_receipt is not None
+        and isinstance(node_receipt.proposal, ProposeEvidenceTrailNodes),
+        "relation stage node receipt does not resolve exactly",
+    )
+    if node_receipt is None or not isinstance(
+        node_receipt.proposal,
+        ProposeEvidenceTrailNodes,
+    ):  # pragma: no cover - narrowed by fail-closed check
+        raise StorageIntegrityError("relation stage node receipt is unavailable")
+    node_stage = node_receipt.proposal
+    source_receipts = tuple(
+        _resolve_receipt(receipts, reference)
+        for reference in node_stage.source_receipts
+    )
+    _require(
+        all(receipt is not None for receipt in source_receipts),
+        "relation stage source receipts do not resolve exactly",
+    )
+    resolved_sources = tuple(
+        receipt for receipt in source_receipts if receipt is not None
+    )
+    source_proposals = tuple(
+        receipt.proposal
+        for receipt in resolved_sources
+        if isinstance(receipt.proposal, AddEvidence)
+    )
+    node_ids = tuple(node.node_id for node in node_stage.nodes)
+    node_id_set = set(node_ids)
+    _require(
+        proposal.classification == FIXED_TRAIL_CLASSIFICATION
+        and node_receipt.governing_policy_hash == policy.policy_hash
+        and _receipt_precedes(node_receipt, transaction, audit_sequence)
+        and proposal.trail_id == node_stage.trail_id
+        and proposal.trail_version_id == node_stage.trail_version_id
+        and proposal.proposer == node_stage.proposer
+        and proposal.node_ids == node_ids
+        and proposal.nodes_hash == canonical_node_set_hash(node_stage.nodes)
+        and len({item.relation_id for item in proposal.relations})
+        == len(proposal.relations)
+        and all(
+            relation.trail_version_id == proposal.trail_version_id
+            and relation.source_node_id in node_id_set
+            and relation.target_node_id in node_id_set
+            for relation in proposal.relations
+        )
+        and len(source_proposals) == len(resolved_sources)
+        and all(
+            receipt.governing_policy_hash == policy.policy_hash
+            and _receipt_precedes(receipt, transaction, audit_sequence)
+            for receipt in resolved_sources
+        )
+        and all(
+            parse_external_grounding(item.evidence)
+            is ExternalGrounding.PRIMARY_SOURCE
+            for item in source_proposals
+        ),
+        "relation stage fails exact historical receipt and graph validation",
+    )
+    authority_rejection = trail_authority_rejection(
+        proposal,
+        policy,
+        authority_actors=(
+            *(item.proposer for item in source_proposals),
+            node_stage.proposer,
+        ),
+        authority_actor_ids=frozenset(
+            item.evidence.ingestion_actor_id for item in source_proposals
+        ),
+    )
+    _require(
+        authority_rejection is None,
+        "relation stage fails historical policy or approval authority",
+    )
+
+
 def _add_expected_measurement(
     measurement: SelfImprovementMeasurementRecord,
     governing_policy_hash: str,
@@ -1214,6 +1545,45 @@ def _require_policy_projection_consistency(
     _require(
         active_policy is not None and active_policy.policy_hash == replay_active_hash,
         "active policy pointer does not match accepted transition replay",
+    )
+
+
+def _require_historical_policy_sequence(
+    audit_records: tuple[_ValidatedAuditRecord, ...],
+    policies: dict[str, PolicySnapshot],
+    active_policy: PolicySnapshot | None,
+) -> None:
+    if not audit_records:
+        return
+    replay_active_hash = audit_records[0].governing_policy_hash
+    _require(
+        replay_active_hash in policies,
+        "initial audit governing policy is not registered",
+    )
+    for record in audit_records:
+        _require(
+            record.governing_policy_hash == replay_active_hash,
+            "audit event does not use the replay-derived active policy",
+        )
+        if (
+            record.transaction_persisted
+            and record.decision.accepted
+            and isinstance(record.proposal, ProposeGovernancePolicyTransition)
+        ):
+            _require(
+                record.proposal.prior_policy_hash == replay_active_hash,
+                "accepted policy transition does not use the active prior policy",
+            )
+            candidate = record.proposal.candidate_policy_snapshot
+            _require(
+                policies.get(candidate.policy_hash) == candidate,
+                "accepted policy transition candidate is not registered exactly",
+            )
+            replay_active_hash = candidate.policy_hash
+    _require(
+        active_policy is not None
+        and active_policy.policy_hash == replay_active_hash,
+        "active policy pointer does not match historical audit replay",
     )
 
 

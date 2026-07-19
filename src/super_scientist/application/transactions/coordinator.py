@@ -48,6 +48,8 @@ from super_scientist.kernel.transactions.models import (
     ProposalAttempt,
     ProposalKind,
     ProposeClaim,
+    ProposeEvidenceTrailNodes,
+    ProposeEvidenceTrailRelations,
     ProposeGovernancePolicyTransition,
     RecordEvidenceTrailVersion,
     RecordProgressPlan,
@@ -389,7 +391,12 @@ class TransactionCoordinator:
                 writes = progress_io
             elif isinstance(
                 admitted_proposal,
-                (RecordEvidenceTrailVersion, BindReportSentence),
+                (
+                    ProposeEvidenceTrailNodes,
+                    ProposeEvidenceTrailRelations,
+                    RecordEvidenceTrailVersion,
+                    BindReportSentence,
+                ),
             ):
                 trail_io = trail_capabilities(
                     admitted_proposal,

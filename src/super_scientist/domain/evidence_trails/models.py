@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
@@ -117,29 +117,59 @@ class ConstructionMethod(StrEnum):
     SOURCE_FIRST = "SOURCE_FIRST"
 
 
-class SourceFirstStageKind(StrEnum):
-    SOURCE_RETAINED = "SOURCE_RETAINED"
-    NODES_PROPOSED = "NODES_PROPOSED"
-    RELATIONS_PROPOSED = "RELATIONS_PROPOSED"
-    CLAIM_FORMED = "CLAIM_FORMED"
+class AcceptedProposalReceiptRef(_StrictFrozenModel):
+    proposal_id: StableIdentifier
+    proposal_hash: Sha256Hex
+    audit_event_id: StableIdentifier
+    audit_event_hash: Sha256Hex
 
 
-class SourceFirstStageEvent(_StrictFrozenModel):
-    schema_version: Literal[1] = 1
-    event_id: StableIdentifier
-    stage: SourceFirstStageKind
-    subject_ids: tuple[StableIdentifier, ...]
-    content_hashes: tuple[Sha256Hex, ...]
-    actor: ActorIdentity
-    occurred_at: UtcTimestamp
+class AddEvidenceReceiptRef(AcceptedProposalReceiptRef):
+    proposal_type: Literal["add_evidence"] = "add_evidence"
+
+
+class EvidenceTrailNodeStageReceiptRef(AcceptedProposalReceiptRef):
+    proposal_type: Literal["propose_evidence_trail_nodes"] = (
+        "propose_evidence_trail_nodes"
+    )
+
+
+class EvidenceTrailRelationStageReceiptRef(AcceptedProposalReceiptRef):
+    proposal_type: Literal["propose_evidence_trail_relations"] = (
+        "propose_evidence_trail_relations"
+    )
+
+
+class ProposeClaimReceiptRef(AcceptedProposalReceiptRef):
+    proposal_type: Literal["propose_claim"] = "propose_claim"
+
+
+class TransitionClaimReceiptRef(AcceptedProposalReceiptRef):
+    proposal_type: Literal["transition_claim"] = "transition_claim"
+
+
+type ClaimStageReceiptRef = Annotated[
+    ProposeClaimReceiptRef | TransitionClaimReceiptRef,
+    Field(discriminator="proposal_type"),
+]
+
+
+type TrailReceiptRef = Annotated[
+    AddEvidenceReceiptRef
+    | EvidenceTrailNodeStageReceiptRef
+    | EvidenceTrailRelationStageReceiptRef
+    | ProposeClaimReceiptRef
+    | TransitionClaimReceiptRef,
+    Field(discriminator="proposal_type"),
+]
 
 
 class SourceFirstProvenance(_StrictFrozenModel):
     schema_version: Literal[1] = 1
-    source_events: tuple[SourceFirstStageEvent, ...] = Field(min_length=1)
-    node_event: SourceFirstStageEvent
-    relation_event: SourceFirstStageEvent
-    claim_event: SourceFirstStageEvent
+    source_receipts: tuple[AddEvidenceReceiptRef, ...] = Field(min_length=1)
+    node_stage_receipt: EvidenceTrailNodeStageReceiptRef
+    relation_stage_receipt: EvidenceTrailRelationStageReceiptRef
+    claim_stage_receipt: ClaimStageReceiptRef
 
 
 class ExactSourceSpan(_StrictFrozenModel):
