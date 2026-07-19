@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -9,6 +9,7 @@ from pydantic import (
     Tag,
     field_serializer,
     field_validator,
+    model_validator,
 )
 
 from super_scientist.domain.identity import ActorKind
@@ -99,6 +100,18 @@ class GovernancePolicyV2(BaseModel):
         human_approval_for: frozenset[str],
     ) -> list[str]:
         return sorted(human_approval_for)
+
+    @model_validator(mode="after")
+    def require_unique_adaptation_requirement_keys(self) -> Self:
+        keys = tuple(
+            (requirement.change_target, requirement.persistence)
+            for requirement in self.adaptation_requirements
+        )
+        if len(keys) != len(set(keys)):
+            raise ValueError(
+                "duplicate adaptation requirement change_target/persistence key"
+            )
+        return self
 
 
 def _policy_schema_version(value: object) -> object:

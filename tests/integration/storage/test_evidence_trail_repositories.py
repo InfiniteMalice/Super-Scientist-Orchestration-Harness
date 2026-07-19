@@ -199,15 +199,15 @@ def _engine(tmp_path: Path, name: str):  # type: ignore[no-untyped-def]
 
 def _binding(fixture):  # type: ignore[no-untyped-def]
     version = fixture.snapshot.version
-    node = fixture.snapshot.nodes[0]
+    nodes = fixture.snapshot.nodes
     return ReportSentenceBinding(
         binding_id="binding-1",
         trail_version_id=version.trail_version_id,
         claim_version_id=version.claim_version_id,
         sentence="The exact source supports the sentence.",
         outcome=version.status,
-        source_node_ids=(node.node_id,),
-        source_spans=(
+        source_node_ids=tuple(node.node_id for node in nodes),
+        source_spans=tuple(
             ReportSourceSpan(
                 node_id=node.node_id,
                 source_id=node.source_id,
@@ -216,7 +216,8 @@ def _binding(fixture):  # type: ignore[no-untyped-def]
                 end=node.exact_span.end,
                 text=node.exact_span.text,
                 content_hash=node.content_hash,
-            ),
+            )
+            for node in nodes
         ),
         contradiction_node_ids=(),
         opposing_node_ids=(),

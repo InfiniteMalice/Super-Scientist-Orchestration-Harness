@@ -67,26 +67,38 @@ class TrailCapabilities:
         version = self.versions.get(trail_version_id)
         if version is None:
             return None
+        node_records = {
+            node.node_id: node
+            for node in self.nodes.list_all()
+            if node.trail_version_id == trail_version_id
+        }
+        relation_records = {
+            relation.relation_id: relation
+            for relation in self.relations.list_all()
+            if relation.trail_version_id == trail_version_id
+        }
+        check_records = {
+            check.check_id: check
+            for check in self.checks.list_all()
+            if check.trail_version_id == trail_version_id
+        }
+        assessment_records = {
+            assessment.assessment_id: assessment
+            for assessment in self.assessments.list_all()
+            if assessment.trail_version_id == trail_version_id
+        }
         return EvidenceTrailSnapshot(
             version=version,
-            nodes=tuple(
-                node for node in self.nodes.list_all() if node.trail_version_id == trail_version_id
+            nodes=_ordered_records(
+                version.source_first_provenance.node_event.subject_ids,
+                node_records,
             ),
-            relations=tuple(
-                relation
-                for relation in self.relations.list_all()
-                if relation.trail_version_id == trail_version_id
+            relations=_ordered_records(
+                version.source_first_provenance.relation_event.subject_ids,
+                relation_records,
             ),
-            checks=tuple(
-                check
-                for check in self.checks.list_all()
-                if check.trail_version_id == trail_version_id
-            ),
-            assessments=tuple(
-                assessment
-                for assessment in self.assessments.list_all()
-                if assessment.trail_version_id == trail_version_id
-            ),
+            checks=_ordered_records(version.check_ids, check_records),
+            assessments=_ordered_records(version.assessment_ids, assessment_records),
         )
 
     def validation_inputs(
@@ -180,6 +192,18 @@ class TrailCapabilities:
                 if f"{claim.claim_id}:{claim.version}" == claim_version_id:
                     return claim
         return None
+
+
+def _ordered_records[RecordT](
+    declared_ids: tuple[str, ...],
+    records: dict[str, RecordT],
+) -> tuple[RecordT, ...]:
+    declared = tuple(records[record_id] for record_id in declared_ids if record_id in records)
+    extras = tuple(
+        records[record_id]
+        for record_id in sorted(set(records).difference(declared_ids))
+    )
+    return (*declared, *extras)
 
 
 def fixed_trail_handlers() -> tuple[FixedTrailHandler, ...]:

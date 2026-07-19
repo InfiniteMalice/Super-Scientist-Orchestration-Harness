@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+from super_scientist.domain.evidence_trails.authority import required_causal_support
 from super_scientist.domain.evidence_trails.models import (
     AssessmentCategory,
     ClaimModality,
@@ -39,6 +41,7 @@ from super_scientist.kernel.transactions.models import (
     Proposal,
     RecordEvidenceTrailVersion,
 )
+from tests.unit.evidence_trails.conftest import with_fresh_source_first
 
 if TYPE_CHECKING:
     from conftest import TrailFixture
@@ -270,6 +273,7 @@ def test_temporal_order_does_not_authorize_causality(trail_fixture: TrailFixture
     snapshot = trail_fixture.with_snapshot(
         relations=(trail_fixture.snapshot.relations[0], causal_relation)
     )
+    snapshot = with_fresh_source_first(trail_fixture, snapshot)
 
     result = validate_trail(snapshot, trail_fixture.inputs)
 
@@ -283,12 +287,45 @@ def test_explicit_causal_support_and_independent_causal_assessment_are_required(
     causal_relation = trail_fixture.snapshot.relations[1].model_copy(
         update={
             "relation_type": RelationType.CAUSES_CANDIDATE,
-            "causal_support": ("evidence-1",),
+            "modality": ClaimModality.QUALIFIED,
         }
     )
-    snapshot = trail_fixture.with_snapshot(
-        relations=(trail_fixture.snapshot.relations[0], causal_relation)
+    causal_relation = causal_relation.model_copy(
+        update={
+            "causal_support": required_causal_support(
+                causal_relation,
+                trail_fixture.snapshot.nodes,
+            )
+        }
     )
+    required, supporting = trail_fixture.snapshot.nodes
+    snapshot = trail_fixture.with_snapshot(
+        nodes=(
+            required.model_copy(update={"causal_position": 0}),
+            supporting.model_copy(update={"causal_position": 1}),
+        ),
+        relations=(trail_fixture.snapshot.relations[0], causal_relation),
+    )
+    snapshot = with_fresh_source_first(trail_fixture, snapshot)
+
+    stale_assessments = tuple(
+        assessment.model_copy(
+            update={
+                "provenance": assessment.provenance.model_copy(
+                    update={
+                        "assessed_at": snapshot.checks[0].checked_at - timedelta(minutes=1)
+                    }
+                )
+            }
+        )
+        if assessment.category is AssessmentCategory.CAUSAL_OVERCLAIM_RISK
+        else assessment
+        for assessment in snapshot.assessments
+    )
+    stale = snapshot.model_copy(update={"assessments": stale_assessments})
+    stale_result = validate_trail(stale, trail_fixture.inputs)
+    assert stale_result.outcome is TrailOutcome.INVALID_TRAIL
+    assert "STALE_CAUSAL_ASSESSMENT" in stale_result.finding_codes
 
     assert validate_trail(snapshot, trail_fixture.inputs).outcome is TrailOutcome.SUFFICIENT
 
@@ -383,6 +420,7 @@ def test_opposing_evidence_produces_conflicted_without_discarding_nodes(
         nodes=(required, opposing),
         relations=(contradiction, trail_fixture.snapshot.relations[1]),
     )
+    snapshot = with_fresh_source_first(trail_fixture, snapshot)
 
     result = validate_trail(snapshot, trail_fixture.inputs)
 
@@ -492,8 +530,7 @@ def test_closed_proposal_union_round_trips_complete_snapshot_and_report_binding(
 def test_report_binding_recomputes_exact_retained_nodes_and_spans(
     trail_fixture: TrailFixture,
 ) -> None:
-    node = trail_fixture.snapshot.nodes[0]
-    binding = _binding_for(trail_fixture, (node,))
+    binding = _binding_for(trail_fixture, trail_fixture.snapshot.nodes)
 
     assert validate_report_binding(binding, trail_fixture.snapshot, trail_fixture.inputs) == ()
 

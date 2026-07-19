@@ -2,22 +2,41 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from super_scientist.config.models import GovernancePolicyV2, PolicySnapshot
+from super_scientist.domain.evidence_trails.authority import (
+    CAUSAL_RELATION_TYPES,
+    derive_causal_positions_from_graph,
+    derive_geometry_from_graph,
+    parse_external_grounding,
+    required_causal_support,
+    trail_actors_are_independent,
+    trusted_assessment_id,
+    trusted_check_id,
+)
 from super_scientist.domain.evidence_trails.models import (
+    AssessmentCategory,
+    ConstructionMethod,
     EvidenceTrailNode,
     EvidenceTrailRelation,
     EvidenceTrailSnapshot,
     EvidenceTrailVersion,
     ReportSentenceBinding,
+    SourceFirstProvenance,
+    TrailAssessment,
+    TrailCheckCategory,
+    TrailCheckResult,
+    TrailGeometry,
+    TrailOrderingConstraint,
+    TrailOutcome,
     TrailValidationInputs,
 )
 from super_scientist.domain.evidence_trails.validation import (
     validate_report_binding,
     validate_trail,
 )
-from super_scientist.domain.identity import ActorIdentity, ActorKind, are_independent
+from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.improvement.classification import (
     ChangeTarget,
     ExternalGrounding,
@@ -41,6 +60,37 @@ if TYPE_CHECKING:
     )
 
 type TrailMutationProposal = RecordEvidenceTrailVersion | BindReportSentence
+
+
+class EvidenceTrailDraft(BaseModel):
+    """A changed graph without validation artifacts; it is not a transaction proposal."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    proposal_id: str
+    idempotency_key: str
+    proposer: ActorIdentity
+    approval: Approval | None
+    trail_version_id: str
+    trail_id: str
+    claim_version_id: str
+    version: int = Field(strict=True, ge=2)
+    parent_trail_version_id: str
+    parent_created_at: UtcTimestamp
+    source_ids: tuple[str, ...]
+    required_node_ids: tuple[str, ...]
+    supporting_node_ids: tuple[str, ...]
+    opposing_node_ids: tuple[str, ...]
+    redundant_node_ids: tuple[str, ...]
+    ordering_constraints: tuple[TrailOrderingConstraint, ...]
+    geometry: TrailGeometry
+    status: TrailOutcome
+    construction_method: ConstructionMethod
+    constructed_by: ActorIdentity
+    created_at: UtcTimestamp
+    governing_policy_hash: str
+    nodes: tuple[EvidenceTrailNode, ...]
+    relations: tuple[EvidenceTrailRelation, ...]
 
 
 class EvidenceTrailVersionBuilder:
@@ -81,7 +131,7 @@ class EvidenceTrailVersionBuilder:
         approval: Approval | None,
         created_at: UtcTimestamp,
         governing_policy_hash: str,
-    ) -> RecordEvidenceTrailVersion:
+    ) -> EvidenceTrailDraft:
         return EvidenceTrailVersionBuilder._successor(
             current_head=current_head,
             trail_version_id=trail_version_id,
@@ -107,7 +157,7 @@ class EvidenceTrailVersionBuilder:
         approval: Approval | None,
         created_at: UtcTimestamp,
         governing_policy_hash: str,
-    ) -> RecordEvidenceTrailVersion:
+    ) -> EvidenceTrailDraft:
         return EvidenceTrailVersionBuilder._successor(
             current_head=current_head,
             trail_version_id=trail_version_id,
@@ -134,7 +184,7 @@ class EvidenceTrailVersionBuilder:
         governing_policy_hash: str,
         added_node: EvidenceTrailNode | None,
         added_relation: EvidenceTrailRelation | None,
-    ) -> RecordEvidenceTrailVersion:
+    ) -> EvidenceTrailDraft:
         prior = current_head.version
         if trail_version_id == prior.trail_version_id:
             raise ValueError("successor trail_version_id must be new")
@@ -199,50 +249,23 @@ class EvidenceTrailVersionBuilder:
                 ),
             )
 
-        relation_ids = tuple(relation.relation_id for relation in relations)
-        node_ids = tuple(node.node_id for node in nodes)
-        evidence_ids = tuple(dict.fromkeys(node.evidence_id for node in nodes))
-        check_id_map = {
-            check.check_id: _derived_child_id(trail_version_id, "check", check.check_id)
-            for check in current_head.checks
-        }
-        checks = tuple(
-            check.model_copy(
-                update={
-                    "check_id": check_id_map[check.check_id],
-                    "trail_version_id": trail_version_id,
-                    "node_ids": node_ids,
-                    "relation_ids": relation_ids,
-                    "evidence_ids": evidence_ids,
-                    "checked_at": created_at,
-                }
+        causal_positions = derive_causal_positions_from_graph(nodes, relations)
+        if causal_positions is not None:
+            nodes = tuple(
+                node.model_copy(
+                    update={"causal_position": causal_positions[node.node_id]}
+                )
+                for node in nodes
             )
-            for check in current_head.checks
-        )
-        check_ids = tuple(check.check_id for check in checks)
-        assessments = tuple(
-            assessment.model_copy(
-                update={
-                    "assessment_id": _derived_child_id(
-                        trail_version_id,
-                        "assessment",
-                        assessment.assessment_id,
-                    ),
-                    "trail_version_id": trail_version_id,
-                    "node_ids": node_ids,
-                    "relation_ids": relation_ids,
-                    "evidence_ids": evidence_ids,
-                    "provenance": assessment.provenance.model_copy(
-                        update={
-                            "evidence_ids": evidence_ids,
-                            "checks_run": check_ids,
-                            "governing_policy_hash": governing_policy_hash,
-                        }
-                    ),
-                }
+        relations = tuple(
+            relation.model_copy(
+                update={"causal_support": required_causal_support(relation, nodes)}
             )
-            for assessment in current_head.assessments
+            if relation.relation_type in CAUSAL_RELATION_TYPES
+            else relation
+            for relation in relations
         )
+
         ordering_constraints = tuple(
             constraint.model_copy(
                 update={
@@ -257,42 +280,127 @@ class EvidenceTrailVersionBuilder:
             )
             for constraint in prior.ordering_constraints
         )
-        version = prior.model_copy(
-            update={
-                "trail_version_id": trail_version_id,
-                "version": prior.version + 1,
-                "parent_trail_version_id": prior.trail_version_id,
-                "source_ids": tuple(dict.fromkeys(node.source_id for node in nodes)),
-                "required_node_ids": tuple(
-                    node.node_id for node in nodes if node.role.value == "REQUIRED"
-                ),
-                "supporting_node_ids": tuple(
-                    node.node_id for node in nodes if node.role.value == "SUPPORTING"
-                ),
-                "opposing_node_ids": tuple(
-                    node.node_id for node in nodes if node.role.value == "OPPOSING"
-                ),
-                "redundant_node_ids": tuple(
-                    node.node_id for node in nodes if node.role.value == "REDUNDANT"
-                ),
-                "ordering_constraints": ordering_constraints,
-                "check_ids": check_ids,
-                "assessment_ids": tuple(
-                    assessment.assessment_id for assessment in assessments
-                ),
-                "constructed_by": proposer,
-                "created_at": created_at,
-                "governing_policy_hash": governing_policy_hash,
-            }
-        )
-        return RecordEvidenceTrailVersion(
+        return EvidenceTrailDraft(
             proposal_id=proposal_id,
             idempotency_key=idempotency_key,
             proposer=proposer,
             approval=approval,
-            trail_version=version,
+            trail_version_id=trail_version_id,
+            trail_id=prior.trail_id,
+            claim_version_id=prior.claim_version_id,
+            version=prior.version + 1,
+            parent_trail_version_id=prior.trail_version_id,
+            parent_created_at=prior.created_at,
+            source_ids=tuple(dict.fromkeys(node.source_id for node in nodes)),
+            required_node_ids=tuple(
+                node.node_id for node in nodes if node.role.value == "REQUIRED"
+            ),
+            supporting_node_ids=tuple(
+                node.node_id for node in nodes if node.role.value == "SUPPORTING"
+            ),
+            opposing_node_ids=tuple(
+                node.node_id for node in nodes if node.role.value == "OPPOSING"
+            ),
+            redundant_node_ids=tuple(
+                node.node_id for node in nodes if node.role.value == "REDUNDANT"
+            ),
+            ordering_constraints=ordering_constraints,
+            geometry=derive_geometry_from_graph(nodes, relations),
+            status=prior.status,
+            construction_method=prior.construction_method,
+            constructed_by=proposer,
+            created_at=created_at,
+            governing_policy_hash=governing_policy_hash,
             nodes=nodes,
             relations=relations,
+        )
+
+    @staticmethod
+    def finalize(
+        *,
+        draft: EvidenceTrailDraft,
+        checks: tuple[TrailCheckResult, ...],
+        assessments: tuple[TrailAssessment, ...],
+        source_first_provenance: SourceFirstProvenance | None = None,
+    ) -> RecordEvidenceTrailVersion:
+        """Attach freshly produced validation artifacts to a changed graph."""
+
+        expected_check_ids = tuple(
+            trusted_check_id(draft.trail_version_id, category)
+            for category in TrailCheckCategory
+        )
+        expected_assessment_ids = tuple(
+            trusted_assessment_id(draft.trail_version_id, category)
+            for category in AssessmentCategory
+        )
+        if tuple(check.check_id for check in checks) != expected_check_ids:
+            raise ValueError("fresh checks are required for the successor graph")
+        if tuple(assessment.assessment_id for assessment in assessments) != expected_assessment_ids:
+            raise ValueError("fresh assessments are required for the successor graph")
+        if any(
+            check.trail_version_id != draft.trail_version_id
+            or check.claim_version_id != draft.claim_version_id
+            or check.governing_policy_hash != draft.governing_policy_hash
+            for check in checks
+        ):
+            raise ValueError("fresh checks must bind the exact successor graph and policy")
+        if any(
+            assessment.trail_version_id != draft.trail_version_id
+            or assessment.claim_version_id != draft.claim_version_id
+            or assessment.governing_policy_hash != draft.governing_policy_hash
+            for assessment in assessments
+        ):
+            raise ValueError("fresh assessments must bind the exact successor graph and policy")
+        if not checks or not assessments:
+            raise ValueError("fresh checks and assessments are required")
+        if source_first_provenance is None:
+            raise ValueError("fresh source-first provenance is required")
+        latest_check = max(check.checked_at for check in checks)
+        earliest_check = min(check.checked_at for check in checks)
+        earliest_assessment = min(
+            assessment.provenance.assessed_at for assessment in assessments
+        )
+        latest_assessment = max(
+            assessment.provenance.assessed_at for assessment in assessments
+        )
+        if not (
+            draft.parent_created_at < earliest_check
+            and latest_check < earliest_assessment
+            and latest_assessment < draft.created_at
+        ):
+            raise ValueError(
+                "fresh checks and assessments must postdate the parent and predate the successor"
+            )
+        version = EvidenceTrailVersion(
+            trail_version_id=draft.trail_version_id,
+            trail_id=draft.trail_id,
+            claim_version_id=draft.claim_version_id,
+            version=draft.version,
+            parent_trail_version_id=draft.parent_trail_version_id,
+            source_ids=draft.source_ids,
+            required_node_ids=draft.required_node_ids,
+            supporting_node_ids=draft.supporting_node_ids,
+            opposing_node_ids=draft.opposing_node_ids,
+            redundant_node_ids=draft.redundant_node_ids,
+            ordering_constraints=draft.ordering_constraints,
+            geometry=draft.geometry,
+            status=draft.status,
+            construction_method=draft.construction_method,
+            source_first_provenance=source_first_provenance,
+            check_ids=expected_check_ids,
+            assessment_ids=expected_assessment_ids,
+            constructed_by=draft.constructed_by,
+            created_at=draft.created_at,
+            governing_policy_hash=draft.governing_policy_hash,
+        )
+        return RecordEvidenceTrailVersion(
+            proposal_id=draft.proposal_id,
+            idempotency_key=draft.idempotency_key,
+            proposer=draft.proposer,
+            approval=draft.approval,
+            trail_version=version,
+            nodes=draft.nodes,
+            relations=draft.relations,
             checks=checks,
             assessments=assessments,
         )
@@ -301,6 +409,13 @@ class EvidenceTrailVersionBuilder:
 def _derived_child_id(trail_version_id: str, kind: str, prior_id: str) -> str:
     digest = sha256_hex(prior_id.encode("utf-8"))[:16]
     return f"{trail_version_id}:{kind}:{digest}"
+
+
+def _external_grounding(evidence: object) -> ExternalGrounding | None:
+    try:
+        return parse_external_grounding(evidence)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 class TrailVersionReadCapability(Protocol):
@@ -375,7 +490,12 @@ class RecordEvidenceTrailVersionHandler:
         proposal: RecordEvidenceTrailVersion,
         context: _TrailVersionContext,
     ) -> TransactionDecision:
-        authority_rejection = trail_authority_rejection(proposal, context.active_policy)
+        authority_rejection = trail_authority_rejection(
+            proposal,
+            context.active_policy,
+            trail=proposal.snapshot(),
+            retained=context.validation_inputs,
+        )
         if authority_rejection is not None:
             return authority_rejection
         snapshot = proposal.snapshot()
@@ -397,6 +517,15 @@ class RecordEvidenceTrailVersionHandler:
                 proposal.proposal_id,
                 RejectionCode.MISSING_EVIDENCE,
                 "atomic claim and every immutable evidence source must already exist",
+            )
+        if any(
+            _external_grounding(source.evidence) is not ExternalGrounding.PRIMARY_SOURCE
+            for source in context.validation_inputs.sources
+        ):
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.INSUFFICIENT_GROUNDING,
+                "every retained evidence source must prove primary-source grounding",
             )
         if context.collision_ids:
             return _rejected(
@@ -460,7 +589,12 @@ class BindReportSentenceHandler:
         proposal: BindReportSentence,
         context: _ReportBindingContext,
     ) -> TransactionDecision:
-        authority_rejection = trail_authority_rejection(proposal, context.active_policy)
+        authority_rejection = trail_authority_rejection(
+            proposal,
+            context.active_policy,
+            trail=context.snapshot,
+            retained=context.validation_inputs,
+        )
         if authority_rejection is not None:
             return authority_rejection
         binding = proposal.binding
@@ -503,6 +637,9 @@ class BindReportSentenceHandler:
 def trail_authority_rejection(
     proposal: TrailMutationProposal,
     snapshot: PolicySnapshot,
+    *,
+    trail: EvidenceTrailSnapshot | None = None,
+    retained: TrailValidationInputs | None = None,
 ) -> TransactionDecision | None:
     policy = snapshot.policy
     if not isinstance(policy, GovernancePolicyV2):
@@ -543,10 +680,32 @@ def trail_authority_rejection(
             "evidence-trail admission cannot satisfy protected-evaluation or rollback flags",
         )
     approval = proposal.approval
+    authority_actors: tuple[ActorIdentity, ...] = ()
+    authority_actor_ids: set[str] = set()
+    if trail is not None:
+        provenance = trail.version.source_first_provenance
+        authority_actors = (
+            trail.version.constructed_by,
+            *(event.actor for event in provenance.source_events),
+            provenance.node_event.actor,
+            provenance.relation_event.actor,
+            provenance.claim_event.actor,
+            *(assessment.provenance.actor for assessment in trail.assessments),
+        )
+    if retained is not None:
+        authority_actor_ids = {
+            retained.claim.created_by,
+            *(source.evidence.ingestion_actor_id for source in retained.sources),
+        }
     if (
         approval is None
         or approval.approver.kind is not requirement.required_approver_kind
-        or not are_independent(proposal.proposer, approval.approver)
+        or not trail_actors_are_independent(proposal.proposer, approval.approver)
+        or approval.approver.actor_id in authority_actor_ids
+        or any(
+            not trail_actors_are_independent(approval.approver, authority_actor)
+            for authority_actor in authority_actors
+        )
     ):
         return _rejected(
             proposal.proposal_id,

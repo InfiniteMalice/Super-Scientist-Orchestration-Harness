@@ -63,3 +63,39 @@ bindings, and whole-workspace semantic replay. No migration or dependency files 
 The implementation is committed with the required message:
 
 `feat: add source-bound evidence trails`
+
+## Review hardening follow-up
+
+The post-review hardening closes the epistemic-authority gaps without changing migrations,
+dependencies, the legacy `EvidenceRecord` wire format, or the prior commit. The implementation now
+requires exact category scopes and deterministic checker IDs, typed causal endpoint support,
+fresh successor validation artifacts, retained primary-source grounding, canonical source-first
+stage provenance, complete actor/source independence, derived graph semantics, unique V2 policy
+keys, and exact report relevance.
+
+### RED to GREEN checkpoints
+
+- Assessment/check authority: **27 failed, 20 passed** to **47 passed** focused; evidence-trail
+  unit suite **68 passed** at that checkpoint.
+- Causal authority: **7 failed, 5 passed, 43 deselected** to **12 passed, 43 deselected**.
+  Fresh-successor integration: **1 failed** to **1 passed**; selected successor/replay set
+  **4 passed**.
+- Primary/source-first authority: **11 failed, 55 deselected** to **12 passed, 55 deselected**;
+  evidence-trail unit **88 passed** and trail integration **16 passed**.
+- Complete independence: assessor **3 failed, 67 deselected** and approver
+  **3 failed, 16 deselected** to **3 passed** in each focused set; evidence-trail unit
+  **91 passed**, trail integration **19 passed**.
+- Graph/structure/relation/conflict semantics: **22 failed, 70 deselected** to
+  **22 passed, 70 deselected**; evidence-trail unit/property **153 passed**, trail integration
+  **19 passed**.
+- V2 requirement uniqueness: unit **2 failed** and storage **2 failed, 5 deselected** to policy
+  unit **16 passed** and combined policy-storage/trail integration **26 passed**.
+- Exact report relevance: **7 failed, 92 deselected** to **7 passed, 92 deselected**; combined
+  evidence-trail unit/property/application **179 passed**, trail integration **20 passed**.
+
+### Hardening quality gates
+
+- Ruff: `ruff check src tests` — **all checks passed**.
+- Strict mypy: `mypy` — **success, 74 source files**.
+- `git diff --check` — **passed** (Git emitted only configured LF-to-CRLF notices).
+- Final complete suite: `pytest -q` — **1,050 passed, 3 skipped, 6 expected negative-test serialization warnings in 365.18s**.

@@ -2,6 +2,7 @@
 
 from super_scientist.domain.evidence_trails.models import (
     AssessmentCategory,
+    CausalSupport,
     ClaimModality,
     ConstructionMethod,
     EvidenceTrailNode,
@@ -13,6 +14,9 @@ from super_scientist.domain.evidence_trails.models import (
     ReportSentenceBinding,
     ReportSourceSpan,
     RetainedEvidenceSource,
+    SourceFirstProvenance,
+    SourceFirstStageEvent,
+    SourceFirstStageKind,
     StructuralLocation,
     StructuralLocationKind,
     TrailAssessment,
@@ -32,6 +36,7 @@ from super_scientist.domain.evidence_trails.validation import (
 
 __all__ = [
     "AssessmentCategory",
+    "CausalSupport",
     "ClaimModality",
     "ConstructionMethod",
     "EvidenceTrailNode",
@@ -43,6 +48,9 @@ __all__ = [
     "ReportSentenceBinding",
     "ReportSourceSpan",
     "RetainedEvidenceSource",
+    "SourceFirstProvenance",
+    "SourceFirstStageEvent",
+    "SourceFirstStageKind",
     "StructuralLocation",
     "StructuralLocationKind",
     "TrailAssessment",

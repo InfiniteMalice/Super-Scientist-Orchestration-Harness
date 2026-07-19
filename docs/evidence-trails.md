@@ -12,6 +12,9 @@ Its children are all version-scoped:
 
 - `EvidenceTrailNode` binds a source identifier and immutable `EvidenceRecord` to an exact UTF-8
   span, content hash, structural locator, temporal/causal position, role, necessity, and confidence.
+- Every retained `EvidenceRecord` must declare `external_grounding=PRIMARY_SOURCE` in immutable
+  provenance and carry a strict `structured_observation.source_structure` index. A node's complete
+  structural location must equal one indexed location; its exact span must be contained by it.
 - `EvidenceTrailRelation` binds two nodes using the closed relation vocabulary (`SUPPORTS`,
   `CONTRADICTS`, ordering relations, `CAUSES_CANDIDATE`, qualification/explanation, identity,
   dependency, and alternative-explanation relations).
@@ -23,31 +26,37 @@ Its children are all version-scoped:
   retains its exact source nodes and spans, contradictions, opposing evidence, uncertainty,
   modality, outcome, claim version, and policy hash.
 
-All records are strict, frozen, and extra-field-forbidden. Storage is append-only. Editing never
+The version also retains canonical source-first stage events for source ingestion, node proposal,
+relation proposal, and claim formation. Event IDs bind the exact subjects, hashes, full actors,
+and UTC timestamps. All records are strict, frozen, and extra-field-forbidden. Storage is
+append-only. Editing never
 mutates children from an earlier version: a successor contains a complete new snapshot, has a new
 `trail_version_id`, points to the exact current head, increments the version by one, and receives
 new version-scoped child identifiers.
 
 ## Source-first construction
 
-Construct a trail only after the claim version and all evidence records have been admitted and the
-artifact bytes have been retained. The normal application sequence is:
+Submit a trail only after the resulting claim version and all evidence records have been admitted.
+The retained construction history must prove this source-first sequence:
 
-1. Read an exact atomic claim version and hash-verified evidence records.
-2. Read artifact bytes through artifact verification; do not accept caller-supplied replacement
-   text.
-3. Select exact byte-backed UTF-8 spans and structural bounds, then create nodes.
-4. Add typed relations, explicit ordering constraints, and explicit causal support where causality
-   is proposed.
-5. Run every deterministic trail check and retain the full check scope and findings.
-6. Collect all independent assessments with their actor, configuration, evidence, checks,
+1. Ingest primary sources, retain artifact bytes, and preserve source structure.
+2. Select exact byte-backed UTF-8 spans and indexed structural locations, then propose nodes.
+3. Propose typed relations and explicit ordering constraints.
+4. Formulate the exact atomic claim version from that graph.
+5. Run every deterministic trail check against the complete immutable version scope.
+6. Collect fresh independent assessments with their actor, configuration, evidence, checks,
    limitations, result, timestamp, and governing policy.
 7. Submit the complete version through `RecordEvidenceTrailVersion`.
 
+The timestamps must be strictly ordered from source retrieval through node and relation proposal,
+claim formation, checks, assessments, and final version creation. Missing, reordered, stale, or
+content-mismatched stages fail closed.
+
 `EvidenceTrailVersionBuilder.create()` packages a complete version-one snapshot. Its `add_node()`
-and `add_relation()` helpers clone the complete current head into an immutable successor and add
-the requested record. The helpers do not read durable state or grant admission authority; the
-transaction handler still validates source fidelity, policy, lineage, and uniqueness.
+and `add_relation()` helpers produce an unsubmittable `EvidenceTrailDraft`, derive successor
+geometry and causal layers, and never copy prior checks or assessments. `finalize()` accepts only
+fresh, successor-bound checks, assessments, and source-first provenance. The transaction handler
+still validates source fidelity, policy, lineage, independence, and uniqueness.
 
 ## Deterministic validation
 
@@ -56,14 +65,15 @@ and artifact bytes. It fails closed on, among other conditions:
 
 - missing, duplicated, cross-version, or out-of-scope identifiers;
 - artifact size/hash changes, invalid UTF-8, inexact spans, or invalid structural bounds;
+- missing/non-primary grounding, invalid structure indices, or fabricated source-first stages;
 - incomplete node-role partitions or check/assessment sets;
-- unknown relation endpoints, self-relations, invalid evidence scope, cycles, or inconsistent
-  ordering and temporal assertions;
+- unknown relation endpoints, self-relations, noncanonical endpoint-evidence tuples, forged graph
+  geometry, invalid relation-specific roles/modalities, cycles, or inconsistent ordering;
 - stronger relation modality than the retained claim permits;
-- causal assertions without explicit retained support and a passed independent causal-overclaim
-  assessment;
-- assessment actors/configurations that are repeated, dependent on the builder or source actor,
-  incomplete, non-authoritative, or detached from exact checks/evidence;
+- any of the three causal relation types without exact endpoint-span support, deterministic DAG
+  layers, strict temporal precedence, and a fresh passed causal-overclaim assessment;
+- assessment or approval actors that alias the builder, claim author, any ingestor/source-stage
+  actor, model identity, or non-null configuration;
 - stored check results or a declared status that differ from recomputation.
 
 The output vocabulary preserves epistemic state: `SUFFICIENT`, `PARTIALLY_SUPPORTING`,
@@ -71,9 +81,11 @@ The output vocabulary preserves epistemic state: `SUFFICIENT`, `PARTIALLY_SUPPOR
 produces `INVALID_TRAIL`; it is never converted into success. Opposing evidence is retained rather
 than discarded.
 
-`validate_report_binding()` first revalidates the referenced trail, then requires exact claim,
-policy, outcome, node, span, contradiction, opposing-evidence, and modality bindings. A report
-binding cannot transition a claim or substitute for claim admission.
+`validate_report_binding()` first revalidates the referenced trail, then requires the exact
+canonical nonredundant node tuple and the same-order exact span tuple. Contradiction IDs must name
+every actual `CONTRADICTS` participant, opposing IDs must name the participating opposing nodes,
+and conflicted prose cannot use asserted modality. A report binding cannot transition a claim or
+substitute for claim admission.
 
 ## Governed admission and recovery
 

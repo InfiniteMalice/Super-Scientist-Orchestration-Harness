@@ -139,6 +139,30 @@ def test_v2_adaptation_requirement_is_strict_and_uses_typed_classifications() ->
         AdaptationRequirement.model_validate(payload)
 
 
+@pytest.mark.parametrize("reverse", (False, True))
+def test_v2_rejects_duplicate_adaptation_requirement_keys_in_any_order(
+    reverse: bool,
+) -> None:
+    first = _v2_policy().adaptation_requirements[0]
+    second = first.model_copy(
+        update={
+            "minimum_verification": VerificationLevel.FORMAL_VERIFIER,
+            "permitted_grounding": frozenset({ExternalGrounding.FORMAL_SYSTEM}),
+            "protected_evaluation_required": False,
+        }
+    )
+    requirements = (first, second)
+    if reverse:
+        requirements = tuple(reversed(requirements))
+
+    with pytest.raises(ValidationError, match=r"duplicate.*change_target.*persistence"):
+        GovernancePolicyV2(
+            required_claim_checks=("source_exists",),
+            human_approval_for=frozenset(),
+            adaptation_requirements=requirements,
+        )
+
+
 def _v2_policy() -> GovernancePolicyV2:
     return GovernancePolicyV2(
         required_claim_checks=("source_exists",),

@@ -20,6 +20,7 @@ from super_scientist.domain.improvement.classification import (
     PersistenceScope,
     VerificationLevel,
 )
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.providers.storage.database import (
     DatabaseUnitOfWork,
     create_database_engine,
@@ -87,6 +88,35 @@ def test_policy_repository_rejects_stored_hash_mismatch_for_v2(tmp_path: Path) -
             )
         )
         with pytest.raises(StorageIntegrityError, match="policy_hash"):
+            unit_of_work.repositories().policies.list_all()
+    engine.dispose()
+
+
+@pytest.mark.parametrize("reverse", (False, True))
+def test_policy_repository_rejects_duplicate_v2_requirement_keys(
+    tmp_path: Path,
+    reverse: bool,
+) -> None:
+    engine = _engine(tmp_path)
+    payload = _v2_policy().model_dump(mode="json")
+    duplicate = dict(payload["adaptation_requirements"][0])
+    duplicate["minimum_verification"] = VerificationLevel.FORMAL_VERIFIER.value
+    duplicate["permitted_grounding"] = [ExternalGrounding.FORMAL_SYSTEM.value]
+    requirements = [payload["adaptation_requirements"][0], duplicate]
+    if reverse:
+        requirements.reverse()
+    payload["adaptation_requirements"] = requirements
+    policy_json = canonical_json_bytes(payload).decode("utf-8")
+    with DatabaseUnitOfWork(engine) as unit_of_work:
+        assert unit_of_work.connection is not None
+        unit_of_work.connection.execute(
+            insert(governance_policies).values(
+                policy_hash=sha256_hex(policy_json.encode("utf-8")),
+                policy_json=policy_json,
+                created_at=NOW.isoformat(),
+            )
+        )
+        with pytest.raises(StorageIntegrityError, match="governance policy"):
             unit_of_work.repositories().policies.list_all()
     engine.dispose()
 

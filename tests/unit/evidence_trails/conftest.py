@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
 from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord, VerificationState
+from super_scientist.domain.evidence_trails.authority import (
+    TRUSTED_TRAIL_CHECKER_ID,
+    TRUSTED_TRAIL_CHECKER_VERSION,
+    build_source_first_provenance,
+    required_assessment_scope,
+    trusted_assessment_id,
+    trusted_check_id,
+)
 from super_scientist.domain.evidence_trails.models import (
     AssessmentCategory,
     ClaimModality,
@@ -39,6 +47,12 @@ from super_scientist.domain.improvement.models import (
 from super_scientist.domain.primitives import sha256_hex
 
 NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+RETRIEVED_AT = NOW - timedelta(minutes=10)
+CLAIMED_AT = NOW - timedelta(minutes=4)
+NODE_PROPOSED_AT = NOW - timedelta(minutes=8)
+RELATION_PROPOSED_AT = NOW - timedelta(minutes=6)
+CHECKED_AT = NOW - timedelta(minutes=2)
+ASSESSED_AT = NOW - timedelta(minutes=1)
 POLICY_HASH = "a" * 64
 SOURCE_TEXT = "Cause happened. Effect followed. Alternative explanation remains."
 
@@ -73,13 +87,13 @@ def _node(
         structural_location=StructuralLocation(
             kind=StructuralLocationKind.PARAGRAPH,
             locator="paragraph-1",
-            start=start,
-            end=end,
+            start=0,
+            end=len(SOURCE_TEXT),
         ),
         content_hash=sha256_hex(text.encode("utf-8")),
         role=role,
         temporal_position=temporal_position,
-        causal_position=temporal_position,
+        causal_position=None,
         confidence=0.9,
         necessity=necessity,
     )
@@ -94,6 +108,31 @@ class TrailFixture:
         return self.snapshot.model_copy(update=updates)
 
 
+def with_fresh_source_first(
+    fixture: TrailFixture,
+    snapshot: EvidenceTrailSnapshot,
+) -> EvidenceTrailSnapshot:
+    prior = fixture.snapshot.version.source_first_provenance
+    provenance = build_source_first_provenance(
+        sources=fixture.inputs.sources,
+        claim=fixture.inputs.claim,
+        nodes=snapshot.nodes,
+        relations=snapshot.relations,
+        builder=snapshot.version.constructed_by,
+        source_actors=tuple(event.actor for event in prior.source_events),
+        claim_actor=prior.claim_event.actor,
+        node_proposed_at=prior.node_event.occurred_at,
+        relation_proposed_at=prior.relation_event.occurred_at,
+    )
+    return snapshot.model_copy(
+        update={
+            "version": snapshot.version.model_copy(
+                update={"source_first_provenance": provenance}
+            )
+        }
+    )
+
+
 @pytest.fixture
 def trail_fixture() -> TrailFixture:
     return make_trail_fixture()
@@ -105,14 +144,30 @@ def make_trail_fixture() -> TrailFixture:
         evidence_id="evidence-1",
         evidence_type="primary-source",
         source_locator="fixture://source-1",
-        retrieved_at=NOW,
+        retrieved_at=RETRIEVED_AT,
         artifact=ArtifactRef(
             sha256=sha256_hex(source_bytes),
             size_bytes=len(source_bytes),
             media_type="text/plain",
             relative_path=f"sha256/{sha256_hex(source_bytes)[:2]}/{sha256_hex(source_bytes)}",
         ),
-        provenance={"fixture": "real artifact bytes"},
+        structured_observation={
+            "source_structure": {
+                "schema_version": 1,
+                "locations": (
+                    {
+                        "kind": "PARAGRAPH",
+                        "locator": "paragraph-1",
+                        "start": 0,
+                        "end": len(SOURCE_TEXT),
+                    },
+                ),
+            }
+        },
+        provenance={
+            "fixture": "real artifact bytes",
+            "external_grounding": "PRIMARY_SOURCE",
+        },
         ingestion_actor_id="ingestor-1",
         verification_state=VerificationState.HASH_VERIFIED,
     )
@@ -124,7 +179,7 @@ def make_trail_fixture() -> TrailFixture:
         population_or_system="fixture system",
         epistemic_modality="ASSERTED",
         status=ClaimStatus.PROPOSED,
-        created_at=NOW,
+        created_at=CLAIMED_AT,
         created_by="claim-author",
     )
     required = _node("node-required", "Cause happened", TrailNodeRole.REQUIRED, 0, necessity=True)
@@ -157,27 +212,34 @@ def make_trail_fixture() -> TrailFixture:
     )
     node_ids = (required.node_id, supporting.node_id)
     relation_ids = tuple(relation.relation_id for relation in relations)
-    check_ids = tuple(f"check-{category.value.lower()}" for category in TrailCheckCategory)
+    check_ids = tuple(
+        trusted_check_id("trail-version-1", category)
+        for category in TrailCheckCategory
+    )
     checks = tuple(
         TrailCheckResult(
             check_id=check_id,
             trail_version_id="trail-version-1",
+            claim_version_id="claim-1:1",
+            governing_policy_hash=POLICY_HASH,
             category=category,
             passed=True,
             finding_codes=(),
             node_ids=node_ids,
             relation_ids=relation_ids,
             evidence_ids=("evidence-1",),
-            checker_id="deterministic-trail-validator",
-            checker_version="1",
-            checked_at=NOW,
+            checker_id=TRUSTED_TRAIL_CHECKER_ID,
+            checker_version=TRUSTED_TRAIL_CHECKER_VERSION,
+            checked_at=CHECKED_AT,
         )
         for category, check_id in zip(TrailCheckCategory, check_ids, strict=True)
     )
     assessments = tuple(
         TrailAssessment(
-            assessment_id=f"assessment-{category.value.lower()}",
+            assessment_id=trusted_assessment_id("trail-version-1", category),
             trail_version_id="trail-version-1",
+            claim_version_id="claim-1:1",
+            governing_policy_hash=POLICY_HASH,
             category=category,
             provenance=AssessmentProvenance(
                 actor=_actor(f"assessor-{index}", model_id=f"judge-{index}"),
@@ -186,20 +248,53 @@ def make_trail_fixture() -> TrailFixture:
                 deterministic_or_learned="LEARNED",
                 proposer_relationship=ActorRelationship.INDEPENDENT,
                 assumptions=(),
-                evidence_ids=("evidence-1",),
+                evidence_ids=required_assessment_scope(
+                    category,
+                    (required, supporting),
+                    relations,
+                ).evidence_ids,
                 checks_run=check_ids,
                 limitations=("Fixture assessment is bounded to the retained source.",),
                 result=AssessmentOutcome.PASSED,
                 meaningful_confidence=0.9,
-                assessed_at=NOW,
+                assessed_at=ASSESSED_AT,
                 governing_policy_hash=POLICY_HASH,
             ),
-            node_ids=node_ids,
-            relation_ids=relation_ids,
-            evidence_ids=("evidence-1",),
+            node_ids=required_assessment_scope(
+                category,
+                (required, supporting),
+                relations,
+            ).node_ids,
+            relation_ids=required_assessment_scope(
+                category,
+                (required, supporting),
+                relations,
+            ).relation_ids,
+            evidence_ids=required_assessment_scope(
+                category,
+                (required, supporting),
+                relations,
+            ).evidence_ids,
             finding_codes=(),
         )
         for index, category in enumerate(AssessmentCategory)
+    )
+    builder = _actor("trail-builder")
+    retained_source = RetainedEvidenceSource(
+        source_id="source-1",
+        evidence=evidence,
+        artifact_bytes=source_bytes,
+    )
+    source_first_provenance = build_source_first_provenance(
+        sources=(retained_source,),
+        claim=claim,
+        nodes=(required, supporting),
+        relations=relations,
+        builder=builder,
+        source_actors=(_actor("ingestor-1"),),
+        claim_actor=_actor("claim-author"),
+        node_proposed_at=NODE_PROPOSED_AT,
+        relation_proposed_at=RELATION_PROPOSED_AT,
     )
     version = EvidenceTrailVersion(
         trail_version_id="trail-version-1",
@@ -221,9 +316,10 @@ def make_trail_fixture() -> TrailFixture:
         geometry=TrailGeometry.LINEAR,
         status=TrailOutcome.SUFFICIENT,
         construction_method=ConstructionMethod.SOURCE_FIRST,
+        source_first_provenance=source_first_provenance,
         check_ids=check_ids,
         assessment_ids=tuple(item.assessment_id for item in assessments),
-        constructed_by=_actor("trail-builder"),
+        constructed_by=builder,
         created_at=NOW,
         governing_policy_hash=POLICY_HASH,
     )
@@ -237,11 +333,7 @@ def make_trail_fixture() -> TrailFixture:
     inputs = TrailValidationInputs(
         claim=claim,
         sources=(
-            RetainedEvidenceSource(
-                source_id="source-1",
-                evidence=evidence,
-                artifact_bytes=source_bytes,
-            ),
+            retained_source,
         ),
     )
     return TrailFixture(snapshot=snapshot, inputs=inputs)

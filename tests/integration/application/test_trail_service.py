@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from sqlalchemy import Engine, text
 
-from super_scientist.application.trails.service import EvidenceTrailVersionBuilder
+from super_scientist.application.trails.service import (
+    EvidenceTrailDraft,
+    EvidenceTrailVersionBuilder,
+)
 from super_scientist.application.transactions.coordinator import TransactionCoordinator
 from super_scientist.application.workspace_integrity import verify_workspace
 from super_scientist.config.loader import policy_hash
@@ -19,13 +22,22 @@ from super_scientist.config.models import (
     PolicySnapshot,
 )
 from super_scientist.domain.evidence.models import VerificationState
+from super_scientist.domain.evidence_trails.authority import (
+    build_source_first_provenance,
+    canonical_evidence_ids,
+    required_assessment_scope,
+    trusted_assessment_id,
+    trusted_check_id,
+)
 from super_scientist.domain.evidence_trails.models import (
+    AssessmentCategory,
     EvidenceTrailNode,
     EvidenceTrailRelation,
     ExactSourceSpan,
     RelationType,
     StructuralLocation,
     StructuralLocationKind,
+    TrailCheckCategory,
     TrailNodeRole,
 )
 from super_scientist.domain.identity import ActorIdentity, ActorKind
@@ -35,7 +47,7 @@ from super_scientist.domain.improvement.classification import (
     PersistenceScope,
     VerificationLevel,
 )
-from super_scientist.domain.primitives import sha256_hex
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
     Approval,
@@ -112,6 +124,99 @@ class TrailRuntime:
             binding=_binding(self.fixture),
         )
 
+
+def _finalize_draft(
+    draft: EvidenceTrailDraft,
+    template: RecordEvidenceTrailVersion,
+    fixture: TrailFixture,
+    *,
+    checked_at: datetime,
+    assessed_at: datetime,
+) -> RecordEvidenceTrailVersion:
+    node_ids = tuple(node.node_id for node in draft.nodes)
+    relation_ids = tuple(relation.relation_id for relation in draft.relations)
+    evidence_ids = canonical_evidence_ids(draft.nodes)
+    checks = tuple(
+        prior.model_copy(
+            update={
+                "check_id": trusted_check_id(draft.trail_version_id, category),
+                "trail_version_id": draft.trail_version_id,
+                "claim_version_id": draft.claim_version_id,
+                "governing_policy_hash": draft.governing_policy_hash,
+                "category": category,
+                "node_ids": node_ids,
+                "relation_ids": relation_ids,
+                "evidence_ids": evidence_ids,
+                "checked_at": checked_at,
+            }
+        )
+        for category, prior in zip(TrailCheckCategory, template.checks, strict=True)
+    )
+    check_ids = tuple(check.check_id for check in checks)
+    assessments = tuple(
+        prior.model_copy(
+            update={
+                "assessment_id": trusted_assessment_id(
+                    draft.trail_version_id,
+                    category,
+                ),
+                "trail_version_id": draft.trail_version_id,
+                "claim_version_id": draft.claim_version_id,
+                "governing_policy_hash": draft.governing_policy_hash,
+                "category": category,
+                "node_ids": required_assessment_scope(
+                    category,
+                    draft.nodes,
+                    draft.relations,
+                ).node_ids,
+                "relation_ids": required_assessment_scope(
+                    category,
+                    draft.nodes,
+                    draft.relations,
+                ).relation_ids,
+                "evidence_ids": required_assessment_scope(
+                    category,
+                    draft.nodes,
+                    draft.relations,
+                ).evidence_ids,
+                "provenance": prior.provenance.model_copy(
+                    update={
+                        "evidence_ids": required_assessment_scope(
+                            category,
+                            draft.nodes,
+                            draft.relations,
+                        ).evidence_ids,
+                        "checks_run": check_ids,
+                        "assessed_at": assessed_at,
+                        "governing_policy_hash": draft.governing_policy_hash,
+                    }
+                ),
+            }
+        )
+        for category, prior in zip(
+            AssessmentCategory,
+            template.assessments,
+            strict=True,
+        )
+    )
+    prior_provenance = template.trail_version.source_first_provenance
+    source_first_provenance = build_source_first_provenance(
+        sources=fixture.inputs.sources,
+        claim=fixture.inputs.claim,
+        nodes=draft.nodes,
+        relations=draft.relations,
+        builder=draft.constructed_by,
+        source_actors=tuple(event.actor for event in prior_provenance.source_events),
+        claim_actor=prior_provenance.claim_event.actor,
+        node_proposed_at=prior_provenance.node_event.occurred_at,
+        relation_proposed_at=prior_provenance.relation_event.occurred_at,
+    )
+    return EvidenceTrailVersionBuilder.finalize(
+        draft=draft,
+        checks=checks,
+        assessments=assessments,
+        source_first_provenance=source_first_provenance,
+    )
 
 @pytest.fixture
 def v2_runtime(tmp_path: Path) -> Iterator[TrailRuntime]:
@@ -290,6 +395,35 @@ def test_v2_policy_verification_grounding_and_unsupported_flags_fail_closed(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("alias_kind", ("claim_author", "source_ingestor", "source_config"))
+def test_human_approver_must_be_independent_of_every_trail_authority(
+    v2_runtime: TrailRuntime,
+    alias_kind: str,
+) -> None:
+    proposal = v2_runtime.record_proposal()
+    source_actor = proposal.trail_version.source_first_provenance.source_events[0].actor
+    if alias_kind == "claim_author":
+        approver = _actor(v2_runtime.fixture.inputs.claim.created_by, ActorKind.HUMAN)
+    elif alias_kind == "source_ingestor":
+        approver = _actor(
+            v2_runtime.fixture.inputs.sources[0].evidence.ingestion_actor_id,
+            ActorKind.HUMAN,
+        )
+    else:
+        approver = source_actor.model_copy(
+            update={"actor_id": "human-source-config-alias", "kind": ActorKind.HUMAN}
+        )
+    proposal = proposal.model_copy(
+        update={"approval": Approval(approver=approver, approved_at=NOW)}
+    )
+
+    decision = v2_runtime.coordinator.submit(proposal)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+
+
+@pytest.mark.integration
 def test_add_node_and_relation_helpers_build_complete_successor_versions_without_mutation(
     v2_runtime: TrailRuntime,
 ) -> None:
@@ -310,17 +444,17 @@ def test_add_node_and_relation_helpers_build_complete_successor_versions_without
         structural_location=StructuralLocation(
             kind=StructuralLocationKind.PARAGRAPH,
             locator="paragraph-1",
-            start=start,
-            end=start + len(alternative_text),
+            start=0,
+            end=len(SOURCE_TEXT),
         ),
         content_hash=sha256_hex(alternative_text.encode("utf-8")),
         role=TrailNodeRole.REDUNDANT,
         temporal_position=2,
-        causal_position=2,
+        causal_position=None,
         confidence=0.7,
         necessity=False,
     )
-    second = EvidenceTrailVersionBuilder.add_node(
+    second_draft = EvidenceTrailVersionBuilder.add_node(
         current_head=initial.snapshot(),
         node=node,
         trail_version_id="trail-version-2",
@@ -328,8 +462,15 @@ def test_add_node_and_relation_helpers_build_complete_successor_versions_without
         idempotency_key="intent-trail-2",
         proposer=v2_runtime.proposer,
         approval=Approval(approver=v2_runtime.approver, approved_at=NOW),
-        created_at=NOW,
+        created_at=NOW + timedelta(minutes=3),
         governing_policy_hash=v2_runtime.policy.policy_hash,
+    )
+    second = _finalize_draft(
+        second_draft,
+        initial,
+        v2_runtime.fixture,
+        checked_at=NOW + timedelta(minutes=1),
+        assessed_at=NOW + timedelta(minutes=2),
     )
     assert v2_runtime.coordinator.submit(second).accepted is True
     second_snapshot = second.snapshot()
@@ -348,7 +489,7 @@ def test_add_node_and_relation_helpers_build_complete_successor_versions_without
         evidence_ids=("evidence-1",),
         modality=initial.relations[0].modality,
     )
-    third = EvidenceTrailVersionBuilder.add_relation(
+    third_draft = EvidenceTrailVersionBuilder.add_relation(
         current_head=second_snapshot,
         relation=relation,
         trail_version_id="trail-version-3",
@@ -356,8 +497,15 @@ def test_add_node_and_relation_helpers_build_complete_successor_versions_without
         idempotency_key="intent-trail-3",
         proposer=v2_runtime.proposer,
         approval=Approval(approver=v2_runtime.approver, approved_at=NOW),
-        created_at=NOW,
+        created_at=NOW + timedelta(minutes=6),
         governing_policy_hash=v2_runtime.policy.policy_hash,
+    )
+    third = _finalize_draft(
+        third_draft,
+        second,
+        v2_runtime.fixture,
+        checked_at=NOW + timedelta(minutes=4),
+        assessed_at=NOW + timedelta(minutes=5),
     )
     assert v2_runtime.coordinator.submit(third).accepted is True
 
@@ -460,6 +608,80 @@ def test_workspace_integrity_replay_detects_missing_trail_children(
 
 
 @pytest.mark.integration
+def test_workspace_integrity_replay_rejects_forged_source_first_provenance(
+    v2_runtime: TrailRuntime,
+) -> None:
+    proposal = v2_runtime.record_proposal()
+    assert v2_runtime.coordinator.submit(proposal).accepted is True
+    provenance = proposal.trail_version.source_first_provenance
+    forged = provenance.model_copy(
+        update={
+            "node_event": provenance.node_event.model_copy(
+                update={"subject_ids": ("fabricated-node",)}
+            )
+        }
+    )
+    version = proposal.trail_version.model_copy(
+        update={"source_first_provenance": forged}
+    )
+    record_json = canonical_json_bytes(version.model_dump(mode="json")).decode("utf-8")
+    with v2_runtime.engine.begin() as connection:
+        connection.execute(text("DROP TRIGGER evidence_trail_versions_no_update"))
+        connection.execute(
+            text(
+                "UPDATE evidence_trail_versions "
+                "SET record_json = :record_json, content_hash = :content_hash "
+                "WHERE trail_version_id = :trail_version_id"
+            ),
+            {
+                "trail_version_id": version.trail_version_id,
+                "record_json": record_json,
+                "content_hash": sha256_hex(record_json.encode("utf-8")),
+            },
+        )
+
+    with v2_runtime.engine.connect() as connection:
+        verification = verify_workspace(RepositorySet(connection), v2_runtime.artifact_store)
+    assert verification.valid is False
+    assert "trail" in (verification.reason or "").lower()
+
+
+@pytest.mark.integration
+def test_workspace_integrity_replay_rejects_reordered_report_semantics(
+    v2_runtime: TrailRuntime,
+) -> None:
+    assert v2_runtime.coordinator.submit(v2_runtime.record_proposal()).accepted is True
+    proposal = v2_runtime.binding_proposal()
+    assert v2_runtime.coordinator.submit(proposal).accepted is True
+    forged = proposal.binding.model_copy(
+        update={
+            "source_node_ids": tuple(reversed(proposal.binding.source_node_ids)),
+            "source_spans": tuple(reversed(proposal.binding.source_spans)),
+        }
+    )
+    record_json = canonical_json_bytes(forged.model_dump(mode="json")).decode("utf-8")
+    with v2_runtime.engine.begin() as connection:
+        connection.execute(text("DROP TRIGGER report_sentence_bindings_no_update"))
+        connection.execute(
+            text(
+                "UPDATE report_sentence_bindings "
+                "SET record_json = :record_json, content_hash = :content_hash "
+                "WHERE binding_id = :binding_id"
+            ),
+            {
+                "binding_id": forged.binding_id,
+                "record_json": record_json,
+                "content_hash": sha256_hex(record_json.encode("utf-8")),
+            },
+        )
+
+    with v2_runtime.engine.connect() as connection:
+        verification = verify_workspace(RepositorySet(connection), v2_runtime.artifact_store)
+    assert verification.valid is False
+    assert "binding" in (verification.reason or "").lower()
+
+
+@pytest.mark.integration
 def test_workspace_integrity_replay_rejects_rewound_trail_head(
     v2_runtime: TrailRuntime,
 ) -> None:
@@ -475,7 +697,7 @@ def test_workspace_integrity_replay_rejects_rewound_trail_head(
         evidence_ids=(source.evidence_id,),
         modality=initial.relations[0].modality,
     )
-    successor = EvidenceTrailVersionBuilder.add_relation(
+    successor_draft = EvidenceTrailVersionBuilder.add_relation(
         current_head=initial.snapshot(),
         relation=relation,
         trail_version_id="trail-version-2",
@@ -483,8 +705,15 @@ def test_workspace_integrity_replay_rejects_rewound_trail_head(
         idempotency_key="intent-trail-2",
         proposer=v2_runtime.proposer,
         approval=Approval(approver=v2_runtime.approver, approved_at=NOW),
-        created_at=NOW,
+        created_at=NOW + timedelta(minutes=3),
         governing_policy_hash=v2_runtime.policy.policy_hash,
+    )
+    successor = _finalize_draft(
+        successor_draft,
+        initial,
+        v2_runtime.fixture,
+        checked_at=NOW + timedelta(minutes=1),
+        assessed_at=NOW + timedelta(minutes=2),
     )
     assert v2_runtime.coordinator.submit(successor).accepted is True
 
@@ -525,6 +754,45 @@ def test_workspace_integrity_replay_rejects_binding_without_accepted_transaction
         verification = verify_workspace(RepositorySet(connection), v2_runtime.artifact_store)
     assert verification.valid is False
     assert "binding" in (verification.reason or "").lower()
+
+
+@pytest.mark.integration
+def test_graph_edit_is_unsubmittable_until_fresh_checks_and_assessments_are_supplied(
+    v2_runtime: TrailRuntime,
+) -> None:
+    initial = v2_runtime.record_proposal()
+    source, target = initial.nodes[:2]
+    relation = EvidenceTrailRelation(
+        relation_id="relation-draft-v2",
+        trail_version_id=initial.trail_version.trail_version_id,
+        source_node_id=source.node_id,
+        target_node_id=target.node_id,
+        relation_type=RelationType.QUALIFIES,
+        evidence_ids=(source.evidence_id,),
+        modality=initial.relations[0].modality,
+    )
+
+    draft = EvidenceTrailVersionBuilder.add_relation(
+        current_head=initial.snapshot(),
+        relation=relation,
+        trail_version_id="trail-version-2",
+        proposal_id="proposal-trail-draft",
+        idempotency_key="intent-trail-draft",
+        proposer=v2_runtime.proposer,
+        approval=Approval(approver=v2_runtime.approver, approved_at=NOW),
+        created_at=NOW,
+        governing_policy_hash=v2_runtime.policy.policy_hash,
+    )
+
+    assert not isinstance(draft, RecordEvidenceTrailVersion)
+    assert v2_runtime.coordinator.submit(draft).accepted is False
+    finalize = EvidenceTrailVersionBuilder.finalize
+    with pytest.raises(ValueError, match="fresh"):
+        finalize(
+            draft=draft,
+            checks=initial.checks,
+            assessments=initial.assessments,
+        )
 
 
 def _runtime(
@@ -590,9 +858,14 @@ def _runtime(
 
 
 def _rebind_fixture(fixture: TrailFixture, governing_policy_hash: str) -> TrailFixture:
+    checks = tuple(
+        check.model_copy(update={"governing_policy_hash": governing_policy_hash})
+        for check in fixture.snapshot.checks
+    )
     assessments = tuple(
         assessment.model_copy(
             update={
+                "governing_policy_hash": governing_policy_hash,
                 "provenance": assessment.provenance.model_copy(
                     update={"governing_policy_hash": governing_policy_hash}
                 )
@@ -607,7 +880,7 @@ def _rebind_fixture(fixture: TrailFixture, governing_policy_hash: str) -> TrailF
         }
     )
     snapshot = fixture.snapshot.model_copy(
-        update={"version": version, "assessments": assessments}
+        update={"version": version, "checks": checks, "assessments": assessments}
     )
     return fixture.__class__(snapshot=snapshot, inputs=fixture.inputs)
 

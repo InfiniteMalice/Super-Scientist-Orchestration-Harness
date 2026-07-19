@@ -117,6 +117,31 @@ class ConstructionMethod(StrEnum):
     SOURCE_FIRST = "SOURCE_FIRST"
 
 
+class SourceFirstStageKind(StrEnum):
+    SOURCE_RETAINED = "SOURCE_RETAINED"
+    NODES_PROPOSED = "NODES_PROPOSED"
+    RELATIONS_PROPOSED = "RELATIONS_PROPOSED"
+    CLAIM_FORMED = "CLAIM_FORMED"
+
+
+class SourceFirstStageEvent(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    event_id: StableIdentifier
+    stage: SourceFirstStageKind
+    subject_ids: tuple[StableIdentifier, ...]
+    content_hashes: tuple[Sha256Hex, ...]
+    actor: ActorIdentity
+    occurred_at: UtcTimestamp
+
+
+class SourceFirstProvenance(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    source_events: tuple[SourceFirstStageEvent, ...] = Field(min_length=1)
+    node_event: SourceFirstStageEvent
+    relation_event: SourceFirstStageEvent
+    claim_event: SourceFirstStageEvent
+
+
 class ExactSourceSpan(_StrictFrozenModel):
     start: StrictInt = Field(ge=0)
     end: StrictInt = Field(gt=0)
@@ -172,6 +197,7 @@ class EvidenceTrailVersion(_StrictFrozenModel):
     geometry: TrailGeometry
     status: TrailOutcome
     construction_method: ConstructionMethod
+    source_first_provenance: SourceFirstProvenance
     check_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
     assessment_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
     constructed_by: ActorIdentity
@@ -208,6 +234,17 @@ class EvidenceTrailNode(_StrictFrozenModel):
         return value
 
 
+class CausalSupport(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    support_id: StableIdentifier
+    trail_version_id: StableIdentifier
+    relation_id: StableIdentifier
+    node_id: StableIdentifier
+    evidence_id: StableIdentifier
+    exact_span: ExactSourceSpan
+    content_hash: Sha256Hex
+
+
 class EvidenceTrailRelation(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     relation_id: StableIdentifier
@@ -217,13 +254,15 @@ class EvidenceTrailRelation(_StrictFrozenModel):
     relation_type: RelationType
     evidence_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
     modality: ClaimModality
-    causal_support: tuple[StableIdentifier, ...] = ()
+    causal_support: tuple[CausalSupport, ...] = ()
 
 
 class TrailCheckResult(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     check_id: StableIdentifier
     trail_version_id: StableIdentifier
+    claim_version_id: StableIdentifier
+    governing_policy_hash: Sha256Hex
     category: TrailCheckCategory
     passed: bool
     finding_codes: tuple[StableIdentifier, ...]
@@ -239,6 +278,8 @@ class TrailAssessment(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     assessment_id: StableIdentifier
     trail_version_id: StableIdentifier
+    claim_version_id: StableIdentifier
+    governing_policy_hash: Sha256Hex
     category: AssessmentCategory
     provenance: AssessmentProvenance
     node_ids: tuple[StableIdentifier, ...]
