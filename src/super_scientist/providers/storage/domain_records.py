@@ -501,6 +501,7 @@ class EvidenceTrailHeadRepository:
         return tuple(heads)
 
     def set(self, trail_id: str, trail_version_id: str, version: int) -> None:
+        validated_version = _stored_integer({"version": version}, "version")
         stored_identity = self._connection.execute(
             select(
                 evidence_trail_versions.c.trail_id,
@@ -508,18 +509,21 @@ class EvidenceTrailHeadRepository:
             ).where(evidence_trail_versions.c.trail_version_id == trail_version_id)
         ).one_or_none()
         _require_integrity(
-            stored_identity == (trail_id, version),
+            stored_identity == (trail_id, validated_version),
             "trail_version_id does not match trail_id and version",
         )
         statement = sqlite_insert(evidence_trail_heads).values(
             trail_id=trail_id,
             trail_version_id=trail_version_id,
-            version=version,
+            version=validated_version,
         )
         self._connection.execute(
             statement.on_conflict_do_update(
                 index_elements=[evidence_trail_heads.c.trail_id],
-                set_={"trail_version_id": trail_version_id, "version": version},
+                set_={
+                    "trail_version_id": trail_version_id,
+                    "version": validated_version,
+                },
             )
         )
 

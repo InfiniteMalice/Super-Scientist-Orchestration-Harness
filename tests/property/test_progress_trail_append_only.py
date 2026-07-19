@@ -452,6 +452,27 @@ def test_evidence_trail_head_repository_round_trips_and_updates_projection(
         engine.dispose()
 
 
+@pytest.mark.parametrize("invalid_version", [True, "1"], ids=["bool", "string"])
+def test_evidence_trail_head_repository_rejects_non_integer_version_without_mutating_head(
+    tmp_path: Path,
+    invalid_version: object,
+) -> None:
+    engine = _engine(tmp_path, "trail-head-invalid-version.db")
+    connection = engine.connect()
+    repository = EvidenceTrailHeadRepository(connection)
+    try:
+        with engine.begin() as writer:
+            _seed_trail_versions(writer)
+
+        repository.set("trail-1", "trail-version-2", 2)
+        with pytest.raises(StorageIntegrityError, match="version must be an integer"):
+            repository.set("trail-1", "trail-version-1", invalid_version)
+        assert repository.get("trail-1") == ("trail-version-2", 2)
+    finally:
+        connection.close()
+        engine.dispose()
+
+
 @pytest.mark.parametrize(
     ("trail_id", "trail_version_id", "version"),
     [
