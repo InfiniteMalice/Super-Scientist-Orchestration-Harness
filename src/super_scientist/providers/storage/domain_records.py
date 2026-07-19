@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 
 from pydantic import BaseModel, TypeAdapter
 from sqlalchemy import Connection, Table, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from super_scientist.domain.behavioral_rules.models import (
+    BehavioralRuleVersion,
+    ReviewerAssessment,
+    RuleConsolidationDecision,
+    RuleIncident,
+    RuleRegressionCase,
+    RuleStatus,
+    SemanticVersion,
+)
 from super_scientist.domain.configurations.models import ConfigurationVersion
 from super_scientist.domain.evaluators.models import (
     EvaluatorCollapseRecord,
@@ -25,7 +35,12 @@ from super_scientist.domain.improvement.models import (
     EvaluatorAuditRecord,
     SelfImprovementMeasurementRecord,
 )
-from super_scientist.domain.primitives import UtcTimestamp, canonical_json_bytes, sha256_hex
+from super_scientist.domain.primitives import (
+    StableIdentifier,
+    UtcTimestamp,
+    canonical_json_bytes,
+    sha256_hex,
+)
 from super_scientist.domain.progress.models import (
     BudgetAllocation,
     CompletionDecision,
@@ -37,6 +52,9 @@ from super_scientist.domain.progress.models import (
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 from super_scientist.providers.storage.repositories import StorageIntegrityError
 from super_scientist.providers.storage.schema import (
+    behavioral_rule_heads,
+    behavioral_rule_version_incidents,
+    behavioral_rule_versions,
     completion_decisions,
     configuration_versions,
     evaluator_audits,
@@ -58,16 +76,29 @@ from super_scientist.providers.storage.schema import (
     research_run_events,
     research_run_heads,
     research_runs,
+    reviewer_assessment_incidents,
+    reviewer_assessment_rule_versions,
+    reviewer_assessments,
+    rule_consolidation_assessments,
+    rule_consolidation_decisions,
+    rule_consolidation_incidents,
+    rule_incidents,
+    rule_regression_case_incidents,
+    rule_regression_cases,
     run_budgets,
     run_checkpoints,
     self_improvement_measurements,
 )
 
 TIMESTAMP_ADAPTER: TypeAdapter[UtcTimestamp] = TypeAdapter(UtcTimestamp)
+STABLE_IDENTIFIER_ADAPTER: TypeAdapter[StableIdentifier] = TypeAdapter(StableIdentifier)
+SEMANTIC_VERSION_ADAPTER: TypeAdapter[SemanticVersion] = TypeAdapter(SemanticVersion)
 
 type _RelationshipStorageType = type[str] | type[int]
 
 __all__ = [
+    "BehavioralRuleHeadRepository",
+    "BehavioralRuleVersionRepository",
     "CompletionDecisionRepository",
     "ConfigurationVersionRepository",
     "EvaluatorAuditRepository",
@@ -89,6 +120,10 @@ __all__ = [
     "ResearchRunEventRepository",
     "ResearchRunHeadRepository",
     "ResearchRunRepository",
+    "ReviewerAssessmentRepository",
+    "RuleConsolidationDecisionRepository",
+    "RuleIncidentRepository",
+    "RuleRegressionCaseRepository",
     "RunBudgetRepository",
     "RunCheckpointRepository",
     "SelfImprovementMeasurementRepository",
@@ -197,9 +232,9 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
             record_json = _stored_string(row, "record_json")
             content_hash = _stored_string(row, "content_hash")
             record = self._model_type.model_validate_json(record_json)
-            canonical_record_json = canonical_json_bytes(
-                record.model_dump(mode="json")
-            ).decode("utf-8")
+            canonical_record_json = canonical_json_bytes(record.model_dump(mode="json")).decode(
+                "utf-8"
+            )
         except (TypeError, ValueError) as error:
             raise StorageIntegrityError("storage integrity error: invalid record JSON") from error
         created_at = _stored_string(row, "created_at")
@@ -231,6 +266,217 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
             )
         _require_integrity(record_json == canonical_record_json, "record_json must be canonical")
         return record
+
+
+@dataclass(frozen=True, slots=True)
+class _OrderedReferenceBinding:
+    table: Table
+    owner_column: str
+    record_field: str
+    reference_column: str
+
+
+class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
+    _AppendOnlyRecordRepository[RecordT]
+):
+    """Materializes ordered relationship tuples and verifies exact canonical equality."""
+
+    def __init__(
+        self,
+        connection: Connection,
+        *,
+        table: Table,
+        model_type: type[RecordT],
+        identifier_field: str,
+        reference_bindings: tuple[_OrderedReferenceBinding, ...],
+        relationship_fields: Mapping[str, str] | None = None,
+        relationship_types: Mapping[str, _RelationshipStorageType] | None = None,
+    ) -> None:
+        super().__init__(
+            connection,
+            table=table,
+            model_type=model_type,
+            identifier_field=identifier_field,
+            relationship_fields=relationship_fields,
+            relationship_types=relationship_types,
+        )
+        _require_integrity(bool(reference_bindings), "referenced repository needs bindings")
+        for binding in reference_bindings:
+            _require_integrity(
+                binding.owner_column in binding.table.c,
+                "unknown reference owner column",
+            )
+            _require_integrity("position" in binding.table.c, "missing reference position")
+            _require_integrity(
+                binding.reference_column in binding.table.c,
+                "unknown reference column",
+            )
+            _require_integrity(
+                binding.record_field in model_type.model_fields,
+                "unknown canonical reference field",
+            )
+        self._reference_bindings = reference_bindings
+
+    def add(self, record_id: str, record: RecordT, created_at: UtcTimestamp) -> None:
+        try:
+            validated = self._model_type.model_validate(record.model_dump(mode="python"))
+        except (TypeError, ValueError) as error:
+            raise StorageIntegrityError(
+                "storage integrity error: invalid append-only record"
+            ) from error
+        super().add(record_id, validated, created_at)
+        for binding in self._reference_bindings:
+            references = _canonical_reference_tuple(validated, binding.record_field)
+            for position, reference_id in enumerate(references):
+                self._connection.execute(
+                    insert(binding.table).values(
+                        **{
+                            binding.owner_column: record_id,
+                            "position": position,
+                            binding.reference_column: reference_id,
+                        }
+                    )
+                )
+
+    def _decode_row(self, row: Mapping[str, object]) -> RecordT:
+        record = super()._decode_row(row)
+        owner_id = _validated_relationship_value(
+            getattr(record, self._identifier_field),
+            self._identifier_field,
+            str,
+        )
+        for binding in self._reference_bindings:
+            expected = _canonical_reference_tuple(record, binding.record_field)
+            stored_rows = self._connection.execute(
+                select(binding.table.c[binding.reference_column])
+                .where(binding.table.c[binding.owner_column] == owner_id)
+                .order_by(binding.table.c.position)
+            ).mappings()
+            actual = tuple(
+                _stored_string(dict(stored_row), binding.reference_column)
+                for stored_row in stored_rows
+            )
+            _require_integrity(
+                actual == expected,
+                f"{binding.record_field} materialization does not match exact canonical references",
+            )
+        return record
+
+
+def _canonical_reference_tuple(record: BaseModel, field_name: str) -> tuple[str, ...]:
+    value = getattr(record, field_name)
+    _require_integrity(isinstance(value, tuple), f"{field_name} must be a tuple")
+    references: list[str] = []
+    for item in value:
+        _require_integrity(isinstance(item, str), f"{field_name} must contain strings")
+        references.append(item)
+    _require_integrity(
+        len(set(references)) == len(references),
+        f"{field_name} must contain unique identifiers",
+    )
+    return tuple(references)
+
+
+class RuleIncidentRepository(_AppendOnlyRecordRepository[RuleIncident]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=rule_incidents,
+            model_type=RuleIncident,
+            identifier_field="incident_id",
+        )
+
+
+class BehavioralRuleVersionRepository(_ReferencedAppendOnlyRecordRepository[BehavioralRuleVersion]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=behavioral_rule_versions,
+            model_type=BehavioralRuleVersion,
+            identifier_field="rule_version_id",
+            relationship_fields={
+                "rule_id": "rule_id",
+                "semantic_version": "semantic_version",
+                "status": "status",
+            },
+            reference_bindings=(
+                _OrderedReferenceBinding(
+                    table=behavioral_rule_version_incidents,
+                    owner_column="rule_version_id",
+                    record_field="source_incident_ids",
+                    reference_column="incident_id",
+                ),
+            ),
+        )
+
+
+class ReviewerAssessmentRepository(_ReferencedAppendOnlyRecordRepository[ReviewerAssessment]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=reviewer_assessments,
+            model_type=ReviewerAssessment,
+            identifier_field="assessment_id",
+            reference_bindings=(
+                _OrderedReferenceBinding(
+                    table=reviewer_assessment_rule_versions,
+                    owner_column="assessment_id",
+                    record_field="rule_version_ids",
+                    reference_column="rule_version_id",
+                ),
+                _OrderedReferenceBinding(
+                    table=reviewer_assessment_incidents,
+                    owner_column="assessment_id",
+                    record_field="incident_ids",
+                    reference_column="incident_id",
+                ),
+            ),
+        )
+
+
+class RuleConsolidationDecisionRepository(
+    _ReferencedAppendOnlyRecordRepository[RuleConsolidationDecision]
+):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=rule_consolidation_decisions,
+            model_type=RuleConsolidationDecision,
+            identifier_field="consolidation_decision_id",
+            reference_bindings=(
+                _OrderedReferenceBinding(
+                    table=rule_consolidation_assessments,
+                    owner_column="consolidation_decision_id",
+                    record_field="consumed_assessment_ids",
+                    reference_column="assessment_id",
+                ),
+                _OrderedReferenceBinding(
+                    table=rule_consolidation_incidents,
+                    owner_column="consolidation_decision_id",
+                    record_field="consumed_incident_ids",
+                    reference_column="incident_id",
+                ),
+            ),
+        )
+
+
+class RuleRegressionCaseRepository(_ReferencedAppendOnlyRecordRepository[RuleRegressionCase]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=rule_regression_cases,
+            model_type=RuleRegressionCase,
+            identifier_field="regression_case_id",
+            relationship_fields={"rule_version_id": "rule_version_id"},
+            reference_bindings=(
+                _OrderedReferenceBinding(
+                    table=rule_regression_case_incidents,
+                    owner_column="regression_case_id",
+                    record_field="incident_ids",
+                    reference_column="incident_id",
+                ),
+            ),
+        )
 
 
 class ResearchRunRepository(_AppendOnlyRecordRepository[ResearchRun]):
@@ -472,9 +718,7 @@ class EvidenceTrailAssessmentRepository(_AppendOnlyRecordRepository[TrailAssessm
         )
 
 
-class ReportSentenceBindingRepository(
-    _AppendOnlyRecordRepository[ReportSentenceBinding]
-):
+class ReportSentenceBindingRepository(_AppendOnlyRecordRepository[ReportSentenceBinding]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -486,6 +730,128 @@ class ReportSentenceBindingRepository(
                 "claim_version_id": "claim_version_id",
             },
         )
+
+
+class BehavioralRuleHeadRepository:
+    def __init__(self, connection: Connection) -> None:
+        self._connection = connection
+
+    def get(self, rule_id: str) -> tuple[str, str, RuleStatus] | None:
+        row = (
+            self._connection.execute(
+                select(
+                    behavioral_rule_heads.c.rule_id,
+                    behavioral_rule_heads.c.rule_version_id,
+                    behavioral_rule_heads.c.semantic_version,
+                    behavioral_rule_heads.c.status,
+                ).where(behavioral_rule_heads.c.rule_id == rule_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return None if row is None else self._decode_row(dict(row))
+
+    def list_all(self) -> tuple[tuple[str, str, str, RuleStatus], ...]:
+        rows = self._connection.execute(
+            select(
+                behavioral_rule_heads.c.rule_id,
+                behavioral_rule_heads.c.rule_version_id,
+                behavioral_rule_heads.c.semantic_version,
+                behavioral_rule_heads.c.status,
+            ).order_by(behavioral_rule_heads.c.rule_id)
+        ).mappings()
+        heads: list[tuple[str, str, str, RuleStatus]] = []
+        for row in rows:
+            stored_row = dict(row)
+            rule_id = _stored_string(stored_row, "rule_id")
+            rule_version_id, semantic_version, status = self._decode_row(stored_row)
+            heads.append((rule_id, rule_version_id, semantic_version, status))
+        return tuple(heads)
+
+    def set(
+        self,
+        rule_id: str,
+        rule_version_id: str,
+        semantic_version: str,
+        status: RuleStatus,
+    ) -> None:
+        try:
+            validated_rule_id = STABLE_IDENTIFIER_ADAPTER.validate_python(rule_id)
+            validated_rule_version_id = STABLE_IDENTIFIER_ADAPTER.validate_python(rule_version_id)
+            validated_semantic_version = SEMANTIC_VERSION_ADAPTER.validate_python(semantic_version)
+            validated_status = RuleStatus(status)
+        except (TypeError, ValueError) as error:
+            raise StorageIntegrityError(
+                "storage integrity error: invalid behavioral rule head"
+            ) from error
+        stored_identity = self._connection.execute(
+            select(
+                behavioral_rule_versions.c.rule_id,
+                behavioral_rule_versions.c.semantic_version,
+                behavioral_rule_versions.c.status,
+            ).where(behavioral_rule_versions.c.rule_version_id == validated_rule_version_id)
+        ).one_or_none()
+        _require_integrity(
+            stored_identity
+            == (
+                validated_rule_id,
+                validated_semantic_version,
+                validated_status.value,
+            ),
+            "rule version does not match rule_id, semantic_version, and status",
+        )
+        statement = sqlite_insert(behavioral_rule_heads).values(
+            rule_id=validated_rule_id,
+            rule_version_id=validated_rule_version_id,
+            semantic_version=validated_semantic_version,
+            status=validated_status.value,
+        )
+        self._connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=[behavioral_rule_heads.c.rule_id],
+                set_={
+                    "rule_version_id": validated_rule_version_id,
+                    "semantic_version": validated_semantic_version,
+                    "status": validated_status.value,
+                },
+            )
+        )
+
+    def _decode_row(self, row: Mapping[str, object]) -> tuple[str, str, RuleStatus]:
+        rule_id = _stored_string(row, "rule_id")
+        rule_version_id = _stored_string(row, "rule_version_id")
+        semantic_version = _stored_string(row, "semantic_version")
+        status_text = _stored_string(row, "status")
+        try:
+            validated_rule_id = STABLE_IDENTIFIER_ADAPTER.validate_python(rule_id)
+            validated_rule_version_id = STABLE_IDENTIFIER_ADAPTER.validate_python(rule_version_id)
+            validated_semantic_version = SEMANTIC_VERSION_ADAPTER.validate_python(semantic_version)
+            status = RuleStatus(status_text)
+        except (TypeError, ValueError) as error:
+            raise StorageIntegrityError(
+                "storage integrity error: invalid behavioral rule head"
+            ) from error
+        _require_integrity(validated_rule_id == rule_id, "rule_id must be canonical")
+        _require_integrity(
+            validated_rule_version_id == rule_version_id,
+            "rule_version_id must be canonical",
+        )
+        _require_integrity(
+            validated_semantic_version == semantic_version,
+            "semantic_version must be canonical",
+        )
+        stored_identity = self._connection.execute(
+            select(
+                behavioral_rule_versions.c.rule_id,
+                behavioral_rule_versions.c.semantic_version,
+                behavioral_rule_versions.c.status,
+            ).where(behavioral_rule_versions.c.rule_version_id == rule_version_id)
+        ).one_or_none()
+        _require_integrity(
+            stored_identity == (rule_id, semantic_version, status.value),
+            "behavioral rule head references an incoherent version",
+        )
+        return rule_version_id, semantic_version, status
 
 
 class ResearchRunHeadRepository:
@@ -777,9 +1143,7 @@ def _validated_relationship_value(
 ) -> str | int:
     if storage_type is str:
         if not isinstance(value, str):
-            raise StorageIntegrityError(
-                f"storage integrity error: {field_name} must be a string"
-            )
+            raise StorageIntegrityError(f"storage integrity error: {field_name} must be a string")
         return value
     if not isinstance(value, int) or isinstance(value, bool):
         raise StorageIntegrityError(f"storage integrity error: {field_name} must be an integer")

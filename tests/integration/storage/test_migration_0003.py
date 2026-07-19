@@ -8,7 +8,7 @@ from sqlalchemy import Connection, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from alembic import command
-from super_scientist.providers.storage.database import create_database_engine, upgrade_database
+from super_scientist.providers.storage.database import create_database_engine
 
 REVISION = "0003_progress_and_evidence_trails"
 
@@ -150,7 +150,7 @@ def database_url(tmp_path: Path) -> str:
 def test_clean_upgrade_creates_progress_and_evidence_trail_storage(
     database_url: str,
 ) -> None:
-    upgrade_database(database_url)
+    _upgrade_to(database_url, REVISION)
 
     assert _table_names(database_url) >= AUTHORITATIVE_0003_TABLES | PROJECTION_0003_TABLES
     assert _revision(database_url) == REVISION

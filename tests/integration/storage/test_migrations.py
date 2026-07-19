@@ -36,7 +36,7 @@ def test_initial_migration_creates_kernel_tables(tmp_path: Path) -> None:
     engine.dispose()
 
     assert names >= KERNEL_TABLES
-    assert revision == "0003_progress_and_evidence_trails"
+    assert revision == "0004_behavioral_rules"
 
 
 def test_upgrade_database_is_idempotent(tmp_path: Path) -> None:
@@ -50,7 +50,7 @@ def test_upgrade_database_is_idempotent(tmp_path: Path) -> None:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
     engine.dispose()
 
-    assert revision == "0003_progress_and_evidence_trails"
+    assert revision == "0004_behavioral_rules"
 
 
 def test_evidence_rows_cannot_be_updated(tmp_path: Path) -> None:

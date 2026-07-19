@@ -480,3 +480,240 @@ evidence_trail_heads = Table(
     ),
     CheckConstraint("version >= 1", name="ck_evidence_trail_heads_version"),
 )
+
+rule_incidents = Table(
+    "rule_incidents",
+    metadata,
+    Column("incident_id", String(128), primary_key=True),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    _content_hash_constraint("ck_rule_incidents_content_hash"),
+)
+
+behavioral_rule_versions = Table(
+    "behavioral_rule_versions",
+    metadata,
+    Column("rule_version_id", String(192), primary_key=True),
+    Column("rule_id", String(128), nullable=False),
+    Column("semantic_version", String(32), nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    UniqueConstraint(
+        "rule_id",
+        "semantic_version",
+        name="uq_behavioral_rule_semantic_version",
+    ),
+    UniqueConstraint(
+        "rule_id",
+        "rule_version_id",
+        "semantic_version",
+        "status",
+        name="uq_behavioral_rule_head_target",
+    ),
+    CheckConstraint(
+        "length(semantic_version) BETWEEN 5 AND 32",
+        name="ck_behavioral_rule_semantic_version_length",
+    ),
+    _content_hash_constraint("ck_behavioral_rule_versions_content_hash"),
+)
+
+reviewer_assessments = Table(
+    "reviewer_assessments",
+    metadata,
+    Column("assessment_id", String(160), primary_key=True),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    _content_hash_constraint("ck_reviewer_assessments_content_hash"),
+)
+
+rule_consolidation_decisions = Table(
+    "rule_consolidation_decisions",
+    metadata,
+    Column("consolidation_decision_id", String(192), primary_key=True),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    _content_hash_constraint("ck_rule_consolidation_decisions_content_hash"),
+)
+
+rule_regression_cases = Table(
+    "rule_regression_cases",
+    metadata,
+    Column("regression_case_id", String(160), primary_key=True),
+    Column(
+        "rule_version_id",
+        String(192),
+        ForeignKey("behavioral_rule_versions.rule_version_id"),
+        nullable=False,
+    ),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    _content_hash_constraint("ck_rule_regression_cases_content_hash"),
+)
+
+behavioral_rule_version_incidents = Table(
+    "behavioral_rule_version_incidents",
+    metadata,
+    Column(
+        "rule_version_id",
+        String(192),
+        ForeignKey("behavioral_rule_versions.rule_version_id"),
+        primary_key=True,
+    ),
+    Column("position", Integer, primary_key=True),
+    Column(
+        "incident_id",
+        String(128),
+        ForeignKey("rule_incidents.incident_id"),
+        nullable=False,
+    ),
+    CheckConstraint("position >= 0", name="ck_behavioral_rule_version_incidents_position"),
+    UniqueConstraint(
+        "rule_version_id",
+        "incident_id",
+        name="uq_behavioral_rule_version_incidents_reference",
+    ),
+)
+
+reviewer_assessment_rule_versions = Table(
+    "reviewer_assessment_rule_versions",
+    metadata,
+    Column(
+        "assessment_id",
+        String(160),
+        ForeignKey("reviewer_assessments.assessment_id"),
+        primary_key=True,
+    ),
+    Column("position", Integer, primary_key=True),
+    Column(
+        "rule_version_id",
+        String(192),
+        ForeignKey("behavioral_rule_versions.rule_version_id"),
+        nullable=False,
+    ),
+    CheckConstraint("position >= 0", name="ck_reviewer_assessment_rule_versions_position"),
+    UniqueConstraint(
+        "assessment_id",
+        "rule_version_id",
+        name="uq_reviewer_assessment_rule_versions_reference",
+    ),
+)
+
+reviewer_assessment_incidents = Table(
+    "reviewer_assessment_incidents",
+    metadata,
+    Column(
+        "assessment_id",
+        String(160),
+        ForeignKey("reviewer_assessments.assessment_id"),
+        primary_key=True,
+    ),
+    Column("position", Integer, primary_key=True),
+    Column(
+        "incident_id",
+        String(128),
+        ForeignKey("rule_incidents.incident_id"),
+        nullable=False,
+    ),
+    CheckConstraint("position >= 0", name="ck_reviewer_assessment_incidents_position"),
+    UniqueConstraint(
+        "assessment_id",
+        "incident_id",
+        name="uq_reviewer_assessment_incidents_reference",
+    ),
+)
+
+rule_consolidation_assessments = Table(
+    "rule_consolidation_assessments",
+    metadata,
+    Column(
+        "consolidation_decision_id",
+        String(192),
+        ForeignKey("rule_consolidation_decisions.consolidation_decision_id"),
+        primary_key=True,
+    ),
+    Column("position", Integer, primary_key=True),
+    Column(
+        "assessment_id",
+        String(160),
+        ForeignKey("reviewer_assessments.assessment_id"),
+        nullable=False,
+    ),
+    CheckConstraint("position >= 0", name="ck_rule_consolidation_assessments_position"),
+    UniqueConstraint(
+        "consolidation_decision_id",
+        "assessment_id",
+        name="uq_rule_consolidation_assessments_reference",
+    ),
+)
+
+rule_consolidation_incidents = Table(
+    "rule_consolidation_incidents",
+    metadata,
+    Column(
+        "consolidation_decision_id",
+        String(192),
+        ForeignKey("rule_consolidation_decisions.consolidation_decision_id"),
+        primary_key=True,
+    ),
+    Column("position", Integer, primary_key=True),
+    Column(
+        "incident_id",
+        String(128),
+        ForeignKey("rule_incidents.incident_id"),
+        nullable=False,
+    ),
+    CheckConstraint("position >= 0", name="ck_rule_consolidation_incidents_position"),
+    UniqueConstraint(
+        "consolidation_decision_id",
+        "incident_id",
+        name="uq_rule_consolidation_incidents_reference",
+    ),
+)
+
+rule_regression_case_incidents = Table(
+    "rule_regression_case_incidents",
+    metadata,
+    Column(
+        "regression_case_id",
+        String(160),
+        ForeignKey("rule_regression_cases.regression_case_id"),
+        primary_key=True,
+    ),
+    Column("position", Integer, primary_key=True),
+    Column(
+        "incident_id",
+        String(128),
+        ForeignKey("rule_incidents.incident_id"),
+        nullable=False,
+    ),
+    CheckConstraint("position >= 0", name="ck_rule_regression_case_incidents_position"),
+    UniqueConstraint(
+        "regression_case_id",
+        "incident_id",
+        name="uq_rule_regression_case_incidents_reference",
+    ),
+)
+
+behavioral_rule_heads = Table(
+    "behavioral_rule_heads",
+    metadata,
+    Column("rule_id", String(128), primary_key=True),
+    Column("rule_version_id", String(192), nullable=False),
+    Column("semantic_version", String(32), nullable=False),
+    Column("status", String(32), nullable=False),
+    ForeignKeyConstraint(
+        ["rule_id", "rule_version_id", "semantic_version", "status"],
+        [
+            "behavioral_rule_versions.rule_id",
+            "behavioral_rule_versions.rule_version_id",
+            "behavioral_rule_versions.semantic_version",
+            "behavioral_rule_versions.status",
+        ],
+    ),
+)
