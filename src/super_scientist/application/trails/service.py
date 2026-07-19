@@ -831,6 +831,16 @@ class RecordEvidenceTrailVersionHandler:
             context.active_policy,
             trail=proposal.snapshot(),
             retained=context.validation_inputs,
+            authority_actors=tuple(
+                receipt.proposal.proposer
+                for receipt in (
+                    *context.source_receipts,
+                    context.node_stage_receipt,
+                    context.relation_stage_receipt,
+                    context.claim_stage_receipt,
+                )
+                if receipt is not None
+            ),
         )
         if authority_rejection is not None:
             return authority_rejection
@@ -1059,6 +1069,19 @@ def trail_authority_rejection(
             "evidence-trail admission cannot satisfy protected-evaluation or rollback flags",
         )
     approval = proposal.approval
+    if trail is not None and any(
+        not trail_actors_are_independent(
+            assessment.provenance.actor,
+            authority_actor,
+        )
+        for assessment in trail.assessments
+        for authority_actor in authority_actors
+    ):
+        return _rejected(
+            proposal.proposal_id,
+            RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+            "trail assessments must be independent of every durable stage actor",
+        )
     exact_authority_actors = authority_actors
     exact_authority_actor_ids = set(authority_actor_ids)
     if trail is not None:

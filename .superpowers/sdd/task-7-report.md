@@ -142,3 +142,28 @@ surface remain unchanged.
 - Strict mypy: `mypy` — **success, 75 source files**.
 - `git diff --check` — **passed** (Git emitted only configured LF-to-CRLF notices).
 - Final complete suite: `pytest -q` — **1,074 passed, 3 skipped in 411.52s**.
+
+## Canonical review assessor-independence fix
+
+The canonical review found that exact actor IDs were protected, but a distinct assessor actor could
+still share provider/model/adapter identity or configuration with a durable source, node-stage,
+relation-stage, or claim-stage proposer. Live final admission did not pass resolved receipt actors
+to the shared authority function, and that function used receipt actors only to check the final
+approver. The fix passes the already resolved actors into the same pure live/replay authority path
+and applies `trail_actors_are_independent()` between every assessor and every receipt proposer.
+
+### RED to GREEN checkpoints
+
+- Focused RED: **7 failed, 40 deselected in 10.31s**. Four direct shared-authority cases returned no
+  rejection for source/node/relation/claim receipt aliases; two live proposals were accepted; and an
+  internally consistent accepted-history replay tamper incorrectly verified as valid.
+- Identical focused GREEN: **7 passed, 40 deselected in 7.67s**.
+- Expanded evidence-trail unit, trail-service integration, and workspace-integrity regression set:
+  **188 passed in 54.24s**.
+
+### Assessor-independence quality gates
+
+- Ruff: `ruff check src tests` — **all checks passed**.
+- Strict mypy: `mypy` — **success, 75 source files**.
+- `git diff --check` — **passed** (Git emitted only configured LF-to-CRLF notices).
+- Final complete suite: `pytest -q` — **1,081 passed, 3 skipped in 451.49s**.

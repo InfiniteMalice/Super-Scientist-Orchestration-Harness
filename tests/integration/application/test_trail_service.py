@@ -159,9 +159,43 @@ def _accepted_receipt(
     return receipt
 
 
+def _record_with_assessor_actor(
+    runtime: TrailRuntime,
+    actor: ActorIdentity,
+) -> RecordEvidenceTrailVersion:
+    proposal = runtime.record_proposal()
+    first, *remaining = proposal.assessments
+    aliased = first.model_copy(
+        update={
+            "provenance": first.provenance.model_copy(update={"actor": actor})
+        }
+    )
+    return proposal.model_copy(update={"assessments": (aliased, *remaining)})
+
+
+def _distinct_assessor_alias(
+    authority_actor: ActorIdentity,
+    *,
+    alias_kind: str,
+    actor_id: str,
+) -> ActorIdentity:
+    if alias_kind == "model":
+        assert authority_actor.kind is ActorKind.MODEL
+        return authority_actor.model_copy(update={"actor_id": actor_id})
+    assert alias_kind == "configuration"
+    assert authority_actor.configuration_hash is not None
+    return _actor(actor_id, ActorKind.MODEL).model_copy(
+        update={"configuration_hash": authority_actor.configuration_hash}
+    )
+
+
 def _append_accepted_without_handler(
     runtime: TrailRuntime,
-    proposal: ProposeEvidenceTrailNodes | ProposeEvidenceTrailRelations,
+    proposal: (
+        ProposeEvidenceTrailNodes
+        | ProposeEvidenceTrailRelations
+        | RecordEvidenceTrailVersion
+    ),
     *,
     governing_policy: PolicySnapshot | None = None,
 ) -> None:
@@ -185,6 +219,45 @@ def _append_accepted_without_handler(
             occurred_at + timedelta(seconds=1),
         )
         repositories.audit.add(event)
+        if isinstance(proposal, RecordEvidenceTrailVersion):
+            connection = unit_of_work.connection
+            assert connection is not None
+            snapshot = proposal.snapshot()
+            version = snapshot.version
+            EvidenceTrailVersionRepository(connection).add(
+                version.trail_version_id,
+                version,
+                version.created_at,
+            )
+            for node in snapshot.nodes:
+                EvidenceTrailNodeRepository(connection).add(
+                    node.node_id,
+                    node,
+                    version.created_at,
+                )
+            for relation in snapshot.relations:
+                EvidenceTrailRelationRepository(connection).add(
+                    relation.relation_id,
+                    relation,
+                    version.created_at,
+                )
+            for check in snapshot.checks:
+                EvidenceTrailCheckRepository(connection).add(
+                    check.check_id,
+                    check,
+                    check.checked_at,
+                )
+            for assessment in snapshot.assessments:
+                EvidenceTrailAssessmentRepository(connection).add(
+                    assessment.assessment_id,
+                    assessment,
+                    assessment.provenance.assessed_at,
+                )
+            EvidenceTrailHeadRepository(connection).set(
+                version.trail_id,
+                version.trail_version_id,
+                version.version,
+            )
 
 
 def _node_stage_proposal(
@@ -439,6 +512,19 @@ def _accept_successor(
 @pytest.fixture
 def v2_runtime(tmp_path: Path) -> Iterator[TrailRuntime]:
     yield from _runtime(tmp_path, _v2_policy(), bootstrap_stages=True)
+
+
+@pytest.fixture
+def v2_configured_claim_runtime(tmp_path: Path) -> Iterator[TrailRuntime]:
+    claim_proposer = _actor("claim-author", ActorKind.HUMAN).model_copy(
+        update={"configuration_hash": sha256_hex(b"claim-author-configuration")}
+    )
+    yield from _runtime(
+        tmp_path,
+        _v2_policy(),
+        bootstrap_stages=True,
+        claim_proposer=claim_proposer,
+    )
 
 
 @pytest.fixture
@@ -859,6 +945,107 @@ def test_human_approver_must_be_independent_of_every_trail_authority(
 
     assert decision.accepted is False
     assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("receipt_id", "alias_kind"),
+    (
+        ("proposal-source", "model"),
+        ("proposal-node-stage-1", "configuration"),
+        ("proposal-relation-stage-1", "model"),
+        ("proposal-claim", "configuration"),
+    ),
+)
+def test_shared_authority_rejects_assessor_aliasing_every_receipt_actor(
+    v2_configured_claim_runtime: TrailRuntime,
+    receipt_id: str,
+    alias_kind: str,
+) -> None:
+    receipt_actor = _accepted_receipt(
+        v2_configured_claim_runtime,
+        receipt_id,
+    ).proposal.proposer
+    assessor = _distinct_assessor_alias(
+        receipt_actor,
+        alias_kind=alias_kind,
+        actor_id=f"assessor-alias-{receipt_id}",
+    )
+    proposal = _record_with_assessor_actor(
+        v2_configured_claim_runtime,
+        assessor,
+    )
+
+    rejection = trail_authority_rejection(
+        proposal,
+        v2_configured_claim_runtime.policy,
+        trail=proposal.snapshot(),
+        retained=v2_configured_claim_runtime.fixture.inputs,
+        authority_actors=(receipt_actor,),
+    )
+
+    assert rejection is not None
+    assert rejection.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("receipt_id", "alias_kind"),
+    (
+        ("proposal-source", "model"),
+        ("proposal-claim", "configuration"),
+    ),
+)
+def test_live_trail_rejects_assessor_aliasing_durable_receipt_actor(
+    v2_configured_claim_runtime: TrailRuntime,
+    receipt_id: str,
+    alias_kind: str,
+) -> None:
+    receipt_actor = _accepted_receipt(
+        v2_configured_claim_runtime,
+        receipt_id,
+    ).proposal.proposer
+    proposal = _record_with_assessor_actor(
+        v2_configured_claim_runtime,
+        _distinct_assessor_alias(
+            receipt_actor,
+            alias_kind=alias_kind,
+            actor_id=f"live-assessor-alias-{receipt_id}",
+        ),
+    )
+
+    decision = v2_configured_claim_runtime.coordinator.submit(proposal)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+
+
+@pytest.mark.integration
+def test_workspace_replay_rejects_accepted_assessor_configuration_alias(
+    v2_configured_claim_runtime: TrailRuntime,
+) -> None:
+    claim_actor = _accepted_receipt(
+        v2_configured_claim_runtime,
+        "proposal-claim",
+    ).proposal.proposer
+    proposal = _record_with_assessor_actor(
+        v2_configured_claim_runtime,
+        _distinct_assessor_alias(
+            claim_actor,
+            alias_kind="configuration",
+            actor_id="replay-assessor-claim-configuration-alias",
+        ),
+    )
+    _append_accepted_without_handler(v2_configured_claim_runtime, proposal)
+
+    with v2_configured_claim_runtime.engine.connect() as connection:
+        verification = verify_workspace(
+            RepositorySet(connection),
+            v2_configured_claim_runtime.artifact_store,
+        )
+
+    assert verification.valid is False
+    assert "authority" in (verification.reason or "").lower()
 
 
 @pytest.mark.integration
@@ -1563,6 +1750,7 @@ def _runtime(
     bootstrap_stages: bool = False,
     include_claim: bool = True,
     source_grounding: ExternalGrounding = ExternalGrounding.PRIMARY_SOURCE,
+    claim_proposer: ActorIdentity | None = None,
 ) -> Iterator[TrailRuntime]:
     database_url = f"sqlite:///{(tmp_path / f'trails-v{policy.schema_version}.db').as_posix()}"
     upgrade_database(database_url)
@@ -1611,7 +1799,11 @@ def _runtime(
         artifact_store,
     )
     evidence_actor = _actor("ingestor-1", ActorKind.MODEL)
-    claim_actor = _actor("claim-author", ActorKind.HUMAN)
+    claim_actor = (
+        _actor("claim-author", ActorKind.HUMAN)
+        if claim_proposer is None
+        else claim_proposer
+    )
     assert coordinator.submit(
         AddEvidence(
             proposal_id="proposal-source",
