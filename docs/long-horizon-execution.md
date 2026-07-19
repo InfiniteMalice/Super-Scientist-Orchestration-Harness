@@ -21,7 +21,9 @@ transaction and audit event. Under V2, each kind uses the fixed
 change target or persistence scope. The active requirement must demand an independent
 deterministic check, permit human judgment, and name a human approver. The proposal must
 carry an approval from an actor independent of its proposer, and every embedded record
-must name the exact active policy hash.
+must name the exact active policy hash. Progress proposals do not carry protected-evaluation
+or rollback proofs, so a requirement that enables either flag fails closed before any
+progress projection.
 
 Each handler receives a narrow read/write capability for only its required tables. It
 cannot commit, roll back, write audit events, access a generic repository set, or gain
@@ -44,8 +46,11 @@ validator identity and version, recomputed actor independence, and a still-valid
 dependency closure. Invalidating a prerequisite therefore removes the effective weight
 of every dependent without deleting history.
 
-The mutable progress head only accelerates reads. It identifies the last accepted event
-and plan for a run and is rebuilt and verified against accepted audited transactions.
+The mutable progress head only accelerates reads. Events may target only the run's highest
+accepted plan version. Within that plan, each event must strictly advance the head by
+`(occurred_at, event_id)`; an older timestamp or a non-increasing identifier at the same
+timestamp is rejected. The head is rebuilt and verified against the same rule during
+workspace replay.
 
 ## Budgets, telemetry, and checkpoints
 
@@ -60,7 +65,11 @@ An accepted `RunCheckpoint` binds the exact run and plan, replay-derived validat
 subtasks, pending dependencies, hypotheses, environment snapshot, attempted operations,
 failures, remaining reserves, next action, and telemetry. Its artifacts, raw logs, and
 raw transactions use canonical content-addressed references. A checkpoint summary never
-replaces those raw references.
+replaces those raw references. Checkpoints target only the current highest plan and require
+an applicable durable budget under the same governing policy. The latest allocation is
+selected by `(recorded_at, budget_id)`; remaining reserves equal that allocation's reserves
+minus its cumulative usage in every category, and checkpoint telemetry must match. Pending
+dependency identifiers are the unique deterministic replay-derived set, not a caller hint.
 
 ## Completion and false finishes
 
@@ -79,7 +88,9 @@ active policy. The following checklist is complete, unique, and ordered:
 8. record remaining uncertainty.
 
 The completion handler recalculates progress, selects the latest retained budget, and
-recomputes the false-finish finding. A false finish is the exact conjunction of voluntary
+recomputes the false-finish finding. Every completed checklist item and the final validation
+must name at least one retained evidence record, and every exact identifier must resolve
+before a decision can be projected. A false finish is the exact conjunction of voluntary
 termination, a completion claim, failed final validation, meaningful official progress,
 and unused budget. Such a proposal is rejected and no completion decision is projected.
 Even 100% official progress cannot substitute for final validation or an incomplete
@@ -96,9 +107,10 @@ Plans, subtasks, validation events, budgets, checkpoints, and completion decisio
 the fixed append-only 0003 tables. The only mutable progress record is the rebuildable
 head. Before any proposal mutation, workspace verification strictly decodes every row,
 replays accepted audited transactions in order, reconstructs all progress records and
-heads, recalculates checkpoint progress, and compares the reconstruction with storage.
-Missing, extra, corrupt, reparented, rewound, dangling, or cross-plan state fails closed
-before a replay or new proposal can mutate the workspace.
+heads, recalculates checkpoint progress, dependencies, budget state, telemetry, and content
+addresses, and recomputes completion evidence, authority, false-finish, and finalization
+bindings. Missing, extra, corrupt, reparented, rewound, dangling, semantically forged, or
+cross-plan state fails closed before a replay or new proposal can mutate the workspace.
 
 Exact idempotent replay returns the original decision with `replayed=true` and creates no
 additional authoritative record, transaction, or audit event. Unexpected projection or

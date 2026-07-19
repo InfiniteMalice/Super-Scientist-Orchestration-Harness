@@ -16,19 +16,35 @@ from super_scientist.domain.evaluators.models import (
     EvaluatorVersion,
 )
 from super_scientist.domain.evidence.models import EvidenceRecord, VerificationState
+from super_scientist.domain.improvement.classification import is_authoritative_verification
 from super_scientist.domain.improvement.models import (
+    ActorRelationship,
+    AssessmentOutcome,
     EvaluatorAuditRecord,
     SelfImprovementMeasurementRecord,
 )
 from super_scientist.domain.primitives import Sha256Hex, canonical_json_bytes
-from super_scientist.domain.progress.calculations import calculate_progress
+from super_scientist.domain.progress.calculations import (
+    calculate_progress,
+    current_progress_plan,
+    detect_false_finish,
+    event_advances_progress_head,
+    has_unused_budget,
+    is_canonical_artifact_ref,
+    remaining_budget,
+    replay_pending_dependency_ids,
+    select_checkpoint_budget,
+)
 from super_scientist.domain.progress.models import (
     BudgetAllocation,
     CompletionDecision,
+    FalseFinishResult,
     ProgressPlan,
     ProgressSubtask,
     ProgressValidationEvent,
     RunCheckpoint,
+    TerminationReason,
+    progress_actors_are_independent,
 )
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 from super_scientist.evaluation.claim_drift.deterministic import run_deterministic_checks
@@ -382,6 +398,20 @@ def _require_projection_consistency(
                 and progress_subtask.plan_version_id == event.plan_version_id,
                 "progress event subtask does not belong to its plan",
             )
+            current_head = expected_progress_heads.get(event.run_id)
+            current_head_event = (
+                None
+                if current_head is None
+                else expected_progress_events.get(current_head[1])
+            )
+            _require(
+                event_advances_progress_head(
+                    event,
+                    tuple(expected_progress_plans.values()),
+                    current_head_event,
+                ),
+                "progress event does not monotonically advance replay-derived history",
+            )
             _add_unique(
                 expected_progress_events,
                 event.event_id,
@@ -428,6 +458,14 @@ def _require_projection_consistency(
             )
             if checkpoint_plan is None:  # pragma: no cover - narrowed by fail-closed check above
                 raise StorageIntegrityError("run checkpoint plan is unavailable")
+            _require(
+                current_progress_plan(
+                    tuple(expected_progress_plans.values()),
+                    checkpoint.run_id,
+                )
+                == checkpoint_plan,
+                "run checkpoint does not target the replay-derived current plan",
+            )
             summary = calculate_progress(
                 checkpoint_plan,
                 tuple(
@@ -439,6 +477,40 @@ def _require_projection_consistency(
             _require(
                 checkpoint.validated_subtask_ids == summary.validated_subtask_ids,
                 "run checkpoint does not match replay-derived progress",
+            )
+            _require(
+                checkpoint.pending_dependency_ids
+                == replay_pending_dependency_ids(
+                    checkpoint_plan,
+                    summary.validated_subtask_ids,
+                ),
+                "run checkpoint pending dependencies do not match replay-derived progress",
+            )
+            checkpoint_budget = select_checkpoint_budget(
+                checkpoint,
+                tuple(expected_budgets.values()),
+            )
+            _require(
+                checkpoint_budget is not None,
+                "run checkpoint has no replay-derived applicable budget",
+            )
+            if checkpoint_budget is None:  # pragma: no cover - narrowed by fail-closed check above
+                raise StorageIntegrityError("run checkpoint budget is unavailable")
+            _require(
+                checkpoint.remaining_budget == remaining_budget(checkpoint_budget)
+                and checkpoint.telemetry == checkpoint_budget.telemetry,
+                "run checkpoint does not reconcile its replay-derived budget",
+            )
+            _require(
+                all(
+                    is_canonical_artifact_ref(reference)
+                    for reference in (
+                        *checkpoint.artifact_refs,
+                        *checkpoint.raw_log_refs,
+                        *checkpoint.raw_transaction_refs,
+                    )
+                ),
+                "run checkpoint contains a noncanonical artifact reference",
             )
             _add_unique(
                 expected_checkpoints,
@@ -477,8 +549,103 @@ def _require_projection_consistency(
             _require(
                 decision.run_id == completion.run_id
                 and decision.plan_version_id == completion.plan_version_id
-                and decision.completion_proposal_id == completion.completion_proposal_id,
+                and decision.completion_proposal_id == completion.completion_proposal_id
+                and decision.checklist == completion.checklist
+                and decision.final_validator_result == completion.final_validation.result
+                and decision.termination_reason == completion.termination_reason
+                and completion.proposer == proposal.proposer,
                 "completion decision is not bound to its completion proposal",
+            )
+            completion_run = expected_runs.get(completion.run_id)
+            if completion_run is None:  # pragma: no cover - narrowed by fail-closed check above
+                raise StorageIntegrityError("completion run is unavailable")
+            final_validation = completion.final_validation
+            _require(
+                final_validation.actor == completion_run.final_validator
+                and final_validation.actor_version == completion_run.final_validator_version
+                and decision.decision_authority == final_validation.actor
+                and progress_actors_are_independent(
+                    final_validation.actor,
+                    completion_run.creator,
+                )
+                and progress_actors_are_independent(
+                    final_validation.actor,
+                    completion.proposer,
+                )
+                and completion.relationship_to_run_creator
+                is ActorRelationship.INDEPENDENT
+                and completion.relationship_to_completion_proposer
+                is ActorRelationship.INDEPENDENT
+                and completion.are_independent
+                and is_authoritative_verification(final_validation.category),
+                "completion does not retain replay-derived independent final authority",
+            )
+            required_evidence_ids = (
+                *(
+                    evidence_id
+                    for item in completion.checklist
+                    if item.completed
+                    for evidence_id in item.evidence_ids
+                ),
+                *final_validation.evidence_ids,
+            )
+            _require(
+                bool(final_validation.evidence_ids)
+                and all(
+                    not item.completed or bool(item.evidence_ids)
+                    for item in completion.checklist
+                )
+                and all(
+                    evidence_id in expected_evidence
+                    for evidence_id in required_evidence_ids
+                ),
+                "completion evidence is not nonempty retained replay history",
+            )
+            if completion_plan is None:  # pragma: no cover - narrowed by fail-closed check above
+                raise StorageIntegrityError("completion plan is unavailable")
+            completion_summary = calculate_progress(
+                completion_plan,
+                tuple(
+                    event
+                    for event in expected_progress_events.values()
+                    if event.plan_version_id == completion.plan_version_id
+                ),
+            )
+            completion_budgets = tuple(
+                budget
+                for budget in expected_budgets.values()
+                if budget.plan_version_id == completion.plan_version_id
+            )
+            _require(
+                bool(completion_budgets),
+                "completion transaction precedes its replay-derived budget",
+            )
+            latest_completion_budget = max(
+                completion_budgets,
+                key=lambda budget: (budget.recorded_at, budget.budget_id),
+            )
+            false_finish = detect_false_finish(
+                voluntary_termination=completion.voluntary_termination,
+                claims_completion=completion.claims_completion,
+                final_validator_result=final_validation.result,
+                validated_weight=completion_summary.official_weight,
+                unused_budget=has_unused_budget(latest_completion_budget),
+            )
+            _require(
+                decision.false_finish == false_finish
+                and false_finish.result is not FalseFinishResult.FALSE_FINISH,
+                "completion false-finish finding does not match replay-derived state",
+            )
+            successful_completion = (
+                completion.claims_completion
+                and completion.termination_reason is TerminationReason.SUCCESS
+                and all(item.completed for item in completion.checklist)
+                and final_validation.result is AssessmentOutcome.PASSED
+            )
+            _require(
+                decision.accepted is successful_completion
+                and (not completion.claims_completion or successful_completion),
+                "completion decision does not match replay-derived finalization gates",
             )
             _add_unique(
                 expected_completion_decisions,

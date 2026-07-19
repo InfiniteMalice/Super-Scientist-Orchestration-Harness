@@ -17,7 +17,7 @@ from super_scientist.config.models import (
     GovernancePolicyV2,
     PolicySnapshot,
 )
-from super_scientist.domain.evidence.models import ArtifactRef
+from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.improvement.classification import (
     ChangeTarget,
@@ -51,6 +51,7 @@ from super_scientist.domain.progress.models import (
 )
 from super_scientist.domain.research_runs.models import ResearchRun, RunBudgetAllocation
 from super_scientist.kernel.transactions.models import (
+    AddEvidence,
     AppendProgressEvent,
     Approval,
     CreateResearchRun,
@@ -298,6 +299,78 @@ def test_progress_semantics_are_fixed_and_a_weaker_v2_requirement_cannot_authori
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize(
+    ("protected_evaluation_required", "rollback_required"),
+    ((True, False), (False, True)),
+    ids=("protected-evaluation", "rollback"),
+)
+@pytest.mark.parametrize(
+    "proposal_kind",
+    (
+        "record_progress_plan",
+        "append_progress_event",
+        "record_run_budget",
+        "record_run_checkpoint",
+        "decide_completion",
+    ),
+)
+def test_progress_proposals_reject_unsupported_v2_policy_flags_before_projection(
+    tmp_path: Path,
+    protected_evaluation_required: bool,
+    rollback_required: bool,
+    proposal_kind: str,
+) -> None:
+    policy = _v2_policy(
+        protected_evaluation_required=protected_evaluation_required,
+        rollback_required=rollback_required,
+    )
+    runtime_iterator = _runtime(tmp_path, policy)
+    runtime = next(runtime_iterator)
+    plan_proposal = runtime.plan_proposal()
+    event_proposal = _event_proposal(runtime, plan_proposal.plan)
+    proposals = {
+        "record_progress_plan": plan_proposal,
+        "append_progress_event": event_proposal,
+        "record_run_budget": _budget_proposal(runtime, plan_proposal.plan),
+        "record_run_checkpoint": _checkpoint_proposal(
+            runtime,
+            plan_proposal.plan,
+            event_proposal.event,
+        ),
+        "decide_completion": _completion_transaction(
+            runtime,
+            plan_proposal.plan,
+            final_result=AssessmentOutcome.PASSED,
+            voluntary=False,
+            termination_reason=TerminationReason.SUCCESS,
+            decision_accepted=True,
+        ),
+    }
+
+    try:
+        decision = runtime.coordinator.submit(proposals[proposal_kind])
+
+        assert decision.accepted is False
+        assert decision.reasons[0].code is RejectionCode.INSUFFICIENT_GROUNDING
+        assert decision.reasons[0].message == (
+            "progress admission cannot satisfy protected-evaluation or rollback requirements"
+        )
+        with runtime.uow_factory() as unit_of_work:
+            connection = unit_of_work.connection
+            assert connection is not None
+            assert ProgressPlanRepository(connection).list_all() == ()
+            assert ProgressSubtaskRepository(connection).list_all() == ()
+            assert ProgressEventRepository(connection).list_all() == ()
+            assert ProgressHeadRepository(connection).get("run-1") is None
+            assert RunBudgetRepository(connection).list_all() == ()
+            assert RunCheckpointRepository(connection).list_all() == ()
+            assert CompletionDecisionRepository(connection).list_all() == ()
+    finally:
+        with pytest.raises(StopIteration):
+            next(runtime_iterator)
+
+
+@pytest.mark.integration
 def test_v2_progress_workflow_projects_events_head_budget_checkpoint_and_completion(
     v2_runtime: ProgressRuntime,
 ) -> None:
@@ -321,6 +394,7 @@ def test_v2_progress_workflow_projects_events_head_budget_checkpoint_and_complet
         termination_reason=TerminationReason.SUCCESS,
         decision_accepted=True,
     )
+    _retain_completion_evidence(v2_runtime, completion_proposal)
 
     _assert_accepted_exact_replay(v2_runtime, completion_proposal)
     with v2_runtime.uow_factory() as unit_of_work:
@@ -337,8 +411,8 @@ def test_v2_progress_workflow_projects_events_head_budget_checkpoint_and_complet
             completion_proposal.completion_decision,
         )
         repositories = unit_of_work.repositories()
-        assert len(repositories.transactions.list_all()) == 6
-        assert len(repositories.audit.list_all()) == 6
+        assert len(repositories.transactions.list_all()) == 15
+        assert len(repositories.audit.list_all()) == 15
 
 
 @pytest.mark.integration
@@ -457,6 +531,286 @@ def test_validation_alias_of_run_creator_is_rejected_and_projects_nothing(
 
 
 @pytest.mark.integration
+def test_progress_event_older_than_current_head_is_rejected_without_rewinding(
+    v2_runtime: ProgressRuntime,
+) -> None:
+    plan_proposal = v2_runtime.plan_proposal()
+    assert v2_runtime.coordinator.submit(plan_proposal).accepted is True
+    newer = _event_proposal(
+        v2_runtime,
+        plan_proposal.plan,
+        proposal_id="newer-event-proposal",
+        event_id="event-e2",
+        occurred_at=NOW + timedelta(seconds=2),
+    )
+    older = _event_proposal(
+        v2_runtime,
+        plan_proposal.plan,
+        proposal_id="older-event-proposal",
+        event_id="event-e1",
+        occurred_at=NOW + timedelta(seconds=1),
+    )
+    assert v2_runtime.coordinator.submit(newer).accepted is True
+
+    decision = v2_runtime.coordinator.submit(older)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        assert ProgressEventRepository(connection).list_all() == (newer.event,)
+        assert ProgressHeadRepository(connection).get("run-1") == (
+            plan_proposal.plan.plan_version_id,
+            newer.event.event_id,
+        )
+
+
+@pytest.mark.integration
+def test_progress_event_for_obsolete_plan_version_is_rejected(
+    v2_runtime: ProgressRuntime,
+) -> None:
+    first_plan = v2_runtime.plan_proposal()
+    assert v2_runtime.coordinator.submit(first_plan).accepted is True
+    second_plan = _second_plan_proposal(v2_runtime)
+    assert v2_runtime.coordinator.submit(second_plan).accepted is True
+    obsolete_event = _event_proposal(
+        v2_runtime,
+        first_plan.plan,
+        proposal_id="obsolete-plan-event-proposal",
+    )
+
+    decision = v2_runtime.coordinator.submit(obsolete_event)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        assert ProgressEventRepository(connection).list_all() == ()
+        assert ProgressHeadRepository(connection).get("run-1") is None
+
+
+@pytest.mark.integration
+def test_progress_event_same_timestamp_requires_increasing_event_id(
+    v2_runtime: ProgressRuntime,
+) -> None:
+    plan_proposal = v2_runtime.plan_proposal()
+    assert v2_runtime.coordinator.submit(plan_proposal).accepted is True
+    occurred_at = NOW + timedelta(seconds=1)
+    middle = _event_proposal(
+        v2_runtime,
+        plan_proposal.plan,
+        proposal_id="middle-event-proposal",
+        event_id="event-b",
+        occurred_at=occurred_at,
+    )
+    lower = _event_proposal(
+        v2_runtime,
+        plan_proposal.plan,
+        proposal_id="lower-event-proposal",
+        event_id="event-a",
+        occurred_at=occurred_at,
+    )
+    higher = _event_proposal(
+        v2_runtime,
+        plan_proposal.plan,
+        proposal_id="higher-event-proposal",
+        event_id="event-c",
+        occurred_at=occurred_at,
+    )
+    assert v2_runtime.coordinator.submit(middle).accepted is True
+
+    lower_decision = v2_runtime.coordinator.submit(lower)
+    higher_decision = v2_runtime.coordinator.submit(higher)
+
+    assert lower_decision.accepted is False
+    assert lower_decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
+    assert higher_decision.accepted is True
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        assert ProgressEventRepository(connection).list_all() == (middle.event, higher.event)
+        assert ProgressHeadRepository(connection).get("run-1") == (
+            plan_proposal.plan.plan_version_id,
+            higher.event.event_id,
+        )
+
+
+@pytest.mark.integration
+def test_checkpoint_requires_a_durable_budget(
+    v2_runtime: ProgressRuntime,
+) -> None:
+    plan_proposal = v2_runtime.plan_proposal()
+    assert v2_runtime.coordinator.submit(plan_proposal).accepted is True
+    event_proposal = _event_proposal(v2_runtime, plan_proposal.plan)
+    assert v2_runtime.coordinator.submit(event_proposal).accepted is True
+    checkpoint = _checkpoint_proposal(v2_runtime, plan_proposal.plan, event_proposal.event)
+
+    decision = v2_runtime.coordinator.submit(checkpoint)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.MISSING_ENTITY
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        assert RunCheckpointRepository(connection).list_all() == ()
+
+
+@pytest.mark.integration
+def test_checkpoint_for_obsolete_plan_version_is_rejected(
+    v2_runtime: ProgressRuntime,
+) -> None:
+    first_plan = v2_runtime.plan_proposal()
+    assert v2_runtime.coordinator.submit(first_plan).accepted is True
+    first_event = _event_proposal(v2_runtime, first_plan.plan)
+    assert v2_runtime.coordinator.submit(first_event).accepted is True
+    assert v2_runtime.coordinator.submit(_budget_proposal(v2_runtime, first_plan.plan)).accepted
+    assert v2_runtime.coordinator.submit(_second_plan_proposal(v2_runtime)).accepted is True
+    checkpoint = _checkpoint_proposal(v2_runtime, first_plan.plan, first_event.event)
+
+    decision = v2_runtime.coordinator.submit(checkpoint)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        assert RunCheckpointRepository(connection).list_all() == ()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "pending_dependency_ids",
+    ((), ("collect", "collect"), ("collect", "analyze")),
+    ids=("missing", "duplicate", "extra"),
+)
+def test_checkpoint_pending_dependencies_must_match_replay_exactly(
+    v2_runtime: ProgressRuntime,
+    pending_dependency_ids: tuple[str, ...],
+) -> None:
+    plan_proposal = v2_runtime.plan_proposal(two_subtasks=True)
+    assert v2_runtime.coordinator.submit(plan_proposal).accepted is True
+    budget = _budget_proposal(v2_runtime, plan_proposal.plan)
+    assert v2_runtime.coordinator.submit(budget).accepted is True
+    checkpoint = _checkpoint_proposal(
+        v2_runtime,
+        plan_proposal.plan,
+        None,
+        pending_dependency_ids=pending_dependency_ids,
+        remaining_budget=_remaining_budget_for(budget.budget),
+    )
+
+    decision = v2_runtime.coordinator.submit(checkpoint)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_DEPENDENCY
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        assert RunCheckpointRepository(connection).list_all() == ()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "mismatch",
+    ("underreported", "overreported", "cross-category"),
+)
+def test_checkpoint_remaining_budget_must_reconcile_exactly(
+    v2_runtime: ProgressRuntime,
+    mismatch: str,
+) -> None:
+    plan_proposal = v2_runtime.plan_proposal()
+    assert v2_runtime.coordinator.submit(plan_proposal).accepted is True
+    event_proposal = _event_proposal(v2_runtime, plan_proposal.plan)
+    assert v2_runtime.coordinator.submit(event_proposal).accepted is True
+    budget = _budget_proposal(
+        v2_runtime,
+        plan_proposal.plan,
+        reserves=_distinct_reserves(),
+        usage=_distinct_usage(),
+    )
+    assert v2_runtime.coordinator.submit(budget).accepted is True
+    expected = _remaining_budget_for(budget.budget)
+    if mismatch == "underreported":
+        exploration = expected.exploration.model_copy(
+            update={"cost_usd": expected.exploration.cost_usd - 0.1}
+        )
+        remaining = expected.model_copy(update={"exploration": exploration})
+    elif mismatch == "overreported":
+        exploration = expected.exploration.model_copy(
+            update={"tokens": expected.exploration.tokens + 1}
+        )
+        remaining = expected.model_copy(update={"exploration": exploration})
+    else:
+        remaining = expected.model_copy(
+            update={
+                "exploration": expected.implementation,
+                "implementation": expected.exploration,
+            }
+        )
+    checkpoint = _checkpoint_proposal(
+        v2_runtime,
+        plan_proposal.plan,
+        event_proposal.event,
+        remaining_budget=remaining,
+    )
+
+    decision = v2_runtime.coordinator.submit(checkpoint)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.UNMATCHED_BUDGETS
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        assert RunCheckpointRepository(connection).list_all() == ()
+
+
+@pytest.mark.integration
+def test_checkpoint_uses_latest_budget_by_timestamp_then_identifier(
+    v2_runtime: ProgressRuntime,
+) -> None:
+    plan_proposal = v2_runtime.plan_proposal()
+    assert v2_runtime.coordinator.submit(plan_proposal).accepted is True
+    event_proposal = _event_proposal(v2_runtime, plan_proposal.plan)
+    assert v2_runtime.coordinator.submit(event_proposal).accepted is True
+    recorded_at = NOW + timedelta(seconds=2)
+    earlier_identifier = _budget_proposal(
+        v2_runtime,
+        plan_proposal.plan,
+        proposal_id="budget-a-proposal",
+        budget_id="budget-a",
+        recorded_at=recorded_at,
+        usage=_progress_usage(),
+    )
+    later_identifier = _budget_proposal(
+        v2_runtime,
+        plan_proposal.plan,
+        proposal_id="budget-b-proposal",
+        budget_id="budget-b",
+        recorded_at=recorded_at,
+        usage=_distinct_usage(),
+    )
+    assert v2_runtime.coordinator.submit(earlier_identifier).accepted is True
+    assert v2_runtime.coordinator.submit(later_identifier).accepted is True
+    checkpoint = _checkpoint_proposal(
+        v2_runtime,
+        plan_proposal.plan,
+        event_proposal.event,
+        remaining_budget=_remaining_budget_for(earlier_identifier.budget),
+    )
+
+    decision = v2_runtime.coordinator.submit(checkpoint)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.UNMATCHED_BUDGETS
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        assert RunCheckpointRepository(connection).list_all() == ()
+
+
+@pytest.mark.integration
 def test_progress_percent_alone_cannot_authorize_completion_and_false_finish_is_not_projected(
     v2_runtime: ProgressRuntime,
 ) -> None:
@@ -478,6 +832,7 @@ def test_progress_percent_alone_cannot_authorize_completion_and_false_finish_is_
         termination_reason=TerminationReason.EARLY_EXIT,
         decision_accepted=False,
     )
+    _retain_completion_evidence(v2_runtime, false_finish)
 
     decision = v2_runtime.coordinator.submit(false_finish)
 
@@ -525,11 +880,148 @@ def test_incomplete_ordered_checklist_cannot_authorize_success(
             ),
         }
     )
+    _retain_completion_evidence(v2_runtime, incomplete)
 
     decision = v2_runtime.coordinator.submit(incomplete)
 
     assert decision.accepted is False
     assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        assert CompletionDecisionRepository(connection).list_all() == ()
+
+
+@pytest.mark.integration
+def test_completion_rejects_empty_final_validation_evidence(
+    v2_runtime: ProgressRuntime,
+) -> None:
+    plan = _submit_completion_prerequisites(v2_runtime)
+    completion = _completion_transaction(
+        v2_runtime,
+        plan,
+        final_result=AssessmentOutcome.PASSED,
+        voluntary=False,
+        termination_reason=TerminationReason.SUCCESS,
+        decision_accepted=True,
+    )
+    _retain_evidence(
+        v2_runtime,
+        tuple(
+            evidence_id
+            for item in completion.completion_proposal.checklist
+            for evidence_id in item.evidence_ids
+        ),
+    )
+    empty_final = completion.completion_proposal.final_validation.model_copy(
+        update={"evidence_ids": ()}
+    )
+    invalid = completion.model_copy(
+        update={
+            "completion_proposal": completion.completion_proposal.model_copy(
+                update={"final_validation": empty_final}
+            )
+        }
+    )
+
+    decision = v2_runtime.coordinator.submit(invalid)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.MISSING_EVIDENCE
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        assert CompletionDecisionRepository(connection).list_all() == ()
+
+
+@pytest.mark.integration
+def test_completion_rejects_empty_evidence_on_a_completed_checklist_step(
+    v2_runtime: ProgressRuntime,
+) -> None:
+    plan = _submit_completion_prerequisites(v2_runtime)
+    completion = _completion_transaction(
+        v2_runtime,
+        plan,
+        final_result=AssessmentOutcome.PASSED,
+        voluntary=False,
+        termination_reason=TerminationReason.SUCCESS,
+        decision_accepted=True,
+    )
+    _retain_completion_evidence(v2_runtime, completion)
+    checklist = (
+        completion.completion_proposal.checklist[0].model_copy(update={"evidence_ids": ()}),
+        *completion.completion_proposal.checklist[1:],
+    )
+    invalid = completion.model_copy(
+        update={
+            "completion_proposal": completion.completion_proposal.model_copy(
+                update={"checklist": checklist}
+            ),
+            "completion_decision": completion.completion_decision.model_copy(
+                update={"checklist": checklist}
+            ),
+        }
+    )
+
+    decision = v2_runtime.coordinator.submit(invalid)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.MISSING_EVIDENCE
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        assert CompletionDecisionRepository(connection).list_all() == ()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("evidence_location", ("checklist", "final_validation"))
+def test_completion_rejects_nonexistent_evidence_ids(
+    v2_runtime: ProgressRuntime,
+    evidence_location: str,
+) -> None:
+    plan = _submit_completion_prerequisites(v2_runtime)
+    completion = _completion_transaction(
+        v2_runtime,
+        plan,
+        final_result=AssessmentOutcome.PASSED,
+        voluntary=False,
+        termination_reason=TerminationReason.SUCCESS,
+        decision_accepted=True,
+    )
+    _retain_completion_evidence(v2_runtime, completion)
+    if evidence_location == "checklist":
+        checklist = (
+            completion.completion_proposal.checklist[0].model_copy(
+                update={"evidence_ids": ("missing-completion-evidence",)}
+            ),
+            *completion.completion_proposal.checklist[1:],
+        )
+        invalid = completion.model_copy(
+            update={
+                "completion_proposal": completion.completion_proposal.model_copy(
+                    update={"checklist": checklist}
+                ),
+                "completion_decision": completion.completion_decision.model_copy(
+                    update={"checklist": checklist}
+                ),
+            }
+        )
+    else:
+        final_validation = completion.completion_proposal.final_validation.model_copy(
+            update={"evidence_ids": ("missing-final-evidence",)}
+        )
+        invalid = completion.model_copy(
+            update={
+                "completion_proposal": completion.completion_proposal.model_copy(
+                    update={"final_validation": final_validation}
+                )
+            }
+        )
+
+    decision = v2_runtime.coordinator.submit(invalid)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.MISSING_EVIDENCE
     with v2_runtime.uow_factory() as unit_of_work:
         connection = unit_of_work.connection
         assert connection is not None
@@ -550,6 +1042,49 @@ def _rejection_code(runtime: ProgressRuntime, proposal: object) -> RejectionCode
     assert decision.accepted is False
     assert decision.reasons
     return decision.reasons[0].code
+
+
+def _submit_completion_prerequisites(runtime: ProgressRuntime) -> ProgressPlan:
+    plan_proposal = runtime.plan_proposal()
+    assert runtime.coordinator.submit(plan_proposal).accepted is True
+    assert runtime.coordinator.submit(_event_proposal(runtime, plan_proposal.plan)).accepted is True
+    budget = _budget_proposal(runtime, plan_proposal.plan)
+    assert runtime.coordinator.submit(budget).accepted is True
+    return plan_proposal.plan
+
+
+def _retain_completion_evidence(runtime: ProgressRuntime, completion: DecideCompletion) -> None:
+    evidence_ids = (
+        *(
+            evidence_id
+            for item in completion.completion_proposal.checklist
+            for evidence_id in item.evidence_ids
+        ),
+        *completion.completion_proposal.final_validation.evidence_ids,
+    )
+    _retain_evidence(runtime, evidence_ids)
+
+
+def _retain_evidence(runtime: ProgressRuntime, evidence_ids: tuple[str, ...]) -> None:
+    for evidence_id in evidence_ids:
+        artifact = runtime.artifact_store.put(evidence_id.encode("utf-8"), "text/plain")
+        decision = runtime.coordinator.submit(
+            AddEvidence(
+                proposal_id=f"retain-{evidence_id}",
+                idempotency_key=f"retain-{evidence_id}-key",
+                proposer=runtime.proposer,
+                evidence=EvidenceRecord(
+                    evidence_id=evidence_id,
+                    evidence_type="completion-gate",
+                    source_locator=f"fixture://{evidence_id}",
+                    retrieved_at=NOW,
+                    artifact=artifact,
+                    provenance={"collector": "progress-service-test"},
+                    ingestion_actor_id=runtime.proposer.actor_id,
+                ),
+            )
+        )
+        assert decision.accepted is True
 
 
 def _plan_proposal_with_validator(
@@ -586,6 +1121,33 @@ def _plan_proposal_with_validator(
     )
 
 
+def _second_plan_proposal(runtime: ProgressRuntime) -> RecordProgressPlan:
+    plan_version_id = "plan-version-2"
+    return RecordProgressPlan(
+        proposal_id="plan-proposal-2",
+        idempotency_key="plan-key-2",
+        proposer=runtime.proposer,
+        approval=runtime.approval(),
+        plan=ProgressPlan(
+            plan_version_id=plan_version_id,
+            run_id="run-1",
+            version=2,
+            subtasks=(
+                _subtask(
+                    "collect-v2",
+                    (),
+                    1,
+                    Decimal("1.00"),
+                    plan_version_id,
+                    runtime,
+                ),
+            ),
+            created_at=NOW + timedelta(seconds=2),
+            governing_policy_hash=runtime.policy.policy_hash,
+        ),
+    )
+
+
 def _event_proposal(
     runtime: ProgressRuntime,
     plan: ProgressPlan,
@@ -593,6 +1155,8 @@ def _event_proposal(
     proposal_id: str = "event-proposal-1",
     proposer: ActorIdentity | None = None,
     validator: ActorIdentity | None = None,
+    event_id: str | None = None,
+    occurred_at: datetime | None = None,
 ) -> AppendProgressEvent:
     completion_proposer = proposer or runtime.proposer
     declared_validator = validator or plan.subtasks[0].validator
@@ -602,7 +1166,7 @@ def _event_proposal(
         proposer=completion_proposer,
         approval=runtime.approval(),
         event=ProgressValidationEvent(
-            event_id=f"event-{proposal_id}",
+            event_id=event_id or f"event-{proposal_id}",
             run_id=plan.run_id,
             plan_version_id=plan.plan_version_id,
             subtask_id=plan.subtasks[0].subtask_id,
@@ -619,7 +1183,7 @@ def _event_proposal(
             assumptions=(),
             limitations=("Limited to retained artifacts",),
             result=AssessmentOutcome.PASSED,
-            occurred_at=NOW + timedelta(seconds=1),
+            occurred_at=occurred_at or NOW + timedelta(seconds=1),
             governing_policy_hash=runtime.policy.policy_hash,
         ),
     )
@@ -628,20 +1192,26 @@ def _event_proposal(
 def _budget_proposal(
     runtime: ProgressRuntime,
     plan: ProgressPlan,
+    *,
+    proposal_id: str = "budget-proposal-1",
+    budget_id: str = "budget-1",
+    recorded_at: datetime | None = None,
+    reserves: BudgetReserves | None = None,
+    usage: BudgetUsage | None = None,
 ) -> RecordRunBudget:
     return RecordRunBudget(
-        proposal_id="budget-proposal-1",
-        idempotency_key="budget-key-1",
+        proposal_id=proposal_id,
+        idempotency_key=f"{proposal_id}-key",
         proposer=runtime.proposer,
         approval=runtime.approval(),
         budget=BudgetAllocation(
-            budget_id="budget-1",
+            budget_id=budget_id,
             run_id=plan.run_id,
             plan_version_id=plan.plan_version_id,
-            reserves=_progress_reserves(),
-            usage=_progress_usage(),
+            reserves=reserves or _progress_reserves(),
+            usage=usage or _progress_usage(),
             telemetry=_telemetry(),
-            recorded_at=NOW + timedelta(seconds=2),
+            recorded_at=recorded_at or NOW + timedelta(seconds=2),
             governing_policy_hash=runtime.policy.policy_hash,
         ),
     )
@@ -650,7 +1220,10 @@ def _budget_proposal(
 def _checkpoint_proposal(
     runtime: ProgressRuntime,
     plan: ProgressPlan,
-    event: ProgressValidationEvent,
+    event: ProgressValidationEvent | None,
+    *,
+    pending_dependency_ids: tuple[str, ...] = (),
+    remaining_budget: BudgetReserves | None = None,
 ) -> RecordRunCheckpoint:
     return RecordRunCheckpoint(
         proposal_id="checkpoint-proposal-1",
@@ -661,14 +1234,15 @@ def _checkpoint_proposal(
             checkpoint_id="checkpoint-1",
             run_id=plan.run_id,
             plan_version_id=plan.plan_version_id,
-            validated_subtask_ids=(event.subtask_id,),
-            pending_dependency_ids=(),
+            validated_subtask_ids=() if event is None else (event.subtask_id,),
+            pending_dependency_ids=pending_dependency_ids,
             hypothesis_ids=("hypothesis-1",),
             artifact_refs=(_artifact("b", "application/json"),),
             environment_snapshot_id="environment-1",
             attempted_operations=("operation-1",),
             failures=(),
-            remaining_budget=_progress_reserves(),
+            remaining_budget=remaining_budget
+            or _remaining_budget_for(_budget_proposal(runtime, plan).budget),
             next_recommended_action="Run final validation",
             raw_log_refs=(_artifact("c", "application/jsonl"),),
             raw_transaction_refs=(_artifact("d", "application/json"),),
@@ -798,6 +1372,54 @@ def _progress_usage() -> BudgetUsage:
     )
 
 
+def _distinct_reserves() -> BudgetReserves:
+    budget = _resource_budget()
+    return BudgetReserves(
+        exploration=budget.model_copy(update={"cost_usd": 100.1}),
+        implementation=budget.model_copy(update={"cost_usd": 80.2}),
+        verification=budget.model_copy(update={"cost_usd": 60.3}),
+        recovery=budget.model_copy(update={"cost_usd": 40.4}),
+        finalization=budget.model_copy(update={"cost_usd": 20.5}),
+    )
+
+
+def _distinct_usage() -> BudgetUsage:
+    usage = _progress_usage().exploration
+    return BudgetUsage(
+        exploration=usage.model_copy(update={"cost_usd": 0.2}),
+        implementation=usage.model_copy(update={"cost_usd": 1.1}),
+        verification=usage.model_copy(update={"cost_usd": 2.2}),
+        recovery=usage.model_copy(update={"cost_usd": 3.3}),
+        finalization=usage.model_copy(update={"cost_usd": 4.4}),
+    )
+
+
+def _remaining_budget_for(allocation: BudgetAllocation) -> BudgetReserves:
+    def remaining(category: str) -> ResourceBudget:
+        reserve = getattr(allocation.reserves, category)
+        usage = getattr(allocation.usage, category)
+        return ResourceBudget(
+            cost_usd=float(Decimal(str(reserve.cost_usd)) - Decimal(str(usage.cost_usd))),
+            compute_units=float(
+                Decimal(str(reserve.compute_units)) - Decimal(str(usage.compute_units))
+            ),
+            tokens=reserve.tokens - usage.tokens,
+            elapsed_seconds=float(
+                Decimal(str(reserve.elapsed_seconds)) - Decimal(str(usage.elapsed_seconds))
+            ),
+            tool_calls=reserve.tool_calls - usage.tool_calls,
+            human_interventions=reserve.human_interventions - usage.human_interventions,
+        )
+
+    return BudgetReserves(
+        exploration=remaining("exploration"),
+        implementation=remaining("implementation"),
+        verification=remaining("verification"),
+        recovery=remaining("recovery"),
+        finalization=remaining("finalization"),
+    )
+
+
 def _telemetry() -> ExecutionTelemetry:
     return ExecutionTelemetry(
         episodes=1,
@@ -863,7 +1485,11 @@ def _runtime(
     engine.dispose()
 
 
-def _v2_policy() -> GovernancePolicyV2:
+def _v2_policy(
+    *,
+    protected_evaluation_required: bool = False,
+    rollback_required: bool = False,
+) -> GovernancePolicyV2:
     return GovernancePolicyV2(
         required_claim_checks=("source_exists",),
         human_approval_for=frozenset(),
@@ -874,8 +1500,8 @@ def _v2_policy() -> GovernancePolicyV2:
                 minimum_verification=VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK,
                 permitted_grounding=frozenset({ExternalGrounding.HUMAN_JUDGMENT}),
                 required_approver_kind=ActorKind.HUMAN,
-                protected_evaluation_required=False,
-                rollback_required=False,
+                protected_evaluation_required=protected_evaluation_required,
+                rollback_required=rollback_required,
             ),
         ),
     )

@@ -2,9 +2,16 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from super_scientist.domain.evidence.models import ArtifactRef
 from super_scientist.domain.improvement.classification import is_authoritative_verification
-from super_scientist.domain.improvement.models import ActorRelationship, AssessmentOutcome
+from super_scientist.domain.improvement.models import (
+    ActorRelationship,
+    AssessmentOutcome,
+    ResourceBudget,
+)
 from super_scientist.domain.progress.models import (
+    BudgetAllocation,
+    BudgetReserves,
     FalseFinishFinding,
     FalseFinishResult,
     ProgressPlan,
@@ -12,6 +19,7 @@ from super_scientist.domain.progress.models import (
     ProgressSubtask,
     ProgressSummary,
     ProgressValidationEvent,
+    RunCheckpoint,
     progress_actors_are_independent,
 )
 
@@ -59,6 +67,118 @@ def calculate_progress(
         provisional_subtask_ids=tuple(provisional_ids),
         validated_subtask_ids=tuple(official_ids),
     )
+
+
+def event_advances_progress_head(
+    event: ProgressValidationEvent,
+    plans: tuple[ProgressPlan, ...],
+    current_head_event: ProgressValidationEvent | None,
+) -> bool:
+    highest_plan = current_progress_plan(plans, event.run_id)
+    if highest_plan is None:
+        return False
+    if event.plan_version_id != highest_plan.plan_version_id:
+        return False
+    if current_head_event is None:
+        return True
+    if current_head_event.run_id != event.run_id:
+        return False
+    if current_head_event.plan_version_id != event.plan_version_id:
+        return True
+    return (event.occurred_at, event.event_id) > (
+        current_head_event.occurred_at,
+        current_head_event.event_id,
+    )
+
+
+def current_progress_plan(
+    plans: tuple[ProgressPlan, ...],
+    run_id: str,
+) -> ProgressPlan | None:
+    run_plans = tuple(plan for plan in plans if plan.run_id == run_id)
+    if not run_plans:
+        return None
+    return max(run_plans, key=lambda plan: (plan.version, plan.plan_version_id))
+
+
+def replay_pending_dependency_ids(
+    plan: ProgressPlan,
+    validated_subtask_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    ordered_subtasks = _topological_subtasks(plan)
+    validated = frozenset(validated_subtask_ids)
+    unmet = {
+        dependency_id
+        for subtask in ordered_subtasks
+        for dependency_id in subtask.dependency_ids
+        if dependency_id not in validated
+    }
+    return tuple(subtask.subtask_id for subtask in ordered_subtasks if subtask.subtask_id in unmet)
+
+
+def select_checkpoint_budget(
+    checkpoint: RunCheckpoint,
+    budgets: tuple[BudgetAllocation, ...],
+) -> BudgetAllocation | None:
+    applicable = tuple(
+        budget
+        for budget in budgets
+        if budget.run_id == checkpoint.run_id
+        and budget.plan_version_id == checkpoint.plan_version_id
+        and budget.governing_policy_hash == checkpoint.governing_policy_hash
+    )
+    if not applicable:
+        return None
+    return max(applicable, key=lambda budget: (budget.recorded_at, budget.budget_id))
+
+
+def remaining_budget(allocation: BudgetAllocation) -> BudgetReserves:
+    def remaining(category: str) -> ResourceBudget:
+        reserve = getattr(allocation.reserves, category)
+        usage = getattr(allocation.usage, category)
+        return ResourceBudget(
+            cost_usd=_subtract_finite_float(reserve.cost_usd, usage.cost_usd),
+            compute_units=_subtract_finite_float(
+                reserve.compute_units,
+                usage.compute_units,
+            ),
+            tokens=reserve.tokens - usage.tokens,
+            elapsed_seconds=_subtract_finite_float(
+                reserve.elapsed_seconds,
+                usage.elapsed_seconds,
+            ),
+            tool_calls=reserve.tool_calls - usage.tool_calls,
+            human_interventions=reserve.human_interventions - usage.human_interventions,
+        )
+
+    return BudgetReserves(
+        exploration=remaining("exploration"),
+        implementation=remaining("implementation"),
+        verification=remaining("verification"),
+        recovery=remaining("recovery"),
+        finalization=remaining("finalization"),
+    )
+
+
+def has_unused_budget(allocation: BudgetAllocation) -> bool:
+    resource_fields = (
+        "cost_usd",
+        "compute_units",
+        "tokens",
+        "elapsed_seconds",
+        "tool_calls",
+        "human_interventions",
+    )
+    return any(
+        getattr(getattr(allocation.usage, category), field_name)
+        < getattr(getattr(allocation.reserves, category), field_name)
+        for category in BudgetReserves.model_fields
+        for field_name in resource_fields
+    )
+
+
+def is_canonical_artifact_ref(reference: ArtifactRef) -> bool:
+    return reference.relative_path == f"sha256/{reference.sha256[:2]}/{reference.sha256}"
 
 
 def detect_false_finish(
@@ -158,3 +278,7 @@ def _is_independently_accepted(
         and event.are_independent
         and progress_actors_are_independent(event.validator, event.completion_proposer)
     )
+
+
+def _subtract_finite_float(reserved: float, used: float) -> float:
+    return float(Decimal(str(reserved)) - Decimal(str(used)))

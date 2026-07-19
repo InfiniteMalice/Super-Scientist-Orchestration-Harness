@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Protocol, cast
 from pydantic import BaseModel, ConfigDict
 
 from super_scientist.config.models import GovernancePolicyV2, PolicySnapshot
-from super_scientist.domain.evidence.models import ArtifactRef
 from super_scientist.domain.identity import ActorKind
 from super_scientist.domain.improvement.classification import (
     ChangeTarget,
@@ -15,10 +14,19 @@ from super_scientist.domain.improvement.classification import (
     is_authoritative_verification,
 )
 from super_scientist.domain.improvement.models import ActorRelationship, AssessmentOutcome
-from super_scientist.domain.progress.calculations import calculate_progress, detect_false_finish
+from super_scientist.domain.progress.calculations import (
+    calculate_progress,
+    current_progress_plan,
+    detect_false_finish,
+    event_advances_progress_head,
+    has_unused_budget,
+    is_canonical_artifact_ref,
+    remaining_budget,
+    replay_pending_dependency_ids,
+    select_checkpoint_budget,
+)
 from super_scientist.domain.progress.models import (
     BudgetAllocation,
-    BudgetReserves,
     CompletionDecision,
     FalseFinishResult,
     ProgressPlan,
@@ -79,6 +87,10 @@ class ProgressEventReadCapability(Protocol):
 
     def get_event(self, event_id: str) -> ProgressValidationEvent | None: ...
 
+    def list_plans(self, run_id: str) -> tuple[ProgressPlan, ...]: ...
+
+    def get_progress_head_event(self, run_id: str) -> ProgressValidationEvent | None: ...
+
 
 class RunBudgetReadCapability(Protocol):
     def policy_snapshot(self) -> PolicySnapshot: ...
@@ -101,6 +113,10 @@ class RunCheckpointReadCapability(Protocol):
 
     def list_events(self, plan_version_id: str) -> tuple[ProgressValidationEvent, ...]: ...
 
+    def list_plans(self, run_id: str) -> tuple[ProgressPlan, ...]: ...
+
+    def list_budgets(self, plan_version_id: str) -> tuple[BudgetAllocation, ...]: ...
+
 
 class CompletionReadCapability(Protocol):
     def policy_snapshot(self) -> PolicySnapshot: ...
@@ -117,6 +133,8 @@ class CompletionReadCapability(Protocol):
     def list_events(self, plan_version_id: str) -> tuple[ProgressValidationEvent, ...]: ...
 
     def list_budgets(self, plan_version_id: str) -> tuple[BudgetAllocation, ...]: ...
+
+    def has_retained_evidence(self, evidence_id: str) -> bool: ...
 
 
 class _ProgressPlanContext(BaseModel):
@@ -137,6 +155,8 @@ class _ProgressEventContext(BaseModel):
     plan: ProgressPlan | None
     subtask: ProgressSubtask | None
     existing_event: ProgressValidationEvent | None
+    plans: tuple[ProgressPlan, ...]
+    head_event: ProgressValidationEvent | None
 
 
 class _RunBudgetContext(BaseModel):
@@ -156,6 +176,8 @@ class _RunCheckpointContext(BaseModel):
     plan: ProgressPlan | None
     existing_checkpoint: RunCheckpoint | None
     events: tuple[ProgressValidationEvent, ...]
+    plans: tuple[ProgressPlan, ...]
+    budgets: tuple[BudgetAllocation, ...]
 
 
 class _CompletionContext(BaseModel):
@@ -167,6 +189,7 @@ class _CompletionContext(BaseModel):
     existing_decision: CompletionDecision | None
     events: tuple[ProgressValidationEvent, ...]
     budgets: tuple[BudgetAllocation, ...]
+    retained_evidence_ids: frozenset[str]
 
 
 class RecordProgressPlanHandler:
@@ -266,6 +289,8 @@ class AppendProgressEventHandler:
             plan=capability.get_plan(event.plan_version_id),
             subtask=capability.get_subtask(event.subtask_id),
             existing_event=capability.get_event(event.event_id),
+            plans=capability.list_plans(event.run_id),
+            head_event=capability.get_progress_head_event(event.run_id),
         )
 
     def decide(
@@ -299,6 +324,12 @@ class AppendProgressEventHandler:
                 proposal.proposal_id,
                 RejectionCode.ENTITY_ALREADY_EXISTS,
                 "progress event already exists",
+            )
+        if not event_advances_progress_head(event, context.plans, context.head_event):
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.INVALID_LINEAGE,
+                "progress event must advance the current plan and event head",
             )
         if event.completion_proposer != proposal.proposer:
             return _rejected(
@@ -418,6 +449,8 @@ class RecordRunCheckpointHandler:
             plan=capability.get_plan(checkpoint.plan_version_id),
             existing_checkpoint=capability.get_checkpoint(checkpoint.checkpoint_id),
             events=capability.list_events(checkpoint.plan_version_id),
+            plans=capability.list_plans(checkpoint.run_id),
+            budgets=capability.list_budgets(checkpoint.plan_version_id),
         )
 
     def decide(
@@ -453,6 +486,12 @@ class RecordRunCheckpointHandler:
                 RejectionCode.MISSING_ENTITY,
                 "progress plan does not exist",
             )
+        if current_progress_plan(context.plans, checkpoint.run_id) != plan:
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.INVALID_LINEAGE,
+                "checkpoint must target the current highest progress plan",
+            )
         try:
             summary = calculate_progress(plan, context.events)
         except ValueError:
@@ -467,17 +506,33 @@ class RecordRunCheckpointHandler:
                 RejectionCode.INVALID_DEPENDENCY,
                 "checkpoint validated progress does not match durable history",
             )
-        known_ids = {subtask.subtask_id for subtask in plan.subtasks}
-        if any(item not in known_ids for item in checkpoint.pending_dependency_ids) or set(
-            checkpoint.pending_dependency_ids
-        ) & set(summary.validated_subtask_ids):
+        expected_pending_dependencies = replay_pending_dependency_ids(
+            plan,
+            summary.validated_subtask_ids,
+        )
+        if checkpoint.pending_dependency_ids != expected_pending_dependencies:
             return _rejected(
                 proposal.proposal_id,
                 RejectionCode.INVALID_DEPENDENCY,
-                "checkpoint pending dependencies are incoherent",
+                "checkpoint pending dependencies do not match durable history",
+            )
+        budget = select_checkpoint_budget(checkpoint, context.budgets)
+        if budget is None:
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.MISSING_ENTITY,
+                "checkpoint requires an applicable durable run budget",
+            )
+        if checkpoint.remaining_budget != remaining_budget(budget) or (
+            checkpoint.telemetry != budget.telemetry
+        ):
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.UNMATCHED_BUDGETS,
+                "checkpoint budget and telemetry do not match the latest durable allocation",
             )
         if not all(
-            _is_canonical_artifact_ref(reference)
+            is_canonical_artifact_ref(reference)
             for reference in (
                 *checkpoint.artifact_refs,
                 *checkpoint.raw_log_refs,
@@ -511,6 +566,13 @@ class DecideCompletionHandler:
     ) -> _CompletionContext:
         capability = cast(CompletionReadCapability, reads)
         completion = proposal.completion_proposal
+        referenced_evidence_ids = {
+            evidence_id
+            for item in completion.checklist
+            if item.completed
+            for evidence_id in item.evidence_ids
+        }
+        referenced_evidence_ids.update(completion.final_validation.evidence_ids)
         return _CompletionContext(
             active_policy=capability.policy_snapshot(),
             run=capability.get_run(completion.run_id),
@@ -520,6 +582,11 @@ class DecideCompletionHandler:
             ),
             events=capability.list_events(completion.plan_version_id),
             budgets=capability.list_budgets(completion.plan_version_id),
+            retained_evidence_ids=frozenset(
+                evidence_id
+                for evidence_id in referenced_evidence_ids
+                if capability.has_retained_evidence(evidence_id)
+            ),
         )
 
     def decide(
@@ -580,6 +647,28 @@ class DecideCompletionHandler:
                 RejectionCode.MISSING_ENTITY,
                 "completion run or plan does not exist",
             )
+        required_evidence_ids = (
+            *(
+                evidence_id
+                for item in completion.checklist
+                if item.completed
+                for evidence_id in item.evidence_ids
+            ),
+            *completion.final_validation.evidence_ids,
+        )
+        if (
+            not completion.final_validation.evidence_ids
+            or any(item.completed and not item.evidence_ids for item in completion.checklist)
+            or any(
+                evidence_id not in context.retained_evidence_ids
+                for evidence_id in required_evidence_ids
+            )
+        ):
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.MISSING_EVIDENCE,
+                "completion gates require nonempty retained evidence",
+            )
         final_validation = completion.final_validation
         if (
             final_validation.actor != run.final_validator
@@ -614,7 +703,7 @@ class DecideCompletionHandler:
             claims_completion=completion.claims_completion,
             final_validator_result=final_validation.result,
             validated_weight=summary.official_weight,
-            unused_budget=_has_unused_budget(latest_budget),
+            unused_budget=has_unused_budget(latest_budget),
         )
         if decision.false_finish != finding:
             return _rejected(
@@ -693,6 +782,12 @@ def progress_authority_rejection(
             RejectionCode.INSUFFICIENT_GROUNDING,
             "progress admission does not satisfy the active policy requirement",
         )
+    if requirement.protected_evaluation_required or requirement.rollback_required:
+        return _rejected(
+            proposal.proposal_id,
+            RejectionCode.INSUFFICIENT_GROUNDING,
+            "progress admission cannot satisfy protected-evaluation or rollback requirements",
+        )
     approval = proposal.approval
     if (
         approval is None
@@ -740,29 +835,6 @@ def _policy_hash_rejection(proposal_id: str, label: str) -> TransactionDecision:
         proposal_id,
         RejectionCode.POLICY_HASH_MISMATCH,
         f"{label} must name the exact active governance policy",
-    )
-
-
-def _is_canonical_artifact_ref(reference: ArtifactRef) -> bool:
-    return reference.relative_path == (f"sha256/{reference.sha256[:2]}/{reference.sha256}")
-
-
-_RESOURCE_FIELDS = (
-    "cost_usd",
-    "compute_units",
-    "tokens",
-    "elapsed_seconds",
-    "tool_calls",
-    "human_interventions",
-)
-
-
-def _has_unused_budget(allocation: BudgetAllocation) -> bool:
-    return any(
-        getattr(getattr(allocation.usage, category), field_name)
-        < getattr(getattr(allocation.reserves, category), field_name)
-        for category in BudgetReserves.model_fields
-        for field_name in _RESOURCE_FIELDS
     )
 
 

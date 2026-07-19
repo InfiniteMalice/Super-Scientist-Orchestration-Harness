@@ -15,6 +15,7 @@ from super_scientist.application.progress.service import (
 from super_scientist.application.transactions.contracts import ProposalHandler
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.primitives import UtcTimestamp
+from super_scientist.domain.progress.calculations import event_advances_progress_head
 from super_scientist.domain.progress.models import (
     BudgetAllocation,
     CompletionDecision,
@@ -41,8 +42,19 @@ from super_scientist.providers.storage.domain_records import (
     RunBudgetRepository,
     RunCheckpointRepository,
 )
+from super_scientist.providers.storage.repositories import EvidenceRepository
 
 type FixedProgressHandler = ProposalHandler[BaseModel, BaseModel]
+
+
+@dataclass(frozen=True)
+class _RetainedEvidenceReader:
+    """Expose only retained-evidence existence to completion admission."""
+
+    _repository: EvidenceRepository
+
+    def contains(self, evidence_id: str) -> bool:
+        return self._repository.get(evidence_id) is not None
 
 
 @dataclass(frozen=True)
@@ -106,6 +118,15 @@ class ProgressEventCapabilities:
     def get_event(self, event_id: str) -> ProgressValidationEvent | None:
         return self.events.get(event_id)
 
+    def list_plans(self, run_id: str) -> tuple[ProgressPlan, ...]:
+        return tuple(plan for plan in self.plans.list_all() if plan.run_id == run_id)
+
+    def get_progress_head_event(self, run_id: str) -> ProgressValidationEvent | None:
+        head = self.head.get(run_id)
+        if head is None:
+            return None
+        return self.events.get(head[1])
+
     def append_authoritative(self, record: BaseModel) -> None:
         if not isinstance(record, ProgressValidationEvent):
             raise TypeError(f"unsupported progress event record: {type(record)!r}")
@@ -114,6 +135,12 @@ class ProgressEventCapabilities:
     def update_projection(self, record: BaseModel) -> None:
         if not isinstance(record, ProgressValidationEvent):
             raise TypeError(f"unsupported progress head record: {type(record)!r}")
+        if not event_advances_progress_head(
+            record,
+            self.list_plans(record.run_id),
+            self.get_progress_head_event(record.run_id),
+        ):
+            raise RuntimeError("progress event cannot rewind the durable head")
         self.head.set(record.run_id, record.plan_version_id, record.event_id)
 
 
@@ -152,6 +179,7 @@ class RunCheckpointCapabilities:
     runs: ResearchRunRepository
     plans: ProgressPlanRepository
     events: ProgressEventRepository
+    budgets: RunBudgetRepository
     checkpoints: RunCheckpointRepository
 
     def policy_snapshot(self) -> PolicySnapshot:
@@ -169,6 +197,16 @@ class RunCheckpointCapabilities:
     def list_events(self, plan_version_id: str) -> tuple[ProgressValidationEvent, ...]:
         return tuple(
             event for event in self.events.list_all() if event.plan_version_id == plan_version_id
+        )
+
+    def list_plans(self, run_id: str) -> tuple[ProgressPlan, ...]:
+        return tuple(plan for plan in self.plans.list_all() if plan.run_id == run_id)
+
+    def list_budgets(self, plan_version_id: str) -> tuple[BudgetAllocation, ...]:
+        return tuple(
+            budget
+            for budget in self.budgets.list_all()
+            if budget.plan_version_id == plan_version_id
         )
 
     def append_authoritative(self, record: BaseModel) -> None:
@@ -189,6 +227,7 @@ class CompletionCapabilities:
     events: ProgressEventRepository
     budgets: RunBudgetRepository
     decisions: CompletionDecisionRepository
+    evidence: _RetainedEvidenceReader
 
     def policy_snapshot(self) -> PolicySnapshot:
         return self.active_policy
@@ -216,6 +255,9 @@ class CompletionCapabilities:
             for budget in self.budgets.list_all()
             if budget.plan_version_id == plan_version_id
         )
+
+    def has_retained_evidence(self, evidence_id: str) -> bool:
+        return self.evidence.contains(evidence_id)
 
     def append_authoritative(self, record: BaseModel) -> None:
         if not isinstance(record, CompletionDecision):
@@ -282,6 +324,7 @@ def progress_capabilities(
             runs=ResearchRunRepository(connection),
             plans=ProgressPlanRepository(connection),
             events=ProgressEventRepository(connection),
+            budgets=RunBudgetRepository(connection),
             checkpoints=RunCheckpointRepository(connection),
         )
     if isinstance(proposal, DecideCompletion):
@@ -292,5 +335,6 @@ def progress_capabilities(
             events=ProgressEventRepository(connection),
             budgets=RunBudgetRepository(connection),
             decisions=CompletionDecisionRepository(connection),
+            evidence=_RetainedEvidenceReader(EvidenceRepository(connection)),
         )
     raise TypeError(f"no fixed progress capability for proposal: {type(proposal)!r}")
