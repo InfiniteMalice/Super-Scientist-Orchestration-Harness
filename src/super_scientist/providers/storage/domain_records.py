@@ -40,6 +40,8 @@ from super_scientist.providers.storage.schema import (
 
 TIMESTAMP_ADAPTER: TypeAdapter[UtcTimestamp] = TypeAdapter(UtcTimestamp)
 
+type _RelationshipStorageType = type[str] | type[int]
+
 __all__ = [
     "ConfigurationVersionRepository",
     "EvaluatorAuditRepository",
@@ -72,6 +74,7 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
         model_type: type[RecordT],
         identifier_field: str,
         relationship_fields: Mapping[str, str] | None = None,
+        relationship_types: Mapping[str, _RelationshipStorageType] | None = None,
     ) -> None:
         _require_integrity(
             bool(model_type.model_config.get("frozen")),
@@ -83,6 +86,7 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
         self._model_type = model_type
         self._identifier_field = identifier_field
         self._relationship_fields = dict(relationship_fields or {})
+        requested_relationship_types = dict(relationship_types or {})
         _require_integrity(
             set(self._relationship_fields).issubset(table.c.keys()),
             "unknown relationship column",
@@ -91,6 +95,21 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
             set(self._relationship_fields.values()).issubset(model_type.model_fields),
             "unknown relationship field",
         )
+        _require_integrity(
+            set(requested_relationship_types).issubset(self._relationship_fields),
+            "unknown typed relationship column",
+        )
+        _require_integrity(
+            all(
+                storage_type is str or storage_type is int
+                for storage_type in requested_relationship_types.values()
+            ),
+            "unsupported relationship storage type",
+        )
+        self._relationship_types: dict[str, _RelationshipStorageType] = {
+            column_name: requested_relationship_types.get(column_name, str)
+            for column_name in self._relationship_fields
+        }
 
     def get(self, record_id: str) -> RecordT | None:
         row = (
@@ -129,9 +148,11 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
             "created_at": validated_created_at.isoformat(),
         }
         for column_name, field_name in self._relationship_fields.items():
-            value = getattr(validated, field_name)
-            _require_integrity(isinstance(value, str), f"{field_name} must be a string")
-            values[column_name] = value
+            values[column_name] = _validated_relationship_value(
+                getattr(validated, field_name),
+                field_name,
+                self._relationship_types[column_name],
+            )
         self._connection.execute(insert(self._table).values(**values))
 
     def _decode_row(self, row: Mapping[str, object]) -> RecordT:
@@ -139,6 +160,9 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
             record_json = _stored_string(row, "record_json")
             content_hash = _stored_string(row, "content_hash")
             record = self._model_type.model_validate_json(record_json)
+            canonical_record_json = canonical_json_bytes(
+                record.model_dump(mode="json")
+            ).decode("utf-8")
         except (TypeError, ValueError) as error:
             raise StorageIntegrityError("storage integrity error: invalid record JSON") from error
         created_at = _stored_string(row, "created_at")
@@ -158,10 +182,17 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
             "content_hash does not match record_json",
         )
         for column_name, field_name in self._relationship_fields.items():
+            storage_type = self._relationship_types[column_name]
+            record_value = _validated_relationship_value(
+                getattr(record, field_name),
+                field_name,
+                storage_type,
+            )
             _require_integrity(
-                getattr(record, field_name) == _stored_string(row, column_name),
+                record_value == _stored_relationship_value(row, column_name, storage_type),
                 f"{column_name} does not match record_json",
             )
+        _require_integrity(record_json == canonical_record_json, "record_json must be canonical")
         return record
 
 
@@ -521,3 +552,29 @@ def _stored_integer(row: Mapping[str, object], column_name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise StorageIntegrityError(f"storage integrity error: {column_name} must be an integer")
     return value
+
+
+def _validated_relationship_value(
+    value: object,
+    field_name: str,
+    storage_type: _RelationshipStorageType,
+) -> str | int:
+    if storage_type is str:
+        if not isinstance(value, str):
+            raise StorageIntegrityError(
+                f"storage integrity error: {field_name} must be a string"
+            )
+        return value
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise StorageIntegrityError(f"storage integrity error: {field_name} must be an integer")
+    return value
+
+
+def _stored_relationship_value(
+    row: Mapping[str, object],
+    column_name: str,
+    storage_type: _RelationshipStorageType,
+) -> str | int:
+    if storage_type is str:
+        return _stored_string(row, column_name)
+    return _stored_integer(row, column_name)

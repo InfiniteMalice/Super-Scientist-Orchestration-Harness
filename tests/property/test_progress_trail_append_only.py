@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import Connection, Engine, insert, text
+from sqlalchemy import Connection, Engine, insert, select, text
 from sqlalchemy.exc import IntegrityError
 
-from super_scientist.domain.primitives import sha256_hex
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.providers.storage import domain_records, schema
 from super_scientist.providers.storage.database import create_database_engine, upgrade_database
 from super_scientist.providers.storage.domain_records import (
@@ -45,6 +45,17 @@ class _ProgressPlanStorageProbe(BaseModel):
 
     plan_version_id: str
     run_id: str
+
+
+class _EvidenceTrailVersionStorageProbe(BaseModel):
+    """Test-only probe for typed private storage bindings, not a trail contract."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    trail_version_id: str
+    trail_id: str
+    claim_version_id: str
+    version: object
 
 
 @pytest.mark.property
@@ -166,6 +177,30 @@ def test_private_record_engine_rejects_identifier_mismatch_before_insert(tmp_pat
         engine.dispose()
 
 
+def test_private_record_engine_rejects_noncanonical_json_with_matching_hash(
+    tmp_path: Path,
+) -> None:
+    repository, connection, engine = _progress_plan_repository(tmp_path)
+    record_json = '{"run_id": "run-1", "plan_version_id": "plan-1"}'
+    try:
+        with engine.begin() as writer:
+            writer.execute(
+                insert(schema.progress_plans).values(
+                    plan_version_id="plan-1",
+                    run_id="run-1",
+                    record_json=record_json,
+                    content_hash=sha256_hex(record_json.encode("utf-8")),
+                    created_at=NOW.isoformat(),
+                )
+            )
+
+        with pytest.raises(StorageIntegrityError, match="record_json must be canonical"):
+            repository.get("plan-1")
+    finally:
+        connection.close()
+        engine.dispose()
+
+
 @pytest.mark.parametrize(
     ("record_json", "content_hash", "created_at", "expected_detail"),
     [
@@ -230,6 +265,128 @@ def test_private_record_engine_rejects_corrupt_0003_storage(
 
         with pytest.raises(StorageIntegrityError, match=expected_detail):
             repository.get("plan-1")
+    finally:
+        connection.close()
+        engine.dispose()
+
+
+def test_private_integer_relationship_binding_round_trips_exact_integer(
+    tmp_path: Path,
+) -> None:
+    repository, connection, engine = _evidence_trail_version_repository(tmp_path)
+    record = _EvidenceTrailVersionStorageProbe(
+        trail_version_id="trail-version-1",
+        trail_id="trail-1",
+        claim_version_id="claim-1:1",
+        version=1,
+    )
+    try:
+        repository.add(record.trail_version_id, record, NOW)
+
+        stored_version = connection.execute(
+            select(schema.evidence_trail_versions.c.version).where(
+                schema.evidence_trail_versions.c.trail_version_id == record.trail_version_id
+            )
+        ).scalar_one()
+        assert type(stored_version) is int
+        assert stored_version == 1
+        assert repository.get(record.trail_version_id) == record
+    finally:
+        connection.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("invalid_version", [True, "1"], ids=["bool", "string"])
+def test_private_integer_relationship_binding_rejects_bool_and_string_writes(
+    tmp_path: Path,
+    invalid_version: object,
+) -> None:
+    repository, connection, engine = _evidence_trail_version_repository(tmp_path)
+    record = _EvidenceTrailVersionStorageProbe(
+        trail_version_id="trail-version-1",
+        trail_id="trail-1",
+        claim_version_id="claim-1:1",
+        version=invalid_version,
+    )
+    try:
+        with pytest.raises(StorageIntegrityError, match="version must be an integer"):
+            repository.add(record.trail_version_id, record, NOW)
+    finally:
+        connection.close()
+        engine.dispose()
+
+
+def test_private_integer_relationship_binding_rejects_boolean_stored_value(
+    tmp_path: Path,
+) -> None:
+    repository, connection, engine = _evidence_trail_version_repository(tmp_path)
+    record_json = canonical_json_bytes(
+        {
+            "trail_version_id": "trail-version-1",
+            "trail_id": "trail-1",
+            "claim_version_id": "claim-1:1",
+            "version": True,
+        }
+    ).decode("utf-8")
+    try:
+        # SQLite normalizes bound booleans to integer storage, so exercise the raw
+        # decoder mapping directly to preserve the bool-versus-int corruption case.
+        with pytest.raises(StorageIntegrityError, match="version must be an integer"):
+            repository._decode_row(
+                {
+                    "trail_version_id": "trail-version-1",
+                    "trail_id": "trail-1",
+                    "claim_version_id": "claim-1:1",
+                    "version": True,
+                    "record_json": record_json,
+                    "content_hash": sha256_hex(record_json.encode("utf-8")),
+                    "created_at": NOW.isoformat(),
+                }
+            )
+    finally:
+        connection.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("stored_version", "record_version", "expected_detail"),
+    [
+        ("not-an-integer", "not-an-integer", "version must be an integer"),
+        (2, 1, "version does not match record_json"),
+    ],
+    ids=["string", "mismatch"],
+)
+def test_private_integer_relationship_binding_rejects_corrupt_stored_versions(
+    tmp_path: Path,
+    stored_version: object,
+    record_version: object,
+    expected_detail: str,
+) -> None:
+    repository, connection, engine = _evidence_trail_version_repository(tmp_path)
+    record_json = canonical_json_bytes(
+        {
+            "trail_version_id": "trail-version-1",
+            "trail_id": "trail-1",
+            "claim_version_id": "claim-1:1",
+            "version": record_version,
+        }
+    ).decode("utf-8")
+    try:
+        with engine.begin() as writer:
+            writer.execute(
+                insert(schema.evidence_trail_versions).values(
+                    trail_version_id="trail-version-1",
+                    trail_id="trail-1",
+                    claim_version_id="claim-1:1",
+                    version=stored_version,
+                    record_json=record_json,
+                    content_hash=sha256_hex(record_json.encode("utf-8")),
+                    created_at=NOW.isoformat(),
+                )
+            )
+
+        with pytest.raises(StorageIntegrityError, match=expected_detail):
+            repository.get("trail-version-1")
     finally:
         connection.close()
         engine.dispose()
@@ -391,6 +548,36 @@ def _progress_plan_repository(
             model_type=_ProgressPlanStorageProbe,
             identifier_field="plan_version_id",
             relationship_fields={"run_id": "run_id"},
+        ),
+        connection,
+        engine,
+    )
+
+
+def _evidence_trail_version_repository(
+    tmp_path: Path,
+) -> tuple[_AppendOnlyRecordRepository[_EvidenceTrailVersionStorageProbe], Connection, Engine]:
+    engine = _engine(tmp_path, "raw-evidence-trail-version.db")
+    with engine.begin() as writer:
+        _insert_claim_version(
+            writer,
+            claim_version_id="claim-1:1",
+            claim_id="claim-1",
+            version=1,
+        )
+    connection = engine.connect()
+    return (
+        _AppendOnlyRecordRepository(
+            connection,
+            table=schema.evidence_trail_versions,
+            model_type=_EvidenceTrailVersionStorageProbe,
+            identifier_field="trail_version_id",
+            relationship_fields={
+                "trail_id": "trail_id",
+                "claim_version_id": "claim_version_id",
+                "version": "version",
+            },
+            relationship_types={"version": int},
         ),
         connection,
         engine,
