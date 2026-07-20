@@ -151,12 +151,16 @@ def _create_scoped_reference_table(
     scope_columns: tuple[tuple[str, int], ...],
     owner_scope_targets: tuple[str, ...],
     reference_scope_targets: tuple[str, ...],
+    *,
+    defer_owner_foreign_keys: bool = False,
 ) -> None:
     scope_names = tuple(column_name for column_name, _ in scope_columns)
     if len(scope_names) != len(owner_scope_targets) or len(scope_names) != len(
         reference_scope_targets
     ):
         raise ValueError("scoped reference targets must exactly match scope columns")
+    owner_foreign_key_deferrable = True if defer_owner_foreign_keys else None
+    owner_foreign_key_initially = "DEFERRED" if defer_owner_foreign_keys else None
     op.create_table(
         table_name,
         sa.Column(owner_column, sa.String(length=owner_length), primary_key=True),
@@ -166,7 +170,12 @@ def _create_scoped_reference_table(
             sa.Column(name, sa.String(length=length), nullable=False)
             for name, length in scope_columns
         ),
-        sa.ForeignKeyConstraint([owner_column], [f"{owner_table}.{owner_column}"]),
+        sa.ForeignKeyConstraint(
+            [owner_column],
+            [f"{owner_table}.{owner_column}"],
+            deferrable=owner_foreign_key_deferrable,
+            initially=owner_foreign_key_initially,
+        ),
         sa.ForeignKeyConstraint(
             [reference_column],
             [f"{reference_table}.{reference_column}"],
@@ -177,6 +186,8 @@ def _create_scoped_reference_table(
                 f"{owner_table}.{owner_column}",
                 *(f"{owner_table}.{column_name}" for column_name in owner_scope_targets),
             ],
+            deferrable=owner_foreign_key_deferrable,
+            initially=owner_foreign_key_initially,
         ),
         sa.ForeignKeyConstraint(
             [reference_column, *scope_names],
@@ -215,6 +226,57 @@ def _create_append_only_triggers() -> None:
 
 def _create_hypothesis_lineage_triggers() -> None:
     op.execute(
+        "CREATE TRIGGER hypothesis_admission_revision_completeness "
+        "BEFORE INSERT ON hypothesis_admission_decisions "
+        "WHEN json_type(NEW.record_json, '$.revision_ids') IS NOT 'array' "
+        "OR (SELECT COUNT(*) FROM hypothesis_admission_revisions AS reference "
+        "WHERE reference.admission_decision_id = NEW.admission_decision_id) "
+        "<> json_array_length(NEW.record_json, '$.revision_ids') "
+        "OR EXISTS ("
+        "SELECT 1 FROM hypothesis_admission_revisions AS reference "
+        "WHERE reference.admission_decision_id = NEW.admission_decision_id "
+        "AND (reference.hypothesis_id <> NEW.hypothesis_id "
+        "OR reference.position < 0 "
+        "OR reference.position >= json_array_length(NEW.record_json, '$.revision_ids') "
+        "OR reference.revision_id <> json_extract(NEW.record_json, "
+        "'$.revision_ids[' || reference.position || ']'))) "
+        "OR (json_array_length(NEW.record_json, '$.revision_ids') = 0 "
+        "AND (NEW.terminal_revision_id IS NOT NULL "
+        "OR NEW.terminal_revision_position IS NOT NULL)) "
+        "OR (json_array_length(NEW.record_json, '$.revision_ids') > 0 AND ("
+        "NEW.terminal_revision_id IS NULL "
+        "OR NEW.terminal_revision_position "
+        "<> json_array_length(NEW.record_json, '$.revision_ids') - 1 "
+        "OR NEW.terminal_revision_id <> json_extract(NEW.record_json, "
+        "'$.revision_ids[' || "
+        "(json_array_length(NEW.record_json, '$.revision_ids') - 1) || ']') "
+        "OR NOT EXISTS ("
+        "SELECT 1 FROM hypothesis_admission_revisions AS terminal_reference "
+        "WHERE terminal_reference.admission_decision_id = NEW.admission_decision_id "
+        "AND terminal_reference.position = NEW.terminal_revision_position "
+        "AND terminal_reference.revision_id = NEW.terminal_revision_id "
+        "AND terminal_reference.hypothesis_id = NEW.hypothesis_id))) "
+        "OR EXISTS ("
+        "SELECT 1 FROM hypothesis_admission_revisions AS current_reference "
+        "JOIN hypothesis_revisions AS current_revision "
+        "ON current_revision.revision_id = current_reference.revision_id "
+        "WHERE current_reference.admission_decision_id = NEW.admission_decision_id "
+        "AND current_reference.position > 0 "
+        "AND NOT EXISTS ("
+        "SELECT 1 FROM hypothesis_admission_revisions AS previous_reference "
+        "JOIN hypothesis_revisions AS previous_revision "
+        "ON previous_revision.revision_id = previous_reference.revision_id "
+        "WHERE previous_reference.admission_decision_id = NEW.admission_decision_id "
+        "AND previous_reference.position = current_reference.position - 1 "
+        "AND previous_reference.hypothesis_id = NEW.hypothesis_id "
+        "AND previous_revision.hypothesis_id = NEW.hypothesis_id "
+        "AND current_revision.hypothesis_id = NEW.hypothesis_id "
+        "AND previous_revision.resulting_hypothesis_version_id = "
+        "current_revision.prior_hypothesis_version_id "
+        "AND previous_revision.resulting_version = current_revision.prior_version)) "
+        "BEGIN SELECT RAISE(ABORT, 'admission revision materialization is incomplete'); END"
+    )
+    op.execute(
         "CREATE TRIGGER hypothesis_admission_requires_revision_lineage "
         "BEFORE INSERT ON hypothesis_admission_decisions "
         "WHEN NEW.terminal_revision_id IS NULL AND EXISTS ("
@@ -227,7 +289,10 @@ def _create_hypothesis_lineage_triggers() -> None:
     op.execute(
         "CREATE TRIGGER hypothesis_admission_revision_bounds "
         "BEFORE INSERT ON hypothesis_admission_revisions "
-        "WHEN NOT EXISTS ("
+        "WHEN EXISTS ("
+        "SELECT 1 FROM hypothesis_admission_decisions AS owner "
+        "WHERE owner.admission_decision_id = NEW.admission_decision_id) "
+        "AND NOT EXISTS ("
         "SELECT 1 FROM hypothesis_admission_decisions AS decision "
         "WHERE decision.admission_decision_id = NEW.admission_decision_id "
         "AND decision.hypothesis_id = NEW.hypothesis_id "
@@ -847,6 +912,7 @@ def upgrade() -> None:
         (("hypothesis_id", 128),),
         ("hypothesis_id",),
         ("hypothesis_id",),
+        defer_owner_foreign_keys=True,
     )
 
     op.create_table(
@@ -887,6 +953,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER IF EXISTS hypothesis_admission_revision_completeness")
     op.execute("DROP TRIGGER IF EXISTS hypothesis_admission_revision_chain")
     op.execute("DROP TRIGGER IF EXISTS hypothesis_admission_revision_bounds")
     op.execute("DROP TRIGGER IF EXISTS hypothesis_admission_requires_revision_lineage")

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from sqlalchemy import Connection, insert, select, text
 from sqlalchemy.exc import IntegrityError
 
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.providers.storage import domain_records, schema
 from super_scientist.providers.storage.database import (
     create_database_engine,
@@ -576,6 +577,140 @@ def test_admission_rejects_omitted_retained_revision_lineage(tmp_path: Path) -> 
             )
     finally:
         connection.rollback()
+        connection.close()
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_database_rejects_admission_with_no_declared_revision_rows(tmp_path: Path) -> None:
+    engine, connection = _connection(tmp_path, "direct-admission-zero-revisions.db")
+    records = _records()
+    try:
+        _add_records(connection, records)
+        direct = records.admission.model_copy(
+            update={"admission_decision_id": "admission-direct-zero-revisions"}
+        )
+        with pytest.raises(IntegrityError):
+            _insert_direct_admission(connection, direct)
+            connection.commit()
+    finally:
+        if connection.in_transaction():
+            connection.rollback()
+        connection.close()
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_database_rejects_admission_with_incomplete_revision_prefix(tmp_path: Path) -> None:
+    engine, connection = _connection(tmp_path, "direct-admission-incomplete-revisions.db")
+    records = _records()
+    try:
+        _add_records(connection, records)
+        hypothesis_v3, revision_v2_to_v3 = _add_third_hypothesis_version(connection, records)
+        direct = records.admission.model_copy(
+            update={
+                "admission_decision_id": "admission-direct-incomplete-revisions",
+                "hypothesis_version_id": hypothesis_v3.hypothesis_version_id,
+                "version": hypothesis_v3.version,
+                "admission_status": hypothesis_v3.admission_status,
+                "revision_ids": (
+                    records.revision.revision_id,
+                    revision_v2_to_v3.revision_id,
+                ),
+            }
+        )
+        with pytest.raises(IntegrityError):
+            _insert_direct_admission_revision(
+                connection,
+                direct,
+                position=0,
+                revision_id=records.revision.revision_id,
+            )
+            _insert_direct_admission(connection, direct)
+            connection.commit()
+    finally:
+        if connection.in_transaction():
+            connection.rollback()
+        connection.close()
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_database_accepts_initial_admission_with_empty_revision_chain(tmp_path: Path) -> None:
+    engine, connection = _connection(tmp_path, "direct-initial-admission.db")
+    records = _records()
+    try:
+        _add_records(connection, records)
+        direct = records.admission.model_copy(
+            update={
+                "admission_decision_id": "admission-direct-initial",
+                "hypothesis_version_id": records.hypothesis_v1.hypothesis_version_id,
+                "version": records.hypothesis_v1.version,
+                "admission_status": records.hypothesis_v1.admission_status,
+                "revision_ids": (),
+            }
+        )
+        _insert_direct_admission(connection, direct)
+        connection.commit()
+        assert (
+            connection.execute(
+                select(schema.hypothesis_admission_decisions.c.admission_decision_id).where(
+                    schema.hypothesis_admission_decisions.c.admission_decision_id
+                    == direct.admission_decision_id
+                )
+            ).scalar_one()
+            == direct.admission_decision_id
+        )
+    finally:
+        if connection.in_transaction():
+            connection.rollback()
+        connection.close()
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_database_accepts_complete_revision_chain_staged_before_admission(
+    tmp_path: Path,
+) -> None:
+    engine, connection = _connection(tmp_path, "direct-complete-admission.db")
+    records = _records()
+    try:
+        _add_records(connection, records)
+        hypothesis_v3, revision_v2_to_v3 = _add_third_hypothesis_version(connection, records)
+        direct = records.admission.model_copy(
+            update={
+                "admission_decision_id": "admission-direct-complete",
+                "hypothesis_version_id": hypothesis_v3.hypothesis_version_id,
+                "version": hypothesis_v3.version,
+                "admission_status": hypothesis_v3.admission_status,
+                "revision_ids": (
+                    records.revision.revision_id,
+                    revision_v2_to_v3.revision_id,
+                ),
+            }
+        )
+        for position, revision_id in enumerate(direct.revision_ids):
+            _insert_direct_admission_revision(
+                connection,
+                direct,
+                position=position,
+                revision_id=revision_id,
+            )
+        _insert_direct_admission(connection, direct)
+        connection.commit()
+        assert (
+            _ordered_references(
+                connection,
+                schema.hypothesis_admission_revisions,
+                "admission_decision_id",
+                direct.admission_decision_id,
+                "revision_id",
+            )
+            == direct.revision_ids
+        )
+    finally:
+        if connection.in_transaction():
+            connection.rollback()
         connection.close()
         engine.dispose()
 
@@ -1293,6 +1428,46 @@ def _add_scope_values(
         values["hypothesis_id"] = hypothesis.hypothesis_id
     if "hypothesis_version" in columns:
         values["hypothesis_version"] = hypothesis.version
+
+
+def _insert_direct_admission(
+    connection: Connection,
+    record: HypothesisAdmissionDecisionRecord,
+) -> None:
+    record_json = canonical_json_bytes(record.model_dump(mode="json")).decode("utf-8")
+    connection.execute(
+        insert(schema.hypothesis_admission_decisions).values(
+            admission_decision_id=record.admission_decision_id,
+            hypothesis_version_id=record.hypothesis_version_id,
+            hypothesis_id=record.hypothesis_id,
+            version=record.version,
+            admission_status=record.admission_status.value,
+            terminal_revision_id=record.revision_ids[-1] if record.revision_ids else None,
+            terminal_revision_position=len(record.revision_ids) - 1
+            if record.revision_ids
+            else None,
+            record_json=record_json,
+            content_hash=sha256_hex(record_json.encode("utf-8")),
+            created_at=record.decided_at.isoformat(),
+        )
+    )
+
+
+def _insert_direct_admission_revision(
+    connection: Connection,
+    record: HypothesisAdmissionDecisionRecord,
+    *,
+    position: int,
+    revision_id: str,
+) -> None:
+    connection.execute(
+        insert(schema.hypothesis_admission_revisions).values(
+            admission_decision_id=record.admission_decision_id,
+            position=position,
+            revision_id=revision_id,
+            hypothesis_id=record.hypothesis_id,
+        )
+    )
 
 
 def _seed_external_references(connection: Connection) -> None:

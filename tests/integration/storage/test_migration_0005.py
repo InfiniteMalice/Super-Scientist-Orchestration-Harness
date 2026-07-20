@@ -526,6 +526,28 @@ def test_hypothesis_references_have_composite_scope_foreign_keys(database_url: s
 
 
 @pytest.mark.integration
+def test_admission_revision_owner_foreign_keys_are_initially_deferred(
+    database_url: str,
+) -> None:
+    _upgrade_to(database_url, REVISION)
+    engine = create_database_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            owner_foreign_keys = tuple(
+                item
+                for item in inspect(connection).get_foreign_keys("hypothesis_admission_revisions")
+                if item["referred_table"] == "hypothesis_admission_decisions"
+            )
+            assert len(owner_foreign_keys) == 2
+            assert all(
+                item["options"] == {"deferrable": True, "initially": "DEFERRED"}
+                for item in owner_foreign_keys
+            )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
 def test_revision_requires_existing_prior_and_resulting_versions(database_url: str) -> None:
     _upgrade_to(database_url, REVISION)
     engine = create_database_engine(database_url)

@@ -874,6 +874,7 @@ class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
         relationship_types: Mapping[str, _RelationshipStorageType] | None = None,
         nullable_relationship_fields: Collection[str] | None = None,
         hypothesis_scope_field: str | None = None,
+        pre_parent_reference_fields: Collection[str] | None = None,
     ) -> None:
         super().__init__(
             connection,
@@ -909,6 +910,18 @@ class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
                 "normalized reference scope is absent from owner",
             )
         self._reference_bindings = reference_bindings
+        self._pre_parent_reference_fields = frozenset(pre_parent_reference_fields or ())
+        binding_fields = {binding.record_field for binding in reference_bindings}
+        _require_integrity(
+            self._pre_parent_reference_fields.issubset(binding_fields),
+            "unknown pre-parent reference field",
+        )
+        for binding in reference_bindings:
+            if binding.record_field in self._pre_parent_reference_fields:
+                _require_integrity(
+                    set(binding.scope_columns).issubset(model_type.model_fields),
+                    "pre-parent reference scope must be canonical",
+                )
 
     def add(self, record_id: str, record: RecordT, created_at: UtcTimestamp) -> None:
         try:
@@ -917,6 +930,12 @@ class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
             raise StorageIntegrityError(
                 "storage integrity error: invalid append-only record"
             ) from error
+        pre_parent_bindings = tuple(
+            binding
+            for binding in self._reference_bindings
+            if binding.record_field in self._pre_parent_reference_fields
+        )
+        self._insert_reference_bindings(record_id, validated, pre_parent_bindings, None)
         super().add(record_id, validated, created_at)
         owner_row = (
             self._connection.execute(
@@ -925,13 +944,42 @@ class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
             .mappings()
             .one()
         )
-        for binding in self._reference_bindings:
-            references = _canonical_reference_tuple(validated, binding.record_field)
+        post_parent_bindings = tuple(
+            binding
+            for binding in self._reference_bindings
+            if binding.record_field not in self._pre_parent_reference_fields
+        )
+        self._insert_reference_bindings(
+            record_id,
+            validated,
+            post_parent_bindings,
+            dict(owner_row),
+        )
+
+    def _insert_reference_bindings(
+        self,
+        record_id: str,
+        record: RecordT,
+        bindings: tuple[_OrderedReferenceBinding, ...],
+        owner_row: Mapping[str, object] | None,
+    ) -> None:
+        for binding in bindings:
+            references = _canonical_reference_tuple(record, binding.record_field)
             for position, reference_id in enumerate(references):
-                scope_values = {
-                    column_name: _stored_string(dict(owner_row), column_name)
-                    for column_name in binding.scope_columns
-                }
+                if owner_row is None:
+                    scope_values = {
+                        column_name: _validated_relationship_value(
+                            getattr(record, column_name),
+                            column_name,
+                            str,
+                        )
+                        for column_name in binding.scope_columns
+                    }
+                else:
+                    scope_values = {
+                        column_name: _stored_string(owner_row, column_name)
+                        for column_name in binding.scope_columns
+                    }
                 self._connection.execute(
                     insert(binding.table).values(
                         **{
@@ -1399,6 +1447,7 @@ class HypothesisAdmissionDecisionRepository(
                 "admission_status": "admission_status",
             },
             relationship_types={"version": int},
+            pre_parent_reference_fields={"revision_ids"},
             reference_bindings=(
                 _OrderedReferenceBinding(
                     table=hypothesis_admission_models,

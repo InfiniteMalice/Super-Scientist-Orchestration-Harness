@@ -70,7 +70,10 @@ simulation, evidence, stable-hypothesis, revision, and admission lineage.
 - Admission decisions materialize the final revision identifier and position. The terminal
   revision must result in the admitted version, multi-revision tuples must be ordered and
   connected, and a version with retained revision history cannot be admitted with an empty
-  revision tuple.
+  revision tuple. Admission revision rows are staged before their parent through deferred owner
+  foreign keys; the parent insert is a mandatory completion barrier that reconciles the exact
+  canonical JSON count, zero-based order, references, stable hypothesis, adjacency, and terminal
+  row. Direct transactions therefore cannot commit absent or partial declared revision chains.
 - All added storage remains inert metadata. No execution, loading, dispatch, network,
   subprocess, dynamic import, lifecycle, or admission-service authority was introduced.
 
@@ -100,21 +103,30 @@ simulation, evidence, stable-hypothesis, revision, and admission lineage.
 - Canonical-review focused GREEN: the ten model, repository, lineage, and direct-database
   regressions passed; **10 passed, 21 deselected in 11.52s**. The connected-chain, initial-empty,
   and omitted-lineage boundary cases then passed **3 passed, 31 deselected in 6.17s**.
+- Admission-completeness RED: a direct transaction with zero revision rows and one with only a
+  prefix both committed, while the valid child-first transaction was blocked by immediate
+  ownership/bounds; **3 failed, 1 passed, 34 deselected in 7.33s**. The initial empty admission
+  was already valid.
+- Admission-completeness GREEN: zero-row and child-first incomplete-prefix transactions are
+  rejected, while initial empty and complete v1-to-v2-to-v3 chains commit; **4 passed,
+  34 deselected in 7.64s**. The final focused Task 10 and migration files passed **52 tests in
+  44.32s**.
 
 ## Migration and quality evidence
 
-- Expanded migration and append-only chain across revisions 0002 through 0005: **176 passed in
-  237.69s**.
+- Expanded migration and append-only chain across revisions 0002 through 0005: **181 passed in
+  249.02s**.
 - Explicit Alembic probe: clean head `0005_hypotheses_and_representations`; metadata operations
-  `0`; downgrade `0004_behavioral_rules`; re-upgrade `0005_hypotheses_and_representations`;
+  `0`; both admission-revision owner foreign keys report `DEFERRABLE INITIALLY DEFERRED`;
+  downgrade `0004_behavioral_rules`; re-upgrade `0005_hypotheses_and_representations`;
   re-upgrade metadata operations `0`.
-- Entire storage integration suite: **105 passed, 3 skipped in 165.38s**.
+- Entire storage integration suite: **106 passed, 3 skipped in 116.42s**.
 - Repository-wide Ruff lint: **all checks passed**.
 - Owned formatter surface: **5 changed Python files already formatted**. A repository-wide
   formatter check identified 18 unrelated pre-existing files and they were left untouched.
 - Strict mypy: **success, 81 source files**.
 - `git diff --check`: **passed** with only the repository's configured LF-to-CRLF notice.
-- Definitive full suite: **1,237 passed, 3 skipped in 1,120.68s**.
+- Definitive full suite: **1,242 passed, 3 skipped in 1,132.88s**.
 
 ## Files and scope
 

@@ -1274,12 +1274,16 @@ def _scoped_ordered_reference_table(
     scope_columns: tuple[tuple[str, int], ...],
     owner_scope_targets: tuple[str, ...],
     reference_scope_targets: tuple[str, ...],
+    *,
+    defer_owner_foreign_keys: bool = False,
 ) -> Table:
     scope_names = tuple(column_name for column_name, _ in scope_columns)
     if len(scope_names) != len(owner_scope_targets) or len(scope_names) != len(
         reference_scope_targets
     ):
         raise ValueError("scoped reference targets must exactly match scope columns")
+    owner_foreign_key_deferrable = True if defer_owner_foreign_keys else None
+    owner_foreign_key_initially = "DEFERRED" if defer_owner_foreign_keys else None
     return Table(
         table_name,
         metadata,
@@ -1287,7 +1291,12 @@ def _scoped_ordered_reference_table(
         Column("position", Integer, primary_key=True),
         Column(reference_column, String(reference_length), nullable=False),
         *(Column(name, String(length), nullable=False) for name, length in scope_columns),
-        ForeignKeyConstraint([owner_column], [f"{owner_table}.{owner_column}"]),
+        ForeignKeyConstraint(
+            [owner_column],
+            [f"{owner_table}.{owner_column}"],
+            deferrable=owner_foreign_key_deferrable,
+            initially=owner_foreign_key_initially,
+        ),
         ForeignKeyConstraint(
             [reference_column],
             [f"{reference_table}.{reference_column}"],
@@ -1298,6 +1307,8 @@ def _scoped_ordered_reference_table(
                 f"{owner_table}.{owner_column}",
                 *(f"{owner_table}.{column_name}" for column_name in owner_scope_targets),
             ],
+            deferrable=owner_foreign_key_deferrable,
+            initially=owner_foreign_key_initially,
         ),
         ForeignKeyConstraint(
             [reference_column, *scope_names],
@@ -1518,6 +1529,7 @@ hypothesis_admission_revisions = _scoped_ordered_reference_table(
     (("hypothesis_id", 128),),
     ("hypothesis_id",),
     ("hypothesis_id",),
+    defer_owner_foreign_keys=True,
 )
 
 primitive_heads = Table(
