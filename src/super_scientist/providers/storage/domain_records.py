@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Literal, Self
 
@@ -35,6 +36,7 @@ from super_scientist.domain.evidence_trails.models import (
 )
 from super_scientist.domain.identity import ActorIdentity
 from super_scientist.domain.improvement.models import (
+    AssessmentOutcome,
     EvaluatorAuditRecord,
     SelfImprovementMeasurementRecord,
 )
@@ -58,6 +60,7 @@ from super_scientist.domain.representations.models import TransformationKind
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 from super_scientist.providers.storage.repositories import StorageIntegrityError
 from super_scientist.providers.storage.schema import (
+    behavior_rule_link_versions,
     behavioral_rule_heads,
     behavioral_rule_version_incidents,
     behavioral_rule_version_supersessions,
@@ -80,6 +83,15 @@ from super_scientist.providers.storage.schema import (
     evidence_trail_relations,
     evidence_trail_versions,
     executable_model_specs,
+    handbook_verification_records,
+    harness_budgets,
+    harness_campaign_heads,
+    harness_campaigns,
+    harness_confounds,
+    harness_decisions,
+    harness_metrics,
+    harness_observations,
+    harness_partition_manifests,
     hypothesis_admission_counterexamples,
     hypothesis_admission_decisions,
     hypothesis_admission_models,
@@ -215,8 +227,223 @@ class AdmissionDecisionOutcome(StrEnum):
     ABSTAIN = "ABSTAIN"
 
 
+class HarnessVariant(StrEnum):
+    UNCHANGED_HARNESS_SINGLE_ATTEMPT = "UNCHANGED_HARNESS_SINGLE_ATTEMPT"
+    UNCHANGED_HARNESS_BEST_OF_N = "UNCHANGED_HARNESS_BEST_OF_N"
+    UNCHANGED_HARNESS_RETRY_WITH_FEEDBACK = "UNCHANGED_HARNESS_RETRY_WITH_FEEDBACK"
+    UNCHANGED_HARNESS_TASK_LEVEL_SEARCH = "UNCHANGED_HARNESS_TASK_LEVEL_SEARCH"
+    RANDOM_HARNESS_SEARCH = "RANDOM_HARNESS_SEARCH"
+    SIMPLE_PARAMETER_SEARCH = "SIMPLE_PARAMETER_SEARCH"
+    EVOLVED_HARNESS = "EVOLVED_HARNESS"
+
+
+class HarnessPartition(StrEnum):
+    HARNESS_DISCOVERY_TASKS = "HARNESS_DISCOVERY_TASKS"
+    HARNESS_VALIDATION_TASKS = "HARNESS_VALIDATION_TASKS"
+    HARNESS_TRANSFER_TASKS = "HARNESS_TRANSFER_TASKS"
+    HARNESS_REGRESSION_TASKS = "HARNESS_REGRESSION_TASKS"
+    HARNESS_SAFETY_TASKS = "HARNESS_SAFETY_TASKS"
+
+
+class HarnessDecisionStatus(StrEnum):
+    PROPOSED = "PROPOSED"
+    DISCOVERY_GAIN = "DISCOVERY_GAIN"
+    VALIDATION_GAIN = "VALIDATION_GAIN"
+    TRANSFER_VALIDATED = "TRANSFER_VALIDATED"
+    REGRESSION_DETECTED = "REGRESSION_DETECTED"
+    BENCHMARK_SPECIFIC = "BENCHMARK_SPECIFIC"
+    INCONCLUSIVE = "INCONCLUSIVE"
+    REJECTED = "REJECTED"
+    ADMITTED = "ADMITTED"
+    ROLLED_BACK = "ROLLED_BACK"
+
+
 class _StrictFrozenStorageRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+class MetricValueRecord(_StrictFrozenStorageRecord):
+    metric_id: StableIdentifier
+    value: Decimal
+
+    @field_validator("value")
+    @classmethod
+    def require_finite_value(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("metric value must be finite")
+        return value
+
+
+class BehaviorRuleLinkVersionRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    link_version_id: StableIdentifier
+    behavior_id: StableIdentifier
+    version: int = Field(ge=1)
+    rule_version_id: StableIdentifier
+    manifest_hash: Sha256Hex
+    created_by: StableIdentifier
+    created_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+
+class HandbookVerificationRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    verification_id: StableIdentifier
+    manifest_hash: Sha256Hex
+    repository_commit: Sha256Hex
+    source_hashes: tuple[Sha256Hex, ...] = Field(min_length=1)
+    generated_artifact_hash: Sha256Hex
+    stale_locations: tuple[NonBlankText, ...]
+    missing_symbols: tuple[NonBlankText, ...]
+    outcome: AssessmentOutcome
+    verified_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator("source_hashes")
+    @classmethod
+    def require_unique_source_hashes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _require_unique_references(value, "source_hashes")
+
+
+class HarnessCampaignRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    campaign_id: StableIdentifier
+    version: int = Field(ge=1)
+    variants: tuple[HarnessVariant, ...] = Field(min_length=1)
+    model_id: StableIdentifier
+    model_version: StableIdentifier
+    adapter_id: StableIdentifier | None
+    created_by: StableIdentifier
+    created_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator("variants")
+    @classmethod
+    def require_unique_variants(
+        cls,
+        value: tuple[HarnessVariant, ...],
+    ) -> tuple[HarnessVariant, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("variants must be unique")
+        return value
+
+
+class HarnessPartitionManifestRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    partition_manifest_id: StableIdentifier
+    campaign_id: StableIdentifier
+    partition: HarnessPartition
+    task_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    manifest_hash: Sha256Hex
+    protected_content_hash: Sha256Hex | None
+    created_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator("task_ids")
+    @classmethod
+    def require_unique_task_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _require_unique_references(value, "task_ids")
+
+
+class HarnessBudgetRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    budget_id: StableIdentifier
+    campaign_id: StableIdentifier
+    variant: HarnessVariant
+    budget_hash: Sha256Hex
+    model_id: StableIdentifier
+    model_version: StableIdentifier
+    adapter_id: StableIdentifier | None
+    feedback_mode: StableIdentifier
+    tool_ids: tuple[StableIdentifier, ...]
+    attempts: int = Field(ge=1)
+    token_limit: int = Field(ge=1)
+    reasoning_limit: int = Field(ge=1)
+    evaluator_call_limit: int = Field(ge=1)
+    wall_clock_seconds: Decimal = Field(gt=0)
+    cost_limit: Decimal = Field(ge=0)
+    human_intervention_limit: int = Field(ge=0)
+    created_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator("tool_ids")
+    @classmethod
+    def require_unique_tool_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _require_unique_references(value, "tool_ids")
+
+    @field_validator("wall_clock_seconds", "cost_limit")
+    @classmethod
+    def require_finite_budget(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("budget values must be finite")
+        return value
+
+
+class HarnessObservationRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    observation_id: StableIdentifier
+    campaign_id: StableIdentifier
+    partition_manifest_id: StableIdentifier
+    task_id: StableIdentifier
+    variant: HarnessVariant
+    candidate_output_hash: Sha256Hex
+    attempt: int = Field(ge=1)
+    negative_result: bool
+    observed_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+
+class HarnessMetricRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    result_id: StableIdentifier
+    campaign_id: StableIdentifier
+    task_id: StableIdentifier
+    expected_output_hash: Sha256Hex
+    candidate_output_hash: Sha256Hex
+    checker_id: StableIdentifier
+    checker_version: StableIdentifier
+    outcome: AssessmentOutcome
+    metric_values: tuple[MetricValueRecord, ...]
+    evaluated_at: UtcTimestamp
+
+    @field_validator("metric_values")
+    @classmethod
+    def require_unique_metrics(
+        cls,
+        value: tuple[MetricValueRecord, ...],
+    ) -> tuple[MetricValueRecord, ...]:
+        metric_ids = tuple(item.metric_id for item in value)
+        _require_unique_references(metric_ids, "metric_values")
+        return value
+
+
+class HarnessConfoundRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    confound_id: StableIdentifier
+    campaign_id: StableIdentifier
+    code: StableIdentifier
+    description: NonBlankText
+    affected_variant: HarnessVariant | None
+    recorded_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+
+class HarnessDecisionRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    decision_id: StableIdentifier
+    campaign_id: StableIdentifier
+    status: HarnessDecisionStatus
+    admitted: bool
+    rationale: tuple[NonBlankText, ...] = Field(min_length=1)
+    authority_id: StableIdentifier
+    decided_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @model_validator(mode="after")
+    def require_exact_admission_status(self) -> Self:
+        if self.admitted != (self.status is HarnessDecisionStatus.ADMITTED):
+            raise ValueError("admitted must be true exactly for ADMITTED status")
+        return self
 
 
 def _require_unique_references(value: tuple[str, ...], field_name: str) -> tuple[str, ...]:
@@ -583,6 +810,8 @@ class HypothesisAdmissionDecisionRecord(_StrictFrozenStorageRecord):
 
 __all__ = [
     "AdmissionDecisionOutcome",
+    "BehaviorRuleLinkVersionRecord",
+    "BehaviorRuleLinkVersionRepository",
     "BehavioralRuleHeadRepository",
     "BehavioralRuleVersionRepository",
     "BuiltinSimulatorId",
@@ -604,6 +833,26 @@ __all__ = [
     "EvidenceTrailVersionRepository",
     "ExecutableModelSpecRecord",
     "ExecutableModelSpecRepository",
+    "HandbookVerificationRecord",
+    "HandbookVerificationRepository",
+    "HarnessBudgetRecord",
+    "HarnessBudgetRepository",
+    "HarnessCampaignHeadRepository",
+    "HarnessCampaignRecord",
+    "HarnessCampaignRepository",
+    "HarnessConfoundRecord",
+    "HarnessConfoundRepository",
+    "HarnessDecisionRecord",
+    "HarnessDecisionRepository",
+    "HarnessDecisionStatus",
+    "HarnessMetricRecord",
+    "HarnessMetricRepository",
+    "HarnessObservationRecord",
+    "HarnessObservationRepository",
+    "HarnessPartition",
+    "HarnessPartitionManifestRecord",
+    "HarnessPartitionManifestRepository",
+    "HarnessVariant",
     "HypothesisAdmissionDecisionRecord",
     "HypothesisAdmissionDecisionRepository",
     "HypothesisAdmissionStatus",
@@ -612,6 +861,7 @@ __all__ = [
     "HypothesisRevisionRepository",
     "HypothesisVersionRecord",
     "HypothesisVersionRepository",
+    "MetricValueRecord",
     "ModelExecutionMode",
     "ModelType",
     "PrimitiveEvaluationFrame",
@@ -1058,6 +1308,145 @@ def _canonical_reference_tuple(record: BaseModel, field_name: str) -> tuple[str,
         f"{field_name} must contain unique identifiers",
     )
     return tuple(references)
+
+
+class BehaviorRuleLinkVersionRepository(_AppendOnlyRecordRepository[BehaviorRuleLinkVersionRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=behavior_rule_link_versions,
+            model_type=BehaviorRuleLinkVersionRecord,
+            identifier_field="link_version_id",
+            relationship_fields={
+                "behavior_id": "behavior_id",
+                "version": "version",
+                "rule_version_id": "rule_version_id",
+            },
+            relationship_types={"version": int},
+        )
+
+
+class HandbookVerificationRepository(_AppendOnlyRecordRepository[HandbookVerificationRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=handbook_verification_records,
+            model_type=HandbookVerificationRecord,
+            identifier_field="verification_id",
+            relationship_fields={
+                "manifest_hash": "manifest_hash",
+                "outcome": "outcome",
+            },
+        )
+
+
+class HarnessCampaignRepository(_AppendOnlyRecordRepository[HarnessCampaignRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=harness_campaigns,
+            model_type=HarnessCampaignRecord,
+            identifier_field="campaign_id",
+            relationship_fields={"version": "version"},
+            relationship_types={"version": int},
+        )
+
+
+class HarnessPartitionManifestRepository(
+    _AppendOnlyRecordRepository[HarnessPartitionManifestRecord]
+):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=harness_partition_manifests,
+            model_type=HarnessPartitionManifestRecord,
+            identifier_field="partition_manifest_id",
+            relationship_fields={
+                "campaign_id": "campaign_id",
+                "partition": "partition",
+                "manifest_hash": "manifest_hash",
+                "protected_content_hash": "protected_content_hash",
+            },
+            nullable_relationship_fields={"protected_content_hash"},
+        )
+
+
+class HarnessBudgetRepository(_AppendOnlyRecordRepository[HarnessBudgetRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=harness_budgets,
+            model_type=HarnessBudgetRecord,
+            identifier_field="budget_id",
+            relationship_fields={
+                "campaign_id": "campaign_id",
+                "variant": "variant",
+            },
+        )
+
+
+class HarnessObservationRepository(_AppendOnlyRecordRepository[HarnessObservationRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=harness_observations,
+            model_type=HarnessObservationRecord,
+            identifier_field="observation_id",
+            relationship_fields={
+                "campaign_id": "campaign_id",
+                "partition_manifest_id": "partition_manifest_id",
+                "task_id": "task_id",
+                "variant": "variant",
+                "candidate_output_hash": "candidate_output_hash",
+            },
+        )
+
+
+class HarnessMetricRepository(_AppendOnlyRecordRepository[HarnessMetricRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=harness_metrics,
+            model_type=HarnessMetricRecord,
+            identifier_field="result_id",
+            relationship_fields={
+                "campaign_id": "campaign_id",
+                "task_id": "task_id",
+                "expected_output_hash": "expected_output_hash",
+                "candidate_output_hash": "candidate_output_hash",
+                "checker_id": "checker_id",
+                "checker_version": "checker_version",
+                "outcome": "outcome",
+            },
+        )
+
+
+class HarnessConfoundRepository(_AppendOnlyRecordRepository[HarnessConfoundRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=harness_confounds,
+            model_type=HarnessConfoundRecord,
+            identifier_field="confound_id",
+            relationship_fields={
+                "campaign_id": "campaign_id",
+                "code": "code",
+            },
+        )
+
+
+class HarnessDecisionRepository(_AppendOnlyRecordRepository[HarnessDecisionRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=harness_decisions,
+            model_type=HarnessDecisionRecord,
+            identifier_field="decision_id",
+            relationship_fields={
+                "campaign_id": "campaign_id",
+                "status": "status",
+            },
+        )
 
 
 class RuleIncidentRepository(_AppendOnlyRecordRepository[RuleIncident]):
@@ -1787,6 +2176,83 @@ class ReportSentenceBindingRepository(_AppendOnlyRecordRepository[ReportSentence
                 "claim_version_id": "claim_version_id",
             },
         )
+
+
+class HarnessCampaignHeadRepository:
+    def __init__(self, connection: Connection) -> None:
+        self._connection = connection
+
+    def get(self, campaign_id: str) -> tuple[str, HarnessDecisionStatus] | None:
+        row = (
+            self._connection.execute(
+                select(harness_campaign_heads).where(
+                    harness_campaign_heads.c.campaign_id == campaign_id
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return None if row is None else self._decode_row(dict(row))
+
+    def list_all(self) -> tuple[tuple[str, str, HarnessDecisionStatus], ...]:
+        rows = self._connection.execute(
+            select(harness_campaign_heads).order_by(harness_campaign_heads.c.campaign_id)
+        ).mappings()
+        return tuple(
+            (
+                _stored_string(dict(row), "campaign_id"),
+                *self._decode_row(dict(row)),
+            )
+            for row in rows
+        )
+
+    def set(
+        self,
+        campaign_id: str,
+        decision_id: str,
+        status: HarnessDecisionStatus,
+    ) -> None:
+        validated_campaign_id = STABLE_IDENTIFIER_ADAPTER.validate_python(campaign_id)
+        validated_decision_id = STABLE_IDENTIFIER_ADAPTER.validate_python(decision_id)
+        validated_status = HarnessDecisionStatus(status)
+        decision = HarnessDecisionRepository(self._connection).get(validated_decision_id)
+        if decision is None:
+            raise StorageIntegrityError(
+                "storage integrity error: campaign head decision does not exist"
+            )
+        _require_integrity(
+            decision.campaign_id == validated_campaign_id,
+            "campaign head decision belongs to another campaign",
+        )
+        _require_integrity(
+            decision.status is validated_status,
+            "campaign head status does not match decision",
+        )
+        statement = sqlite_insert(harness_campaign_heads).values(
+            campaign_id=validated_campaign_id,
+            decision_id=validated_decision_id,
+            status=validated_status.value,
+        )
+        self._connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=[harness_campaign_heads.c.campaign_id],
+                set_={
+                    "decision_id": statement.excluded.decision_id,
+                    "status": statement.excluded.status,
+                },
+            )
+        )
+
+    @staticmethod
+    def _decode_row(row: Mapping[str, object]) -> tuple[str, HarnessDecisionStatus]:
+        decision_id = _stored_string(row, "decision_id")
+        try:
+            status = HarnessDecisionStatus(_stored_string(row, "status"))
+        except ValueError as error:
+            raise StorageIntegrityError(
+                "storage integrity error: invalid harness campaign head status"
+            ) from error
+        return decision_id, status
 
 
 class BehavioralRuleHeadRepository:

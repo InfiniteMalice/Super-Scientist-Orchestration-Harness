@@ -136,6 +136,39 @@ MECHANISM_CATEGORIES = (
 EXECUTION_MODES = ("METADATA_ONLY", "BUILTIN_DETERMINISTIC_SIMULATOR")
 BUILTIN_SIMULATORS = ("thermal-chamber-v1", "exponential-decay-v1")
 
+HARNESS_VARIANTS = (
+    "UNCHANGED_HARNESS_SINGLE_ATTEMPT",
+    "UNCHANGED_HARNESS_BEST_OF_N",
+    "UNCHANGED_HARNESS_RETRY_WITH_FEEDBACK",
+    "UNCHANGED_HARNESS_TASK_LEVEL_SEARCH",
+    "RANDOM_HARNESS_SEARCH",
+    "SIMPLE_PARAMETER_SEARCH",
+    "EVOLVED_HARNESS",
+)
+
+HARNESS_PARTITIONS = (
+    "HARNESS_DISCOVERY_TASKS",
+    "HARNESS_VALIDATION_TASKS",
+    "HARNESS_TRANSFER_TASKS",
+    "HARNESS_REGRESSION_TASKS",
+    "HARNESS_SAFETY_TASKS",
+)
+
+HARNESS_DECISION_STATUSES = (
+    "PROPOSED",
+    "DISCOVERY_GAIN",
+    "VALIDATION_GAIN",
+    "TRANSFER_VALIDATED",
+    "REGRESSION_DETECTED",
+    "BENCHMARK_SPECIFIC",
+    "INCONCLUSIVE",
+    "REJECTED",
+    "ADMITTED",
+    "ROLLED_BACK",
+)
+
+ASSESSMENT_OUTCOMES = ("PASSED", "FAILED", "INCONCLUSIVE", "ABSTAINED")
+
 
 research_runs = Table(
     "research_runs",
@@ -1567,4 +1600,236 @@ hypothesis_heads = Table(
         ],
     ),
     CheckConstraint("version >= 1", name="ck_hypothesis_heads_version"),
+)
+
+behavior_rule_link_versions = Table(
+    "behavior_rule_link_versions",
+    metadata,
+    Column("link_version_id", String(160), primary_key=True),
+    Column("behavior_id", String(128), nullable=False),
+    Column("version", Integer, nullable=False),
+    Column(
+        "rule_version_id",
+        String(192),
+        ForeignKey("behavioral_rule_versions.rule_version_id"),
+        nullable=False,
+    ),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    UniqueConstraint("behavior_id", "version", name="uq_behavior_rule_link_version"),
+    CheckConstraint("version >= 1", name="ck_behavior_rule_link_versions_version"),
+    _content_hash_constraint("ck_behavior_rule_link_versions_content_hash"),
+)
+
+handbook_verification_records = Table(
+    "handbook_verification_records",
+    metadata,
+    Column("verification_id", String(160), primary_key=True),
+    Column("manifest_hash", String(64), nullable=False),
+    Column("outcome", String(24), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    _optional_hash_constraint("manifest_hash", "ck_handbook_verification_manifest_hash"),
+    CheckConstraint(
+        f"outcome IN ({_quoted(ASSESSMENT_OUTCOMES)})",
+        name="ck_handbook_verification_outcome",
+    ),
+    _content_hash_constraint("ck_handbook_verification_records_content_hash"),
+)
+
+harness_campaigns = Table(
+    "harness_campaigns",
+    metadata,
+    Column("campaign_id", String(160), primary_key=True),
+    Column("version", Integer, nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    CheckConstraint("version >= 1", name="ck_harness_campaigns_version"),
+    _content_hash_constraint("ck_harness_campaigns_content_hash"),
+)
+
+harness_partition_manifests = Table(
+    "harness_partition_manifests",
+    metadata,
+    Column("partition_manifest_id", String(160), primary_key=True),
+    Column(
+        "campaign_id",
+        String(160),
+        ForeignKey("harness_campaigns.campaign_id"),
+        nullable=False,
+    ),
+    Column("partition", String(48), nullable=False),
+    Column("manifest_hash", String(64), nullable=False),
+    Column("protected_content_hash", String(64), nullable=True),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    UniqueConstraint(
+        "partition_manifest_id",
+        "campaign_id",
+        name="uq_harness_partition_campaign_scope",
+    ),
+    UniqueConstraint("campaign_id", "partition", name="uq_harness_campaign_partition"),
+    CheckConstraint(
+        f"partition IN ({_quoted(HARNESS_PARTITIONS)})",
+        name="ck_harness_partition_manifests_partition",
+    ),
+    _optional_hash_constraint(
+        "manifest_hash",
+        "ck_harness_partition_manifests_manifest_hash",
+    ),
+    _optional_hash_constraint(
+        "protected_content_hash",
+        "ck_harness_partition_manifests_protected_hash",
+    ),
+    _content_hash_constraint("ck_harness_partition_manifests_content_hash"),
+)
+
+harness_budgets = Table(
+    "harness_budgets",
+    metadata,
+    Column("budget_id", String(160), primary_key=True),
+    Column(
+        "campaign_id",
+        String(160),
+        ForeignKey("harness_campaigns.campaign_id"),
+        nullable=False,
+    ),
+    Column("variant", String(64), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    UniqueConstraint("campaign_id", "variant", name="uq_harness_campaign_budget_variant"),
+    CheckConstraint(
+        f"variant IN ({_quoted(HARNESS_VARIANTS)})",
+        name="ck_harness_budgets_variant",
+    ),
+    _content_hash_constraint("ck_harness_budgets_content_hash"),
+)
+
+harness_observations = Table(
+    "harness_observations",
+    metadata,
+    Column("observation_id", String(160), primary_key=True),
+    Column("campaign_id", String(160), nullable=False),
+    Column("partition_manifest_id", String(160), nullable=False),
+    Column("task_id", String(160), nullable=False),
+    Column("variant", String(64), nullable=False),
+    Column("candidate_output_hash", String(64), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["partition_manifest_id", "campaign_id"],
+        [
+            "harness_partition_manifests.partition_manifest_id",
+            "harness_partition_manifests.campaign_id",
+        ],
+    ),
+    CheckConstraint(
+        f"variant IN ({_quoted(HARNESS_VARIANTS)})",
+        name="ck_harness_observations_variant",
+    ),
+    _optional_hash_constraint(
+        "candidate_output_hash",
+        "ck_harness_observations_candidate_output_hash",
+    ),
+    _content_hash_constraint("ck_harness_observations_content_hash"),
+)
+
+harness_metrics = Table(
+    "harness_metrics",
+    metadata,
+    Column("result_id", String(160), primary_key=True),
+    Column(
+        "campaign_id",
+        String(160),
+        ForeignKey("harness_campaigns.campaign_id"),
+        nullable=False,
+    ),
+    Column("task_id", String(160), nullable=False),
+    Column("expected_output_hash", String(64), nullable=False),
+    Column("candidate_output_hash", String(64), nullable=False),
+    Column("checker_id", String(160), nullable=False),
+    Column("checker_version", String(160), nullable=False),
+    Column("outcome", String(24), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    _optional_hash_constraint(
+        "expected_output_hash",
+        "ck_harness_metrics_expected_output_hash",
+    ),
+    _optional_hash_constraint(
+        "candidate_output_hash",
+        "ck_harness_metrics_candidate_output_hash",
+    ),
+    CheckConstraint(
+        f"outcome IN ({_quoted(ASSESSMENT_OUTCOMES)})",
+        name="ck_harness_metrics_outcome",
+    ),
+    _content_hash_constraint("ck_harness_metrics_content_hash"),
+)
+
+harness_confounds = Table(
+    "harness_confounds",
+    metadata,
+    Column("confound_id", String(160), primary_key=True),
+    Column(
+        "campaign_id",
+        String(160),
+        ForeignKey("harness_campaigns.campaign_id"),
+        nullable=False,
+    ),
+    Column("code", String(128), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    _content_hash_constraint("ck_harness_confounds_content_hash"),
+)
+
+harness_decisions = Table(
+    "harness_decisions",
+    metadata,
+    Column("decision_id", String(160), primary_key=True),
+    Column(
+        "campaign_id",
+        String(160),
+        ForeignKey("harness_campaigns.campaign_id"),
+        nullable=False,
+    ),
+    Column("status", String(40), nullable=False),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    UniqueConstraint(
+        "decision_id",
+        "campaign_id",
+        "status",
+        name="uq_harness_decision_head_target",
+    ),
+    CheckConstraint(
+        f"status IN ({_quoted(HARNESS_DECISION_STATUSES)})",
+        name="ck_harness_decisions_status",
+    ),
+    _content_hash_constraint("ck_harness_decisions_content_hash"),
+)
+
+harness_campaign_heads = Table(
+    "harness_campaign_heads",
+    metadata,
+    Column("campaign_id", String(160), primary_key=True),
+    Column("decision_id", String(160), nullable=False),
+    Column("status", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["decision_id", "campaign_id", "status"],
+        [
+            "harness_decisions.decision_id",
+            "harness_decisions.campaign_id",
+            "harness_decisions.status",
+        ],
+    ),
 )
