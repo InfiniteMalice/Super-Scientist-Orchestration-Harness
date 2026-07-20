@@ -2,199 +2,178 @@
 
 ## Outcome
 
-Task 13 was implemented in `84ca6f7` (`feat: separate protected harness evaluation
-storage`) on base `ca567ba`. Review hardening is delivered as a separate follow-up
-commit with the required subject `fix: enforce protected storage capability
-boundaries`.
+Task 13 was introduced in `84ca6f7` (`feat: separate protected harness evaluation
+storage`) and first hardened in `287b796` (`fix: enforce protected storage capability
+boundaries`). A second, separate review-reconciliation commit uses the required subject
+`fix: reconcile protected worker transactions and lifecycle`.
 
-The original feature adds strict append-only handbook and harness-evaluation history
-to the main database while placing held-out answer bytes and private metadata beneath
-a separately supplied protected filesystem root. The review fix removes transitive
-storage authority from every public role capability, uses strict non-pickle IPC, adds
-deterministic worker lifecycle behavior, and accepts real Git SHA-1 or SHA-256 object
-identifiers for handbook verification records.
+The final design keeps protected answers in a physically separate store and sends only
+strict typed hashes, aggregates, and checker outcomes into ordinary campaign storage.
+It now also preserves the coordinator's exact transaction, serializes every worker
+exchange, poisons desynchronized channels, releases process resources deterministically,
+and converts expected protected-store failures into fixed non-leaking responses.
 
-## Review findings and test-driven evidence
+## Review reconciliation and RED evidence
 
-The review regressions reproduced all reported authority leaks before implementation:
+The second review found four related defects in the first worker-based hardening:
 
-- the answer reader graph reached `._reader.__self__ -> ProtectedEvaluationStore`;
-- the integrity auditor graph reached `._auditor.__self__ ->
-  ProtectedEvaluationStore`;
-- the result gateway graph reached `._repository -> HarnessMetricRepository` and its
-  underlying SQLAlchemy connection; and
-- the repository's actual 40-character `git rev-parse HEAD` value failed the former
-  SHA-256-only handbook contract.
+1. The result gateway ignored its supplied SQLAlchemy connection, opened a competing
+   SQLite writer in a child process, could not see a campaign created in the same unit
+   of work, and made result persistence non-atomic with coordinator commit or rollback.
+2. Shared capabilities incremented request IDs and performed send/poll/receive without
+   one exchange-level lock. Concurrent callers could consume one another's responses,
+   and a timed-out or mismatched response did not permanently invalidate the channel.
+3. Close joined or terminated a worker without calling `BaseProcess.close()`, while the
+   owner store strongly retained closed wrappers. Concurrent close could leave process
+   handles and stale capability state behind.
+4. Expected SQLAlchemy, SQLite, and filesystem failures could escape a role worker,
+   produce an inherited child traceback, and collapse a typed integrity failure into
+   `CAPABILITY_WORKER_UNAVAILABLE`.
 
-That focused RED run selected 5 tests and failed all 5 in 5.40 seconds. A second
-worker-behavior RED run failed 5 of 5 tests in 6.02 seconds because role workers,
-typed failures, close semantics, and operation allowlists did not yet exist.
+The focused reviewer command selected 20 cases. Before implementation it reproduced
+the report with **17 failed and 3 passed in 159.06 seconds**. Failures included real
+`DatabaseUnitOfWork` commit and rollback cases, 32-thread reader and gateway races,
+timeout and request-ID desynchronization reuse, retained/partially closed workers, and
+a structurally corrupt protected SQLite database leaking a child traceback.
 
-While hardening IPC, an adversarial pickle probe proved that
-`multiprocessing.Connection.send`/`recv` could deserialize attacker-controlled
-objects before an operation allowlist ran. The RED probe caused its marker side
-effect. IPC was then changed to size-limited `send_bytes`/`recv_bytes` frames with
-strict Pydantic JSON request and response envelopes. The strict-JSON adversarial
-slice passed 4 of 4 tests in 12.85 seconds, including proof that the same malicious
-pickle bytes are rejected without execution and that the worker remains usable.
+After implementation the identical selection passed **20 of 20** (18 other tests
+deselected) in 63.10 seconds. The full protected-evaluation integration file then passed
+38 of 38 in 94.95 seconds.
 
-A final lifecycle RED test expected `CAPABILITY_WORKER_UNAVAILABLE` for a live worker
-that never returns a frame but received `INVALID_WORKER_RESPONSE`. Finite 10-second
-response polling made that test GREEN in 2.38 seconds and prevents an unbounded close
-wait. Bandit then identified three low-severity production assertions; each was
-replaced by an equivalent explicit fail-closed runtime guard. The focused post-change
-slice passed 4 of 4 tests, and the complete protected-storage file passed 26 of 26.
+## Transaction and authority model
 
-## Delivered ordinary storage
+Evaluator validation and coordinator persistence are separate authorities:
 
-Migration `0006_handbook_and_harness_evaluation` adds these authoritative append-only
-main-database tables:
+- `ProtectedResultValidator` is a spawned evaluator-facing capability. It accepts
+  strict JSON, reconstructs a `ProtectedCheckerResult`, and returns only that validated
+  DTO. It owns no SQLAlchemy object, database URL, protected path, or repository.
+- `ProtectedResultGateway` remains the coordinator-facing persistence protocol. Its
+  implementation is a local adapter over the caller's supplied active SQLAlchemy
+  connection. It uses repositories bound to that exact connection and never creates
+  an engine, connection, transaction, or child process.
+- The local gateway is intentionally transparent about its main-database authority and
+  must never be inserted into evaluator or candidate dependency graphs. Recursive
+  graph tests prove the evaluator validator has no database/gateway authority and the
+  coordinator adapter contains the exact supplied connection.
+- Gateway `close()` closes only the adapter. The coordinator continues to own commit,
+  rollback, and connection lifecycle through `DatabaseUnitOfWork`.
 
-1. `behavior_rule_link_versions`
-2. `handbook_verification_records`
-3. `harness_campaigns`
-4. `harness_partition_manifests`
-5. `harness_budgets`
-6. `harness_observations`
-7. `harness_metrics`
-8. `harness_confounds`
-9. `harness_decisions`
+Consequently a campaign created earlier in the same unit of work is visible to the
+gateway, campaign/result writes commit together, and an exception rolls both back.
+There is no second SQLite writer and no independently durable protected result.
 
-Every authoritative table has update- and delete-rejecting triggers. The mutable
-`harness_campaign_heads` table is a rebuildable projection whose campaign, decision,
-and status identity is constrained to an exact retained decision.
+## Worker concurrency and lifecycle
 
-The schema and strict frozen records also enforce:
+Each process capability owns a re-entrant lock around the complete request-number,
+send, poll, and receive exchange. A 32-thread shared-reader regression proves response
+correlation, while a 32-thread coordinator-gateway regression proves serialized use of
+the single supplied connection.
 
-- behavior links reference immutable behavioral-rule versions;
-- every harness child references its campaign;
-- observations reference a partition manifest from the same campaign;
-- ordered tuple fields and relationship identities retain canonical JSON;
-- content hashes are lowercase SHA-256 values;
-- numeric metrics and budgets are finite before storage; and
-- decisions admit a campaign exactly when their status is `ADMITTED`.
+Timeout, EOF, transport failure, malformed response, or request-ID mismatch permanently
+poisons a channel. Later calls return `CAPABILITY_CHANNEL_UNUSABLE`; they cannot consume
+a delayed frame as if it belonged to a newer request. Typed operation failures from a
+healthy worker do not poison the channel.
 
-`HandbookVerificationRecord.repository_commit` now uses `GitObjectId`, a strict
-lowercase hexadecimal contract accepting the two Git object formats: 40 characters
-for SHA-1 repositories and 64 for SHA-256 repositories. Tests validate the actual
-repository HEAD rather than a fabricated value. This is a canonical-JSON record
-contract change only; no migration or relational column change is required.
+Close is idempotent and protected by the same lock. It sends a cooperative close only
+while the channel is usable, closes the transport, joins or terminates and joins the
+child, and finally calls `BaseProcess.close()`. Portable tests check the closed process
+state and weak capability registry; Windows additionally checks aggregate process-handle
+counts. Concurrent 32-caller close is deterministic. Stores weakly track live role
+capabilities so already closed or abandoned wrapper objects are not retained indefinitely.
 
-## Protected capability boundary
+## Protected worker error behavior
 
-`ProtectedEvaluationStore` owns `protected.sqlite3` plus a content-addressed artifact
-directory beneath its private root. Its metadata table stores only task identity,
-expected-output hash, byte count, and creation time and is append only. Artifact
-reads revalidate byte length and SHA-256 content. Replaying identical task content is
-idempotent; rebinding a task identity to different bytes is rejected.
+Reader and auditor workers catch expected SQLAlchemy/database, storage-integrity, and
+filesystem failures at their process boundary. The reader returns fixed typed errors;
+the auditor returns a fixed integrity finding when it can safely continue. Neither
+response includes exception text, SQL, identifiers from rejected payloads, filesystem
+paths, protected bytes, or reversible answer references.
 
-Every public capability now owns only a duplex IPC endpoint and a spawned process
-handle:
+Regressions cover a structurally corrupt SQLite schema plus missing and non-regular
+artifact paths. They assert no `Traceback`, SQLite diagnostic, protected-root path, or
+secret reaches captured child output, exception messages, or serialized reports.
 
-- the reader worker permits only `READ_EXPECTED_OUTPUT` and `CLOSE`;
-- the auditor worker permits only `VERIFY_INTEGRITY` and `CLOSE`; and
-- the main-database gateway worker permits only `APPEND_RESULT` and `CLOSE`.
+## Existing Task 13 storage retained
 
-Recursive adversarial graph traversal covers ordinary attributes, all inherited
-slots, bound-method `__self__`, closures, defaults, partials, mappings, sequences,
-and nested repository state. Reader and auditor graphs expose no full store, writer,
-factory, path, engine, connection, repository, or cross-role operation. The gateway
-graph exposes no database URL/path, SQLAlchemy engine/connection, or unrestricted
-repository. Raw IPC probes verify the same role allowlists inside each worker.
+Migration `0006_handbook_and_harness_evaluation` still provides append-only behavior
+links, handbook verification, campaigns, partition manifests, budgets, observations,
+metrics, confounds, and decisions. `ProtectedEvaluationStore` still owns its separate
+`protected.sqlite3` database and content-addressed artifact root. Protected metadata
+contains task identity, SHA-256, byte count, and creation time, never answer bytes.
 
-Messages are strict, frozen JSON models with exact fields, correlated request IDs,
-fixed safe error codes/messages, a 64 MiB frame ceiling, and no pickle decoding.
-Reader bytes cross as validated Base64. Auditor reports and checker results are
-revalidated from canonical JSON in their receiving process. Corruption, missing
-outputs, invalid checker results, duplicate appends, worker loss, malformed frames,
-and startup failure return typed errors without paths, identifiers from rejected
-payloads, answer data, or underlying exception text.
-
-Capabilities have idempotent `close()`. The owner store closes all outstanding role
-capabilities before disposing its engine. Workers receive a cooperative close,
-responses have a finite timeout, processes are joined, and an unresponsive process
-is terminated and joined. Calls after close fail with `CAPABILITY_CLOSED`.
-
-The gateway uses a separate synchronous main-database worker and therefore sees only
-committed state. A referenced campaign must be committed before `append_result`;
-uncommitted caller state fails with `REFERENCED_CAMPAIGN_UNAVAILABLE`. This deliberate
-tradeoff preserves the capability boundary and makes the append independently
-durable, but it means callers cannot atomically create a campaign and append its
-protected result inside one uncommitted caller transaction.
+Strict size-limited JSON framing, fixed operation allowlists, base64 reader responses,
+append-only triggers, canonical records, and Git SHA-1/SHA-256 object-ID support remain
+unchanged. No migration or relational schema adjustment was needed for this review fix.
 
 ## Verification inventory
 
-Focused and migration gates:
+Focused and migration gates on the final behavior:
 
-- initial post-review protected-storage file plus both real-repository Git regressions:
-  18 passed in 38.89 seconds;
-- final Task 13 focused slice: 39 passed in 72.18 seconds;
-- complete migration chain from 0001 through 0006: 49 passed in 54.59 seconds; and
-- final complete protected-storage file: 26 passed in 106.13 seconds.
+- reviewer regression selection: 20 passed, 18 deselected in 63.10 seconds;
+- complete protected-evaluation file: 38 passed in 94.95 seconds;
+- protected coverage run: 38 passed in 148.25 seconds;
+- exact Task 13 slice: 51 passed in 142.10 seconds; and
+- complete migration chain from 0001 through 0006: 49 passed in 62.67 seconds.
 
-Fresh non-overlapping inventory on the timeout-finalized source tree:
+The coverage run measured 92.17% branch-aware coverage for
+`protected_evaluation.py`: 508 statements and 92 branches, above the configured 90%
+threshold. It also exposed three test-owned `sqlite3.Connection` resource warnings;
+those connections now use explicit closing semantics. The five affected
+corruption/authority tests pass with `ResourceWarning` promoted to an error.
 
-- unit, adversarial, end-to-end, and evaluation: 792 passed in 60.58 seconds;
-- application and CLI integration: 315 passed in 1,188.54 seconds;
-- storage integration: 137 passed and 3 skipped in 383.71 seconds; and
-- property tests: 213 passed in 752.45 seconds.
+Fresh non-overlapping repository inventory on the frozen implementation tree:
 
-Combined result: **1,457 passed, 3 skipped**. The only later production adjustment
-was the assertion-to-explicit-guard security cleanup described above. Its directly
-affected protected-storage file, focused regression slice, Ruff, mypy, Bandit, and
-coverage gates were all rerun after that adjustment.
+- unit, adversarial, end-to-end, and evaluation: 792 passed in 59.50 seconds;
+- application and CLI integration: 315 passed in 1,206.86 seconds;
+- storage integration: 149 passed and 3 skipped in 453.35 seconds; and
+- property tests: 213 passed in 784.31 seconds.
 
-Branch coverage for `protected_evaluation.py` is 92.42% over 455 statements and 86
-branches. The coverage command enforced and passed the repository's configured 90%
-threshold.
+Combined result: **1,469 passed, 3 skipped**.
 
 ## Release gates
 
-- Changed-file Ruff lint and formatting: passed for all 6 changed Python files.
+- Repository Ruff lint: passed.
+- Changed-file Ruff formatting: passed.
 - Strict mypy: passed across 81 source files.
-- Bandit recursive source scan: passed; only the repository's pre-existing B105
-  enum-value false positive was suppressed.
-- Dependency audit: no known vulnerabilities; the editable unpublished local
-  distribution was skipped as expected. Python UTF-8 mode was enabled for the
-  non-ASCII virtual-environment path on Windows.
-- Isolated sdist and wheel build: passed.
+- Bandit recursive source scan: passed with only the repository's established B105
+  enum-value suppression.
+- Dependency audit: no known vulnerabilities; the unpublished local distribution was
+  skipped as expected.
+- Fresh isolated sdist and wheel build: passed.
 - Twine checks: passed for both artifacts.
-- Wheel contents: include migration 0006, `protected_evaluation.py`,
-  `domain_records.py`, and the Git object-ID primitive.
-- Fresh short-path wheel installation: import resolved from the installed wheel,
-  `scientist-harness --help` passed, and a spawned installed-wheel answer-reader
-  worker completed a strict-JSON round trip.
+- Wheel inspection: 94 entries and the wheel contains migration 0006,
+  `protected_evaluation.py`, and `domain_records.py`.
+- Fresh short-path wheel install: import resolved from
+  `C:\c13smoke\Lib\site-packages`; a 32-thread spawned answer reader, spawned result
+  validator, real-unit-of-work commit and rollback, and installed
+  `scientist-harness --help` all passed.
 
-The repository-wide Ruff format check still identifies 18 pre-existing unrelated
-files. They were not reformatted or included in this fix; every changed Python file
-is format-clean.
-
-## Files in the review fix
+## Files in this reconciliation
 
 Modified:
 
-- `src/super_scientist/domain/primitives.py`
-- `src/super_scientist/providers/storage/domain_records.py`
 - `src/super_scientist/providers/storage/protected_evaluation.py`
 - `tests/integration/storage/test_protected_evaluation_store.py`
-- `tests/property/test_harness_eval_append_only.py`
-- `tests/unit/domain/test_primitives.py`
+- `docs/superpowers/plans/2026-07-18-governed-adaptation-and-harness-evolution.md`
+- `docs/superpowers/specs/2026-07-18-governed-adaptation-and-harness-evolution-design.md`
 - `.superpowers/sdd/task-13-report.md`
 
+Added:
+
+- `docs/adr/0001-protected-evaluation-transaction-and-worker-lifecycle.md`
+
 No migration, dependency, CI, CLI, network, dynamic-import, or runtime plugin surface
-was added by the review fix.
+was added by this reconciliation.
 
 ## Residual boundary
 
 Spawned workers enforce object-capability and protocol separation inside the Python
-application, but they run under the same operating-system account. Any process with
-OS-level authority over the protected root can still read those files. Deployments
-must place that root behind the separately privileged evaluation role; OS sandboxing
-or separate service identities are outside Task 13.
+application, but they run under the same operating-system account. A process with
+OS-level authority over the protected root can still read those files. Deployment must
+place that root behind the separately privileged evaluation role; OS sandboxing or
+separate service identities remain outside Task 13.
 
 Ordinary storage intentionally retains protected-content hashes. Those hashes can
-reveal equality between records but cannot reconstruct answer bytes.
-
-Task 13 remains a storage and capability-boundary change. It does not implement Task
-14 campaign execution, evaluator object graphs, fairness comparisons, admission,
-promotion, or rollback orchestration.
+reveal equality between records but cannot reconstruct answer bytes. Task 13 remains a
+storage and capability-boundary change; campaign execution, fairness comparison,
+admission, promotion, and rollback orchestration remain later tasks.

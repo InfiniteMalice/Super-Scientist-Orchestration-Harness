@@ -1254,7 +1254,7 @@ git commit -m "feat: add safe hypothesis revision loop"
 
 **Interfaces:**
 - Consumes: 0005 schema, artifact-store containment rules, and repository base.
-- Produces: ordinary repositories for behavior links, handbook verification, campaigns, partitions, budgets, candidate observations, metrics, confounds, and decisions; separately produces `ProtectedEvaluationStore`, `ProtectedAnswerReader`, `ProtectedIntegrityAuditor`, and `ProtectedResultGateway`.
+- Produces: ordinary repositories for behavior links, handbook verification, campaigns, partitions, budgets, candidate observations, metrics, confounds, and decisions; separately produces `ProtectedEvaluationStore`, `ProtectedAnswerReader`, `ProtectedIntegrityAuditor`, evaluator-facing `ProtectedResultValidator`, and coordinator-facing `ProtectedResultGateway`.
 
 - [ ] **Step 1: Write migration and physical-separation tests**
 
@@ -1311,13 +1311,25 @@ class ProtectedResultGateway(Protocol):
     def append_result(self, result: ProtectedCheckerResult) -> None: ...
 ```
 
-No main-database object owns the protected engine, connection, artifact root, answer reader, or reversible reference. The gateway validates the result model and transfers only typed hashes, aggregates, and checker outcomes.
+No main-database object owns the protected engine, protected connection, artifact root,
+answer reader, or reversible reference. The evaluator-facing result validator is a
+spawned capability with no database authority and returns only a strictly validated
+`ProtectedCheckerResult`. The result gateway is a coordinator-local adapter over the
+caller's supplied active `DatabaseUnitOfWork` connection; it appends through that exact
+transaction so campaign creation, result persistence, commit, and rollback remain
+atomic and no second SQLite writer is opened. Because that adapter necessarily owns a
+main-database connection and repositories, it must not be placed in evaluator or
+candidate dependency graphs.
 
 - [ ] **Step 4: Verify migration chain, triggers, object graphs, and store integrity**
 
 Run: `python -m pytest tests/integration/storage/test_migrations.py tests/integration/storage/test_migration_0006.py tests/integration/storage/test_protected_evaluation_store.py tests/property/test_harness_eval_append_only.py -v`
 
-Expected: PASS; protected corruption is detected by the separately privileged auditor without exposing answer bytes.
+Expected: PASS; protected corruption is detected by the separately privileged auditor
+without exposing answer bytes. Real-unit-of-work tests also prove same-transaction
+campaign visibility and rollback, shared worker requests are serialized and poison on
+protocol loss, concurrent close releases process resources, and expected database or
+filesystem failures return fixed non-leaking errors/findings.
 
 - [ ] **Step 5: Commit migration 0006 and protected storage**
 

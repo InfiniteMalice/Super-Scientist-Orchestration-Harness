@@ -886,16 +886,23 @@ Capability-scoped roles enforce the boundary:
 - the campaign coordinator can write public manifests but cannot read protected data;
 - an evaluator executor receives read-only protected answers, candidate outputs, and a
   fixed checker configuration, but cannot invoke or import candidate code;
-- a result gateway may append typed aggregate/checker results to the main transaction
-  but cannot transmit protected bytes or object references; and
+- an evaluator-facing spawned result validator has no database authority and may
+  return only a strict `ProtectedCheckerResult` DTO containing typed hashes,
+  aggregates, and checker outcomes;
+- a coordinator-local result gateway may append that DTO only through its supplied
+  active main-database unit-of-work connection, is never placed in evaluator or
+  candidate graphs, and cannot transmit protected bytes or reversible references; and
 - decision authorities receive admitted result records without expected outputs, while
   a separately privileged integrity auditor may verify protected-store hashes.
 
 Deterministic adversarial tests inspect dependency object graphs and exercise
 serialization, exceptions, logs, audit events, exports, and indirect-reference fields to
 prove candidate and coordinator services cannot fetch, construct, infer through object
-references, or leak protected answers. Evaluator tests prove that only the result
-gateway crosses stores and that its schema cannot contain answer material.
+references, or leak protected answers. Evaluator tests prove that only the validated
+result DTO crosses the worker boundary and that its schema cannot contain answer
+material. Coordinator tests prove the local gateway uses the exact supplied
+transaction, including same-transaction campaign visibility and atomic rollback,
+without opening a competing SQLite writer.
 
 ### 20.3 Results and decisions
 

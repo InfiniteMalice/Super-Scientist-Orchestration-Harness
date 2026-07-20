@@ -3,12 +3,15 @@ from __future__ import annotations
 import base64
 import stat
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 from decimal import Decimal
 from multiprocessing import get_context
 from multiprocessing.process import BaseProcess
 from pathlib import Path
+from threading import RLock
 from typing import Literal, Protocol, Self, runtime_checkable
+from weakref import WeakSet
 
 from pydantic import (
     BaseModel,
@@ -165,6 +168,10 @@ class ProtectedIntegrityReport(_StrictFrozenModel):
     findings: tuple[ProtectedIntegrityFinding, ...]
 
 
+class _ProtectedOutputUnavailable(ValueError):
+    pass
+
+
 @runtime_checkable
 class ProtectedAnswerReader(Protocol):
     def read_expected_output(self, task_id: str) -> bytes: ...
@@ -175,6 +182,13 @@ class ProtectedAnswerReader(Protocol):
 @runtime_checkable
 class ProtectedIntegrityAuditor(Protocol):
     def verify_integrity(self) -> ProtectedIntegrityReport: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class ProtectedResultValidator(Protocol):
+    def validate_result(self, result: ProtectedCheckerResult) -> ProtectedCheckerResult: ...
 
     def close(self) -> None: ...
 
@@ -199,7 +213,7 @@ class _ProcessTransport(Protocol):
 class ProtectedEvaluationStore:
     """Own protected metadata and bytes outside the ordinary repository graph."""
 
-    __slots__ = ("_artifacts", "_engine", "_role_capabilities", "_root")
+    __slots__ = ("_artifacts", "_engine", "_lock", "_role_capabilities", "_root")
 
     def __init__(self, protected_root: Path) -> None:
         root = _prepare_private_root(protected_root)
@@ -225,8 +239,9 @@ class ProtectedEvaluationStore:
             raise
         self._engine: Engine | None = engine
         self._artifacts: FileArtifactStore | None = artifacts
+        self._lock = RLock()
         self._root = root
-        self._role_capabilities: list[_ProcessCapability] = []
+        self._role_capabilities: WeakSet[_ProcessCapability] = WeakSet()
 
     def add_expected_output(
         self,
@@ -274,25 +289,28 @@ class ProtectedEvaluationStore:
         )
 
     def answer_reader(self) -> ProtectedAnswerReader:
-        self._resources()
-        capability = _start_answer_reader_capability(self._root)
-        self._role_capabilities.append(capability)
-        return capability
+        with self._lock:
+            self._resources()
+            capability = _start_answer_reader_capability(self._root)
+            self._role_capabilities.add(capability)
+            return capability
 
     def integrity_auditor(self) -> ProtectedIntegrityAuditor:
-        self._resources()
-        capability = _start_integrity_auditor_capability(self._root)
-        self._role_capabilities.append(capability)
-        return capability
+        with self._lock:
+            self._resources()
+            capability = _start_integrity_auditor_capability(self._root)
+            self._role_capabilities.add(capability)
+            return capability
 
     def close(self) -> None:
-        capabilities = tuple(self._role_capabilities)
-        self._role_capabilities.clear()
+        with self._lock:
+            capabilities = tuple(self._role_capabilities)
+            self._role_capabilities.clear()
+            engine = self._engine
+            self._engine = None
+            self._artifacts = None
         for capability in capabilities:
             capability.close()
-        engine = self._engine
-        self._engine = None
-        self._artifacts = None
         if engine is not None:
             engine.dispose()
 
@@ -303,37 +321,76 @@ class ProtectedEvaluationStore:
 
 
 class _ProcessCapability:
-    __slots__ = ("_closed", "_process", "_request_number", "_transport")
+    __slots__ = (
+        "__weakref__",
+        "_channel_usable",
+        "_closed",
+        "_lock",
+        "_process",
+        "_request_number",
+        "_transport",
+    )
 
     def __init__(self, transport: _ProcessTransport, process: BaseProcess) -> None:
         self._transport = transport
         self._process = process
+        self._lock = RLock()
+        self._channel_usable = True
         self._closed = False
         self._request_number = 0
-        self._receive_response("worker-startup")
+        try:
+            self._receive_response("worker-startup")
+        except ProtectedCapabilityError:
+            self._channel_usable = False
+            raise
 
     def close(self) -> None:
-        if self._closed:
-            return
-        try:
-            if self._process.is_alive():
-                self._request("CLOSE", None)
-        except (EOFError, OSError, ProtectedCapabilityError):
-            pass
-        finally:
-            self._closed = True
-            self._transport.close()
-            self._process.join(_WORKER_JOIN_TIMEOUT_SECONDS)
-            if self._process.is_alive():
-                self._process.terminate()
+        with self._lock:
+            if self._closed:
+                return
+            try:
+                if self._channel_usable and self._process.is_alive():
+                    try:
+                        self._exchange("CLOSE", None)
+                    except (EOFError, OSError, ProtectedCapabilityError):
+                        self._channel_usable = False
+            finally:
+                self._closed = True
+                self._channel_usable = False
+                with suppress(OSError):
+                    self._transport.close()
                 self._process.join(_WORKER_JOIN_TIMEOUT_SECONDS)
+                if self._process.is_alive():
+                    self._process.terminate()
+                    self._process.join(_WORKER_JOIN_TIMEOUT_SECONDS)
+                self._process.close()
 
     def _request(self, operation: str, payload: object | None) -> object | None:
-        if self._closed:
-            raise ProtectedCapabilityError(
-                "CAPABILITY_CLOSED",
-                "protected capability is closed",
-            )
+        with self._lock:
+            if self._closed:
+                raise ProtectedCapabilityError(
+                    "CAPABILITY_CLOSED",
+                    "protected capability is closed",
+                )
+            if not self._channel_usable:
+                raise ProtectedCapabilityError(
+                    "CAPABILITY_CHANNEL_UNUSABLE",
+                    "protected capability channel is unusable",
+                )
+            try:
+                return self._exchange(operation, payload)
+            except ProtectedCapabilityError as error:
+                if error.code in {"CAPABILITY_WORKER_UNAVAILABLE", "INVALID_WORKER_RESPONSE"}:
+                    self._channel_usable = False
+                raise
+            except (EOFError, OSError) as error:
+                self._channel_usable = False
+                raise ProtectedCapabilityError(
+                    "CAPABILITY_WORKER_UNAVAILABLE",
+                    "protected capability worker is unavailable",
+                ) from error
+
+    def _exchange(self, operation: str, payload: object | None) -> object | None:
         self._request_number += 1
         request_id = f"request-{self._request_number}"
         request = _WorkerRequest(
@@ -341,14 +398,8 @@ class _ProcessCapability:
             operation=operation,
             payload=payload,
         )
-        try:
-            self._transport.send_bytes(request.model_dump_json().encode("utf-8"))
-            return self._receive_response(request_id)
-        except (EOFError, OSError) as error:
-            raise ProtectedCapabilityError(
-                "CAPABILITY_WORKER_UNAVAILABLE",
-                "protected capability worker is unavailable",
-            ) from error
+        self._transport.send_bytes(request.model_dump_json().encode("utf-8"))
+        return self._receive_response(request_id)
 
     def _receive_response(self, request_id: str) -> object | None:
         try:
@@ -426,22 +477,89 @@ class _IntegrityAuditorCapability(_ProcessCapability):
             ) from error
 
 
-class _MainDatabaseProtectedResultGateway(_ProcessCapability):
-    def append_result(self, result: ProtectedCheckerResult) -> None:
-        validated = ProtectedCheckerResult.model_validate(result.model_dump(mode="python"))
-        payload = self._request("APPEND_RESULT", validated.model_dump(mode="json"))
-        if payload is not None:
+class _ProtectedResultValidatorCapability(_ProcessCapability):
+    def validate_result(self, result: ProtectedCheckerResult) -> ProtectedCheckerResult:
+        try:
+            validated = ProtectedCheckerResult.model_validate(result.model_dump(mode="python"))
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ProtectedCapabilityError(
+                "INVALID_CHECKER_RESULT",
+                "protected checker result is invalid",
+            ) from error
+        payload = self._request("VALIDATE_RESULT", validated.model_dump(mode="json"))
+        try:
+            return ProtectedCheckerResult.model_validate_json(canonical_json_bytes(payload))
+        except (TypeError, ValueError) as error:
             raise ProtectedCapabilityError(
                 "INVALID_WORKER_RESPONSE",
                 "protected capability worker returned an invalid response",
-            )
+            ) from error
+
+
+class _CoordinatorProtectedResultGateway:
+    __slots__ = ("_campaigns", "_closed", "_connection", "_lock", "_metrics")
+
+    def __init__(self, connection: SqlConnection) -> None:
+        self._connection = connection
+        self._campaigns = HarnessCampaignRepository(connection)
+        self._metrics = HarnessMetricRepository(connection)
+        self._lock = RLock()
+        self._closed = False
+
+    def append_result(self, result: ProtectedCheckerResult) -> None:
+        with self._lock:
+            if self._closed:
+                raise ProtectedCapabilityError(
+                    "CAPABILITY_CLOSED",
+                    "protected capability is closed",
+                )
+            try:
+                validated = ProtectedCheckerResult.model_validate(result.model_dump(mode="python"))
+            except (AttributeError, TypeError, ValueError) as error:
+                raise ProtectedCapabilityError(
+                    "INVALID_CHECKER_RESULT",
+                    "protected checker result is invalid",
+                ) from error
+            if self._connection.closed or not self._connection.in_transaction():
+                raise ProtectedCapabilityError(
+                    "RESULT_APPEND_REJECTED",
+                    "protected checker result append was rejected",
+                )
+            try:
+                if self._campaigns.get(validated.campaign_id) is None:
+                    raise ProtectedCapabilityError(
+                        "REFERENCED_CAMPAIGN_UNAVAILABLE",
+                        "referenced campaign state is unavailable",
+                    )
+                record = _harness_metric_record(validated)
+                self._metrics.add(record.result_id, record, record.evaluated_at)
+            except ProtectedCapabilityError:
+                raise
+            except (SQLAlchemyError, StorageIntegrityError, TypeError, ValueError) as error:
+                raise ProtectedCapabilityError(
+                    "RESULT_APPEND_REJECTED",
+                    "protected checker result append was rejected",
+                ) from error
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
 
 
 def create_protected_result_gateway(connection: SqlConnection) -> ProtectedResultGateway:
-    """Create a narrow worker that durably appends results visible in the committed main DB."""
+    """Create the coordinator adapter over the caller's active main-DB transaction."""
 
-    main_url = _main_database_worker_url(connection)
-    return _start_gateway_capability(main_url)
+    if not isinstance(connection, SqlConnection) or connection.closed:
+        raise TypeError("result gateway requires an open SQLAlchemy connection")
+    if not connection.in_transaction():
+        raise ValueError("result gateway requires an active transaction")
+    return _CoordinatorProtectedResultGateway(connection)
+
+
+def create_protected_result_validator() -> ProtectedResultValidator:
+    """Create the evaluator-facing worker that returns only a validated result DTO."""
+
+    return _start_result_validator_capability()
 
 
 def _start_answer_reader_capability(protected_root: Path) -> _AnswerReaderCapability:
@@ -462,11 +580,11 @@ def _start_integrity_auditor_capability(
     )
 
 
-def _start_gateway_capability(main_url: str) -> _MainDatabaseProtectedResultGateway:
+def _start_result_validator_capability() -> _ProtectedResultValidatorCapability:
     return _spawn_process_capability(
-        _run_gateway_worker,
-        (main_url,),
-        _MainDatabaseProtectedResultGateway,
+        _run_result_validation_worker,
+        (),
+        _ProtectedResultValidatorCapability,
     )
 
 
@@ -487,6 +605,7 @@ def _spawn_process_capability[CapabilityT: _ProcessCapability](
     except BaseException:
         parent_transport.close()
         worker_transport.close()
+        process.close()
         raise
     worker_transport.close()
     try:
@@ -497,22 +616,8 @@ def _spawn_process_capability[CapabilityT: _ProcessCapability](
         if process.is_alive():
             process.terminate()
             process.join(_WORKER_JOIN_TIMEOUT_SECONDS)
+        process.close()
         raise
-
-
-def _main_database_worker_url(connection: SqlConnection) -> str:
-    if not isinstance(connection, SqlConnection) or connection.closed:
-        raise TypeError("result gateway requires an open SQLAlchemy connection")
-    url = connection.engine.url
-    database = url.database
-    if (
-        url.get_backend_name() != "sqlite"
-        or not isinstance(database, str)
-        or database in ("", ":memory:")
-    ):
-        raise ValueError("result gateway requires a file-backed SQLite database")
-    database_path = Path(database).absolute()
-    return f"sqlite+pysqlite:///{database_path.as_posix()}"
 
 
 def _run_protected_role_worker(
@@ -551,21 +656,26 @@ def _run_protected_role_worker(
                     continue
                 try:
                     output = _read_expected_output(engine, artifacts, request.payload)
-                except ValueError as error:
-                    unavailable = str(error) == "protected expected output is unavailable"
+                except _ProtectedOutputUnavailable:
                     _send_worker_error(
                         transport,
                         request.request_id,
-                        (
-                            "PROTECTED_OUTPUT_UNAVAILABLE"
-                            if unavailable
-                            else "PROTECTED_OUTPUT_INTEGRITY_FAILURE"
-                        ),
-                        (
-                            "protected expected output is unavailable"
-                            if unavailable
-                            else "protected expected output failed integrity verification"
-                        ),
+                        "PROTECTED_OUTPUT_UNAVAILABLE",
+                        "protected expected output is unavailable",
+                    )
+                except (SQLAlchemyError, OSError, StorageIntegrityError):
+                    _send_worker_error(
+                        transport,
+                        request.request_id,
+                        "PROTECTED_STORE_INTEGRITY_FAILURE",
+                        "protected store failed integrity verification",
+                    )
+                except (TypeError, ValueError):
+                    _send_worker_error(
+                        transport,
+                        request.request_id,
+                        "PROTECTED_OUTPUT_INTEGRITY_FAILURE",
+                        "protected expected output failed integrity verification",
                     )
                 else:
                     _send_worker_success(transport, request.request_id, output)
@@ -574,7 +684,10 @@ def _run_protected_role_worker(
                 if request.payload is not None:
                     _send_invalid_worker_request(transport, request.request_id)
                     continue
-                report = _verify_integrity(engine, artifacts)
+                try:
+                    report = _verify_integrity(engine, artifacts)
+                except (SQLAlchemyError, OSError, StorageIntegrityError, TypeError, ValueError):
+                    report = _protected_store_integrity_report()
                 _send_worker_success(transport, request.request_id, report)
                 continue
             _send_worker_error(
@@ -588,21 +701,7 @@ def _run_protected_role_worker(
         transport.close()
 
 
-def _run_gateway_worker(main_url: str, transport: _ProcessTransport) -> None:
-    engine: Engine | None = None
-    try:
-        engine = create_database_engine(main_url)
-        with engine.connect():
-            pass
-    except BaseException:
-        _send_worker_error(
-            transport,
-            "worker-startup",
-            "CAPABILITY_WORKER_INITIALIZATION_FAILED",
-            "protected capability worker failed to initialize",
-        )
-        transport.close()
-        return
+def _run_result_validation_worker(transport: _ProcessTransport) -> None:
     _send_worker_success(transport, "worker-startup", None)
     try:
         while True:
@@ -612,12 +711,12 @@ def _run_gateway_worker(main_url: str, transport: _ProcessTransport) -> None:
             if request.operation == "CLOSE":
                 _send_worker_success(transport, request.request_id, None)
                 return
-            if request.operation != "APPEND_RESULT":
+            if request.operation != "VALIDATE_RESULT":
                 _send_worker_error(
                     transport,
                     request.request_id,
                     "UNAUTHORIZED_OPERATION",
-                    "operation is not allowed for the protected result gateway",
+                    "operation is not allowed for the protected result validator",
                 )
                 continue
             try:
@@ -632,34 +731,8 @@ def _run_gateway_worker(main_url: str, transport: _ProcessTransport) -> None:
                     "protected checker result is invalid",
                 )
                 continue
-            try:
-                with engine.begin() as connection:
-                    campaign = HarnessCampaignRepository(connection).get(result.campaign_id)
-                    if campaign is None:
-                        _send_worker_error(
-                            transport,
-                            request.request_id,
-                            "REFERENCED_CAMPAIGN_UNAVAILABLE",
-                            "referenced committed campaign state is unavailable",
-                        )
-                        continue
-                    record = _harness_metric_record(result)
-                    HarnessMetricRepository(connection).add(
-                        record.result_id,
-                        record,
-                        record.evaluated_at,
-                    )
-            except (SQLAlchemyError, StorageIntegrityError, TypeError, ValueError):
-                _send_worker_error(
-                    transport,
-                    request.request_id,
-                    "RESULT_APPEND_REJECTED",
-                    "protected checker result append was rejected",
-                )
-            else:
-                _send_worker_success(transport, request.request_id, None)
+            _send_worker_success(transport, request.request_id, result)
     finally:
-        engine.dispose()
         transport.close()
 
 
@@ -766,11 +839,11 @@ def _read_expected_output(
             .one_or_none()
         )
     if row is None:
-        raise ValueError("protected expected output is unavailable")
-    content_hash, size_bytes = _validated_expected_output_row(dict(row))
+        raise _ProtectedOutputUnavailable("protected expected output is unavailable")
     try:
+        content_hash, size_bytes = _validated_expected_output_row(dict(row))
         return artifacts.read(_artifact_ref(content_hash, size_bytes))
-    except ValueError:
+    except (OSError, TypeError, ValueError):
         raise ValueError("protected expected output failed integrity verification") from None
 
 
@@ -796,7 +869,7 @@ def _verify_integrity(
             validated_task_id = _STABLE_IDENTIFIER_ADAPTER.validate_python(safe_task_id)
             content_hash, size_bytes = _validated_expected_output_row(row)
             artifacts.read(_artifact_ref(content_hash, size_bytes))
-        except (TypeError, ValueError):
+        except (OSError, TypeError, ValueError):
             try:
                 finding_hash = _SHA256_ADAPTER.validate_python(safe_hash)
             except ValueError:
@@ -812,6 +885,20 @@ def _verify_integrity(
         valid=not findings,
         checked_outputs=len(rows),
         findings=tuple(findings),
+    )
+
+
+def _protected_store_integrity_report() -> ProtectedIntegrityReport:
+    return ProtectedIntegrityReport(
+        valid=False,
+        checked_outputs=0,
+        findings=(
+            ProtectedIntegrityFinding(
+                task_id="protected-store",
+                expected_output_hash="0" * 64,
+                code="PROTECTED_STORE_INTEGRITY_FAILURE",
+            ),
+        ),
     )
 
 
@@ -885,5 +972,7 @@ __all__ = [
     "ProtectedIntegrityFinding",
     "ProtectedIntegrityReport",
     "ProtectedResultGateway",
+    "ProtectedResultValidator",
     "create_protected_result_gateway",
+    "create_protected_result_validator",
 ]
