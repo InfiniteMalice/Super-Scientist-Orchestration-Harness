@@ -844,6 +844,11 @@ hypothesis_versions = Table(
     UniqueConstraint(
         "hypothesis_id",
         "hypothesis_version_id",
+        name="uq_hypothesis_version_scope",
+    ),
+    UniqueConstraint(
+        "hypothesis_id",
+        "hypothesis_version_id",
         "version",
         name="uq_hypothesis_revision_target",
     ),
@@ -866,12 +871,8 @@ executable_model_specs = Table(
     "executable_model_specs",
     metadata,
     Column("model_spec_id", String(160), primary_key=True),
-    Column(
-        "hypothesis_version_id",
-        String(192),
-        ForeignKey("hypothesis_versions.hypothesis_version_id"),
-        nullable=False,
-    ),
+    Column("hypothesis_id", String(128), nullable=False),
+    Column("hypothesis_version_id", String(192), nullable=False),
     Column("execution_mode", String(48), nullable=False),
     Column("artifact_hash", String(64), nullable=True),
     Column("artifact_media_type", String(128), nullable=True),
@@ -880,8 +881,18 @@ executable_model_specs = Table(
     Column("record_json", Text, nullable=False),
     Column("content_hash", String(64), nullable=False),
     Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["hypothesis_id", "hypothesis_version_id"],
+        ["hypothesis_versions.hypothesis_id", "hypothesis_versions.hypothesis_version_id"],
+    ),
     UniqueConstraint(
         "model_spec_id",
+        "hypothesis_id",
+        name="uq_model_spec_hypothesis",
+    ),
+    UniqueConstraint(
+        "model_spec_id",
+        "hypothesis_id",
         "hypothesis_version_id",
         "execution_mode",
         name="uq_model_spec_hypothesis_execution",
@@ -908,18 +919,24 @@ verification_mechanism_specs = Table(
     "verification_mechanism_specs",
     metadata,
     Column("mechanism_spec_id", String(160), primary_key=True),
-    Column(
-        "hypothesis_version_id",
-        String(192),
-        ForeignKey("hypothesis_versions.hypothesis_version_id"),
-        nullable=False,
-    ),
+    Column("hypothesis_id", String(128), nullable=False),
+    Column("hypothesis_version_id", String(192), nullable=False),
     Column("mechanism_category", String(48), nullable=False),
     Column("record_json", Text, nullable=False),
     Column("content_hash", String(64), nullable=False),
     Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["hypothesis_id", "hypothesis_version_id"],
+        ["hypothesis_versions.hypothesis_id", "hypothesis_versions.hypothesis_version_id"],
+    ),
     UniqueConstraint(
         "mechanism_spec_id",
+        "hypothesis_id",
+        name="uq_mechanism_spec_hypothesis",
+    ),
+    UniqueConstraint(
+        "mechanism_spec_id",
+        "hypothesis_id",
         "hypothesis_version_id",
         "mechanism_category",
         name="uq_mechanism_spec_hypothesis_category",
@@ -935,6 +952,7 @@ simulation_results = Table(
     "simulation_results",
     metadata,
     Column("simulation_result_id", String(160), primary_key=True),
+    Column("hypothesis_id", String(128), nullable=False),
     Column("hypothesis_version_id", String(192), nullable=False),
     Column("model_spec_id", String(160), nullable=False),
     Column("execution_mode", String(48), nullable=False),
@@ -942,15 +960,29 @@ simulation_results = Table(
     Column("content_hash", String(64), nullable=False),
     Column("created_at", String(40), nullable=False),
     ForeignKeyConstraint(
-        ["model_spec_id", "hypothesis_version_id", "execution_mode"],
+        ["model_spec_id", "hypothesis_id", "hypothesis_version_id", "execution_mode"],
         [
             "executable_model_specs.model_spec_id",
+            "executable_model_specs.hypothesis_id",
             "executable_model_specs.hypothesis_version_id",
             "executable_model_specs.execution_mode",
         ],
     ),
+    UniqueConstraint(
+        "simulation_result_id",
+        "hypothesis_id",
+        name="uq_simulation_result_hypothesis",
+    ),
+    UniqueConstraint(
+        "simulation_result_id",
+        "hypothesis_id",
+        "hypothesis_version_id",
+        "model_spec_id",
+        "execution_mode",
+        name="uq_simulation_result_scope",
+    ),
     CheckConstraint(
-        f"execution_mode IN ({_quoted(EXECUTION_MODES)})",
+        "execution_mode = 'BUILTIN_DETERMINISTIC_SIMULATOR'",
         name="ck_simulation_results_execution_mode",
     ),
     _content_hash_constraint("ck_simulation_results_content_hash"),
@@ -960,6 +992,7 @@ verification_results = Table(
     "verification_results",
     metadata,
     Column("verification_result_id", String(160), primary_key=True),
+    Column("hypothesis_id", String(128), nullable=False),
     Column("hypothesis_version_id", String(192), nullable=False),
     Column("mechanism_spec_id", String(160), nullable=False),
     Column("mechanism_category", String(48), nullable=False),
@@ -970,20 +1003,45 @@ verification_results = Table(
     Column("content_hash", String(64), nullable=False),
     Column("created_at", String(40), nullable=False),
     ForeignKeyConstraint(
-        ["mechanism_spec_id", "hypothesis_version_id", "mechanism_category"],
+        [
+            "mechanism_spec_id",
+            "hypothesis_id",
+            "hypothesis_version_id",
+            "mechanism_category",
+        ],
         [
             "verification_mechanism_specs.mechanism_spec_id",
+            "verification_mechanism_specs.hypothesis_id",
             "verification_mechanism_specs.hypothesis_version_id",
             "verification_mechanism_specs.mechanism_category",
         ],
     ),
     ForeignKeyConstraint(
-        ["model_spec_id", "hypothesis_version_id", "model_execution_mode"],
+        [
+            "model_spec_id",
+            "hypothesis_id",
+            "hypothesis_version_id",
+            "model_execution_mode",
+        ],
         [
             "executable_model_specs.model_spec_id",
+            "executable_model_specs.hypothesis_id",
             "executable_model_specs.hypothesis_version_id",
             "executable_model_specs.execution_mode",
         ],
+    ),
+    UniqueConstraint(
+        "verification_result_id",
+        "hypothesis_id",
+        name="uq_verification_result_hypothesis",
+    ),
+    UniqueConstraint(
+        "verification_result_id",
+        "hypothesis_id",
+        "hypothesis_version_id",
+        "model_spec_id",
+        "model_execution_mode",
+        name="uq_verification_result_model_scope",
     ),
     CheckConstraint(
         "((mechanism_category = 'FORMAL_VERIFIER' "
@@ -1027,24 +1085,39 @@ counterexample_records = Table(
     "counterexample_records",
     metadata,
     Column("counterexample_id", String(160), primary_key=True),
-    Column(
-        "hypothesis_version_id",
-        String(192),
-        ForeignKey("hypothesis_versions.hypothesis_version_id"),
-        nullable=False,
-    ),
+    Column("hypothesis_id", String(128), nullable=False),
+    Column("hypothesis_version_id", String(192), nullable=False),
     Column("model_spec_id", String(160), nullable=True),
     Column("model_execution_mode", String(48), nullable=True),
     Column("record_json", Text, nullable=False),
     Column("content_hash", String(64), nullable=False),
     Column("created_at", String(40), nullable=False),
     ForeignKeyConstraint(
-        ["model_spec_id", "hypothesis_version_id", "model_execution_mode"],
+        [
+            "model_spec_id",
+            "hypothesis_id",
+            "hypothesis_version_id",
+            "model_execution_mode",
+        ],
         [
             "executable_model_specs.model_spec_id",
+            "executable_model_specs.hypothesis_id",
             "executable_model_specs.hypothesis_version_id",
             "executable_model_specs.execution_mode",
         ],
+    ),
+    UniqueConstraint(
+        "counterexample_id",
+        "hypothesis_id",
+        name="uq_counterexample_hypothesis",
+    ),
+    UniqueConstraint(
+        "counterexample_id",
+        "hypothesis_id",
+        "hypothesis_version_id",
+        "model_spec_id",
+        "model_execution_mode",
+        name="uq_counterexample_model_scope",
     ),
     CheckConstraint(
         "((model_spec_id IS NULL AND model_execution_mode IS NULL) OR "
@@ -1074,6 +1147,18 @@ hypothesis_revisions = Table(
             "hypothesis_versions.version",
         ],
     ),
+    UniqueConstraint(
+        "revision_id",
+        "hypothesis_id",
+        name="uq_hypothesis_revision_scope",
+    ),
+    UniqueConstraint(
+        "revision_id",
+        "hypothesis_id",
+        "resulting_hypothesis_version_id",
+        "resulting_version",
+        name="uq_hypothesis_revision_terminal",
+    ),
     ForeignKeyConstraint(
         ["hypothesis_id", "resulting_hypothesis_version_id", "resulting_version"],
         [
@@ -1101,6 +1186,8 @@ hypothesis_admission_decisions = Table(
     Column("hypothesis_id", String(128), nullable=False),
     Column("version", Integer, nullable=False),
     Column("admission_status", String(40), nullable=False),
+    Column("terminal_revision_id", String(160), nullable=True),
+    Column("terminal_revision_position", Integer, nullable=True),
     Column("record_json", Text, nullable=False),
     Column("content_hash", String(64), nullable=False),
     Column("created_at", String(40), nullable=False),
@@ -1113,10 +1200,29 @@ hypothesis_admission_decisions = Table(
             "hypothesis_versions.admission_status",
         ],
     ),
+    ForeignKeyConstraint(
+        ["terminal_revision_id", "hypothesis_id", "hypothesis_version_id", "version"],
+        [
+            "hypothesis_revisions.revision_id",
+            "hypothesis_revisions.hypothesis_id",
+            "hypothesis_revisions.resulting_hypothesis_version_id",
+            "hypothesis_revisions.resulting_version",
+        ],
+    ),
+    UniqueConstraint(
+        "admission_decision_id",
+        "hypothesis_id",
+        name="uq_hypothesis_admission_scope",
+    ),
     CheckConstraint("version >= 1", name="ck_admission_decisions_version"),
     CheckConstraint(
         f"admission_status IN ({_quoted(HYPOTHESIS_STATUSES)})",
         name="ck_admission_decisions_status",
+    ),
+    CheckConstraint(
+        "((terminal_revision_id IS NULL AND terminal_revision_position IS NULL) OR "
+        "(terminal_revision_id IS NOT NULL AND terminal_revision_position >= 0))",
+        name="ck_admission_terminal_revision_pair",
     ),
     _content_hash_constraint("ck_hypothesis_admission_decisions_content_hash"),
 )
@@ -1153,6 +1259,65 @@ def _ordered_reference_table(
             owner_column,
             reference_column,
             name=f"uq_{table_name}_reference",
+        ),
+    )
+
+
+def _scoped_ordered_reference_table(
+    table_name: str,
+    owner_column: str,
+    owner_length: int,
+    owner_table: str,
+    reference_column: str,
+    reference_length: int,
+    reference_table: str,
+    scope_columns: tuple[tuple[str, int], ...],
+    owner_scope_targets: tuple[str, ...],
+    reference_scope_targets: tuple[str, ...],
+) -> Table:
+    scope_names = tuple(column_name for column_name, _ in scope_columns)
+    if len(scope_names) != len(owner_scope_targets) or len(scope_names) != len(
+        reference_scope_targets
+    ):
+        raise ValueError("scoped reference targets must exactly match scope columns")
+    return Table(
+        table_name,
+        metadata,
+        Column(owner_column, String(owner_length), primary_key=True),
+        Column("position", Integer, primary_key=True),
+        Column(reference_column, String(reference_length), nullable=False),
+        *(Column(name, String(length), nullable=False) for name, length in scope_columns),
+        ForeignKeyConstraint([owner_column], [f"{owner_table}.{owner_column}"]),
+        ForeignKeyConstraint(
+            [reference_column],
+            [f"{reference_table}.{reference_column}"],
+        ),
+        ForeignKeyConstraint(
+            [owner_column, *scope_names],
+            [
+                f"{owner_table}.{owner_column}",
+                *(f"{owner_table}.{column_name}" for column_name in owner_scope_targets),
+            ],
+        ),
+        ForeignKeyConstraint(
+            [reference_column, *scope_names],
+            [
+                f"{reference_table}.{reference_column}",
+                *(f"{reference_table}.{column_name}" for column_name in reference_scope_targets),
+            ],
+        ),
+        CheckConstraint("position >= 0", name=f"ck_{table_name}_position"),
+        UniqueConstraint(
+            owner_column,
+            reference_column,
+            name=f"uq_{table_name}_reference",
+        ),
+        UniqueConstraint(
+            owner_column,
+            "position",
+            reference_column,
+            *scope_names,
+            name=f"uq_{table_name}_scoped_row",
         ),
     )
 
@@ -1222,7 +1387,7 @@ hypothesis_version_evidence = _ordered_reference_table(
     128,
     "evidence_records",
 )
-verification_result_simulations = _ordered_reference_table(
+verification_result_simulations = _scoped_ordered_reference_table(
     "verification_result_simulations",
     "verification_result_id",
     160,
@@ -1230,8 +1395,16 @@ verification_result_simulations = _ordered_reference_table(
     "simulation_result_id",
     160,
     "simulation_results",
+    (
+        ("hypothesis_id", 128),
+        ("hypothesis_version_id", 192),
+        ("model_spec_id", 160),
+        ("model_execution_mode", 48),
+    ),
+    ("hypothesis_id", "hypothesis_version_id", "model_spec_id", "model_execution_mode"),
+    ("hypothesis_id", "hypothesis_version_id", "model_spec_id", "execution_mode"),
 )
-counterexample_simulations = _ordered_reference_table(
+counterexample_simulations = _scoped_ordered_reference_table(
     "counterexample_simulations",
     "counterexample_id",
     160,
@@ -1239,8 +1412,16 @@ counterexample_simulations = _ordered_reference_table(
     "simulation_result_id",
     160,
     "simulation_results",
+    (
+        ("hypothesis_id", 128),
+        ("hypothesis_version_id", 192),
+        ("model_spec_id", 160),
+        ("model_execution_mode", 48),
+    ),
+    ("hypothesis_id", "hypothesis_version_id", "model_spec_id", "model_execution_mode"),
+    ("hypothesis_id", "hypothesis_version_id", "model_spec_id", "execution_mode"),
 )
-counterexample_verification_results = _ordered_reference_table(
+counterexample_verification_results = _scoped_ordered_reference_table(
     "counterexample_verification_results",
     "counterexample_id",
     160,
@@ -1248,6 +1429,14 @@ counterexample_verification_results = _ordered_reference_table(
     "verification_result_id",
     160,
     "verification_results",
+    (
+        ("hypothesis_id", 128),
+        ("hypothesis_version_id", 192),
+        ("model_spec_id", 160),
+        ("model_execution_mode", 48),
+    ),
+    ("hypothesis_id", "hypothesis_version_id", "model_spec_id", "model_execution_mode"),
+    ("hypothesis_id", "hypothesis_version_id", "model_spec_id", "model_execution_mode"),
 )
 counterexample_evidence = _ordered_reference_table(
     "counterexample_evidence",
@@ -1258,7 +1447,7 @@ counterexample_evidence = _ordered_reference_table(
     128,
     "evidence_records",
 )
-hypothesis_revision_verification_results = _ordered_reference_table(
+hypothesis_revision_verification_results = _scoped_ordered_reference_table(
     "hypothesis_revision_verification_results",
     "revision_id",
     160,
@@ -1266,8 +1455,11 @@ hypothesis_revision_verification_results = _ordered_reference_table(
     "verification_result_id",
     160,
     "verification_results",
+    (("hypothesis_id", 128),),
+    ("hypothesis_id",),
+    ("hypothesis_id",),
 )
-hypothesis_revision_counterexamples = _ordered_reference_table(
+hypothesis_revision_counterexamples = _scoped_ordered_reference_table(
     "hypothesis_revision_counterexamples",
     "revision_id",
     160,
@@ -1275,8 +1467,11 @@ hypothesis_revision_counterexamples = _ordered_reference_table(
     "counterexample_id",
     160,
     "counterexample_records",
+    (("hypothesis_id", 128),),
+    ("hypothesis_id",),
+    ("hypothesis_id",),
 )
-hypothesis_admission_models = _ordered_reference_table(
+hypothesis_admission_models = _scoped_ordered_reference_table(
     "hypothesis_admission_models",
     "admission_decision_id",
     160,
@@ -1284,8 +1479,11 @@ hypothesis_admission_models = _ordered_reference_table(
     "model_spec_id",
     160,
     "executable_model_specs",
+    (("hypothesis_id", 128),),
+    ("hypothesis_id",),
+    ("hypothesis_id",),
 )
-hypothesis_admission_verification_results = _ordered_reference_table(
+hypothesis_admission_verification_results = _scoped_ordered_reference_table(
     "hypothesis_admission_verification_results",
     "admission_decision_id",
     160,
@@ -1293,8 +1491,11 @@ hypothesis_admission_verification_results = _ordered_reference_table(
     "verification_result_id",
     160,
     "verification_results",
+    (("hypothesis_id", 128),),
+    ("hypothesis_id",),
+    ("hypothesis_id",),
 )
-hypothesis_admission_counterexamples = _ordered_reference_table(
+hypothesis_admission_counterexamples = _scoped_ordered_reference_table(
     "hypothesis_admission_counterexamples",
     "admission_decision_id",
     160,
@@ -1302,8 +1503,11 @@ hypothesis_admission_counterexamples = _ordered_reference_table(
     "counterexample_id",
     160,
     "counterexample_records",
+    (("hypothesis_id", 128),),
+    ("hypothesis_id",),
+    ("hypothesis_id",),
 )
-hypothesis_admission_revisions = _ordered_reference_table(
+hypothesis_admission_revisions = _scoped_ordered_reference_table(
     "hypothesis_admission_revisions",
     "admission_decision_id",
     160,
@@ -1311,6 +1515,9 @@ hypothesis_admission_revisions = _ordered_reference_table(
     "revision_id",
     160,
     "hypothesis_revisions",
+    (("hypothesis_id", 128),),
+    ("hypothesis_id",),
+    ("hypothesis_id",),
 )
 
 primitive_heads = Table(

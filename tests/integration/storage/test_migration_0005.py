@@ -171,6 +171,189 @@ REFERENCE_ENDPOINTS = {
     ),
 }
 
+SCOPED_REFERENCE_FOREIGN_KEYS = {
+    "verification_result_simulations": (
+        (
+            (
+                "verification_result_id",
+                "hypothesis_id",
+                "hypothesis_version_id",
+                "model_spec_id",
+                "model_execution_mode",
+            ),
+            "verification_results",
+            (
+                "verification_result_id",
+                "hypothesis_id",
+                "hypothesis_version_id",
+                "model_spec_id",
+                "model_execution_mode",
+            ),
+        ),
+        (
+            (
+                "simulation_result_id",
+                "hypothesis_id",
+                "hypothesis_version_id",
+                "model_spec_id",
+                "model_execution_mode",
+            ),
+            "simulation_results",
+            (
+                "simulation_result_id",
+                "hypothesis_id",
+                "hypothesis_version_id",
+                "model_spec_id",
+                "execution_mode",
+            ),
+        ),
+    ),
+    "counterexample_simulations": (
+        (
+            (
+                "counterexample_id",
+                "hypothesis_id",
+                "hypothesis_version_id",
+                "model_spec_id",
+                "model_execution_mode",
+            ),
+            "counterexample_records",
+            (
+                "counterexample_id",
+                "hypothesis_id",
+                "hypothesis_version_id",
+                "model_spec_id",
+                "model_execution_mode",
+            ),
+        ),
+        (
+            (
+                "simulation_result_id",
+                "hypothesis_id",
+                "hypothesis_version_id",
+                "model_spec_id",
+                "model_execution_mode",
+            ),
+            "simulation_results",
+            (
+                "simulation_result_id",
+                "hypothesis_id",
+                "hypothesis_version_id",
+                "model_spec_id",
+                "execution_mode",
+            ),
+        ),
+    ),
+    "counterexample_verification_results": (
+        (
+            (
+                "counterexample_id",
+                "hypothesis_id",
+                "hypothesis_version_id",
+                "model_spec_id",
+                "model_execution_mode",
+            ),
+            "counterexample_records",
+            (
+                "counterexample_id",
+                "hypothesis_id",
+                "hypothesis_version_id",
+                "model_spec_id",
+                "model_execution_mode",
+            ),
+        ),
+        (
+            (
+                "verification_result_id",
+                "hypothesis_id",
+                "hypothesis_version_id",
+                "model_spec_id",
+                "model_execution_mode",
+            ),
+            "verification_results",
+            (
+                "verification_result_id",
+                "hypothesis_id",
+                "hypothesis_version_id",
+                "model_spec_id",
+                "model_execution_mode",
+            ),
+        ),
+    ),
+    "hypothesis_revision_verification_results": (
+        (
+            ("revision_id", "hypothesis_id"),
+            "hypothesis_revisions",
+            ("revision_id", "hypothesis_id"),
+        ),
+        (
+            ("verification_result_id", "hypothesis_id"),
+            "verification_results",
+            ("verification_result_id", "hypothesis_id"),
+        ),
+    ),
+    "hypothesis_revision_counterexamples": (
+        (
+            ("revision_id", "hypothesis_id"),
+            "hypothesis_revisions",
+            ("revision_id", "hypothesis_id"),
+        ),
+        (
+            ("counterexample_id", "hypothesis_id"),
+            "counterexample_records",
+            ("counterexample_id", "hypothesis_id"),
+        ),
+    ),
+    "hypothesis_admission_models": (
+        (
+            ("admission_decision_id", "hypothesis_id"),
+            "hypothesis_admission_decisions",
+            ("admission_decision_id", "hypothesis_id"),
+        ),
+        (
+            ("model_spec_id", "hypothesis_id"),
+            "executable_model_specs",
+            ("model_spec_id", "hypothesis_id"),
+        ),
+    ),
+    "hypothesis_admission_verification_results": (
+        (
+            ("admission_decision_id", "hypothesis_id"),
+            "hypothesis_admission_decisions",
+            ("admission_decision_id", "hypothesis_id"),
+        ),
+        (
+            ("verification_result_id", "hypothesis_id"),
+            "verification_results",
+            ("verification_result_id", "hypothesis_id"),
+        ),
+    ),
+    "hypothesis_admission_counterexamples": (
+        (
+            ("admission_decision_id", "hypothesis_id"),
+            "hypothesis_admission_decisions",
+            ("admission_decision_id", "hypothesis_id"),
+        ),
+        (
+            ("counterexample_id", "hypothesis_id"),
+            "counterexample_records",
+            ("counterexample_id", "hypothesis_id"),
+        ),
+    ),
+    "hypothesis_admission_revisions": (
+        (
+            ("admission_decision_id", "hypothesis_id"),
+            "hypothesis_admission_decisions",
+            ("admission_decision_id", "hypothesis_id"),
+        ),
+        (
+            ("revision_id", "hypothesis_id"),
+            "hypothesis_revisions",
+            ("revision_id", "hypothesis_id"),
+        ),
+    ),
+}
+
 
 @pytest.fixture
 def database_url(tmp_path: Path) -> str:
@@ -322,6 +505,27 @@ def test_0005_normalized_references_have_owner_and_target_foreign_keys(
 
 
 @pytest.mark.integration
+def test_hypothesis_references_have_composite_scope_foreign_keys(database_url: str) -> None:
+    _upgrade_to(database_url, REVISION)
+    engine = create_database_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            for table_name, expected_foreign_keys in SCOPED_REFERENCE_FOREIGN_KEYS.items():
+                actual = {
+                    (
+                        tuple(item["constrained_columns"]),
+                        str(item["referred_table"]),
+                        tuple(item["referred_columns"]),
+                    )
+                    for item in inspector.get_foreign_keys(table_name)
+                }
+                assert set(expected_foreign_keys) <= actual
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
 def test_revision_requires_existing_prior_and_resulting_versions(database_url: str) -> None:
     _upgrade_to(database_url, REVISION)
     engine = create_database_engine(database_url)
@@ -436,9 +640,19 @@ def test_discriminators_are_materialized_and_exact_relationships_are_foreign_key
                 for item in inspector.get_foreign_keys("verification_results")
             }
             assert (
-                ("mechanism_spec_id", "hypothesis_version_id", "mechanism_category"),
+                (
+                    "mechanism_spec_id",
+                    "hypothesis_id",
+                    "hypothesis_version_id",
+                    "mechanism_category",
+                ),
                 "verification_mechanism_specs",
-                ("mechanism_spec_id", "hypothesis_version_id", "mechanism_category"),
+                (
+                    "mechanism_spec_id",
+                    "hypothesis_id",
+                    "hypothesis_version_id",
+                    "mechanism_category",
+                ),
             ) in result_foreign_keys
     finally:
         engine.dispose()

@@ -390,6 +390,13 @@ class SimulationResultRecord(_StrictFrozenStorageRecord):
     completed_at: UtcTimestamp
     governing_policy_hash: Sha256Hex
 
+    @field_validator("execution_mode")
+    @classmethod
+    def require_builtin_execution(cls, value: ModelExecutionMode) -> ModelExecutionMode:
+        if value is not ModelExecutionMode.BUILTIN_DETERMINISTIC_SIMULATOR:
+            raise ValueError("execution_mode must use the closed builtin simulator")
+        return value
+
 
 class VerificationResultRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
@@ -429,6 +436,13 @@ class VerificationResultRecord(_StrictFrozenStorageRecord):
             raise ValueError("result_category must match mechanism_category")
         if (self.model_spec_id is None) != (self.model_execution_mode is None):
             raise ValueError("model_spec_id and model_execution_mode must both be set or null")
+        if self.simulation_result_ids and (
+            self.model_spec_id is None
+            or self.model_execution_mode is not ModelExecutionMode.BUILTIN_DETERMINISTIC_SIMULATOR
+        ):
+            raise ValueError(
+                "simulation_result_ids require a model_spec_id with builtin execution mode"
+            )
         return self
 
 
@@ -465,6 +479,15 @@ class CounterexampleRecord(_StrictFrozenStorageRecord):
     def require_complete_model_pair(self) -> Self:
         if (self.model_spec_id is None) != (self.model_execution_mode is None):
             raise ValueError("model_spec_id and model_execution_mode must both be set or null")
+        if self.simulation_result_ids and (
+            self.model_spec_id is None
+            or self.model_execution_mode is not ModelExecutionMode.BUILTIN_DETERMINISTIC_SIMULATOR
+        ):
+            raise ValueError(
+                "simulation_result_ids require a model_spec_id with builtin execution mode"
+            )
+        if self.verification_result_ids and self.model_spec_id is None:
+            raise ValueError("verification_result_ids require a model_spec_id")
         return self
 
 
@@ -633,6 +656,7 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
         relationship_fields: Mapping[str, str] | None = None,
         relationship_types: Mapping[str, _RelationshipStorageType] | None = None,
         nullable_relationship_fields: Collection[str] | None = None,
+        hypothesis_scope_field: str | None = None,
     ) -> None:
         _require_integrity(
             bool(model_type.model_config.get("frozen")),
@@ -645,6 +669,7 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
         self._identifier_field = identifier_field
         self._relationship_fields = dict(relationship_fields or {})
         self._nullable_relationship_fields = frozenset(nullable_relationship_fields or ())
+        self._hypothesis_scope_field = hypothesis_scope_field
         requested_relationship_types = dict(relationship_types or {})
         _require_integrity(
             set(self._relationship_fields).issubset(table.c.keys()),
@@ -676,6 +701,12 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
             ),
             "unsupported relationship storage type",
         )
+        if hypothesis_scope_field is not None:
+            _require_integrity(
+                hypothesis_scope_field in model_type.model_fields,
+                "unknown hypothesis scope field",
+            )
+            _require_integrity("hypothesis_id" in table.c, "missing hypothesis scope column")
         self._relationship_types: dict[str, _RelationshipStorageType] = {
             column_name: requested_relationship_types.get(column_name, str)
             for column_name in self._relationship_fields
@@ -724,6 +755,16 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
                 self._relationship_types[column_name],
                 nullable=column_name in self._nullable_relationship_fields,
             )
+        derived_values = self._derive_storage_values(validated)
+        _require_integrity(
+            set(derived_values).issubset(self._table.c.keys()),
+            "unknown derived relationship column",
+        )
+        _require_integrity(
+            not (set(derived_values) & set(values)),
+            "derived relationship column overlaps canonical storage",
+        )
+        values.update(derived_values)
         self._connection.execute(insert(self._table).values(**values))
 
     def _decode_row(self, row: Mapping[str, object]) -> RecordT:
@@ -770,8 +811,41 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
                 ),
                 f"{column_name} does not match record_json",
             )
+        self._verify_derived_storage_values(row, record)
         _require_integrity(record_json == canonical_record_json, "record_json must be canonical")
         return record
+
+    def _derive_storage_values(self, record: RecordT) -> dict[str, object]:
+        if self._hypothesis_scope_field is None:
+            return {}
+        hypothesis_version_id = _validated_relationship_value(
+            getattr(record, self._hypothesis_scope_field),
+            self._hypothesis_scope_field,
+            str,
+        )
+        hypothesis_id = self._connection.execute(
+            select(hypothesis_versions.c.hypothesis_id).where(
+                hypothesis_versions.c.hypothesis_version_id == hypothesis_version_id
+            )
+        ).scalar_one_or_none()
+        _require_integrity(
+            isinstance(hypothesis_id, str),
+            "hypothesis scope version does not exist",
+        )
+        return {"hypothesis_id": hypothesis_id}
+
+    def _verify_derived_storage_values(
+        self,
+        row: Mapping[str, object],
+        record: RecordT,
+    ) -> None:
+        if self._hypothesis_scope_field is None:
+            return
+        expected = self._derive_storage_values(record)
+        _require_integrity(
+            _stored_string(row, "hypothesis_id") == expected["hypothesis_id"],
+            "hypothesis_id does not match the exact hypothesis version scope",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -780,6 +854,7 @@ class _OrderedReferenceBinding:
     owner_column: str
     record_field: str
     reference_column: str
+    scope_columns: tuple[str, ...] = ()
 
 
 class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
@@ -798,6 +873,7 @@ class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
         relationship_fields: Mapping[str, str] | None = None,
         relationship_types: Mapping[str, _RelationshipStorageType] | None = None,
         nullable_relationship_fields: Collection[str] | None = None,
+        hypothesis_scope_field: str | None = None,
     ) -> None:
         super().__init__(
             connection,
@@ -807,6 +883,7 @@ class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
             relationship_fields=relationship_fields,
             relationship_types=relationship_types,
             nullable_relationship_fields=nullable_relationship_fields,
+            hypothesis_scope_field=hypothesis_scope_field,
         )
         _require_integrity(bool(reference_bindings), "referenced repository needs bindings")
         for binding in reference_bindings:
@@ -823,6 +900,14 @@ class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
                 binding.record_field in model_type.model_fields,
                 "unknown canonical reference field",
             )
+            _require_integrity(
+                set(binding.scope_columns).issubset(binding.table.c.keys()),
+                "unknown normalized reference scope column",
+            )
+            _require_integrity(
+                set(binding.scope_columns).issubset(table.c.keys()),
+                "normalized reference scope is absent from owner",
+            )
         self._reference_bindings = reference_bindings
 
     def add(self, record_id: str, record: RecordT, created_at: UtcTimestamp) -> None:
@@ -833,15 +918,27 @@ class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
                 "storage integrity error: invalid append-only record"
             ) from error
         super().add(record_id, validated, created_at)
+        owner_row = (
+            self._connection.execute(
+                select(self._table).where(self._table.c[self._identifier_field] == record_id)
+            )
+            .mappings()
+            .one()
+        )
         for binding in self._reference_bindings:
             references = _canonical_reference_tuple(validated, binding.record_field)
             for position, reference_id in enumerate(references):
+                scope_values = {
+                    column_name: _stored_string(dict(owner_row), column_name)
+                    for column_name in binding.scope_columns
+                }
                 self._connection.execute(
                     insert(binding.table).values(
                         **{
                             binding.owner_column: record_id,
                             "position": position,
                             binding.reference_column: reference_id,
+                            **scope_values,
                         }
                     )
                 )
@@ -855,10 +952,14 @@ class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
         )
         for binding in self._reference_bindings:
             expected = _canonical_reference_tuple(record, binding.record_field)
+            expected_scope = tuple(
+                _stored_string(row, column_name) for column_name in binding.scope_columns
+            )
             stored_rows = self._connection.execute(
                 select(
                     binding.table.c.position,
                     binding.table.c[binding.reference_column],
+                    *(binding.table.c[column_name] for column_name in binding.scope_columns),
                 )
                 .where(binding.table.c[binding.owner_column] == owner_id)
                 .order_by(binding.table.c.position)
@@ -867,11 +968,19 @@ class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
                 (
                     _stored_integer(dict(stored_row), "position"),
                     _stored_string(dict(stored_row), binding.reference_column),
+                    *(
+                        _stored_string(dict(stored_row), column_name)
+                        for column_name in binding.scope_columns
+                    ),
                 )
                 for stored_row in stored_rows
             )
             _require_integrity(
-                actual == tuple(enumerate(expected)),
+                actual
+                == tuple(
+                    (position, reference_id, *expected_scope)
+                    for position, reference_id in enumerate(expected)
+                ),
                 f"{binding.record_field} materialization does not match exact canonical references",
             )
         return record
@@ -1120,6 +1229,7 @@ class ExecutableModelSpecRepository(_AppendOnlyRecordRepository[ExecutableModelS
                 "artifact_size_bytes",
                 "builtin_simulator_id",
             },
+            hypothesis_scope_field="hypothesis_version_id",
         )
 
 
@@ -1136,6 +1246,7 @@ class VerificationMechanismSpecRepository(
                 "hypothesis_version_id": "hypothesis_version_id",
                 "mechanism_category": "mechanism_category",
             },
+            hypothesis_scope_field="hypothesis_version_id",
         )
 
 
@@ -1151,6 +1262,7 @@ class SimulationResultRepository(_AppendOnlyRecordRepository[SimulationResultRec
                 "model_spec_id": "model_spec_id",
                 "execution_mode": "execution_mode",
             },
+            hypothesis_scope_field="hypothesis_version_id",
         )
 
 
@@ -1170,12 +1282,19 @@ class VerificationResultRepository(_ReferencedAppendOnlyRecordRepository[Verific
                 "model_execution_mode": "model_execution_mode",
             },
             nullable_relationship_fields={"model_spec_id", "model_execution_mode"},
+            hypothesis_scope_field="hypothesis_version_id",
             reference_bindings=(
                 _OrderedReferenceBinding(
                     table=verification_result_simulations,
                     owner_column="verification_result_id",
                     record_field="simulation_result_ids",
                     reference_column="simulation_result_id",
+                    scope_columns=(
+                        "hypothesis_id",
+                        "hypothesis_version_id",
+                        "model_spec_id",
+                        "model_execution_mode",
+                    ),
                 ),
             ),
         )
@@ -1194,18 +1313,31 @@ class CounterexampleRecordRepository(_ReferencedAppendOnlyRecordRepository[Count
                 "model_execution_mode": "model_execution_mode",
             },
             nullable_relationship_fields={"model_spec_id", "model_execution_mode"},
+            hypothesis_scope_field="hypothesis_version_id",
             reference_bindings=(
                 _OrderedReferenceBinding(
                     table=counterexample_simulations,
                     owner_column="counterexample_id",
                     record_field="simulation_result_ids",
                     reference_column="simulation_result_id",
+                    scope_columns=(
+                        "hypothesis_id",
+                        "hypothesis_version_id",
+                        "model_spec_id",
+                        "model_execution_mode",
+                    ),
                 ),
                 _OrderedReferenceBinding(
                     table=counterexample_verification_results,
                     owner_column="counterexample_id",
                     record_field="verification_result_ids",
                     reference_column="verification_result_id",
+                    scope_columns=(
+                        "hypothesis_id",
+                        "hypothesis_version_id",
+                        "model_spec_id",
+                        "model_execution_mode",
+                    ),
                 ),
                 _OrderedReferenceBinding(
                     table=counterexample_evidence,
@@ -1238,12 +1370,14 @@ class HypothesisRevisionRepository(_ReferencedAppendOnlyRecordRepository[Hypothe
                     owner_column="revision_id",
                     record_field="triggering_verification_result_ids",
                     reference_column="verification_result_id",
+                    scope_columns=("hypothesis_id",),
                 ),
                 _OrderedReferenceBinding(
                     table=hypothesis_revision_counterexamples,
                     owner_column="revision_id",
                     record_field="considered_counterexample_ids",
                     reference_column="counterexample_id",
+                    scope_columns=("hypothesis_id",),
                 ),
             ),
         )
@@ -1271,26 +1405,73 @@ class HypothesisAdmissionDecisionRepository(
                     owner_column="admission_decision_id",
                     record_field="model_spec_ids",
                     reference_column="model_spec_id",
+                    scope_columns=("hypothesis_id",),
                 ),
                 _OrderedReferenceBinding(
                     table=hypothesis_admission_verification_results,
                     owner_column="admission_decision_id",
                     record_field="verification_result_ids",
                     reference_column="verification_result_id",
+                    scope_columns=("hypothesis_id",),
                 ),
                 _OrderedReferenceBinding(
                     table=hypothesis_admission_counterexamples,
                     owner_column="admission_decision_id",
                     record_field="counterexample_ids",
                     reference_column="counterexample_id",
+                    scope_columns=("hypothesis_id",),
                 ),
                 _OrderedReferenceBinding(
                     table=hypothesis_admission_revisions,
                     owner_column="admission_decision_id",
                     record_field="revision_ids",
                     reference_column="revision_id",
+                    scope_columns=("hypothesis_id",),
                 ),
             ),
+        )
+
+    def _derive_storage_values(
+        self,
+        record: HypothesisAdmissionDecisionRecord,
+    ) -> dict[str, object]:
+        values = super()._derive_storage_values(record)
+        if record.revision_ids:
+            values.update(
+                terminal_revision_id=record.revision_ids[-1],
+                terminal_revision_position=len(record.revision_ids) - 1,
+            )
+        else:
+            values.update(terminal_revision_id=None, terminal_revision_position=None)
+        return values
+
+    def _verify_derived_storage_values(
+        self,
+        row: Mapping[str, object],
+        record: HypothesisAdmissionDecisionRecord,
+    ) -> None:
+        super()._verify_derived_storage_values(row, record)
+        expected_revision_id = record.revision_ids[-1] if record.revision_ids else None
+        expected_position = len(record.revision_ids) - 1 if record.revision_ids else None
+        _require_integrity(
+            _stored_relationship_value(
+                row,
+                "terminal_revision_id",
+                str,
+                nullable=True,
+            )
+            == expected_revision_id,
+            "terminal_revision_id does not match revision_ids",
+        )
+        _require_integrity(
+            _stored_relationship_value(
+                row,
+                "terminal_revision_position",
+                int,
+                nullable=True,
+            )
+            == expected_position,
+            "terminal_revision_position does not match revision_ids",
         )
 
 
