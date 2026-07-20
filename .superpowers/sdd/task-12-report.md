@@ -21,8 +21,9 @@ The implementation contributes the eight fixed proposal kinds required by the ta
 8. `admit_hypothesis`
 
 The original feature commit subject is `feat: add safe hypothesis revision loop`. The
-canonical-review correction uses the required subject
-`fix: reconcile hypothesis history and chronology`.
+chronology and whole-snapshot correction is
+`fix: reconcile hypothesis history and chronology`; the exact shared-table ownership
+follow-up uses `fix: bind shared verification ownership`.
 
 ## Test-driven implementation evidence
 
@@ -55,6 +56,11 @@ canonical-review correction uses the required subject
 - The same focused matrix is now GREEN at **20 passed**: **11 chronology cases in 97.07s**
   and **9 projection-family cases in 61.81s**. The explicit simulation-time contract and
   regression pair is GREEN at **2 passed in 10.81s**.
+- The shared-table follow-up began RED at **1 failed in 6.80s**: a complete unlogged,
+  model-independent hypothesis, deterministic mechanism, and result were incorrectly accepted as
+  Task 11 support solely because of their record shape. After removing that inference, the exact
+  regression, governed Task 11 baseline, and dual-ownership tamper case were GREEN at **3 passed
+  in 13.82s**.
 
 ## Implemented boundaries
 
@@ -93,9 +99,12 @@ canonical-review correction uses the required subject
   hypothesis transactions through the same fixed handlers in audit order, and compares exact
   rebuilt append-only records and hypothesis heads with storage.
 - The comparison covers all nine Task 12 projection families: hypothesis versions, models,
-  mechanisms, simulations, results, counterexamples, revisions, admissions, and heads. The
-  pre-existing Task 10/11 primitive-verification support rows remain outside Task 12 ownership;
-  other missing, extra, or changed rows fail closed even when they use a wholly separate scope.
+  mechanisms, simulations, results, counterexamples, revisions, admissions, and heads. Task 11
+  ownership begins only with verification-result IDs bound by accepted, replayed primitive
+  evaluations; exact mechanism, model, simulation, and hypothesis-version IDs are derived from
+  those retained results. Record shape never establishes ownership. IDs also expected from Task
+  12 replay remain in the Task 12 comparison, so dual ownership cannot hide tampering. Any row
+  absent from both exact closures is additional state and fails reconciliation.
 - Deleted heads, missing or forged receipts, altered records, invalid chronology, and projection
   disagreement fail closed in both live validation and replay.
 
@@ -143,28 +152,35 @@ canonical-review correction uses the required subject
   **123 passed in 63.83s**.
 - Adjacent representation, workspace, coordinator, and governance checkpoint:
   **99 passed in 85.47s**.
+- Shared-ownership focused RED: **1 failed in 6.80s**, with workspace verification incorrectly
+  returning valid for an unlogged model-independent verification graph.
+- Shared-ownership RED/GREEN triplet: **3 passed in 13.82s**.
+- Complete ten-case snapshot matrix: **10 passed, 26 deselected in 38.16s**.
+- Governed Task 11 representation, workspace-integrity, coordinator, and governance coverage
+  shard: **49 passed in 231.93s**.
+- Complete Task 12 hypothesis application coverage shard: **36 passed in 672.58s**.
 
 ### Bounded full inventory
 
-The complete fresh non-overlapping inventory ran after the canonical-review implementation:
+The complete fresh non-overlapping inventory ran after the exact shared-ownership correction:
 
-- Unit, adversarial, e2e, and evaluation: **791 passed in 31.71s**.
-- Application integration: **283 passed** across four successful coverage shards: **35**, **48**,
+- Unit, adversarial, e2e, and evaluation: **791 passed in 48.76s**.
+- Application integration: **285 passed** across four successful coverage shards: **36**, **49**,
   **109**, and **91** passed.
-- CLI and storage integration: **136 passed, 3 skipped in 315.19s**.
-- Property suite: **205 passed in 598.94s**.
-- Combined result: **1,415 passed, 3 skipped**.
+- CLI and storage integration: **136 passed, 3 skipped in 348.07s**.
+- Property suite: **205 passed in 600.94s**.
+- Combined result: **1,417 passed, 3 skipped**.
 
 No production source changed after this full inventory.
 
 ### Coverage and quality
 
-- Combined fresh full-inventory branch coverage: **90.448867%** over **10,944 statements and 2,824
+- Combined fresh full-inventory branch coverage: **90.447479%** over **10,942 statements and 2,824
   branches**; `coverage report --fail-under=90` passed.
 - `src/super_scientist/application/transactions/hypotheses.py` itself reports **91%** branch-aware
   coverage.
 - Repository-wide Ruff lint: **all checks passed**.
-- All **6 changed Python files** are Ruff-format clean. A repository-wide format claim is not
+- All **3 changed Python files** are Ruff-format clean. A repository-wide format claim is not
   made because the branch retains the previously documented untouched baseline format backlog.
 - Strict mypy: **success, 80 source files**.
 - `git diff --check`: passed, with only configured LF-to-CRLF notices.

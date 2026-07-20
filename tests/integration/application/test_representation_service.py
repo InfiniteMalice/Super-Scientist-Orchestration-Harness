@@ -9,6 +9,10 @@ import pytest
 from pydantic import BaseModel
 from sqlalchemy import Engine, update
 
+from super_scientist.application.hypothesis_testing.service import (
+    FIXED_HYPOTHESIS_CLASSIFICATION,
+    HypothesisTestingService,
+)
 from super_scientist.application.representations.service import (
     FIXED_PRIMITIVE_CLASSIFICATION,
     RepresentationService,
@@ -28,6 +32,16 @@ from super_scientist.config.models import (
     PolicySnapshot,
 )
 from super_scientist.domain.evidence.models import EvidenceRecord, VerificationState
+from super_scientist.domain.hypotheses.models import (
+    AcceptedHypothesisReceiptRef,
+    DeterministicCheckerSpec,
+    DeterministicCheckResult,
+    HypothesisSpec,
+    HypothesisVersionReceiptRef,
+    ImportedPatternStatus,
+    VerificationMechanismReceiptRef,
+    VerificationOutcome,
+)
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.improvement.classification import (
     ChangeTarget,
@@ -65,10 +79,13 @@ from super_scientist.kernel.transactions.models import (
     AdmitPrimitiveVersion,
     Approval,
     CreateResearchRun,
+    ProposeHypothesisVersion,
     ProposePrimitiveVersion,
     RecordEvaluatorAudit,
     RecordPrimitiveEvaluation,
     RecordSelfImprovementMeasurement,
+    RecordVerificationResult,
+    RegisterVerificationMechanism,
     RejectionCode,
 )
 from super_scientist.providers.storage.artifacts import FileArtifactStore
@@ -78,22 +95,17 @@ from super_scientist.providers.storage.database import (
     upgrade_database,
 )
 from super_scientist.providers.storage.domain_records import (
-    HypothesisAdmissionStatus,
-    HypothesisVersionRecord,
-    HypothesisVersionRepository,
     PrimitiveEvaluationRepository,
     PrimitiveHeadRepository,
     PrimitiveVersionRepository,
-    VerificationMechanismCategory,
-    VerificationMechanismSpecRecord,
-    VerificationMechanismSpecRepository,
-    VerificationOutcome,
-    VerificationResultCategory,
-    VerificationResultRecord,
     VerificationResultRepository,
 )
 from super_scientist.providers.storage.repositories import PolicyRepository
-from super_scientist.providers.storage.schema import primitive_heads, primitive_versions
+from super_scientist.providers.storage.schema import (
+    primitive_heads,
+    primitive_versions,
+    verification_results,
+)
 from tests.integration.application.test_adaptation_foundation import (
     _audit as base_audit,
 )
@@ -106,12 +118,13 @@ BASE = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 
 
 class SettableClock:
-    def __init__(self) -> None:
+    def __init__(self, *, step: timedelta = timedelta(seconds=1)) -> None:
         self.current = BASE
+        self._step = step
 
-    def now(self):  # type: ignore[no-untyped-def]
+    def now(self) -> datetime:
         value = self.current
-        self.current += timedelta(seconds=1)
+        self.current += self._step
         return value
 
     def advance_to(self, value: datetime) -> None:
@@ -542,6 +555,40 @@ def test_full_two_frame_promotion_sets_only_exact_admitted_head_and_replays(
 
 
 @pytest.mark.integration
+def test_workspace_replay_keeps_dual_owned_result_in_task12_comparison(
+    representation_runtime: RepresentationRuntime,
+) -> None:
+    runtime = representation_runtime
+    prepared = _prepare_evaluated_candidate(runtime)
+    result_id = prepared.old_evaluation.verification_result_ids[0]
+    with runtime.uow_factory() as uow:
+        assert uow.connection is not None
+        baseline = verify_workspace(uow.repositories(), runtime.artifacts)
+        stored = VerificationResultRepository(uow.connection).get(result_id)
+    assert baseline.valid, baseline.reason
+    assert stored is not None
+    tampered = stored.model_copy(
+        update={"findings": ("Task 11 ownership must not hide Task 12 projection tampering.",)}
+    )
+    record_json = canonical_json_bytes(tampered.model_dump(mode="json")).decode("utf-8")
+    with runtime.engine.begin() as connection:
+        connection.exec_driver_sql("DROP TRIGGER verification_results_no_update")
+        connection.execute(
+            update(verification_results)
+            .where(verification_results.c.verification_result_id == result_id)
+            .values(
+                record_json=record_json,
+                content_hash=sha256_hex(record_json.encode("utf-8")),
+            )
+        )
+
+    with runtime.uow_factory() as uow:
+        verification = verify_workspace(uow.repositories(), runtime.artifacts)
+    assert verification.valid is False
+    assert "hypothesis verification" in (verification.reason or "")
+
+
+@pytest.mark.integration
 def test_promotion_requirements_are_not_imposed_on_staging_but_fail_closed_at_admission(
     representation_runtime: RepresentationRuntime,
 ) -> None:
@@ -588,7 +635,7 @@ def test_live_evaluation_rejects_candidate_author_as_evaluator(
         candidate,
         "old",
         "evidence-old",
-        completed_at=BASE + timedelta(seconds=14),
+        SettableClock(step=timedelta(milliseconds=100)),
     )
     evaluation = _evaluation(runtime, candidate, "old", BASE + timedelta(seconds=15))
     circular = evaluation.model_copy(
@@ -774,38 +821,30 @@ def _prepare_evaluated_candidate(
             alternate_stage.proposal_id,
             PrimitiveVersionReceiptRef,
         )
-    _seed_verification_result(
-        runtime,
-        candidate,
-        "old",
-        "evidence-old",
-        completed_at=BASE + timedelta(seconds=14),
-    )
-    _seed_verification_result(
-        runtime,
-        candidate,
-        "new",
-        "evidence-new",
-        completed_at=BASE + timedelta(seconds=18),
-    )
+    support_clock = SettableClock(step=timedelta(milliseconds=100))
+    support_clock.advance_to(runtime.clock.current)
+    _seed_verification_result(runtime, candidate, "old", "evidence-old", support_clock)
+    old_evaluated_at = runtime.clock.current + timedelta(milliseconds=100)
+    runtime.clock.advance_to(old_evaluated_at)
     old_evaluation = _evaluation(
         runtime,
         candidate,
         "old",
-        BASE + timedelta(seconds=15),
+        old_evaluated_at,
     )
-    runtime.clock.advance_to(BASE + timedelta(seconds=16))
     old_proposal = _evaluation_proposal(runtime, evaluation_candidate_receipt, old_evaluation)
     assert runtime.service.evaluate(old_proposal).accepted
     old_receipt = _receipt(runtime, old_proposal.proposal_id, PrimitiveEvaluationReceiptRef)
+    _seed_verification_result(runtime, candidate, "new", "evidence-new", support_clock)
+    new_evaluated_at = runtime.clock.current + timedelta(milliseconds=100)
+    runtime.clock.advance_to(new_evaluated_at)
     new_evaluation = _evaluation(
         runtime,
         candidate,
         "new",
-        BASE + timedelta(seconds=19),
+        new_evaluated_at,
         evaluator=new_evaluator,
     )
-    runtime.clock.advance_to(BASE + timedelta(seconds=20))
     new_proposal = _evaluation_proposal(runtime, evaluation_candidate_receipt, new_evaluation)
     assert runtime.service.evaluate(new_proposal).accepted
     new_receipt = _receipt(runtime, new_proposal.proposal_id, PrimitiveEvaluationReceiptRef)
@@ -969,7 +1008,12 @@ def _policy() -> GovernancePolicyV2:
                 change_target=ChangeTarget.RESEARCH_PROCESS,
                 persistence=PersistenceScope.RUN_LOCAL,
                 minimum_verification=VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK,
-                permitted_grounding=frozenset({ExternalGrounding.HUMAN_JUDGMENT}),
+                permitted_grounding=frozenset(
+                    {
+                        ExternalGrounding.CONTROLLED_EXPERIMENT,
+                        ExternalGrounding.HUMAN_JUDGMENT,
+                    }
+                ),
                 required_approver_kind=ActorKind.HUMAN,
                 protected_evaluation_required=False,
                 rollback_required=False,
@@ -1061,13 +1105,22 @@ def _seed_verification_result(
     primitive: PrimitiveVersion,
     frame: str,
     evidence_id: str,
-    *,
-    completed_at: datetime,
+    support_clock: SettableClock,
 ) -> None:
+    if support_clock.current < runtime.clock.current:
+        support_clock.advance_to(runtime.clock.current)
+    service = HypothesisTestingService(
+        TransactionCoordinator(
+            runtime.uow_factory,
+            runtime.policy,
+            support_clock,
+            runtime.artifacts,
+        )
+    )
     hypothesis_id = f"primitive-evaluation-{frame}"
     hypothesis_version_id = f"{hypothesis_id}-v1"
     checker = _actor(f"{frame}-checker", ActorKind.MODEL)
-    hypothesis = HypothesisVersionRecord(
+    hypothesis = HypothesisSpec(
         hypothesis_version_id=hypothesis_version_id,
         hypothesis_id=hypothesis_id,
         version=1,
@@ -1079,56 +1132,102 @@ def _seed_verification_result(
         falsification_conditions=("The declared criterion fails.",),
         primitive_version_ids=(primitive.primitive_version_id,),
         evidence_ids=(evidence_id,),
-        admission_status=HypothesisAdmissionStatus.TRANSFER_TESTING,
-        proposer_id=runtime.integrator.actor_id,
-        created_at=completed_at - timedelta(seconds=2),
+        imported_pattern_status=ImportedPatternStatus.TRANSFER_TESTING,
+        proposer=runtime.integrator,
+        created_at=support_clock.current,
         governing_policy_hash=runtime.policy.policy_hash,
     )
-    mechanism = VerificationMechanismSpecRecord(
+    stage = ProposeHypothesisVersion(
+        proposal_id=f"propose-{hypothesis_version_id}",
+        idempotency_key=f"intent-propose-{hypothesis_version_id}",
+        proposer=hypothesis.proposer,
+        approval=Approval(
+            approver=runtime.stage_approver,
+            approved_at=support_clock.current,
+        ),
+        classification=FIXED_HYPOTHESIS_CLASSIFICATION,
+        hypothesis=hypothesis,
+    )
+    assert service.propose(stage).accepted
+    hypothesis_receipt = _receipt(runtime, stage.proposal_id, HypothesisVersionReceiptRef)
+    mechanism = DeterministicCheckerSpec(
+        mechanism_type="DETERMINISTIC_CHECKER",
         mechanism_spec_id=f"mechanism-{frame}",
         hypothesis_version_id=hypothesis_version_id,
-        mechanism_category=VerificationMechanismCategory.INDEPENDENT_DETERMINISTIC_CHECKER,
         name=f"{frame}-frame-checker",
         description="A fixed deterministic fixture checker.",
         specification_hash=sha256_hex(f"mechanism-{frame}".encode()),
         input_schema_id="primitive-evaluation-input-v1",
         output_schema_id="primitive-evaluation-output-v1",
-        created_by=checker.actor_id,
-        created_at=completed_at - timedelta(seconds=1),
+        created_by=checker,
+        created_at=support_clock.current,
+        governing_policy_hash=runtime.policy.policy_hash,
+        checked_invariants=(f"{frame}-frame-criterion",),
+    )
+    mechanism_proposal = RegisterVerificationMechanism(
+        proposal_id=f"register-{mechanism.mechanism_spec_id}",
+        idempotency_key=f"intent-register-{mechanism.mechanism_spec_id}",
+        proposer=checker,
+        approval=Approval(
+            approver=runtime.stage_approver,
+            approved_at=support_clock.current,
+        ),
+        classification=FIXED_HYPOTHESIS_CLASSIFICATION,
+        hypothesis_receipt=hypothesis_receipt,
+        mechanism_spec=mechanism,
+    )
+    assert service.register_verification_mechanism(mechanism_proposal).accepted
+    mechanism_receipt = _receipt(
+        runtime,
+        mechanism_proposal.proposal_id,
+        VerificationMechanismReceiptRef,
+    )
+    provenance = AssessmentProvenance(
+        actor=checker,
+        actor_version=f"{frame}-checker-v1",
+        category=VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK,
+        deterministic_or_learned="DETERMINISTIC",
+        proposer_relationship=ActorRelationship.INDEPENDENT,
+        assumptions=("The retained primitive fixture is bounded.",),
+        evidence_ids=(evidence_id,),
+        checks_run=(mechanism.mechanism_spec_id,),
+        limitations=("The check covers only the retained deterministic fixture.",),
+        result=AssessmentOutcome.PASSED,
+        meaningful_confidence=None,
+        assessed_at=support_clock.current,
         governing_policy_hash=runtime.policy.policy_hash,
     )
-    result = VerificationResultRecord(
+    result = DeterministicCheckResult(
+        mechanism_type="DETERMINISTIC_CHECKER",
         verification_result_id=f"verification-{frame}",
         hypothesis_version_id=hypothesis_version_id,
         mechanism_spec_id=mechanism.mechanism_spec_id,
-        mechanism_category=VerificationMechanismCategory.INDEPENDENT_DETERMINISTIC_CHECKER,
-        result_category=VerificationResultCategory.DETERMINISTIC_CHECK_RESULT,
         model_spec_id=None,
-        model_execution_mode=None,
         simulation_result_ids=(),
         outcome=VerificationOutcome.PASS,
         findings=(f"The {frame}-frame criterion passed.",),
-        verified_by=checker.actor_id,
-        completed_at=completed_at,
-        governing_policy_hash=runtime.policy.policy_hash,
+        provenance=provenance,
+        counterexample_search_performed=True,
+        counterexample_found=False,
+        checked_invariants=mechanism.checked_invariants,
     )
-    with runtime.uow_factory() as uow:
-        assert uow.connection is not None
-        HypothesisVersionRepository(uow.connection).add(
-            hypothesis.hypothesis_version_id,
-            hypothesis,
-            hypothesis.created_at,
-        )
-        VerificationMechanismSpecRepository(uow.connection).add(
-            mechanism.mechanism_spec_id,
-            mechanism,
-            mechanism.created_at,
-        )
-        VerificationResultRepository(uow.connection).add(
-            result.verification_result_id,
-            result,
-            result.completed_at,
-        )
+    result_proposal = RecordVerificationResult(
+        proposal_id=f"record-{result.verification_result_id}",
+        idempotency_key=f"intent-record-{result.verification_result_id}",
+        proposer=checker,
+        approval=Approval(
+            approver=runtime.stage_approver,
+            approved_at=support_clock.current,
+        ),
+        classification=FIXED_HYPOTHESIS_CLASSIFICATION,
+        hypothesis_receipt=hypothesis_receipt,
+        mechanism_receipt=mechanism_receipt,
+        model_receipt=None,
+        simulation_receipts=(),
+        verification_result=result,
+    )
+    assert service.record_verification(result_proposal).accepted
+    runtime.clock.advance_to(support_clock.current)
 
 
 def _evaluation(
@@ -1206,7 +1305,7 @@ def _evaluation_proposal(
     )
 
 
-def _receipt[ReceiptT: AcceptedPrimitiveReceiptRef](
+def _receipt[ReceiptT: AcceptedPrimitiveReceiptRef | AcceptedHypothesisReceiptRef](
     runtime: RepresentationRuntime,
     proposal_id: str,
     receipt_type: type[ReceiptT],

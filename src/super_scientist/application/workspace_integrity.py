@@ -1957,54 +1957,42 @@ def _require_projection_consistency(
         == expected_primitive_heads,
         "primitive heads do not match accepted admission transactions",
     )
-    representation_result_ids = {
+    primitive_evaluation_result_ids = {
         result_id
         for evaluation in expected_primitive_evaluations.values()
         for result_id in evaluation.verification_result_ids
     }
-    representation_result_ids.update(
-        record.verification_result_id
-        for record in hypotheses.results
-        if record.model_spec_id is None
-        and not record.simulation_result_ids
-        and record.verification_result_id not in expected_hypothesis_results
-    )
-    representation_result_records = tuple(
+    primitive_evaluation_result_records = tuple(
         verification_results[result_id]
-        for result_id in representation_result_ids
+        for result_id in primitive_evaluation_result_ids
         if result_id in verification_results
     )
-    representation_mechanism_ids = {
-        record.mechanism_spec_id for record in representation_result_records
+    primitive_evaluation_mechanism_ids = {
+        record.mechanism_spec_id for record in primitive_evaluation_result_records
     }
-    representation_simulation_ids = {
+    primitive_evaluation_simulation_ids = {
         simulation_id
-        for record in representation_result_records
+        for record in primitive_evaluation_result_records
         for simulation_id in record.simulation_result_ids
     }
-    representation_model_ids = {
+    primitive_evaluation_model_ids = {
         record.model_spec_id
-        for record in representation_result_records
+        for record in primitive_evaluation_result_records
         if record.model_spec_id is not None
     }
-    representation_hypothesis_version_ids = {
-        record.hypothesis_version_id for record in representation_result_records
+    primitive_evaluation_hypothesis_version_ids = {
+        record.hypothesis_version_id for record in primitive_evaluation_result_records
     }
-    representation_hypothesis_version_ids.update(
+    primitive_evaluation_hypothesis_version_ids.update(
         record.hypothesis_version_id
         for record in hypotheses.simulations
-        if record.simulation_result_id in representation_simulation_ids
-    )
-    representation_mechanism_ids.update(
-        verification_results[result_id].mechanism_spec_id
-        for result_id in representation_result_ids
-        if result_id in verification_results
+        if record.simulation_result_id in primitive_evaluation_simulation_ids
     )
     _require(
         {
             record.hypothesis_version_id: record
             for record in hypotheses.versions
-            if record.hypothesis_version_id not in representation_hypothesis_version_ids
+            if record.hypothesis_version_id not in primitive_evaluation_hypothesis_version_ids
             or record.hypothesis_version_id in expected_hypothesis_versions
         }
         == expected_hypothesis_versions,
@@ -2014,7 +2002,7 @@ def _require_projection_consistency(
         {
             record.model_spec_id: record
             for record in hypotheses.models
-            if record.model_spec_id not in representation_model_ids
+            if record.model_spec_id not in primitive_evaluation_model_ids
             or record.model_spec_id in expected_models
         }
         == expected_models,
@@ -2024,7 +2012,7 @@ def _require_projection_consistency(
         {
             record.mechanism_spec_id: record
             for record in hypotheses.mechanisms
-            if record.mechanism_spec_id not in representation_mechanism_ids
+            if record.mechanism_spec_id not in primitive_evaluation_mechanism_ids
             or record.mechanism_spec_id in expected_hypothesis_mechanisms
         }
         == expected_hypothesis_mechanisms,
@@ -2034,7 +2022,7 @@ def _require_projection_consistency(
         {
             record.simulation_result_id: record
             for record in hypotheses.simulations
-            if record.simulation_result_id not in representation_simulation_ids
+            if record.simulation_result_id not in primitive_evaluation_simulation_ids
             or record.simulation_result_id in expected_simulations
         }
         == expected_simulations,
@@ -2044,7 +2032,7 @@ def _require_projection_consistency(
         {
             record.verification_result_id: record
             for record in hypotheses.results
-            if record.verification_result_id not in representation_result_ids
+            if record.verification_result_id not in primitive_evaluation_result_ids
             or record.verification_result_id in expected_hypothesis_results
         }
         == expected_hypothesis_results,

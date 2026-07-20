@@ -1053,6 +1053,25 @@ def test_workspace_replay_rejects_every_unlogged_hypothesis_snapshot_family(
 
 
 @pytest.mark.integration
+def test_workspace_replay_rejects_unlogged_model_independent_verification_graph(
+    hypothesis_runtime: HypothesisRuntime,
+) -> None:
+    runtime = hypothesis_runtime
+    _stage_hypothesis(runtime, 1)
+    with runtime.uow_factory() as uow:
+        baseline = verify_workspace(uow.repositories(), runtime.artifacts)
+    assert baseline.valid, baseline.reason
+
+    _insert_unlogged_model_independent_verification_graph(runtime)
+
+    with runtime.uow_factory() as uow:
+        verification = verify_workspace(uow.repositories(), runtime.artifacts)
+    assert verification.valid is False
+    assert verification.reason is not None
+    assert "hypothesis" in verification.reason
+
+
+@pytest.mark.integration
 def test_stage_rejections_and_exact_duplicate_projection_are_durable(
     hypothesis_runtime: HypothesisRuntime,
 ) -> None:
@@ -2429,6 +2448,58 @@ def _insert_unlogged_hypothesis_scope(
             resulting.hypothesis_version_id,
             resulting.version,
             admission_record.admission_status,
+        )
+
+
+def _insert_unlogged_model_independent_verification_graph(
+    runtime: HypothesisRuntime,
+) -> None:
+    retained_at = runtime.clock.current
+    hypothesis = _hypothesis(runtime, 1).model_copy(
+        update={
+            "hypothesis_version_id": "unlogged-model-independent-hypothesis-v1",
+            "hypothesis_id": "unlogged-model-independent-hypothesis",
+            "created_at": retained_at,
+        }
+    )
+    mechanism = _mechanism(runtime, hypothesis, "unlogged-model-independent").model_copy(
+        update={"created_at": retained_at}
+    )
+    result = DeterministicCheckResult(
+        mechanism_type="DETERMINISTIC_CHECKER",
+        verification_result_id="unlogged-model-independent-result",
+        hypothesis_version_id=hypothesis.hypothesis_version_id,
+        mechanism_spec_id=mechanism.mechanism_spec_id,
+        model_spec_id=None,
+        simulation_result_ids=(),
+        outcome=VerificationOutcome.PASS,
+        findings=("An unlogged model-independent check must not acquire Task 11 ownership.",),
+        provenance=_provenance(runtime, mechanism.mechanism_spec_id).model_copy(
+            update={"assessed_at": retained_at}
+        ),
+        counterexample_search_performed=True,
+        counterexample_found=False,
+        checked_invariants=mechanism.checked_invariants,
+    )
+    hypothesis_record = hypothesis_to_storage(hypothesis)
+    mechanism_record = mechanism_to_storage(mechanism)
+    result_record = verification_to_storage(result, None)
+    with runtime.uow_factory() as uow:
+        assert uow.connection is not None
+        HypothesisVersionRepository(uow.connection).add(
+            hypothesis_record.hypothesis_version_id,
+            hypothesis_record,
+            hypothesis_record.created_at,
+        )
+        VerificationMechanismSpecRepository(uow.connection).add(
+            mechanism_record.mechanism_spec_id,
+            mechanism_record,
+            mechanism_record.created_at,
+        )
+        VerificationResultRepository(uow.connection).add(
+            result_record.verification_result_id,
+            result_record,
+            result_record.completed_at,
         )
 
 
