@@ -11,6 +11,14 @@ from super_scientist.application.evidence_verification import (
     verified_artifact_bytes,
     verify_artifact_binding,
 )
+from super_scientist.application.rules.service import (
+    ConsolidateBehavioralRuleHandler,
+    ImportReviewerAssessmentHandler,
+    ProposeBehavioralRuleHandler,
+    RecordRuleIncidentHandler,
+    RuleMutationProposal,
+    rule_consolidation_decision,
+)
 from super_scientist.application.trails.receipts import (
     AcceptedProposalReceipt,
     accepted_proposal_receipts,
@@ -21,6 +29,15 @@ from super_scientist.application.trails.service import (
     trail_receipt_rejection,
 )
 from super_scientist.config.models import PolicySnapshot
+from super_scientist.domain.behavioral_rules.models import (
+    BehavioralRuleVersion,
+    ReviewerAssessment,
+    RuleAction,
+    RuleConsolidationDecision,
+    RuleIncident,
+    RuleRegressionCase,
+    RuleStatus,
+)
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
 from super_scientist.domain.configurations.models import ConfigurationVersion
 from super_scientist.domain.evaluators.models import (
@@ -96,10 +113,13 @@ from super_scientist.kernel.transactions.models import (
     AppendProgressEvent,
     AppendResearchRunEvent,
     BindReportSentence,
+    ConsolidateBehavioralRule,
     CreateResearchRun,
     DecideCompletion,
     DecideEvaluatorSuccession,
+    ImportReviewerAssessment,
     Proposal,
+    ProposeBehavioralRule,
     ProposeClaim,
     ProposeEvaluatorVersion,
     ProposeEvidenceTrailNodes,
@@ -109,6 +129,7 @@ from super_scientist.kernel.transactions.models import (
     RecordEvaluatorAudit,
     RecordEvidenceTrailVersion,
     RecordProgressPlan,
+    RecordRuleIncident,
     RecordRunBudget,
     RecordRunCheckpoint,
     RecordSelfImprovementMeasurement,
@@ -119,6 +140,7 @@ from super_scientist.providers.storage.artifacts import ArtifactStore
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
     ProgressIntegritySnapshot,
+    RuleIntegritySnapshot,
     TrailIntegritySnapshot,
 )
 from super_scientist.providers.storage.repositories import (
@@ -142,6 +164,57 @@ class _ValidatedAuditRecord:
     payload: Mapping[str, object]
 
 
+@dataclass(frozen=True)
+class _RuleReplayCapability:
+    active_policy: PolicySnapshot
+    incidents: Mapping[str, RuleIncident]
+    rules: Mapping[str, BehavioralRuleVersion]
+    assessments: Mapping[str, ReviewerAssessment]
+    decisions: Mapping[str, RuleConsolidationDecision]
+    measurements: Mapping[str, SelfImprovementMeasurementRecord]
+    evaluator_audits: Mapping[str, EvaluatorAuditRecord]
+    heads: Mapping[str, tuple[str, str, RuleStatus]]
+    reviewed_proposals: Mapping[str, ProposeBehavioralRule]
+
+    def policy_snapshot(self) -> PolicySnapshot:
+        return self.active_policy
+
+    def get_incident(self, incident_id: str) -> RuleIncident | None:
+        return self.incidents.get(incident_id)
+
+    def get_rule(self, rule_version_id: str) -> BehavioralRuleVersion | None:
+        return self.rules.get(rule_version_id)
+
+    def list_rules(self) -> tuple[BehavioralRuleVersion, ...]:
+        return tuple(
+            sorted(
+                self.rules.values(),
+                key=lambda item: (item.created_at, item.rule_version_id),
+            )
+        )
+
+    def get_assessment(self, assessment_id: str) -> ReviewerAssessment | None:
+        return self.assessments.get(assessment_id)
+
+    def reviewed_rule_proposal(self, proposal_id: str) -> ProposeBehavioralRule | None:
+        return self.reviewed_proposals.get(proposal_id)
+
+    def get_decision(self, decision_id: str) -> RuleConsolidationDecision | None:
+        return self.decisions.get(decision_id)
+
+    def get_measurement(
+        self,
+        measurement_id: str,
+    ) -> SelfImprovementMeasurementRecord | None:
+        return self.measurements.get(measurement_id)
+
+    def get_evaluator_audit(self, audit_id: str) -> EvaluatorAuditRecord | None:
+        return self.evaluator_audits.get(audit_id)
+
+    def get_head(self, rule_id: str) -> tuple[str, str, RuleStatus] | None:
+        return self.heads.get(rule_id)
+
+
 def verify_workspace(
     repositories: RepositorySet,
     artifact_store: ArtifactStore,
@@ -155,6 +228,7 @@ def verify_workspace(
         adaptation = repositories.adaptation_integrity_snapshot()
         progress = repositories.progress_integrity_snapshot()
         trails = repositories.trail_integrity_snapshot()
+        rules = repositories.rule_integrity_snapshot()
         transactions = repositories.transactions.list_all()
         events = repositories.audit.list_all()
         _require(
@@ -171,6 +245,7 @@ def verify_workspace(
             adaptation,
             progress,
             trails,
+            rules,
             policies,
             active_policy,
             artifact_store,
@@ -323,6 +398,7 @@ def _require_projection_consistency(
     adaptation: AdaptationIntegritySnapshot,
     progress: ProgressIntegritySnapshot,
     trails: TrailIntegritySnapshot,
+    rules: RuleIntegritySnapshot,
     policies: tuple[PolicySnapshot, ...],
     active_policy: PolicySnapshot | None,
     artifact_store: ArtifactStore,
@@ -354,14 +430,20 @@ def _require_projection_consistency(
     expected_trail_assessments: dict[str, TrailAssessment] = {}
     expected_report_bindings: dict[str, ReportSentenceBinding] = {}
     expected_trail_heads: dict[str, tuple[str, int]] = {}
+    expected_rule_incidents: dict[str, RuleIncident] = {}
+    expected_rule_versions: dict[str, BehavioralRuleVersion] = {}
+    expected_rule_assessments: dict[str, ReviewerAssessment] = {}
+    expected_rule_decisions: dict[str, RuleConsolidationDecision] = {}
+    expected_rule_regressions: dict[str, RuleRegressionCase] = {}
+    expected_rule_heads: dict[str, tuple[str, str, RuleStatus]] = {}
+    accepted_rule_proposals: dict[str, ProposeBehavioralRule] = {}
     accepted_evaluator_succession = False
     transitions: list[tuple[ProposeGovernancePolicyTransition, str]] = []
     receipt_index = accepted_proposal_receipts(transactions, events)
     policy_by_hash = {snapshot.policy_hash: snapshot for snapshot in policies}
     _require_historical_policy_sequence(audit_records, policy_by_hash, active_policy)
     transactions_by_id = {
-        transaction.proposal.proposal_id: transaction
-        for transaction in transactions
+        transaction.proposal.proposal_id: transaction for transaction in transactions
     }
     for audit_record in audit_records:
         if not (audit_record.transaction_persisted and audit_record.decision.accepted):
@@ -472,9 +554,7 @@ def _require_projection_consistency(
             )
             current_head = expected_progress_heads.get(event.run_id)
             current_head_event = (
-                None
-                if current_head is None
-                else expected_progress_events.get(current_head[1])
+                None if current_head is None else expected_progress_events.get(current_head[1])
             )
             _require(
                 event_advances_progress_head(
@@ -644,10 +724,8 @@ def _require_projection_consistency(
                     final_validation.actor,
                     completion.proposer,
                 )
-                and completion.relationship_to_run_creator
-                is ActorRelationship.INDEPENDENT
-                and completion.relationship_to_completion_proposer
-                is ActorRelationship.INDEPENDENT
+                and completion.relationship_to_run_creator is ActorRelationship.INDEPENDENT
+                and completion.relationship_to_completion_proposer is ActorRelationship.INDEPENDENT
                 and completion.are_independent
                 and is_authoritative_verification(final_validation.category),
                 "completion does not retain replay-derived independent final authority",
@@ -664,13 +742,9 @@ def _require_projection_consistency(
             _require(
                 bool(final_validation.evidence_ids)
                 and all(
-                    not item.completed or bool(item.evidence_ids)
-                    for item in completion.checklist
+                    not item.completed or bool(item.evidence_ids) for item in completion.checklist
                 )
-                and all(
-                    evidence_id in expected_evidence
-                    for evidence_id in required_evidence_ids
-                ),
+                and all(evidence_id in expected_evidence for evidence_id in required_evidence_ids),
                 "completion evidence is not nonempty retained replay history",
             )
             if completion_plan is None:  # pragma: no cover - narrowed by fail-closed check above
@@ -765,8 +839,7 @@ def _require_projection_consistency(
                     (
                         claim
                         for claim in expected_claims.values()
-                        if f"{claim.claim_id}:{claim.version}"
-                        == version.claim_version_id
+                        if f"{claim.claim_id}:{claim.version}" == version.claim_version_id
                     ),
                     None,
                 )
@@ -774,8 +847,7 @@ def _require_projection_consistency(
                     parent is not None
                     and parent.trail_id == version.trail_id
                     and child_claim is not None
-                    and child_claim.parent_version_id
-                    == parent.claim_version_id,
+                    and child_claim.parent_version_id == parent.claim_version_id,
                     "evidence trail version reparented or broke claim lineage",
                 )
             snapshot = proposal.snapshot()
@@ -945,6 +1017,84 @@ def _require_projection_consistency(
                 binding,
                 "report sentence binding projection",
             )
+        elif isinstance(
+            proposal,
+            (
+                RecordRuleIncident,
+                ProposeBehavioralRule,
+                ImportReviewerAssessment,
+                ConsolidateBehavioralRule,
+            ),
+        ):
+            rule_capability = _RuleReplayCapability(
+                active_policy=historical_policy,
+                incidents=expected_rule_incidents,
+                rules=expected_rule_versions,
+                assessments=expected_rule_assessments,
+                decisions=expected_rule_decisions,
+                measurements=expected_measurements,
+                evaluator_audits=expected_audits,
+                heads=expected_rule_heads,
+                reviewed_proposals=accepted_rule_proposals,
+            )
+            rule_decision = _rule_replay_decision(proposal, rule_capability)
+            _require(
+                rule_decision.accepted,
+                "behavioral-rule historical authority validation failed",
+            )
+            if isinstance(proposal, RecordRuleIncident):
+                _add_stable(
+                    expected_rule_incidents,
+                    proposal.incident.incident_id,
+                    proposal.incident,
+                    "rule incident projection",
+                )
+            elif isinstance(proposal, ProposeBehavioralRule):
+                _add_stable(
+                    expected_rule_versions,
+                    proposal.rule_version.rule_version_id,
+                    proposal.rule_version,
+                    "behavioral rule projection",
+                )
+                accepted_rule_proposals[proposal.proposal_id] = proposal
+            elif isinstance(proposal, ImportReviewerAssessment):
+                _add_stable(
+                    expected_rule_assessments,
+                    proposal.assessment.assessment_id,
+                    proposal.assessment,
+                    "reviewer assessment projection",
+                )
+            else:
+                consolidation = proposal.consolidation
+                candidate = consolidation.candidate_rule
+                _add_unique(
+                    expected_rule_decisions,
+                    consolidation.consolidation_decision_id,
+                    rule_consolidation_decision(proposal),
+                    "rule consolidation decision projection",
+                )
+                if consolidation.action not in {
+                    RuleAction.REJECT,
+                    RuleAction.ESCALATE_TO_HUMAN,
+                }:
+                    _add_unique(
+                        expected_rule_versions,
+                        candidate.rule_version_id,
+                        candidate,
+                        "behavioral rule projection",
+                    )
+                    for regression_case in consolidation.regression_cases:
+                        _add_unique(
+                            expected_rule_regressions,
+                            regression_case.regression_case_id,
+                            regression_case,
+                            "rule regression projection",
+                        )
+                    expected_rule_heads[candidate.rule_id] = (
+                        candidate.rule_version_id,
+                        candidate.semantic_version,
+                        candidate.status,
+                    )
         elif isinstance(proposal, RecordConfigurationVersion):
             configuration = proposal.configuration_version
             _require_governing_hash(
@@ -1158,8 +1308,7 @@ def _require_projection_consistency(
         "progress heads do not match accepted event transactions",
     )
     _require(
-        {record.trail_version_id: record for record in trails.versions}
-        == expected_trail_versions,
+        {record.trail_version_id: record for record in trails.versions} == expected_trail_versions,
         "evidence trail version projections do not match accepted transactions",
     )
     _require(
@@ -1167,8 +1316,7 @@ def _require_projection_consistency(
         "evidence trail node projections do not match accepted transactions",
     )
     _require(
-        {record.relation_id: record for record in trails.relations}
-        == expected_trail_relations,
+        {record.relation_id: record for record in trails.relations} == expected_trail_relations,
         "evidence trail relation projections do not match accepted transactions",
     )
     _require(
@@ -1181,8 +1329,7 @@ def _require_projection_consistency(
         "evidence trail assessment projections do not match accepted transactions",
     )
     _require(
-        {record.binding_id: record for record in trails.bindings}
-        == expected_report_bindings,
+        {record.binding_id: record for record in trails.bindings} == expected_report_bindings,
         "report sentence binding projections do not match accepted transactions",
     )
     _require(
@@ -1192,6 +1339,36 @@ def _require_projection_consistency(
         }
         == expected_trail_heads,
         "evidence trail heads do not match accepted transactions",
+    )
+    _require(
+        {record.incident_id: record for record in rules.incidents} == expected_rule_incidents,
+        "rule incident projections do not match accepted transactions",
+    )
+    _require(
+        {record.rule_version_id: record for record in rules.versions} == expected_rule_versions,
+        "behavioral rule projections do not match accepted transactions",
+    )
+    _require(
+        {record.assessment_id: record for record in rules.assessments} == expected_rule_assessments,
+        "reviewer assessment projections do not match accepted transactions",
+    )
+    _require(
+        {record.consolidation_decision_id: record for record in rules.decisions}
+        == expected_rule_decisions,
+        "rule consolidation projections do not match accepted transactions",
+    )
+    _require(
+        {record.regression_case_id: record for record in rules.regressions}
+        == expected_rule_regressions,
+        "rule regression projections do not match accepted transactions",
+    )
+    _require(
+        {
+            rule_id: (rule_version_id, semantic_version, status)
+            for rule_id, rule_version_id, semantic_version, status in rules.heads
+        }
+        == expected_rule_heads,
+        "behavioral rule heads do not match accepted transactions",
     )
     if accepted_evaluator_succession:
         _require(
@@ -1218,6 +1395,32 @@ def _require_projection_consistency(
     )
 
 
+def _rule_replay_decision(
+    proposal: RuleMutationProposal,
+    capability: _RuleReplayCapability,
+) -> TransactionDecision:
+    if isinstance(proposal, RecordRuleIncident):
+        handler = RecordRuleIncidentHandler()
+        return handler.decide(proposal, handler.build_context(proposal, capability))
+    if isinstance(proposal, ProposeBehavioralRule):
+        rule_handler = ProposeBehavioralRuleHandler()
+        return rule_handler.decide(
+            proposal,
+            rule_handler.build_context(proposal, capability),
+        )
+    if isinstance(proposal, ImportReviewerAssessment):
+        assessment_handler = ImportReviewerAssessmentHandler()
+        return assessment_handler.decide(
+            proposal,
+            assessment_handler.build_context(proposal, capability),
+        )
+    consolidation_handler = ConsolidateBehavioralRuleHandler()
+    return consolidation_handler.decide(
+        proposal,
+        consolidation_handler.build_context(proposal, capability),
+    )
+
+
 def _expected_trail_snapshot(
     trail_version_id: str,
     versions: dict[str, EvidenceTrailVersion],
@@ -1236,9 +1439,7 @@ def _expected_trail_snapshot(
         relations=tuple(
             item for item in relations.values() if item.trail_version_id == trail_version_id
         ),
-        checks=tuple(
-            item for item in checks.values() if item.trail_version_id == trail_version_id
-        ),
+        checks=tuple(item for item in checks.values() if item.trail_version_id == trail_version_id),
         assessments=tuple(
             item for item in assessments.values() if item.trail_version_id == trail_version_id
         ),
@@ -1263,9 +1464,7 @@ def _trail_validation_inputs(
     )
     retained_sources: list[RetainedEvidenceSource] = []
     for source_id in version.source_ids:
-        evidence_ids = {
-            node.evidence_id for node in snapshot.nodes if node.source_id == source_id
-        }
+        evidence_ids = {node.evidence_id for node in snapshot.nodes if node.source_id == source_id}
         _require(
             len(evidence_ids) == 1,
             "evidence trail source must resolve to exactly one retained evidence record",
@@ -1305,23 +1504,18 @@ def _receipt_precedes(
     audit_sequence: int,
 ) -> bool:
     return (
-        (
-            receipt.transaction_created_at,
-            receipt.proposal.proposal_id,
-        )
-        < (transaction.created_at, transaction.proposal.proposal_id)
-        and receipt.audit_sequence < audit_sequence
-    )
+        receipt.transaction_created_at,
+        receipt.proposal.proposal_id,
+    ) < (
+        transaction.created_at,
+        transaction.proposal.proposal_id,
+    ) and receipt.audit_sequence < audit_sequence
 
 
 def _receipt_authority_actors(
     receipts: tuple[AcceptedProposalReceipt | None, ...],
 ) -> tuple[ActorIdentity, ...]:
-    return tuple(
-        receipt.proposal.proposer
-        for receipt in receipts
-        if receipt is not None
-    )
+    return tuple(receipt.proposal.proposer for receipt in receipts if receipt is not None)
 
 
 def _require_node_stage_replay(
@@ -1332,20 +1526,15 @@ def _require_node_stage_replay(
     audit_sequence: int,
 ) -> None:
     source_receipts = tuple(
-        _resolve_receipt(receipts, reference)
-        for reference in proposal.source_receipts
+        _resolve_receipt(receipts, reference) for reference in proposal.source_receipts
     )
     _require(
         all(receipt is not None for receipt in source_receipts),
         "node stage source receipts do not resolve exactly",
     )
-    resolved = tuple(
-        receipt for receipt in source_receipts if receipt is not None
-    )
+    resolved = tuple(receipt for receipt in source_receipts if receipt is not None)
     source_proposals = tuple(
-        receipt.proposal
-        for receipt in resolved
-        if isinstance(receipt.proposal, AddEvidence)
+        receipt.proposal for receipt in resolved if isinstance(receipt.proposal, AddEvidence)
     )
     source_pairs = tuple(
         dict.fromkeys((node.source_id, node.evidence_id) for node in proposal.nodes)
@@ -1353,8 +1542,7 @@ def _require_node_stage_replay(
     _require(
         proposal.classification == FIXED_TRAIL_CLASSIFICATION
         and len(source_proposals) == len(resolved)
-        and len({receipt.reference.proposal_id for receipt in resolved})
-        == len(resolved)
+        and len({receipt.reference.proposal_id for receipt in resolved}) == len(resolved)
         and all(
             receipt.governing_policy_hash == policy.policy_hash
             and _receipt_precedes(receipt, transaction, audit_sequence)
@@ -1363,13 +1551,9 @@ def _require_node_stage_replay(
         and len({node.node_id for node in proposal.nodes}) == len(proposal.nodes)
         and tuple(evidence_id for _, evidence_id in source_pairs)
         == tuple(item.evidence.evidence_id for item in source_proposals)
+        and all(node.trail_version_id == proposal.trail_version_id for node in proposal.nodes)
         and all(
-            node.trail_version_id == proposal.trail_version_id
-            for node in proposal.nodes
-        )
-        and all(
-            parse_external_grounding(item.evidence)
-            is ExternalGrounding.PRIMARY_SOURCE
+            parse_external_grounding(item.evidence) is ExternalGrounding.PRIMARY_SOURCE
             for item in source_proposals
         ),
         "node stage fails exact historical receipt and graph validation",
@@ -1397,8 +1581,7 @@ def _require_relation_stage_replay(
 ) -> None:
     node_receipt = _resolve_receipt(receipts, proposal.node_stage_receipt)
     _require(
-        node_receipt is not None
-        and isinstance(node_receipt.proposal, ProposeEvidenceTrailNodes),
+        node_receipt is not None and isinstance(node_receipt.proposal, ProposeEvidenceTrailNodes),
         "relation stage node receipt does not resolve exactly",
     )
     if node_receipt is None or not isinstance(
@@ -1408,16 +1591,13 @@ def _require_relation_stage_replay(
         raise StorageIntegrityError("relation stage node receipt is unavailable")
     node_stage = node_receipt.proposal
     source_receipts = tuple(
-        _resolve_receipt(receipts, reference)
-        for reference in node_stage.source_receipts
+        _resolve_receipt(receipts, reference) for reference in node_stage.source_receipts
     )
     _require(
         all(receipt is not None for receipt in source_receipts),
         "relation stage source receipts do not resolve exactly",
     )
-    resolved_sources = tuple(
-        receipt for receipt in source_receipts if receipt is not None
-    )
+    resolved_sources = tuple(receipt for receipt in source_receipts if receipt is not None)
     source_proposals = tuple(
         receipt.proposal
         for receipt in resolved_sources
@@ -1434,8 +1614,7 @@ def _require_relation_stage_replay(
         and proposal.proposer == node_stage.proposer
         and proposal.node_ids == node_ids
         and proposal.nodes_hash == canonical_node_set_hash(node_stage.nodes)
-        and len({item.relation_id for item in proposal.relations})
-        == len(proposal.relations)
+        and len({item.relation_id for item in proposal.relations}) == len(proposal.relations)
         and all(
             relation.trail_version_id == proposal.trail_version_id
             and relation.source_node_id in node_id_set
@@ -1449,8 +1628,7 @@ def _require_relation_stage_replay(
             for receipt in resolved_sources
         )
         and all(
-            parse_external_grounding(item.evidence)
-            is ExternalGrounding.PRIMARY_SOURCE
+            parse_external_grounding(item.evidence) is ExternalGrounding.PRIMARY_SOURCE
             for item in source_proposals
         ),
         "relation stage fails exact historical receipt and graph validation",
@@ -1581,8 +1759,7 @@ def _require_historical_policy_sequence(
             )
             replay_active_hash = candidate.policy_hash
     _require(
-        active_policy is not None
-        and active_policy.policy_hash == replay_active_hash,
+        active_policy is not None and active_policy.policy_hash == replay_active_hash,
         "active policy pointer does not match historical audit replay",
     )
 
@@ -1649,6 +1826,17 @@ def _add_unique[KeyT, ValueT](
     label: str,
 ) -> None:
     _require(key not in values, f"duplicate {label}")
+    values[key] = value
+
+
+def _add_stable[KeyT, ValueT](
+    values: dict[KeyT, ValueT],
+    key: KeyT,
+    value: ValueT,
+    label: str,
+) -> None:
+    existing = values.get(key)
+    _require(existing is None or existing == value, f"changed stable-key {label}")
     values[key] = value
 
 

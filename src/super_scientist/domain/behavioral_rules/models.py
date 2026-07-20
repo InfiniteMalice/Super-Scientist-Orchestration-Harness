@@ -112,6 +112,14 @@ class RuleAction(StrEnum):
     ESCALATE_TO_HUMAN = "ESCALATE_TO_HUMAN"
 
 
+class RecurrenceRepair(StrEnum):
+    ABSTRACTION = "ABSTRACTION"
+    TRIGGER = "TRIGGER"
+    RETRIEVAL = "RETRIEVAL"
+    ENFORCEMENT = "ENFORCEMENT"
+    SCOPE = "SCOPE"
+
+
 class RuleIncident(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     incident_id: StableIdentifier
@@ -274,6 +282,84 @@ class RuleRegressionCase(_StrictFrozenModel):
         value: tuple[str, ...],
     ) -> tuple[str, ...]:
         return _require_unique(value, "incident_ids")
+
+
+class RecommendationDisposition(_StrictFrozenModel):
+    assessment_id: StableIdentifier
+    recommended_action: RuleAction
+    accepted: bool
+    explanation: NonBlankText
+
+
+class ConsolidationProposal(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    consolidation_decision_id: StableIdentifier
+    review_proposal_id: StableIdentifier
+    assessment_ids: tuple[StableIdentifier, ...] = Field(min_length=5)
+    incident_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    candidate_rule: BehavioralRuleVersion
+    regression_cases: tuple[RuleRegressionCase, ...] = Field(min_length=1)
+    action: RuleAction
+    overlap: OverlapClassification | None
+    conflict: ConflictClassification | None
+    separating_variable: NonBlankText | None
+    recommendation_dispositions: tuple[RecommendationDisposition, ...] = Field(min_length=5)
+    preserved_findings: tuple[NonBlankText, ...] = Field(min_length=1)
+    preserved_dissent: tuple[NonBlankText, ...]
+    recurrence_incident_ids: tuple[StableIdentifier, ...]
+    recurrence_repairs: tuple[RecurrenceRepair, ...]
+    integrated_by: ActorIdentity
+    integrated_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator(
+        "assessment_ids",
+        "incident_ids",
+        "recurrence_incident_ids",
+    )
+    @classmethod
+    def require_unique_identifiers(
+        cls,
+        value: tuple[str, ...],
+        info: object,
+    ) -> tuple[str, ...]:
+        return _require_unique(value, str(getattr(info, "field_name", "references")))
+
+    @field_validator("recurrence_repairs")
+    @classmethod
+    def require_unique_repairs(
+        cls,
+        value: tuple[RecurrenceRepair, ...],
+    ) -> tuple[RecurrenceRepair, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("recurrence_repairs must contain unique values")
+        return value
+
+    @model_validator(mode="after")
+    def require_exact_candidate_bindings(self) -> Self:
+        disposition_ids = tuple(item.assessment_id for item in self.recommendation_dispositions)
+        if disposition_ids != self.assessment_ids:
+            raise ValueError(
+                "recommendation dispositions must exactly match assessment_ids in canonical order"
+            )
+        if self.incident_ids != self.candidate_rule.source_incident_ids:
+            raise ValueError("candidate rule must retain the exact consolidation incidents")
+        if self.integrated_by != self.candidate_rule.creator:
+            raise ValueError("candidate rule creator must be the consolidation integrator")
+        if self.governing_policy_hash != self.candidate_rule.governing_policy_hash:
+            raise ValueError("candidate rule must name the consolidation policy")
+        for regression_case in self.regression_cases:
+            if (
+                regression_case.rule_version_id != self.candidate_rule.rule_version_id
+                or regression_case.created_by != self.integrated_by
+                or regression_case.governing_policy_hash != self.governing_policy_hash
+            ):
+                raise ValueError("regression cases must bind the candidate, integrator, and policy")
+        if not set(self.recurrence_incident_ids).issubset(self.incident_ids):
+            raise ValueError("recurrence incidents must remain in the candidate rule")
+        if self.recurrence_incident_ids and not self.recurrence_repairs:
+            raise ValueError("recurrence requires at least one named recurrence repair")
+        return self
 
 
 def _require_unique(value: tuple[str, ...], field_name: str) -> tuple[str, ...]:

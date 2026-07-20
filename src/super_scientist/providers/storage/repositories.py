@@ -26,6 +26,7 @@ from super_scientist.kernel.transactions.models import Proposal, TransactionDeci
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
     ProgressIntegritySnapshot,
+    RuleIntegritySnapshot,
     TrailIntegritySnapshot,
 )
 from super_scientist.providers.storage.schema import (
@@ -90,6 +91,10 @@ _STRICT_JSON_PROPOSAL_TYPES = frozenset(
         "propose_evidence_trail_relations",
         "record_evidence_trail_version",
         "bind_report_sentence",
+        "record_rule_incident",
+        "propose_behavioral_rule",
+        "import_reviewer_assessment",
+        "consolidate_behavioral_rule",
     }
 )
 
@@ -979,6 +984,25 @@ class RepositorySet:
             assessments=EvidenceTrailAssessmentRepository(self._connection).list_all(),
             bindings=ReportSentenceBindingRepository(self._connection).list_all(),
             heads=EvidenceTrailHeadRepository(self._connection).list_all(),
+        )
+
+    def rule_integrity_snapshot(self) -> RuleIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            BehavioralRuleHeadRepository,
+            BehavioralRuleVersionRepository,
+            ReviewerAssessmentRepository,
+            RuleConsolidationDecisionRepository,
+            RuleIncidentRepository,
+            RuleRegressionCaseRepository,
+        )
+
+        return RuleIntegritySnapshot(
+            incidents=RuleIncidentRepository(self._connection).list_all(),
+            versions=BehavioralRuleVersionRepository(self._connection).list_all(),
+            assessments=ReviewerAssessmentRepository(self._connection).list_all(),
+            decisions=RuleConsolidationDecisionRepository(self._connection).list_all(),
+            regressions=RuleRegressionCaseRepository(self._connection).list_all(),
+            heads=BehavioralRuleHeadRepository(self._connection).list_all(),
         )
 
     def has_durable_state(self) -> bool:

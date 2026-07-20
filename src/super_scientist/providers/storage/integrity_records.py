@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from super_scientist.domain.behavioral_rules.models import (
+    BehavioralRuleVersion,
+    ReviewerAssessment,
+    RuleConsolidationDecision,
+    RuleIncident,
+    RuleRegressionCase,
+    RuleStatus,
+)
 from super_scientist.domain.configurations.models import ConfigurationVersion
 from super_scientist.domain.evaluators.models import (
     EvaluatorCollapseRecord,
@@ -71,3 +79,15 @@ class TrailIntegritySnapshot:
     assessments: tuple[TrailAssessment, ...]
     bindings: tuple[ReportSentenceBinding, ...]
     heads: tuple[tuple[str, str, int], ...]
+
+
+@dataclass(frozen=True)
+class RuleIntegritySnapshot:
+    """Fixed read-only behavioral-rule view used only for transaction replay."""
+
+    incidents: tuple[RuleIncident, ...]
+    versions: tuple[BehavioralRuleVersion, ...]
+    assessments: tuple[ReviewerAssessment, ...]
+    decisions: tuple[RuleConsolidationDecision, ...]
+    regressions: tuple[RuleRegressionCase, ...]
+    heads: tuple[tuple[str, str, str, RuleStatus], ...]

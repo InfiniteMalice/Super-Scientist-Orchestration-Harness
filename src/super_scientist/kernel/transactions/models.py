@@ -8,6 +8,12 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 from super_scientist.config.models import PolicySnapshot
+from super_scientist.domain.behavioral_rules.models import (
+    BehavioralRuleVersion,
+    ConsolidationProposal,
+    ReviewerAssessment,
+    RuleIncident,
+)
 from super_scientist.domain.claims.models import AtomicClaim
 from super_scientist.domain.configurations.models import ConfigurationVersion
 from super_scientist.domain.evaluators.models import (
@@ -69,6 +75,10 @@ type ProposalKind = Literal[
     "propose_evidence_trail_relations",
     "record_evidence_trail_version",
     "bind_report_sentence",
+    "record_rule_incident",
+    "propose_behavioral_rule",
+    "import_reviewer_assessment",
+    "consolidate_behavioral_rule",
 ]
 
 
@@ -225,9 +235,7 @@ class DecideCompletion(ProposalBase):
 
 
 class ProposeEvidenceTrailNodes(ProposalBase):
-    proposal_type: Literal["propose_evidence_trail_nodes"] = (
-        "propose_evidence_trail_nodes"
-    )
+    proposal_type: Literal["propose_evidence_trail_nodes"] = "propose_evidence_trail_nodes"
     trail_id: StableIdentifier
     trail_version_id: StableIdentifier
     classification: ChangeClassification
@@ -236,9 +244,7 @@ class ProposeEvidenceTrailNodes(ProposalBase):
 
 
 class ProposeEvidenceTrailRelations(ProposalBase):
-    proposal_type: Literal["propose_evidence_trail_relations"] = (
-        "propose_evidence_trail_relations"
-    )
+    proposal_type: Literal["propose_evidence_trail_relations"] = "propose_evidence_trail_relations"
     trail_id: StableIdentifier
     trail_version_id: StableIdentifier
     classification: ChangeClassification
@@ -249,9 +255,7 @@ class ProposeEvidenceTrailRelations(ProposalBase):
 
 
 class RecordEvidenceTrailVersion(ProposalBase):
-    proposal_type: Literal["record_evidence_trail_version"] = (
-        "record_evidence_trail_version"
-    )
+    proposal_type: Literal["record_evidence_trail_version"] = "record_evidence_trail_version"
     trail_version: EvidenceTrailVersion
     nodes: tuple[EvidenceTrailNode, ...] = Field(min_length=1)
     relations: tuple[EvidenceTrailRelation, ...]
@@ -271,6 +275,33 @@ class RecordEvidenceTrailVersion(ProposalBase):
 class BindReportSentence(ProposalBase):
     proposal_type: Literal["bind_report_sentence"] = "bind_report_sentence"
     binding: ReportSentenceBinding
+
+
+class RecordRuleIncident(ProposalBase):
+    proposal_type: Literal["record_rule_incident"] = "record_rule_incident"
+    classification: ChangeClassification
+    incident: RuleIncident
+
+
+class ProposeBehavioralRule(ProposalBase):
+    proposal_type: Literal["propose_behavioral_rule"] = "propose_behavioral_rule"
+    classification: ChangeClassification
+    rule_version: BehavioralRuleVersion
+
+
+class ImportReviewerAssessment(ProposalBase):
+    proposal_type: Literal["import_reviewer_assessment"] = "import_reviewer_assessment"
+    classification: ChangeClassification
+    assessment: ReviewerAssessment
+
+
+class ConsolidateBehavioralRule(ProposalBase):
+    proposal_type: Literal["consolidate_behavioral_rule"] = "consolidate_behavioral_rule"
+    classification: ChangeClassification
+    consolidation: ConsolidationProposal
+    measurement_id: StableIdentifier
+    evaluator_audit_id: StableIdentifier
+    rollback_rule_version_id: StableIdentifier
 
 
 class InvalidProposal(BaseModel):
@@ -305,6 +336,10 @@ Proposal = Annotated[
     | ProposeEvidenceTrailRelations
     | RecordEvidenceTrailVersion
     | BindReportSentence
+    | RecordRuleIncident
+    | ProposeBehavioralRule
+    | ImportReviewerAssessment
+    | ConsolidateBehavioralRule
     | InvalidProposal,
     Field(discriminator="proposal_type"),
 ]

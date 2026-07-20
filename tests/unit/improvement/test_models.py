@@ -252,7 +252,7 @@ def test_new_rejection_codes_are_appended_with_stable_values() -> None:
     )
 
 
-def test_proposal_union_has_seventeen_fixed_additive_persistent_kinds() -> None:
+def test_proposal_union_has_twenty_one_fixed_additive_persistent_kinds() -> None:
     proposal_types = (
         CreateResearchRun,
         AppendResearchRunEvent,
@@ -271,6 +271,10 @@ def test_proposal_union_has_seventeen_fixed_additive_persistent_kinds() -> None:
         transaction_models.ProposeEvidenceTrailRelations,
         RecordEvidenceTrailVersion,
         BindReportSentence,
+        transaction_models.RecordRuleIncident,
+        transaction_models.ProposeBehavioralRule,
+        transaction_models.ImportReviewerAssessment,
+        transaction_models.ConsolidateBehavioralRule,
     )
     expected = (
         "create_research_run",
@@ -290,6 +294,10 @@ def test_proposal_union_has_seventeen_fixed_additive_persistent_kinds() -> None:
         "propose_evidence_trail_relations",
         "record_evidence_trail_version",
         "bind_report_sentence",
+        "record_rule_incident",
+        "propose_behavioral_rule",
+        "import_reviewer_assessment",
+        "consolidate_behavioral_rule",
     )
     legacy = ("add_evidence", "propose_claim", "transition_claim")
 

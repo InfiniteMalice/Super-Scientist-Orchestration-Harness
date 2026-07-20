@@ -21,6 +21,10 @@ from super_scientist.application.transactions.progress import (
     progress_capabilities,
 )
 from super_scientist.application.transactions.router import ProposalRouter
+from super_scientist.application.transactions.rules import (
+    fixed_rule_handlers,
+    rule_capabilities,
+)
 from super_scientist.application.transactions.trails import (
     fixed_trail_handlers,
     trail_capabilities,
@@ -42,17 +46,21 @@ from super_scientist.kernel.transactions.models import (
     AddEvidence,
     AppendProgressEvent,
     BindReportSentence,
+    ConsolidateBehavioralRule,
     DecideCompletion,
+    ImportReviewerAssessment,
     InvalidProposal,
     Proposal,
     ProposalAttempt,
     ProposalKind,
+    ProposeBehavioralRule,
     ProposeClaim,
     ProposeEvidenceTrailNodes,
     ProposeEvidenceTrailRelations,
     ProposeGovernancePolicyTransition,
     RecordEvidenceTrailVersion,
     RecordProgressPlan,
+    RecordRuleIncident,
     RecordRunBudget,
     RecordRunCheckpoint,
     RejectionCode,
@@ -176,8 +184,15 @@ class TransactionCoordinator:
         trail_handlers = tuple(
             (handler.proposal_type, handler) for handler in fixed_trail_handlers()
         )
+        rule_handlers = tuple((handler.proposal_type, handler) for handler in fixed_rule_handlers())
         self._router = ProposalRouter(
-            (*compatibility_handlers, *adaptation_handlers, *progress_handlers, *trail_handlers)
+            (
+                *compatibility_handlers,
+                *adaptation_handlers,
+                *progress_handlers,
+                *trail_handlers,
+                *rule_handlers,
+            )
         )
 
     @property
@@ -406,6 +421,22 @@ class TransactionCoordinator:
                 )
                 reads = trail_io
                 writes = trail_io
+            elif isinstance(
+                admitted_proposal,
+                (
+                    RecordRuleIncident,
+                    ProposeBehavioralRule,
+                    ImportReviewerAssessment,
+                    ConsolidateBehavioralRule,
+                ),
+            ):
+                rule_io = rule_capabilities(
+                    admitted_proposal,
+                    connection,
+                    stored_policy,
+                )
+                reads = rule_io
+                writes = rule_io
             else:
                 adaptation_io = adaptation_capabilities(
                     admitted_proposal,
@@ -494,6 +525,18 @@ class TransactionCoordinator:
 
 def _normalize_proposal(value: object) -> Proposal | TransactionDecision:
     try:
+        if isinstance(
+            value,
+            (
+                RecordRuleIncident,
+                ProposeBehavioralRule,
+                ImportReviewerAssessment,
+                ConsolidateBehavioralRule,
+            ),
+        ):
+            return PROPOSAL_ADAPTER.validate_json(
+                canonical_json_bytes(value.model_dump(mode="json"))
+            )
         if isinstance(value, BaseModel):
             return PROPOSAL_ADAPTER.validate_python(dict(value.__dict__))
         if isinstance(value, Mapping):

@@ -1,7 +1,10 @@
 from super_scientist.domain.behavioral_rules.models import (
     BehavioralRuleVersion,
     ConflictClassification,
+    ConsolidationProposal,
     OverlapClassification,
+    RecommendationDisposition,
+    RecurrenceRepair,
     ReviewerAssessment,
     ReviewerRole,
     RuleAction,
@@ -17,7 +20,10 @@ from super_scientist.domain.behavioral_rules.models import (
 __all__ = [
     "BehavioralRuleVersion",
     "ConflictClassification",
+    "ConsolidationProposal",
     "OverlapClassification",
+    "RecommendationDisposition",
+    "RecurrenceRepair",
     "ReviewerAssessment",
     "ReviewerRole",
     "RuleAction",
