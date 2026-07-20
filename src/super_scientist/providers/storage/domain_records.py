@@ -3,8 +3,10 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
+from typing import Literal, Self
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from sqlalchemy import Connection, Table, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -36,6 +38,8 @@ from super_scientist.domain.improvement.models import (
     SelfImprovementMeasurementRecord,
 )
 from super_scientist.domain.primitives import (
+    NonBlankText,
+    Sha256Hex,
     StableIdentifier,
     UtcTimestamp,
     canonical_json_bytes,
@@ -58,6 +62,10 @@ from super_scientist.providers.storage.schema import (
     behavioral_rule_versions,
     completion_decisions,
     configuration_versions,
+    counterexample_evidence,
+    counterexample_records,
+    counterexample_simulations,
+    counterexample_verification_results,
     evaluator_audits,
     evaluator_collapse_records,
     evaluator_heads,
@@ -69,6 +77,27 @@ from super_scientist.providers.storage.schema import (
     evidence_trail_nodes,
     evidence_trail_relations,
     evidence_trail_versions,
+    executable_model_specs,
+    hypothesis_admission_counterexamples,
+    hypothesis_admission_decisions,
+    hypothesis_admission_models,
+    hypothesis_admission_revisions,
+    hypothesis_admission_verification_results,
+    hypothesis_heads,
+    hypothesis_revision_counterexamples,
+    hypothesis_revision_verification_results,
+    hypothesis_revisions,
+    hypothesis_version_evidence,
+    hypothesis_version_primitives,
+    hypothesis_versions,
+    primitive_evaluation_evidence,
+    primitive_evaluation_verification_results,
+    primitive_evaluations,
+    primitive_heads,
+    primitive_version_dependencies,
+    primitive_version_measurements,
+    primitive_version_predecessors,
+    primitive_versions,
     progress_events,
     progress_heads,
     progress_plans,
@@ -89,6 +118,10 @@ from super_scientist.providers.storage.schema import (
     run_budgets,
     run_checkpoints,
     self_improvement_measurements,
+    simulation_results,
+    verification_mechanism_specs,
+    verification_result_simulations,
+    verification_results,
 )
 
 TIMESTAMP_ADAPTER: TypeAdapter[UtcTimestamp] = TypeAdapter(UtcTimestamp)
@@ -97,11 +130,434 @@ SEMANTIC_VERSION_ADAPTER: TypeAdapter[SemanticVersion] = TypeAdapter(SemanticVer
 
 type _RelationshipStorageType = type[str] | type[int]
 
+
+class PrimitiveStatus(StrEnum):
+    PROPOSED = "PROPOSED"
+    DUPLICATE_SUSPECTED = "DUPLICATE_SUSPECTED"
+    UNDER_DEFINITION = "UNDER_DEFINITION"
+    EXPERIMENTAL = "EXPERIMENTAL"
+    LOCALLY_USEFUL = "LOCALLY_USEFUL"
+    REPLICATED = "REPLICATED"
+    STABILIZED = "STABILIZED"
+    REJECTED = "REJECTED"
+    SUPERSEDED = "SUPERSEDED"
+    RETIRED = "RETIRED"
+
+
+class PrimitiveEvaluationFrame(StrEnum):
+    OLD_FRAME = "OLD_FRAME"
+    NEW_FRAME = "NEW_FRAME"
+
+
+class EvaluationOutcome(StrEnum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    ABSTAIN = "ABSTAIN"
+
+
+class HypothesisAdmissionStatus(StrEnum):
+    SOURCE_PATTERN_REVIEW_PENDING = "SOURCE_PATTERN_REVIEW_PENDING"
+    GENERIC_PATTERN_EXTRACTED = "GENERIC_PATTERN_EXTRACTED"
+    TRANSFER_TESTING = "TRANSFER_TESTING"
+    TRANSFER_VALIDATED = "TRANSFER_VALIDATED"
+    DOMAIN_SPECIFIC = "DOMAIN_SPECIFIC"
+    BENCHMARK_SPECIFIC = "BENCHMARK_SPECIFIC"
+    REJECTED = "REJECTED"
+    ADMITTED_TO_SSOH = "ADMITTED_TO_SSOH"
+
+
+class ModelType(StrEnum):
+    SOURCE_CONTROLLED_METADATA = "SOURCE_CONTROLLED_METADATA"
+    SYMBOLIC_EQUATION = "SYMBOLIC_EQUATION"
+    PROBABILISTIC_MODEL = "PROBABILISTIC_MODEL"
+    CAUSAL_GRAPH = "CAUSAL_GRAPH"
+    STATE_TRANSITION_SYSTEM = "STATE_TRANSITION_SYSTEM"
+    DETERMINISTIC_SIMULATOR = "DETERMINISTIC_SIMULATOR"
+    FORMAL_SPECIFICATION = "FORMAL_SPECIFICATION"
+    APPROVED_DOMAIN_MODEL = "APPROVED_DOMAIN_MODEL"
+
+
+class ModelExecutionMode(StrEnum):
+    METADATA_ONLY = "METADATA_ONLY"
+    BUILTIN_DETERMINISTIC_SIMULATOR = "BUILTIN_DETERMINISTIC_SIMULATOR"
+
+
+class BuiltinSimulatorId(StrEnum):
+    """Closed inert names; execution dispatch remains outside storage."""
+
+    THERMAL_CHAMBER_V1 = "thermal-chamber-v1"
+    EXPONENTIAL_DECAY_V1 = "exponential-decay-v1"
+
+
+class VerificationMechanismCategory(StrEnum):
+    FORMAL_VERIFIER = "FORMAL_VERIFIER"
+    INDEPENDENT_DETERMINISTIC_CHECKER = "INDEPENDENT_DETERMINISTIC_CHECKER"
+    LEARNED_JUDGE = "LEARNED_JUDGE"
+
+
+class VerificationResultCategory(StrEnum):
+    FORMAL_VERIFICATION_RESULT = "FORMAL_VERIFICATION_RESULT"
+    DETERMINISTIC_CHECK_RESULT = "DETERMINISTIC_CHECK_RESULT"
+    LEARNED_JUDGE_RESULT = "LEARNED_JUDGE_RESULT"
+
+
+class VerificationOutcome(StrEnum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    ABSTAIN = "ABSTAIN"
+
+
+class AdmissionDecisionOutcome(StrEnum):
+    ACCEPT = "ACCEPT"
+    REJECT = "REJECT"
+    ABSTAIN = "ABSTAIN"
+
+
+class _StrictFrozenStorageRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+def _require_unique_references(value: tuple[str, ...], field_name: str) -> tuple[str, ...]:
+    if len(set(value)) != len(value):
+        raise ValueError(f"{field_name} must contain unique identifiers")
+    return value
+
+
+class PrimitiveVersionRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    primitive_version_id: StableIdentifier
+    primitive_id: StableIdentifier
+    semantic_version: SemanticVersion
+    definition: NonBlankText
+    motivation: NonBlankText
+    parent_vocabulary: tuple[NonBlankText, ...]
+    contrasts: tuple[NonBlankText, ...]
+    examples: tuple[NonBlankText, ...]
+    counterexamples: tuple[NonBlankText, ...]
+    construction_method: NonBlankText
+    expected_uses: tuple[NonBlankText, ...]
+    predecessor_primitive_version_ids: tuple[StableIdentifier, ...]
+    dependency_primitive_version_ids: tuple[StableIdentifier, ...]
+    measurement_ids: tuple[StableIdentifier, ...]
+    falsification_tests: tuple[NonBlankText, ...] = Field(min_length=1)
+    ambiguity: tuple[NonBlankText, ...]
+    proposer_id: StableIdentifier
+    status: PrimitiveStatus
+    created_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator(
+        "predecessor_primitive_version_ids",
+        "dependency_primitive_version_ids",
+        "measurement_ids",
+    )
+    @classmethod
+    def require_unique_identifier_references(
+        cls,
+        value: tuple[str, ...],
+        info: object,
+    ) -> tuple[str, ...]:
+        return _require_unique_references(
+            value,
+            str(getattr(info, "field_name", "references")),
+        )
+
+
+class PrimitiveEvaluationRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    primitive_evaluation_id: StableIdentifier
+    primitive_version_id: StableIdentifier
+    frame: PrimitiveEvaluationFrame
+    verification_result_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    evidence_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    criteria: tuple[NonBlankText, ...] = Field(min_length=1)
+    findings: tuple[NonBlankText, ...] = Field(min_length=1)
+    outcome: EvaluationOutcome
+    evaluator_id: StableIdentifier
+    evaluated_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator("verification_result_ids", "evidence_ids")
+    @classmethod
+    def require_unique_identifier_references(
+        cls,
+        value: tuple[str, ...],
+        info: object,
+    ) -> tuple[str, ...]:
+        return _require_unique_references(
+            value,
+            str(getattr(info, "field_name", "references")),
+        )
+
+
+class HypothesisVersionRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    hypothesis_version_id: StableIdentifier
+    hypothesis_id: StableIdentifier
+    version: int = Field(ge=1)
+    statement: NonBlankText
+    assumptions: tuple[NonBlankText, ...] = Field(min_length=1)
+    scope: tuple[NonBlankText, ...] = Field(min_length=1)
+    variables: tuple[NonBlankText, ...] = Field(min_length=1)
+    predictions: tuple[NonBlankText, ...] = Field(min_length=1)
+    falsification_conditions: tuple[NonBlankText, ...] = Field(min_length=1)
+    primitive_version_ids: tuple[StableIdentifier, ...]
+    evidence_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    admission_status: HypothesisAdmissionStatus
+    proposer_id: StableIdentifier
+    created_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator("primitive_version_ids", "evidence_ids")
+    @classmethod
+    def require_unique_identifier_references(
+        cls,
+        value: tuple[str, ...],
+        info: object,
+    ) -> tuple[str, ...]:
+        return _require_unique_references(
+            value,
+            str(getattr(info, "field_name", "references")),
+        )
+
+
+class ExecutableModelSpecRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    model_spec_id: StableIdentifier
+    hypothesis_version_id: StableIdentifier
+    model_type: ModelType
+    execution_mode: ModelExecutionMode
+    artifact_hash: Sha256Hex | None
+    artifact_media_type: NonBlankText | None
+    artifact_size_bytes: int | None = Field(ge=0)
+    artifact_name: NonBlankText
+    builtin_simulator_id: BuiltinSimulatorId | None
+    input_schema_id: StableIdentifier
+    output_schema_id: StableIdentifier
+    deterministic_seed: int
+    max_steps: int = Field(ge=1, le=100_000)
+    max_state_bytes: int = Field(ge=1, le=10_000_000)
+    registered_by: StableIdentifier
+    created_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @model_validator(mode="after")
+    def require_safe_execution_shape(self) -> Self:
+        artifact_fields = (
+            self.artifact_hash,
+            self.artifact_media_type,
+            self.artifact_size_bytes,
+        )
+        if self.execution_mode is ModelExecutionMode.METADATA_ONLY:
+            if any(value is None for value in artifact_fields):
+                raise ValueError("metadata-only model requires complete artifact metadata")
+            if self.builtin_simulator_id is not None:
+                raise ValueError("metadata-only model cannot name builtin_simulator_id")
+        else:
+            if any(value is not None for value in artifact_fields):
+                raise ValueError("builtin simulator cannot carry an untrusted artifact")
+            if self.builtin_simulator_id is None:
+                raise ValueError("builtin_simulator_id is required for builtin execution mode")
+        return self
+
+
+class VerificationMechanismSpecRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    mechanism_spec_id: StableIdentifier
+    hypothesis_version_id: StableIdentifier
+    mechanism_category: VerificationMechanismCategory
+    name: NonBlankText
+    description: NonBlankText
+    specification_hash: Sha256Hex
+    input_schema_id: StableIdentifier
+    output_schema_id: StableIdentifier
+    created_by: StableIdentifier
+    created_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+
+class SimulationResultRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    simulation_result_id: StableIdentifier
+    hypothesis_version_id: StableIdentifier
+    model_spec_id: StableIdentifier
+    execution_mode: ModelExecutionMode
+    input_hash: Sha256Hex
+    output_hash: Sha256Hex
+    deterministic_seed: int
+    steps: int = Field(ge=0, le=100_000)
+    state_bytes: int = Field(ge=0, le=10_000_000)
+    completed_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+
+class VerificationResultRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    verification_result_id: StableIdentifier
+    hypothesis_version_id: StableIdentifier
+    mechanism_spec_id: StableIdentifier
+    mechanism_category: VerificationMechanismCategory
+    result_category: VerificationResultCategory
+    model_spec_id: StableIdentifier | None
+    model_execution_mode: ModelExecutionMode | None
+    simulation_result_ids: tuple[StableIdentifier, ...]
+    outcome: VerificationOutcome
+    findings: tuple[NonBlankText, ...] = Field(min_length=1)
+    verified_by: StableIdentifier
+    completed_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator("simulation_result_ids")
+    @classmethod
+    def require_unique_simulation_results(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _require_unique_references(value, "simulation_result_ids")
+
+    @model_validator(mode="after")
+    def require_exact_category_and_model_pairs(self) -> Self:
+        expected_result_category = {
+            VerificationMechanismCategory.FORMAL_VERIFIER: (
+                VerificationResultCategory.FORMAL_VERIFICATION_RESULT
+            ),
+            VerificationMechanismCategory.INDEPENDENT_DETERMINISTIC_CHECKER: (
+                VerificationResultCategory.DETERMINISTIC_CHECK_RESULT
+            ),
+            VerificationMechanismCategory.LEARNED_JUDGE: (
+                VerificationResultCategory.LEARNED_JUDGE_RESULT
+            ),
+        }[self.mechanism_category]
+        if self.result_category is not expected_result_category:
+            raise ValueError("result_category must match mechanism_category")
+        if (self.model_spec_id is None) != (self.model_execution_mode is None):
+            raise ValueError("model_spec_id and model_execution_mode must both be set or null")
+        return self
+
+
+class CounterexampleRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    counterexample_id: StableIdentifier
+    hypothesis_version_id: StableIdentifier
+    model_spec_id: StableIdentifier | None
+    model_execution_mode: ModelExecutionMode | None
+    simulation_result_ids: tuple[StableIdentifier, ...]
+    verification_result_ids: tuple[StableIdentifier, ...]
+    evidence_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    description: NonBlankText
+    input_hash: Sha256Hex
+    observed_output_hash: Sha256Hex
+    expected_output_hash: Sha256Hex
+    discovered_by: StableIdentifier
+    discovered_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator("simulation_result_ids", "verification_result_ids", "evidence_ids")
+    @classmethod
+    def require_unique_identifier_references(
+        cls,
+        value: tuple[str, ...],
+        info: object,
+    ) -> tuple[str, ...]:
+        return _require_unique_references(
+            value,
+            str(getattr(info, "field_name", "references")),
+        )
+
+    @model_validator(mode="after")
+    def require_complete_model_pair(self) -> Self:
+        if (self.model_spec_id is None) != (self.model_execution_mode is None):
+            raise ValueError("model_spec_id and model_execution_mode must both be set or null")
+        return self
+
+
+class HypothesisRevisionRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    revision_id: StableIdentifier
+    hypothesis_id: StableIdentifier
+    prior_hypothesis_version_id: StableIdentifier
+    prior_version: int = Field(ge=1)
+    resulting_hypothesis_version_id: StableIdentifier
+    resulting_version: int = Field(ge=2)
+    triggering_verification_result_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    considered_counterexample_ids: tuple[StableIdentifier, ...]
+    assumptions_added: tuple[NonBlankText, ...]
+    assumptions_removed: tuple[NonBlankText, ...]
+    assumptions_changed: tuple[NonBlankText, ...]
+    variables_added: tuple[NonBlankText, ...]
+    variables_removed: tuple[NonBlankText, ...]
+    variables_changed: tuple[NonBlankText, ...]
+    mechanism_changes: tuple[NonBlankText, ...]
+    preserved_elements: tuple[NonBlankText, ...] = Field(min_length=1)
+    changed_predictions: tuple[NonBlankText, ...] = Field(min_length=1)
+    changed_falsification_conditions: tuple[NonBlankText, ...] = Field(min_length=1)
+    author_id: StableIdentifier
+    revised_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator("triggering_verification_result_ids", "considered_counterexample_ids")
+    @classmethod
+    def require_unique_identifier_references(
+        cls,
+        value: tuple[str, ...],
+        info: object,
+    ) -> tuple[str, ...]:
+        return _require_unique_references(
+            value,
+            str(getattr(info, "field_name", "references")),
+        )
+
+    @model_validator(mode="after")
+    def require_contiguous_distinct_versions(self) -> Self:
+        if self.resulting_version != self.prior_version + 1:
+            raise ValueError("resulting_version must immediately follow prior_version")
+        if self.resulting_hypothesis_version_id == self.prior_hypothesis_version_id:
+            raise ValueError("resulting hypothesis version must differ from prior version")
+        return self
+
+
+class HypothesisAdmissionDecisionRecord(_StrictFrozenStorageRecord):
+    schema_version: Literal[1] = 1
+    admission_decision_id: StableIdentifier
+    hypothesis_version_id: StableIdentifier
+    hypothesis_id: StableIdentifier
+    version: int = Field(ge=1)
+    admission_status: HypothesisAdmissionStatus
+    model_spec_ids: tuple[StableIdentifier, ...]
+    verification_result_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    counterexample_ids: tuple[StableIdentifier, ...]
+    revision_ids: tuple[StableIdentifier, ...]
+    outcome: AdmissionDecisionOutcome
+    rationale: NonBlankText
+    decided_by: StableIdentifier
+    decided_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator(
+        "model_spec_ids",
+        "verification_result_ids",
+        "counterexample_ids",
+        "revision_ids",
+    )
+    @classmethod
+    def require_unique_identifier_references(
+        cls,
+        value: tuple[str, ...],
+        info: object,
+    ) -> tuple[str, ...]:
+        return _require_unique_references(
+            value,
+            str(getattr(info, "field_name", "references")),
+        )
+
+
 __all__ = [
+    "AdmissionDecisionOutcome",
     "BehavioralRuleHeadRepository",
     "BehavioralRuleVersionRepository",
+    "BuiltinSimulatorId",
     "CompletionDecisionRepository",
     "ConfigurationVersionRepository",
+    "CounterexampleRecord",
+    "CounterexampleRecordRepository",
+    "EvaluationOutcome",
     "EvaluatorAuditRepository",
     "EvaluatorCollapseRepository",
     "EvaluatorHeadRepository",
@@ -113,6 +569,25 @@ __all__ = [
     "EvidenceTrailNodeRepository",
     "EvidenceTrailRelationRepository",
     "EvidenceTrailVersionRepository",
+    "ExecutableModelSpecRecord",
+    "ExecutableModelSpecRepository",
+    "HypothesisAdmissionDecisionRecord",
+    "HypothesisAdmissionDecisionRepository",
+    "HypothesisAdmissionStatus",
+    "HypothesisHeadRepository",
+    "HypothesisRevisionRecord",
+    "HypothesisRevisionRepository",
+    "HypothesisVersionRecord",
+    "HypothesisVersionRepository",
+    "ModelExecutionMode",
+    "ModelType",
+    "PrimitiveEvaluationFrame",
+    "PrimitiveEvaluationRecord",
+    "PrimitiveEvaluationRepository",
+    "PrimitiveHeadRepository",
+    "PrimitiveStatus",
+    "PrimitiveVersionRecord",
+    "PrimitiveVersionRepository",
     "ProgressEventRepository",
     "ProgressHeadRepository",
     "ProgressPlanRepository",
@@ -128,6 +603,15 @@ __all__ = [
     "RunBudgetRepository",
     "RunCheckpointRepository",
     "SelfImprovementMeasurementRepository",
+    "SimulationResultRecord",
+    "SimulationResultRepository",
+    "VerificationMechanismCategory",
+    "VerificationMechanismSpecRecord",
+    "VerificationMechanismSpecRepository",
+    "VerificationOutcome",
+    "VerificationResultCategory",
+    "VerificationResultRecord",
+    "VerificationResultRepository",
 ]
 
 
@@ -519,6 +1003,297 @@ class RuleRegressionCaseRepository(_ReferencedAppendOnlyRecordRepository[RuleReg
         )
 
 
+class PrimitiveVersionRepository(_ReferencedAppendOnlyRecordRepository[PrimitiveVersionRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=primitive_versions,
+            model_type=PrimitiveVersionRecord,
+            identifier_field="primitive_version_id",
+            relationship_fields={
+                "primitive_id": "primitive_id",
+                "semantic_version": "semantic_version",
+                "status": "status",
+            },
+            reference_bindings=(
+                _OrderedReferenceBinding(
+                    table=primitive_version_predecessors,
+                    owner_column="primitive_version_id",
+                    record_field="predecessor_primitive_version_ids",
+                    reference_column="predecessor_primitive_version_id",
+                ),
+                _OrderedReferenceBinding(
+                    table=primitive_version_dependencies,
+                    owner_column="primitive_version_id",
+                    record_field="dependency_primitive_version_ids",
+                    reference_column="dependency_primitive_version_id",
+                ),
+                _OrderedReferenceBinding(
+                    table=primitive_version_measurements,
+                    owner_column="primitive_version_id",
+                    record_field="measurement_ids",
+                    reference_column="measurement_id",
+                ),
+            ),
+        )
+
+
+class PrimitiveEvaluationRepository(
+    _ReferencedAppendOnlyRecordRepository[PrimitiveEvaluationRecord]
+):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=primitive_evaluations,
+            model_type=PrimitiveEvaluationRecord,
+            identifier_field="primitive_evaluation_id",
+            relationship_fields={
+                "primitive_version_id": "primitive_version_id",
+                "frame": "frame",
+            },
+            reference_bindings=(
+                _OrderedReferenceBinding(
+                    table=primitive_evaluation_verification_results,
+                    owner_column="primitive_evaluation_id",
+                    record_field="verification_result_ids",
+                    reference_column="verification_result_id",
+                ),
+                _OrderedReferenceBinding(
+                    table=primitive_evaluation_evidence,
+                    owner_column="primitive_evaluation_id",
+                    record_field="evidence_ids",
+                    reference_column="evidence_id",
+                ),
+            ),
+        )
+
+
+class HypothesisVersionRepository(_ReferencedAppendOnlyRecordRepository[HypothesisVersionRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=hypothesis_versions,
+            model_type=HypothesisVersionRecord,
+            identifier_field="hypothesis_version_id",
+            relationship_fields={
+                "hypothesis_id": "hypothesis_id",
+                "version": "version",
+                "admission_status": "admission_status",
+            },
+            relationship_types={"version": int},
+            reference_bindings=(
+                _OrderedReferenceBinding(
+                    table=hypothesis_version_primitives,
+                    owner_column="hypothesis_version_id",
+                    record_field="primitive_version_ids",
+                    reference_column="primitive_version_id",
+                ),
+                _OrderedReferenceBinding(
+                    table=hypothesis_version_evidence,
+                    owner_column="hypothesis_version_id",
+                    record_field="evidence_ids",
+                    reference_column="evidence_id",
+                ),
+            ),
+        )
+
+
+class ExecutableModelSpecRepository(_AppendOnlyRecordRepository[ExecutableModelSpecRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=executable_model_specs,
+            model_type=ExecutableModelSpecRecord,
+            identifier_field="model_spec_id",
+            relationship_fields={
+                "hypothesis_version_id": "hypothesis_version_id",
+                "execution_mode": "execution_mode",
+                "artifact_hash": "artifact_hash",
+                "artifact_media_type": "artifact_media_type",
+                "artifact_size_bytes": "artifact_size_bytes",
+                "builtin_simulator_id": "builtin_simulator_id",
+            },
+            relationship_types={"artifact_size_bytes": int},
+            nullable_relationship_fields={
+                "artifact_hash",
+                "artifact_media_type",
+                "artifact_size_bytes",
+                "builtin_simulator_id",
+            },
+        )
+
+
+class VerificationMechanismSpecRepository(
+    _AppendOnlyRecordRepository[VerificationMechanismSpecRecord]
+):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=verification_mechanism_specs,
+            model_type=VerificationMechanismSpecRecord,
+            identifier_field="mechanism_spec_id",
+            relationship_fields={
+                "hypothesis_version_id": "hypothesis_version_id",
+                "mechanism_category": "mechanism_category",
+            },
+        )
+
+
+class SimulationResultRepository(_AppendOnlyRecordRepository[SimulationResultRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=simulation_results,
+            model_type=SimulationResultRecord,
+            identifier_field="simulation_result_id",
+            relationship_fields={
+                "hypothesis_version_id": "hypothesis_version_id",
+                "model_spec_id": "model_spec_id",
+                "execution_mode": "execution_mode",
+            },
+        )
+
+
+class VerificationResultRepository(_ReferencedAppendOnlyRecordRepository[VerificationResultRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=verification_results,
+            model_type=VerificationResultRecord,
+            identifier_field="verification_result_id",
+            relationship_fields={
+                "hypothesis_version_id": "hypothesis_version_id",
+                "mechanism_spec_id": "mechanism_spec_id",
+                "mechanism_category": "mechanism_category",
+                "result_category": "result_category",
+                "model_spec_id": "model_spec_id",
+                "model_execution_mode": "model_execution_mode",
+            },
+            nullable_relationship_fields={"model_spec_id", "model_execution_mode"},
+            reference_bindings=(
+                _OrderedReferenceBinding(
+                    table=verification_result_simulations,
+                    owner_column="verification_result_id",
+                    record_field="simulation_result_ids",
+                    reference_column="simulation_result_id",
+                ),
+            ),
+        )
+
+
+class CounterexampleRecordRepository(_ReferencedAppendOnlyRecordRepository[CounterexampleRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=counterexample_records,
+            model_type=CounterexampleRecord,
+            identifier_field="counterexample_id",
+            relationship_fields={
+                "hypothesis_version_id": "hypothesis_version_id",
+                "model_spec_id": "model_spec_id",
+                "model_execution_mode": "model_execution_mode",
+            },
+            nullable_relationship_fields={"model_spec_id", "model_execution_mode"},
+            reference_bindings=(
+                _OrderedReferenceBinding(
+                    table=counterexample_simulations,
+                    owner_column="counterexample_id",
+                    record_field="simulation_result_ids",
+                    reference_column="simulation_result_id",
+                ),
+                _OrderedReferenceBinding(
+                    table=counterexample_verification_results,
+                    owner_column="counterexample_id",
+                    record_field="verification_result_ids",
+                    reference_column="verification_result_id",
+                ),
+                _OrderedReferenceBinding(
+                    table=counterexample_evidence,
+                    owner_column="counterexample_id",
+                    record_field="evidence_ids",
+                    reference_column="evidence_id",
+                ),
+            ),
+        )
+
+
+class HypothesisRevisionRepository(_ReferencedAppendOnlyRecordRepository[HypothesisRevisionRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=hypothesis_revisions,
+            model_type=HypothesisRevisionRecord,
+            identifier_field="revision_id",
+            relationship_fields={
+                "hypothesis_id": "hypothesis_id",
+                "prior_hypothesis_version_id": "prior_hypothesis_version_id",
+                "prior_version": "prior_version",
+                "resulting_hypothesis_version_id": "resulting_hypothesis_version_id",
+                "resulting_version": "resulting_version",
+            },
+            relationship_types={"prior_version": int, "resulting_version": int},
+            reference_bindings=(
+                _OrderedReferenceBinding(
+                    table=hypothesis_revision_verification_results,
+                    owner_column="revision_id",
+                    record_field="triggering_verification_result_ids",
+                    reference_column="verification_result_id",
+                ),
+                _OrderedReferenceBinding(
+                    table=hypothesis_revision_counterexamples,
+                    owner_column="revision_id",
+                    record_field="considered_counterexample_ids",
+                    reference_column="counterexample_id",
+                ),
+            ),
+        )
+
+
+class HypothesisAdmissionDecisionRepository(
+    _ReferencedAppendOnlyRecordRepository[HypothesisAdmissionDecisionRecord]
+):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=hypothesis_admission_decisions,
+            model_type=HypothesisAdmissionDecisionRecord,
+            identifier_field="admission_decision_id",
+            relationship_fields={
+                "hypothesis_version_id": "hypothesis_version_id",
+                "hypothesis_id": "hypothesis_id",
+                "version": "version",
+                "admission_status": "admission_status",
+            },
+            relationship_types={"version": int},
+            reference_bindings=(
+                _OrderedReferenceBinding(
+                    table=hypothesis_admission_models,
+                    owner_column="admission_decision_id",
+                    record_field="model_spec_ids",
+                    reference_column="model_spec_id",
+                ),
+                _OrderedReferenceBinding(
+                    table=hypothesis_admission_verification_results,
+                    owner_column="admission_decision_id",
+                    record_field="verification_result_ids",
+                    reference_column="verification_result_id",
+                ),
+                _OrderedReferenceBinding(
+                    table=hypothesis_admission_counterexamples,
+                    owner_column="admission_decision_id",
+                    record_field="counterexample_ids",
+                    reference_column="counterexample_id",
+                ),
+                _OrderedReferenceBinding(
+                    table=hypothesis_admission_revisions,
+                    owner_column="admission_decision_id",
+                    record_field="revision_ids",
+                    reference_column="revision_id",
+                ),
+            ),
+        )
+
+
 class ResearchRunRepository(_AppendOnlyRecordRepository[ResearchRun]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
@@ -892,6 +1667,249 @@ class BehavioralRuleHeadRepository:
             "behavioral rule head references an incoherent version",
         )
         return rule_version_id, semantic_version, status
+
+
+class PrimitiveHeadRepository:
+    def __init__(self, connection: Connection) -> None:
+        self._connection = connection
+
+    def get(self, primitive_id: str) -> tuple[str, str, PrimitiveStatus] | None:
+        row = (
+            self._connection.execute(
+                select(
+                    primitive_heads.c.primitive_id,
+                    primitive_heads.c.primitive_version_id,
+                    primitive_heads.c.semantic_version,
+                    primitive_heads.c.status,
+                ).where(primitive_heads.c.primitive_id == primitive_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return None if row is None else self._decode_row(dict(row))
+
+    def list_all(self) -> tuple[tuple[str, str, str, PrimitiveStatus], ...]:
+        rows = self._connection.execute(
+            select(
+                primitive_heads.c.primitive_id,
+                primitive_heads.c.primitive_version_id,
+                primitive_heads.c.semantic_version,
+                primitive_heads.c.status,
+            ).order_by(primitive_heads.c.primitive_id)
+        ).mappings()
+        heads: list[tuple[str, str, str, PrimitiveStatus]] = []
+        for row in rows:
+            stored_row = dict(row)
+            primitive_id = _stored_string(stored_row, "primitive_id")
+            primitive_version_id, semantic_version, status = self._decode_row(stored_row)
+            heads.append((primitive_id, primitive_version_id, semantic_version, status))
+        return tuple(heads)
+
+    def set(
+        self,
+        primitive_id: str,
+        primitive_version_id: str,
+        semantic_version: str,
+        status: PrimitiveStatus,
+    ) -> None:
+        try:
+            validated_primitive_id = STABLE_IDENTIFIER_ADAPTER.validate_python(primitive_id)
+            validated_version_id = STABLE_IDENTIFIER_ADAPTER.validate_python(primitive_version_id)
+            validated_semantic_version = SEMANTIC_VERSION_ADAPTER.validate_python(semantic_version)
+            validated_status = PrimitiveStatus(status)
+        except (TypeError, ValueError) as error:
+            raise StorageIntegrityError(
+                "storage integrity error: invalid primitive head"
+            ) from error
+        stored_identity = self._connection.execute(
+            select(
+                primitive_versions.c.primitive_id,
+                primitive_versions.c.semantic_version,
+                primitive_versions.c.status,
+            ).where(primitive_versions.c.primitive_version_id == validated_version_id)
+        ).one_or_none()
+        _require_integrity(
+            stored_identity
+            == (
+                validated_primitive_id,
+                validated_semantic_version,
+                validated_status.value,
+            ),
+            "primitive version does not match primitive_id, semantic_version, and status",
+        )
+        statement = sqlite_insert(primitive_heads).values(
+            primitive_id=validated_primitive_id,
+            primitive_version_id=validated_version_id,
+            semantic_version=validated_semantic_version,
+            status=validated_status.value,
+        )
+        self._connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=[primitive_heads.c.primitive_id],
+                set_={
+                    "primitive_version_id": validated_version_id,
+                    "semantic_version": validated_semantic_version,
+                    "status": validated_status.value,
+                },
+            )
+        )
+
+    def _decode_row(self, row: Mapping[str, object]) -> tuple[str, str, PrimitiveStatus]:
+        primitive_id = _stored_string(row, "primitive_id")
+        primitive_version_id = _stored_string(row, "primitive_version_id")
+        semantic_version = _stored_string(row, "semantic_version")
+        status_text = _stored_string(row, "status")
+        try:
+            validated_primitive_id = STABLE_IDENTIFIER_ADAPTER.validate_python(primitive_id)
+            validated_version_id = STABLE_IDENTIFIER_ADAPTER.validate_python(primitive_version_id)
+            validated_semantic_version = SEMANTIC_VERSION_ADAPTER.validate_python(semantic_version)
+            status = PrimitiveStatus(status_text)
+        except (TypeError, ValueError) as error:
+            raise StorageIntegrityError(
+                "storage integrity error: invalid primitive head"
+            ) from error
+        _require_integrity(validated_primitive_id == primitive_id, "primitive_id must be canonical")
+        _require_integrity(
+            validated_version_id == primitive_version_id,
+            "primitive_version_id must be canonical",
+        )
+        _require_integrity(
+            validated_semantic_version == semantic_version,
+            "semantic_version must be canonical",
+        )
+        stored_identity = self._connection.execute(
+            select(
+                primitive_versions.c.primitive_id,
+                primitive_versions.c.semantic_version,
+                primitive_versions.c.status,
+            ).where(primitive_versions.c.primitive_version_id == primitive_version_id)
+        ).one_or_none()
+        _require_integrity(
+            stored_identity == (primitive_id, semantic_version, status.value),
+            "primitive head references an incoherent version",
+        )
+        return primitive_version_id, semantic_version, status
+
+
+class HypothesisHeadRepository:
+    def __init__(self, connection: Connection) -> None:
+        self._connection = connection
+
+    def get(self, hypothesis_id: str) -> tuple[str, int, HypothesisAdmissionStatus] | None:
+        row = (
+            self._connection.execute(
+                select(
+                    hypothesis_heads.c.hypothesis_id,
+                    hypothesis_heads.c.hypothesis_version_id,
+                    hypothesis_heads.c.version,
+                    hypothesis_heads.c.admission_status,
+                ).where(hypothesis_heads.c.hypothesis_id == hypothesis_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return None if row is None else self._decode_row(dict(row))
+
+    def list_all(self) -> tuple[tuple[str, str, int, HypothesisAdmissionStatus], ...]:
+        rows = self._connection.execute(
+            select(
+                hypothesis_heads.c.hypothesis_id,
+                hypothesis_heads.c.hypothesis_version_id,
+                hypothesis_heads.c.version,
+                hypothesis_heads.c.admission_status,
+            ).order_by(hypothesis_heads.c.hypothesis_id)
+        ).mappings()
+        heads: list[tuple[str, str, int, HypothesisAdmissionStatus]] = []
+        for row in rows:
+            stored_row = dict(row)
+            hypothesis_id = _stored_string(stored_row, "hypothesis_id")
+            version_id, version, admission_status = self._decode_row(stored_row)
+            heads.append((hypothesis_id, version_id, version, admission_status))
+        return tuple(heads)
+
+    def set(
+        self,
+        hypothesis_id: str,
+        hypothesis_version_id: str,
+        version: int,
+        admission_status: HypothesisAdmissionStatus,
+    ) -> None:
+        try:
+            validated_hypothesis_id = STABLE_IDENTIFIER_ADAPTER.validate_python(hypothesis_id)
+            validated_version_id = STABLE_IDENTIFIER_ADAPTER.validate_python(hypothesis_version_id)
+            if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+                raise ValueError("version must be a positive integer")
+            validated_status = HypothesisAdmissionStatus(admission_status)
+        except (TypeError, ValueError) as error:
+            raise StorageIntegrityError(
+                "storage integrity error: invalid hypothesis head"
+            ) from error
+        stored_identity = self._connection.execute(
+            select(
+                hypothesis_versions.c.hypothesis_id,
+                hypothesis_versions.c.version,
+                hypothesis_versions.c.admission_status,
+            ).where(hypothesis_versions.c.hypothesis_version_id == validated_version_id)
+        ).one_or_none()
+        _require_integrity(
+            stored_identity == (validated_hypothesis_id, version, validated_status.value),
+            "hypothesis version does not match hypothesis_id, version, and admission_status",
+        )
+        statement = sqlite_insert(hypothesis_heads).values(
+            hypothesis_id=validated_hypothesis_id,
+            hypothesis_version_id=validated_version_id,
+            version=version,
+            admission_status=validated_status.value,
+        )
+        self._connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=[hypothesis_heads.c.hypothesis_id],
+                set_={
+                    "hypothesis_version_id": validated_version_id,
+                    "version": version,
+                    "admission_status": validated_status.value,
+                },
+            )
+        )
+
+    def _decode_row(
+        self,
+        row: Mapping[str, object],
+    ) -> tuple[str, int, HypothesisAdmissionStatus]:
+        hypothesis_id = _stored_string(row, "hypothesis_id")
+        hypothesis_version_id = _stored_string(row, "hypothesis_version_id")
+        version = _stored_integer(row, "version")
+        admission_status_text = _stored_string(row, "admission_status")
+        try:
+            validated_hypothesis_id = STABLE_IDENTIFIER_ADAPTER.validate_python(hypothesis_id)
+            validated_version_id = STABLE_IDENTIFIER_ADAPTER.validate_python(hypothesis_version_id)
+            if version < 1:
+                raise ValueError("version must be positive")
+            admission_status = HypothesisAdmissionStatus(admission_status_text)
+        except (TypeError, ValueError) as error:
+            raise StorageIntegrityError(
+                "storage integrity error: invalid hypothesis head"
+            ) from error
+        _require_integrity(
+            validated_hypothesis_id == hypothesis_id,
+            "hypothesis_id must be canonical",
+        )
+        _require_integrity(
+            validated_version_id == hypothesis_version_id,
+            "hypothesis_version_id must be canonical",
+        )
+        stored_identity = self._connection.execute(
+            select(
+                hypothesis_versions.c.hypothesis_id,
+                hypothesis_versions.c.version,
+                hypothesis_versions.c.admission_status,
+            ).where(hypothesis_versions.c.hypothesis_version_id == hypothesis_version_id)
+        ).one_or_none()
+        _require_integrity(
+            stored_identity == (hypothesis_id, version, admission_status.value),
+            "hypothesis head references an incoherent version",
+        )
+        return hypothesis_version_id, version, admission_status
 
 
 class ResearchRunHeadRepository:
