@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import base64
 import stat
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from multiprocessing import get_context
+from multiprocessing.process import BaseProcess
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, Self, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import (
     CheckConstraint,
     Column,
@@ -19,27 +29,35 @@ from sqlalchemy import (
     insert,
     select,
 )
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection as SqlConnection
+from sqlalchemy.exc import SQLAlchemyError
 
 from super_scientist.domain.evidence.models import ArtifactRef
 from super_scientist.domain.improvement.models import AssessmentOutcome
 from super_scientist.domain.primitives import (
+    NonBlankText,
     Sha256Hex,
     StableIdentifier,
     UtcTimestamp,
+    canonical_json_bytes,
     sha256_hex,
 )
 from super_scientist.providers.storage.artifacts import FileArtifactStore
 from super_scientist.providers.storage.database import create_database_engine
 from super_scientist.providers.storage.domain_records import (
+    HarnessCampaignRepository,
     HarnessMetricRecord,
     HarnessMetricRepository,
     MetricValueRecord,
 )
+from super_scientist.providers.storage.repositories import StorageIntegrityError
 
 _PROTECTED_MEDIA_TYPE = "application/octet-stream"
 _STABLE_IDENTIFIER_ADAPTER: TypeAdapter[StableIdentifier] = TypeAdapter(StableIdentifier)
 _SHA256_ADAPTER: TypeAdapter[Sha256Hex] = TypeAdapter(Sha256Hex)
+_WORKER_JOIN_TIMEOUT_SECONDS = 5.0
+_WORKER_RESPONSE_TIMEOUT_SECONDS = 10.0
+_MAX_WORKER_MESSAGE_BYTES = 64 * 1024 * 1024
 
 _protected_metadata = MetaData()
 _protected_expected_outputs = Table(
@@ -59,6 +77,38 @@ _protected_expected_outputs = Table(
 
 class _StrictFrozenModel(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+
+class ProtectedCapabilityError(ValueError):
+    """A typed, non-leaking failure returned by a role-scoped worker."""
+
+    __slots__ = ("code",)
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = _STABLE_IDENTIFIER_ADAPTER.validate_python(code)
+        super().__init__(message)
+
+
+class _WorkerRequest(_StrictFrozenModel):
+    request_id: StableIdentifier
+    operation: StableIdentifier
+    payload: object | None
+
+
+class _WorkerResponse(_StrictFrozenModel):
+    request_id: StableIdentifier
+    ok: bool
+    payload: object | None
+    error_code: StableIdentifier | None
+    error_message: NonBlankText | None
+
+    @model_validator(mode="after")
+    def require_exact_error_shape(self) -> Self:
+        if self.ok and (self.error_code is not None or self.error_message is not None):
+            raise ValueError("worker response error fields must exactly match failure status")
+        if not self.ok and (self.error_code is None or self.error_message is None):
+            raise ValueError("worker response error fields must exactly match failure status")
+        return self
 
 
 class MetricValue(_StrictFrozenModel):
@@ -119,21 +169,37 @@ class ProtectedIntegrityReport(_StrictFrozenModel):
 class ProtectedAnswerReader(Protocol):
     def read_expected_output(self, task_id: str) -> bytes: ...
 
+    def close(self) -> None: ...
+
 
 @runtime_checkable
 class ProtectedIntegrityAuditor(Protocol):
     def verify_integrity(self) -> ProtectedIntegrityReport: ...
+
+    def close(self) -> None: ...
 
 
 @runtime_checkable
 class ProtectedResultGateway(Protocol):
     def append_result(self, result: ProtectedCheckerResult) -> None: ...
 
+    def close(self) -> None: ...
+
+
+class _ProcessTransport(Protocol):
+    def send_bytes(self, value: bytes) -> None: ...
+
+    def recv_bytes(self, maxlength: int | None = None) -> bytes: ...
+
+    def poll(self, timeout: float = 0.0) -> bool: ...
+
+    def close(self) -> None: ...
+
 
 class ProtectedEvaluationStore:
     """Own protected metadata and bytes outside the ordinary repository graph."""
 
-    __slots__ = ("_artifacts", "_engine")
+    __slots__ = ("_artifacts", "_engine", "_role_capabilities", "_root")
 
     def __init__(self, protected_root: Path) -> None:
         root = _prepare_private_root(protected_root)
@@ -159,6 +225,8 @@ class ProtectedEvaluationStore:
             raise
         self._engine: Engine | None = engine
         self._artifacts: FileArtifactStore | None = artifacts
+        self._root = root
+        self._role_capabilities: list[_ProcessCapability] = []
 
     def add_expected_output(
         self,
@@ -207,13 +275,21 @@ class ProtectedEvaluationStore:
 
     def answer_reader(self) -> ProtectedAnswerReader:
         self._resources()
-        return _AnswerReaderCapability(self._read_expected_output)
+        capability = _start_answer_reader_capability(self._root)
+        self._role_capabilities.append(capability)
+        return capability
 
     def integrity_auditor(self) -> ProtectedIntegrityAuditor:
         self._resources()
-        return _IntegrityAuditorCapability(self._verify_integrity)
+        capability = _start_integrity_auditor_capability(self._root)
+        self._role_capabilities.append(capability)
+        return capability
 
     def close(self) -> None:
+        capabilities = tuple(self._role_capabilities)
+        self._role_capabilities.clear()
+        for capability in capabilities:
+            capability.close()
         engine = self._engine
         self._engine = None
         self._artifacts = None
@@ -225,120 +301,518 @@ class ProtectedEvaluationStore:
             raise RuntimeError("protected evaluation store is closed")
         return self._engine, self._artifacts
 
-    def _read_expected_output(self, task_id: str) -> bytes:
-        validated_task_id = _STABLE_IDENTIFIER_ADAPTER.validate_python(task_id)
-        engine, artifacts = self._resources()
-        with engine.connect() as connection:
-            row = (
-                connection.execute(
-                    select(_protected_expected_outputs).where(
-                        _protected_expected_outputs.c.task_id == validated_task_id
-                    )
-                )
-                .mappings()
-                .one_or_none()
-            )
-        if row is None:
-            raise ValueError("protected expected output is unavailable")
-        content_hash, size_bytes = _validated_expected_output_row(dict(row))
+
+class _ProcessCapability:
+    __slots__ = ("_closed", "_process", "_request_number", "_transport")
+
+    def __init__(self, transport: _ProcessTransport, process: BaseProcess) -> None:
+        self._transport = transport
+        self._process = process
+        self._closed = False
+        self._request_number = 0
+        self._receive_response("worker-startup")
+
+    def close(self) -> None:
+        if self._closed:
+            return
         try:
-            return artifacts.read(_artifact_ref(content_hash, size_bytes))
-        except ValueError:
-            raise ValueError("protected expected output failed integrity verification") from None
+            if self._process.is_alive():
+                self._request("CLOSE", None)
+        except (EOFError, OSError, ProtectedCapabilityError):
+            pass
+        finally:
+            self._closed = True
+            self._transport.close()
+            self._process.join(_WORKER_JOIN_TIMEOUT_SECONDS)
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(_WORKER_JOIN_TIMEOUT_SECONDS)
 
-    def _verify_integrity(self) -> ProtectedIntegrityReport:
-        engine, artifacts = self._resources()
-        with engine.connect() as connection:
-            rows = tuple(
-                dict(row)
-                for row in connection.execute(
-                    select(_protected_expected_outputs).order_by(
-                        _protected_expected_outputs.c.task_id
-                    )
-                ).mappings()
+    def _request(self, operation: str, payload: object | None) -> object | None:
+        if self._closed:
+            raise ProtectedCapabilityError(
+                "CAPABILITY_CLOSED",
+                "protected capability is closed",
             )
-        findings: list[ProtectedIntegrityFinding] = []
-        for row in rows:
-            task_id = row.get("task_id")
-            raw_hash = row.get("expected_output_hash")
-            safe_task_id = (
-                task_id if isinstance(task_id, str) and task_id.strip() else "invalid-task"
-            )
-            safe_hash = raw_hash if isinstance(raw_hash, str) else "0" * 64
-            validated_task_id = "invalid-task"
-            try:
-                validated_task_id = _STABLE_IDENTIFIER_ADAPTER.validate_python(safe_task_id)
-                content_hash, size_bytes = _validated_expected_output_row(row)
-                artifacts.read(_artifact_ref(content_hash, size_bytes))
-            except (TypeError, ValueError):
-                try:
-                    finding_hash = _SHA256_ADAPTER.validate_python(safe_hash)
-                except ValueError:
-                    finding_hash = "0" * 64
-                findings.append(
-                    ProtectedIntegrityFinding(
-                        task_id=validated_task_id,
-                        expected_output_hash=finding_hash,
-                        code="PROTECTED_ARTIFACT_INTEGRITY_FAILURE",
-                    )
-                )
-        return ProtectedIntegrityReport(
-            valid=not findings,
-            checked_outputs=len(rows),
-            findings=tuple(findings),
+        self._request_number += 1
+        request_id = f"request-{self._request_number}"
+        request = _WorkerRequest(
+            request_id=request_id,
+            operation=operation,
+            payload=payload,
         )
+        try:
+            self._transport.send_bytes(request.model_dump_json().encode("utf-8"))
+            return self._receive_response(request_id)
+        except (EOFError, OSError) as error:
+            raise ProtectedCapabilityError(
+                "CAPABILITY_WORKER_UNAVAILABLE",
+                "protected capability worker is unavailable",
+            ) from error
+
+    def _receive_response(self, request_id: str) -> object | None:
+        try:
+            response_ready = self._transport.poll(_WORKER_RESPONSE_TIMEOUT_SECONDS)
+        except (EOFError, OSError) as error:
+            raise ProtectedCapabilityError(
+                "CAPABILITY_WORKER_UNAVAILABLE",
+                "protected capability worker is unavailable",
+            ) from error
+        if not response_ready:
+            raise ProtectedCapabilityError(
+                "CAPABILITY_WORKER_UNAVAILABLE",
+                "protected capability worker is unavailable",
+            )
+        try:
+            raw_response = self._transport.recv_bytes(_MAX_WORKER_MESSAGE_BYTES)
+        except (EOFError, OSError) as error:
+            raise ProtectedCapabilityError(
+                "CAPABILITY_WORKER_UNAVAILABLE",
+                "protected capability worker is unavailable",
+            ) from error
+        try:
+            response = _WorkerResponse.model_validate_json(raw_response)
+        except (TypeError, ValueError) as error:
+            raise ProtectedCapabilityError(
+                "INVALID_WORKER_RESPONSE",
+                "protected capability worker returned an invalid response",
+            ) from error
+        if response.request_id != request_id:
+            raise ProtectedCapabilityError(
+                "INVALID_WORKER_RESPONSE",
+                "protected capability worker returned an invalid response",
+            )
+        if not response.ok:
+            if response.error_code is None or response.error_message is None:
+                raise ProtectedCapabilityError(
+                    "INVALID_WORKER_RESPONSE",
+                    "protected capability worker returned an invalid response",
+                )
+            raise ProtectedCapabilityError(response.error_code, response.error_message)
+        return response.payload
 
 
-class _AnswerReaderCapability:
-    __slots__ = ("_reader",)
-
-    def __init__(self, reader: Callable[[str], bytes]) -> None:
-        self._reader = reader
-
+class _AnswerReaderCapability(_ProcessCapability):
     def read_expected_output(self, task_id: str) -> bytes:
-        return self._reader(task_id)
+        validated_task_id = _STABLE_IDENTIFIER_ADAPTER.validate_python(task_id)
+        payload = self._request("READ_EXPECTED_OUTPUT", validated_task_id)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"base64"}
+            or not isinstance(payload.get("base64"), str)
+        ):
+            raise ProtectedCapabilityError(
+                "INVALID_WORKER_RESPONSE",
+                "protected capability worker returned an invalid response",
+            )
+        try:
+            return base64.b64decode(payload["base64"], validate=True)
+        except ValueError as error:
+            raise ProtectedCapabilityError(
+                "INVALID_WORKER_RESPONSE",
+                "protected capability worker returned an invalid response",
+            ) from error
 
 
-class _IntegrityAuditorCapability:
-    __slots__ = ("_auditor",)
-
-    def __init__(self, auditor: Callable[[], ProtectedIntegrityReport]) -> None:
-        self._auditor = auditor
-
+class _IntegrityAuditorCapability(_ProcessCapability):
     def verify_integrity(self) -> ProtectedIntegrityReport:
-        return self._auditor()
+        payload = self._request("VERIFY_INTEGRITY", None)
+        try:
+            return ProtectedIntegrityReport.model_validate_json(canonical_json_bytes(payload))
+        except (TypeError, ValueError) as error:
+            raise ProtectedCapabilityError(
+                "INVALID_WORKER_RESPONSE",
+                "protected capability worker returned an invalid response",
+            ) from error
 
 
-class _MainDatabaseProtectedResultGateway:
-    __slots__ = ("_repository",)
-
-    def __init__(self, connection: Connection) -> None:
-        self._repository = HarnessMetricRepository(connection)
-
+class _MainDatabaseProtectedResultGateway(_ProcessCapability):
     def append_result(self, result: ProtectedCheckerResult) -> None:
         validated = ProtectedCheckerResult.model_validate(result.model_dump(mode="python"))
-        record = HarnessMetricRecord(
-            result_id=validated.result_id,
-            campaign_id=validated.campaign_id,
-            task_id=validated.task_id,
-            expected_output_hash=validated.expected_output_hash,
-            candidate_output_hash=validated.candidate_output_hash,
-            checker_id=validated.checker_id,
-            checker_version=validated.checker_version,
-            outcome=validated.outcome,
-            metric_values=tuple(
-                MetricValueRecord(metric_id=item.metric_id, value=item.value)
-                for item in validated.metric_values
-            ),
-            evaluated_at=validated.evaluated_at,
+        payload = self._request("APPEND_RESULT", validated.model_dump(mode="json"))
+        if payload is not None:
+            raise ProtectedCapabilityError(
+                "INVALID_WORKER_RESPONSE",
+                "protected capability worker returned an invalid response",
+            )
+
+
+def create_protected_result_gateway(connection: SqlConnection) -> ProtectedResultGateway:
+    """Create a narrow worker that durably appends results visible in the committed main DB."""
+
+    main_url = _main_database_worker_url(connection)
+    return _start_gateway_capability(main_url)
+
+
+def _start_answer_reader_capability(protected_root: Path) -> _AnswerReaderCapability:
+    return _spawn_process_capability(
+        _run_protected_role_worker,
+        ("reader", str(protected_root)),
+        _AnswerReaderCapability,
+    )
+
+
+def _start_integrity_auditor_capability(
+    protected_root: Path,
+) -> _IntegrityAuditorCapability:
+    return _spawn_process_capability(
+        _run_protected_role_worker,
+        ("auditor", str(protected_root)),
+        _IntegrityAuditorCapability,
+    )
+
+
+def _start_gateway_capability(main_url: str) -> _MainDatabaseProtectedResultGateway:
+    return _spawn_process_capability(
+        _run_gateway_worker,
+        (main_url,),
+        _MainDatabaseProtectedResultGateway,
+    )
+
+
+def _spawn_process_capability[CapabilityT: _ProcessCapability](
+    target: Callable[..., None],
+    target_arguments: tuple[object, ...],
+    capability_type: type[CapabilityT],
+) -> CapabilityT:
+    context = get_context("spawn")
+    parent_transport, worker_transport = context.Pipe(duplex=True)
+    process = context.Process(
+        target=target,
+        args=(*target_arguments, worker_transport),
+        daemon=True,
+    )
+    try:
+        process.start()
+    except BaseException:
+        parent_transport.close()
+        worker_transport.close()
+        raise
+    worker_transport.close()
+    try:
+        return capability_type(parent_transport, process)
+    except BaseException:
+        parent_transport.close()
+        process.join(_WORKER_JOIN_TIMEOUT_SECONDS)
+        if process.is_alive():
+            process.terminate()
+            process.join(_WORKER_JOIN_TIMEOUT_SECONDS)
+        raise
+
+
+def _main_database_worker_url(connection: SqlConnection) -> str:
+    if not isinstance(connection, SqlConnection) or connection.closed:
+        raise TypeError("result gateway requires an open SQLAlchemy connection")
+    url = connection.engine.url
+    database = url.database
+    if (
+        url.get_backend_name() != "sqlite"
+        or not isinstance(database, str)
+        or database in ("", ":memory:")
+    ):
+        raise ValueError("result gateway requires a file-backed SQLite database")
+    database_path = Path(database).absolute()
+    return f"sqlite+pysqlite:///{database_path.as_posix()}"
+
+
+def _run_protected_role_worker(
+    role: Literal["reader", "auditor"],
+    protected_root: str,
+    transport: _ProcessTransport,
+) -> None:
+    engine: Engine | None = None
+    try:
+        root = _prepare_private_root(Path(protected_root))
+        database_path = root / "protected.sqlite3"
+        _require_regular_or_missing(database_path)
+        engine = create_database_engine(f"sqlite+pysqlite:///{database_path.as_posix()}")
+        artifacts = FileArtifactStore(root / "artifacts")
+    except BaseException:
+        _send_worker_error(
+            transport,
+            "worker-startup",
+            "CAPABILITY_WORKER_INITIALIZATION_FAILED",
+            "protected capability worker failed to initialize",
         )
-        self._repository.add(record.result_id, record, record.evaluated_at)
+        transport.close()
+        return
+    _send_worker_success(transport, "worker-startup", None)
+    try:
+        while True:
+            request = _receive_worker_request(transport)
+            if request is None:
+                return
+            if request.operation == "CLOSE":
+                _send_worker_success(transport, request.request_id, None)
+                return
+            if role == "reader" and request.operation == "READ_EXPECTED_OUTPUT":
+                if not isinstance(request.payload, str):
+                    _send_invalid_worker_request(transport, request.request_id)
+                    continue
+                try:
+                    output = _read_expected_output(engine, artifacts, request.payload)
+                except ValueError as error:
+                    unavailable = str(error) == "protected expected output is unavailable"
+                    _send_worker_error(
+                        transport,
+                        request.request_id,
+                        (
+                            "PROTECTED_OUTPUT_UNAVAILABLE"
+                            if unavailable
+                            else "PROTECTED_OUTPUT_INTEGRITY_FAILURE"
+                        ),
+                        (
+                            "protected expected output is unavailable"
+                            if unavailable
+                            else "protected expected output failed integrity verification"
+                        ),
+                    )
+                else:
+                    _send_worker_success(transport, request.request_id, output)
+                continue
+            if role == "auditor" and request.operation == "VERIFY_INTEGRITY":
+                if request.payload is not None:
+                    _send_invalid_worker_request(transport, request.request_id)
+                    continue
+                report = _verify_integrity(engine, artifacts)
+                _send_worker_success(transport, request.request_id, report)
+                continue
+            _send_worker_error(
+                transport,
+                request.request_id,
+                "UNAUTHORIZED_OPERATION",
+                "operation is not allowed for this protected capability",
+            )
+    finally:
+        engine.dispose()
+        transport.close()
 
 
-def create_protected_result_gateway(connection: Connection) -> ProtectedResultGateway:
-    """Create the sole cross-store shape; it owns only an ordinary main-DB repository."""
+def _run_gateway_worker(main_url: str, transport: _ProcessTransport) -> None:
+    engine: Engine | None = None
+    try:
+        engine = create_database_engine(main_url)
+        with engine.connect():
+            pass
+    except BaseException:
+        _send_worker_error(
+            transport,
+            "worker-startup",
+            "CAPABILITY_WORKER_INITIALIZATION_FAILED",
+            "protected capability worker failed to initialize",
+        )
+        transport.close()
+        return
+    _send_worker_success(transport, "worker-startup", None)
+    try:
+        while True:
+            request = _receive_worker_request(transport)
+            if request is None:
+                return
+            if request.operation == "CLOSE":
+                _send_worker_success(transport, request.request_id, None)
+                return
+            if request.operation != "APPEND_RESULT":
+                _send_worker_error(
+                    transport,
+                    request.request_id,
+                    "UNAUTHORIZED_OPERATION",
+                    "operation is not allowed for the protected result gateway",
+                )
+                continue
+            try:
+                result = ProtectedCheckerResult.model_validate_json(
+                    canonical_json_bytes(request.payload)
+                )
+            except (TypeError, ValueError):
+                _send_worker_error(
+                    transport,
+                    request.request_id,
+                    "INVALID_CHECKER_RESULT",
+                    "protected checker result is invalid",
+                )
+                continue
+            try:
+                with engine.begin() as connection:
+                    campaign = HarnessCampaignRepository(connection).get(result.campaign_id)
+                    if campaign is None:
+                        _send_worker_error(
+                            transport,
+                            request.request_id,
+                            "REFERENCED_CAMPAIGN_UNAVAILABLE",
+                            "referenced committed campaign state is unavailable",
+                        )
+                        continue
+                    record = _harness_metric_record(result)
+                    HarnessMetricRepository(connection).add(
+                        record.result_id,
+                        record,
+                        record.evaluated_at,
+                    )
+            except (SQLAlchemyError, StorageIntegrityError, TypeError, ValueError):
+                _send_worker_error(
+                    transport,
+                    request.request_id,
+                    "RESULT_APPEND_REJECTED",
+                    "protected checker result append was rejected",
+                )
+            else:
+                _send_worker_success(transport, request.request_id, None)
+    finally:
+        engine.dispose()
+        transport.close()
 
-    return _MainDatabaseProtectedResultGateway(connection)
+
+def _receive_worker_request(transport: _ProcessTransport) -> _WorkerRequest | None:
+    while True:
+        try:
+            raw_request = transport.recv_bytes(_MAX_WORKER_MESSAGE_BYTES)
+        except (EOFError, OSError):
+            return None
+        try:
+            return _WorkerRequest.model_validate_json(raw_request)
+        except (TypeError, ValueError):
+            _send_invalid_worker_request(transport, "invalid-request")
+
+
+def _send_invalid_worker_request(
+    transport: _ProcessTransport,
+    request_id: str,
+) -> None:
+    _send_worker_error(
+        transport,
+        request_id,
+        "INVALID_REQUEST",
+        "protected capability request is invalid",
+    )
+
+
+def _send_worker_success(
+    transport: _ProcessTransport,
+    request_id: str,
+    payload: object | None,
+) -> None:
+    wire_payload: object | None
+    if isinstance(payload, bytes):
+        wire_payload = {"base64": base64.b64encode(payload).decode("ascii")}
+    elif isinstance(payload, BaseModel):
+        wire_payload = payload.model_dump(mode="json")
+    else:
+        wire_payload = payload
+    transport.send_bytes(
+        _WorkerResponse(
+            request_id=request_id,
+            ok=True,
+            payload=wire_payload,
+            error_code=None,
+            error_message=None,
+        )
+        .model_dump_json()
+        .encode("utf-8")
+    )
+
+
+def _send_worker_error(
+    transport: _ProcessTransport,
+    request_id: str,
+    error_code: str,
+    error_message: str,
+) -> None:
+    transport.send_bytes(
+        _WorkerResponse(
+            request_id=request_id,
+            ok=False,
+            payload=None,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        .model_dump_json()
+        .encode("utf-8")
+    )
+
+
+def _harness_metric_record(result: ProtectedCheckerResult) -> HarnessMetricRecord:
+    return HarnessMetricRecord(
+        result_id=result.result_id,
+        campaign_id=result.campaign_id,
+        task_id=result.task_id,
+        expected_output_hash=result.expected_output_hash,
+        candidate_output_hash=result.candidate_output_hash,
+        checker_id=result.checker_id,
+        checker_version=result.checker_version,
+        outcome=result.outcome,
+        metric_values=tuple(
+            MetricValueRecord(metric_id=item.metric_id, value=item.value)
+            for item in result.metric_values
+        ),
+        evaluated_at=result.evaluated_at,
+    )
+
+
+def _read_expected_output(
+    engine: Engine,
+    artifacts: FileArtifactStore,
+    task_id: str,
+) -> bytes:
+    validated_task_id = _STABLE_IDENTIFIER_ADAPTER.validate_python(task_id)
+    with engine.connect() as connection:
+        row = (
+            connection.execute(
+                select(_protected_expected_outputs).where(
+                    _protected_expected_outputs.c.task_id == validated_task_id
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+    if row is None:
+        raise ValueError("protected expected output is unavailable")
+    content_hash, size_bytes = _validated_expected_output_row(dict(row))
+    try:
+        return artifacts.read(_artifact_ref(content_hash, size_bytes))
+    except ValueError:
+        raise ValueError("protected expected output failed integrity verification") from None
+
+
+def _verify_integrity(
+    engine: Engine,
+    artifacts: FileArtifactStore,
+) -> ProtectedIntegrityReport:
+    with engine.connect() as connection:
+        rows = tuple(
+            dict(row)
+            for row in connection.execute(
+                select(_protected_expected_outputs).order_by(_protected_expected_outputs.c.task_id)
+            ).mappings()
+        )
+    findings: list[ProtectedIntegrityFinding] = []
+    for row in rows:
+        task_id = row.get("task_id")
+        raw_hash = row.get("expected_output_hash")
+        safe_task_id = task_id if isinstance(task_id, str) and task_id.strip() else "invalid-task"
+        safe_hash = raw_hash if isinstance(raw_hash, str) else "0" * 64
+        validated_task_id = "invalid-task"
+        try:
+            validated_task_id = _STABLE_IDENTIFIER_ADAPTER.validate_python(safe_task_id)
+            content_hash, size_bytes = _validated_expected_output_row(row)
+            artifacts.read(_artifact_ref(content_hash, size_bytes))
+        except (TypeError, ValueError):
+            try:
+                finding_hash = _SHA256_ADAPTER.validate_python(safe_hash)
+            except ValueError:
+                finding_hash = "0" * 64
+            findings.append(
+                ProtectedIntegrityFinding(
+                    task_id=validated_task_id,
+                    expected_output_hash=finding_hash,
+                    code="PROTECTED_ARTIFACT_INTEGRITY_FAILURE",
+                )
+            )
+    return ProtectedIntegrityReport(
+        valid=not findings,
+        checked_outputs=len(rows),
+        findings=tuple(findings),
+    )
 
 
 def _validated_expected_output_row(row: dict[str, object]) -> tuple[str, int]:
@@ -403,6 +877,7 @@ def _assert_no_link_or_reparse(path: Path) -> None:
 __all__ = [
     "MetricValue",
     "ProtectedAnswerReader",
+    "ProtectedCapabilityError",
     "ProtectedCheckerResult",
     "ProtectedEvaluationStore",
     "ProtectedExpectedOutputReceipt",

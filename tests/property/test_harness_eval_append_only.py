@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime
 from decimal import Decimal
 from inspect import signature
@@ -51,6 +52,33 @@ AUTHORITATIVE_0006_TABLES = {
     "harness_confounds",
     "harness_decisions",
 }
+
+
+def test_handbook_verification_accepts_the_real_repository_commit() -> None:
+    completed = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    repository_head = completed.stdout.strip()
+    assert len(repository_head) == 40
+
+    record = HandbookVerificationRecord(
+        verification_id="real-commit-verification",
+        manifest_hash="1" * 64,
+        repository_commit=repository_head,
+        source_hashes=("2" * 64,),
+        generated_artifact_hash="3" * 64,
+        stale_locations=(),
+        missing_symbols=(),
+        outcome=AssessmentOutcome.PASSED,
+        verified_at=datetime(2026, 7, 20, tzinfo=UTC),
+        governing_policy_hash="4" * 64,
+    )
+    assert record.repository_commit == repository_head
+
+
 REPOSITORIES = (
     BehaviorRuleLinkVersionRepository,
     HandbookVerificationRepository,

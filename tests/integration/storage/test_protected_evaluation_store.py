@@ -1,19 +1,31 @@
 from __future__ import annotations
 
+import inspect
+import json
+import pickle
+import sqlite3
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
+from functools import partial
+from multiprocessing.process import BaseProcess
+from pathlib import Path, PurePath
+from types import ModuleType
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from super_scientist.domain.improvement.models import AssessmentOutcome
+from super_scientist.providers.storage import protected_evaluation as protected_evaluation_module
+from super_scientist.providers.storage.artifacts import FileArtifactStore
 from super_scientist.providers.storage.database import create_database_engine, upgrade_database
 from super_scientist.providers.storage.domain_records import HarnessMetricRepository
 from super_scientist.providers.storage.protected_evaluation import (
     MetricValue,
     ProtectedAnswerReader,
+    ProtectedCapabilityError,
     ProtectedCheckerResult,
     ProtectedEvaluationStore,
     ProtectedIntegrityAuditor,
@@ -21,6 +33,45 @@ from super_scientist.providers.storage.protected_evaluation import (
     create_protected_result_gateway,
 )
 from super_scientist.providers.storage.repositories import RepositorySet
+
+_GRAPH_LEAF_TYPES = (
+    str,
+    bytes,
+    bytearray,
+    int,
+    float,
+    bool,
+    type(None),
+    Decimal,
+    datetime,
+    type,
+    ModuleType,
+)
+_FORBIDDEN_CAPABILITY_TYPES = (
+    ProtectedEvaluationStore,
+    FileArtifactStore,
+    HarnessMetricRepository,
+    RepositorySet,
+    Engine,
+    Connection,
+    PurePath,
+)
+_GRAPH_TERMINAL_TYPES = (
+    *_GRAPH_LEAF_TYPES,
+    ProtectedEvaluationStore,
+    FileArtifactStore,
+    Engine,
+    Connection,
+    PurePath,
+)
+_ROLE_OPERATIONS = {
+    "add_expected_output",
+    "answer_reader",
+    "integrity_auditor",
+    "read_expected_output",
+    "verify_integrity",
+    "append_result",
+}
 
 
 @pytest.mark.integration
@@ -71,6 +122,11 @@ def test_store_returns_role_specific_capabilities_and_detects_corruption(
             / receipt.expected_output_hash
         )
         artifact.write_bytes(b"corrupt")
+        with pytest.raises(ProtectedCapabilityError) as read_error:
+            reader.read_expected_output("task-1")
+        assert read_error.value.code == "PROTECTED_OUTPUT_INTEGRITY_FAILURE"
+        assert "path" not in str(read_error.value).lower()
+        assert secret not in str(read_error.value).encode()
         corrupted = auditor.verify_integrity()
         assert corrupted.valid is False
         assert corrupted.findings[0].code == "PROTECTED_ARTIFACT_INTEGRITY_FAILURE"
@@ -89,21 +145,14 @@ def test_result_gateway_crosses_only_typed_hashes_and_aggregates(tmp_path: Path)
     try:
         with engine.begin() as connection:
             _seed_campaign(connection)
+        with engine.connect() as connection:
             gateway = create_protected_result_gateway(connection)
-            assert isinstance(gateway, ProtectedResultGateway)
-            result = ProtectedCheckerResult(
-                result_id="result-1",
-                campaign_id="campaign-1",
-                task_id="task-1",
-                expected_output_hash="a" * 64,
-                candidate_output_hash="b" * 64,
-                checker_id="checker-1",
-                checker_version="checker-v1",
-                outcome=AssessmentOutcome.PASSED,
-                metric_values=(MetricValue(metric_id="correctness", value=Decimal("1.0")),),
-                evaluated_at=datetime(2026, 7, 20, tzinfo=UTC),
-            )
-            gateway.append_result(result)
+            try:
+                assert isinstance(gateway, ProtectedResultGateway)
+                gateway.append_result(_checker_result())
+            finally:
+                gateway.close()
+        with engine.connect() as connection:
             stored = HarnessMetricRepository(connection).get("result-1")
             assert stored is not None
             assert stored.expected_output_hash == "a" * 64
@@ -136,6 +185,31 @@ def test_result_gateway_schema_cannot_carry_answer_material() -> None:
         ProtectedCheckerResult.model_validate(payload)
 
 
+def test_result_gateway_requires_an_open_file_backed_sqlite_connection(
+    tmp_path: Path,
+) -> None:
+    memory_engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    try:
+        with (
+            memory_engine.connect() as connection,
+            pytest.raises(ValueError, match="file-backed SQLite"),
+        ):
+            create_protected_result_gateway(connection)
+    finally:
+        memory_engine.dispose()
+
+    file_engine = create_database_engine(
+        f"sqlite+pysqlite:///{(tmp_path / 'closed.db').as_posix()}"
+    )
+    connection = file_engine.connect()
+    connection.close()
+    try:
+        with pytest.raises(TypeError, match="open SQLAlchemy connection"):
+            create_protected_result_gateway(connection)
+    finally:
+        file_engine.dispose()
+
+
 @pytest.mark.integration
 def test_protected_store_is_absent_from_repository_set(tmp_path: Path) -> None:
     main_url = f"sqlite+pysqlite:///{(tmp_path / 'main.db').as_posix()}"
@@ -164,8 +238,9 @@ def test_protected_expected_output_identity_is_append_only_and_replay_safe(tmp_p
             store.add_expected_output("task-1", b"changed")
         with pytest.raises(TypeError, match="must be bytes"):
             store.add_expected_output("task-2", bytearray(b"not-bytes"))  # type: ignore[arg-type]
-        with pytest.raises(ValueError, match="unavailable"):
+        with pytest.raises(ProtectedCapabilityError, match="unavailable") as unavailable:
             store.answer_reader().read_expected_output("missing-task")
+        assert unavailable.value.code == "PROTECTED_OUTPUT_UNAVAILABLE"
 
         protected_url = f"sqlite+pysqlite:///{(protected_root / 'protected.sqlite3').as_posix()}"
         protected_engine = create_database_engine(protected_url)
@@ -207,6 +282,60 @@ def test_protected_contracts_reject_duplicate_and_nonfinite_metrics() -> None:
         ProtectedCheckerResult.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {
+            "request_id": "request-1",
+            "ok": True,
+            "payload": None,
+            "error_code": "UNEXPECTED_ERROR",
+            "error_message": "unexpected error",
+        },
+        {
+            "request_id": "request-1",
+            "ok": False,
+            "payload": None,
+            "error_code": None,
+            "error_message": None,
+        },
+    ),
+)
+def test_worker_response_contract_requires_exact_error_shape(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError, match="exactly match failure status"):
+        protected_evaluation_module._WorkerResponse.model_validate(payload)
+
+
+def test_capability_response_timeout_is_typed_and_close_terminates_worker() -> None:
+    transport = _TimeoutTransport()
+    process = _StubbornProcess()
+    capability = protected_evaluation_module._AnswerReaderCapability(transport, process)
+
+    with pytest.raises(ProtectedCapabilityError) as captured:
+        capability.read_expected_output("task-1")
+    assert captured.value.code == "CAPABILITY_WORKER_UNAVAILABLE"
+
+    capability.close()
+    assert transport.closed is True
+    assert process.terminated is True
+    assert transport.poll_timeouts
+    assert all(timeout > 0 for timeout in transport.poll_timeouts)
+
+
+@pytest.mark.integration
+def test_role_worker_initialization_failure_is_typed_and_non_leaking(tmp_path: Path) -> None:
+    invalid_root = tmp_path / "root-is-a-file"
+    invalid_root.write_text("not a protected directory", encoding="utf-8")
+
+    with pytest.raises(ProtectedCapabilityError) as captured:
+        protected_evaluation_module._start_answer_reader_capability(invalid_root)
+
+    assert captured.value.code == "CAPABILITY_WORKER_INITIALIZATION_FAILED"
+    assert str(invalid_root) not in str(captured.value)
+
+
 def test_protected_root_and_database_shapes_fail_closed(tmp_path: Path) -> None:
     with pytest.raises(TypeError, match=r"pathlib\.Path"):
         ProtectedEvaluationStore(str(tmp_path / "protected"))  # type: ignore[arg-type]
@@ -222,10 +351,523 @@ def test_protected_root_and_database_shapes_fail_closed(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="regular file"):
         ProtectedEvaluationStore(protected_root)
 
+    protected_root = tmp_path / "protected-with-file-artifact-root"
+    protected_root.mkdir()
+    artifact_root = protected_root / "artifacts"
+    artifact_root.write_text("not a directory", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        ProtectedEvaluationStore(protected_root)
+    artifact_root.unlink()
+    recovered = ProtectedEvaluationStore(protected_root)
+    recovered.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("case_name", "mutation_sql"),
+    (
+        (
+            "invalid-hash",
+            "UPDATE protected_expected_outputs "
+            "SET expected_output_hash = 'not-a-valid-hash' WHERE task_id = 'task-1'",
+        ),
+        (
+            "invalid-size",
+            "UPDATE protected_expected_outputs SET size_bytes = -1 WHERE task_id = 'task-1'",
+        ),
+    ),
+)
+def test_corrupt_protected_metadata_fails_closed_without_leaking(
+    tmp_path: Path,
+    case_name: str,
+    mutation_sql: str,
+) -> None:
+    protected_root = tmp_path / case_name
+    secret = b"metadata-corruption-secret"
+    store = ProtectedEvaluationStore(protected_root)
+    try:
+        store.add_expected_output("task-1", secret)
+        with sqlite3.connect(protected_root / "protected.sqlite3") as connection:
+            connection.execute("PRAGMA ignore_check_constraints = ON")
+            connection.execute("DROP TRIGGER protected_expected_outputs_no_update")
+            connection.execute(mutation_sql)
+
+        auditor = store.integrity_auditor()
+        report = auditor.verify_integrity()
+        assert report.valid is False
+        assert report.findings[0].code == "PROTECTED_ARTIFACT_INTEGRITY_FAILURE"
+        assert secret not in report.model_dump_json().encode()
+
+        reader = store.answer_reader()
+        with pytest.raises(ProtectedCapabilityError) as captured:
+            reader.read_expected_output("task-1")
+        assert captured.value.code == "PROTECTED_OUTPUT_INTEGRITY_FAILURE"
+        assert secret not in str(captured.value).encode()
+    finally:
+        store.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("role", "factory_name", "allowed_operation"),
+    (
+        ("answer reader", "answer_reader", "read_expected_output"),
+        ("integrity auditor", "integrity_auditor", "verify_integrity"),
+    ),
+)
+def test_protected_role_capability_graphs_have_only_their_intended_authority(
+    tmp_path: Path,
+    role: str,
+    factory_name: str,
+    allowed_operation: str,
+) -> None:
+    protected_root = tmp_path / role.replace(" ", "-")
+    store = ProtectedEvaluationStore(protected_root)
+    try:
+        capability = getattr(store, factory_name)()
+        violations = _capability_graph_violations(
+            capability,
+            {allowed_operation},
+            forbidden_references={
+                str(protected_root.resolve()),
+                protected_root.resolve().as_posix(),
+            },
+        )
+        assert not violations, f"{role} excess authority:\n" + "\n".join(violations)
+    finally:
+        store.close()
+    worker_processes = tuple(
+        value for _, value in _walk_capability_graph(capability) if isinstance(value, BaseProcess)
+    )
+    assert len(worker_processes) == 1
+    assert worker_processes[0].is_alive() is False
+    with pytest.raises(ProtectedCapabilityError) as closed:
+        if allowed_operation == "read_expected_output":
+            capability.read_expected_output("task-1")
+        else:
+            capability.verify_integrity()
+    assert closed.value.code == "CAPABILITY_CLOSED"
+
+
+@pytest.mark.integration
+def test_result_gateway_graph_has_no_raw_database_or_repository_authority(
+    tmp_path: Path,
+) -> None:
+    main_path = tmp_path / "main.db"
+    main_url = f"sqlite+pysqlite:///{main_path.as_posix()}"
+    upgrade_database(main_url)
+    engine = create_database_engine(main_url)
+    try:
+        with engine.connect() as connection:
+            gateway = create_protected_result_gateway(connection)
+            try:
+                violations = _capability_graph_violations(
+                    gateway,
+                    {"append_result"},
+                    forbidden_references={
+                        str(main_path.resolve()),
+                        main_path.resolve().as_posix(),
+                        main_url,
+                    },
+                )
+                assert not violations, "result gateway excess authority:\n" + "\n".join(violations)
+            finally:
+                gateway.close()
+            worker_processes = tuple(
+                value
+                for _, value in _walk_capability_graph(gateway)
+                if isinstance(value, BaseProcess)
+            )
+            assert len(worker_processes) == 1
+            assert worker_processes[0].is_alive() is False
+            with pytest.raises(ProtectedCapabilityError) as closed:
+                gateway.append_result(_checker_result())
+            assert closed.value.code == "CAPABILITY_CLOSED"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_role_capability_reports_worker_loss_with_a_typed_safe_error(tmp_path: Path) -> None:
+    secret = b"worker-loss-secret"
+    store = ProtectedEvaluationStore(tmp_path / "protected")
+    try:
+        store.add_expected_output("task-1", secret)
+        reader = store.answer_reader()
+        worker_processes = tuple(
+            value for _, value in _walk_capability_graph(reader) if isinstance(value, BaseProcess)
+        )
+        assert len(worker_processes) == 1
+        worker_processes[0].terminate()
+        worker_processes[0].join(5)
+
+        with pytest.raises(ProtectedCapabilityError) as captured:
+            reader.read_expected_output("task-1")
+        assert captured.value.code == "CAPABILITY_WORKER_UNAVAILABLE"
+        assert secret not in str(captured.value).encode()
+        reader.close()
+        reader.close()
+    finally:
+        store.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("factory_name", "forbidden_operation", "payload"),
+    (
+        ("answer_reader", "VERIFY_INTEGRITY", None),
+        ("integrity_auditor", "READ_EXPECTED_OUTPUT", "task-1"),
+    ),
+)
+def test_protected_worker_role_allowlists_reject_cross_role_messages(
+    tmp_path: Path,
+    factory_name: str,
+    forbidden_operation: str,
+    payload: object,
+) -> None:
+    secret = b"role-isolated-answer"
+    store = ProtectedEvaluationStore(tmp_path / factory_name)
+    try:
+        store.add_expected_output("task-1", secret)
+        capability = getattr(store, factory_name)()
+        response = _send_raw_worker_operation(
+            capability,
+            operation=forbidden_operation,
+            payload=payload,
+        )
+        assert response["ok"] is False
+        assert response["error_code"] == "UNAUTHORIZED_OPERATION"
+        assert secret not in repr(response).encode()
+        if factory_name == "answer_reader":
+            assert capability.read_expected_output("task-1") == secret
+        else:
+            assert capability.verify_integrity().valid is True
+    finally:
+        store.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("factory_name", "operation", "invalid_payload"),
+    (
+        ("answer_reader", "READ_EXPECTED_OUTPUT", None),
+        ("integrity_auditor", "VERIFY_INTEGRITY", "unexpected-payload"),
+    ),
+)
+def test_protected_worker_allowed_operations_reject_invalid_payloads(
+    tmp_path: Path,
+    factory_name: str,
+    operation: str,
+    invalid_payload: object,
+) -> None:
+    secret = b"invalid-payload-secret"
+    store = ProtectedEvaluationStore(tmp_path / factory_name)
+    try:
+        store.add_expected_output("task-1", secret)
+        capability = getattr(store, factory_name)()
+        response = _send_raw_worker_operation(
+            capability,
+            operation=operation,
+            payload=invalid_payload,
+        )
+        assert response["ok"] is False
+        assert response["error_code"] == "INVALID_REQUEST"
+        assert secret not in repr(response).encode()
+        if factory_name == "answer_reader":
+            assert capability.read_expected_output("task-1") == secret
+        else:
+            assert capability.verify_integrity().valid is True
+    finally:
+        store.close()
+
+
+@pytest.mark.integration
+def test_gateway_rejects_uncommitted_campaign_state_with_a_typed_safe_error(
+    tmp_path: Path,
+) -> None:
+    main_url = f"sqlite+pysqlite:///{(tmp_path / 'main.db').as_posix()}"
+    upgrade_database(main_url)
+    engine = create_database_engine(main_url)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                _seed_campaign(connection)
+                gateway = create_protected_result_gateway(connection)
+                try:
+                    with pytest.raises(ProtectedCapabilityError) as captured:
+                        gateway.append_result(_checker_result())
+                    assert captured.value.code == "REFERENCED_CAMPAIGN_UNAVAILABLE"
+                    assert "campaign-1" not in str(captured.value)
+                    assert "path" not in str(captured.value).lower()
+                finally:
+                    gateway.close()
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_gateway_worker_rejects_invalid_messages_and_duplicate_appends(
+    tmp_path: Path,
+) -> None:
+    main_url = f"sqlite+pysqlite:///{(tmp_path / 'main.db').as_posix()}"
+    upgrade_database(main_url)
+    engine = create_database_engine(main_url)
+    try:
+        with engine.begin() as connection:
+            _seed_campaign(connection)
+        with engine.connect() as connection:
+            gateway = create_protected_result_gateway(connection)
+            try:
+                invalid = _send_raw_worker_operation(
+                    gateway,
+                    operation="APPEND_RESULT",
+                    payload={"answer": "must-not-cross-worker-boundary"},
+                )
+                assert invalid["ok"] is False
+                assert invalid["error_code"] == "INVALID_CHECKER_RESULT"
+                assert "must-not-cross" not in repr(invalid)
+
+                response = _send_raw_worker_operation(
+                    gateway,
+                    operation="READ_EXPECTED_OUTPUT",
+                    payload="task-1",
+                )
+                assert response["ok"] is False
+                assert response["error_code"] == "UNAUTHORIZED_OPERATION"
+                gateway.append_result(_checker_result())
+                with pytest.raises(ProtectedCapabilityError) as duplicate:
+                    gateway.append_result(_checker_result())
+                assert duplicate.value.code == "RESULT_APPEND_REJECTED"
+                assert "result-1" not in str(duplicate.value)
+                gateway.append_result(
+                    _checker_result().model_copy(update={"result_id": "result-2"})
+                )
+            finally:
+                gateway.close()
+                gateway.close()
+        with engine.connect() as connection:
+            assert HarnessMetricRepository(connection).get("result-1") is not None
+            assert HarnessMetricRepository(connection).get("result-2") is not None
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_worker_transport_rejects_pickle_without_executing_it(tmp_path: Path) -> None:
+    marker = tmp_path / "pickle-executed"
+    store = ProtectedEvaluationStore(tmp_path / "protected")
+    try:
+        store.add_expected_output("task-1", b"never-unpickle-role-messages")
+        reader = store.answer_reader()
+        transport = _worker_transport(reader)
+        transport.send_bytes(pickle.dumps(_WorkerPickleProbe(str(marker))))
+        response = _decode_raw_worker_response(transport.recv_bytes())
+
+        assert marker.exists() is False
+        assert response["ok"] is False
+        assert response["error_code"] == "INVALID_REQUEST"
+        assert reader.read_expected_output("task-1") == b"never-unpickle-role-messages"
+    finally:
+        store.close()
+
+
+class _WorkerPickleProbe:
+    def __init__(self, marker: str) -> None:
+        self._marker = marker
+
+    def __reduce__(self) -> tuple[object, tuple[str]]:
+        return (_execute_pickle_probe, (self._marker,))
+
+
+def _execute_pickle_probe(marker: str) -> dict[str, object]:
+    Path(marker).touch()
+    return {
+        "request_id": "pickle-probe",
+        "operation": "READ_EXPECTED_OUTPUT",
+        "payload": "task-1",
+    }
+
+
+class _TimeoutTransport:
+    def __init__(self) -> None:
+        self._responses = [
+            json.dumps(
+                {
+                    "request_id": "worker-startup",
+                    "ok": True,
+                    "payload": None,
+                    "error_code": None,
+                    "error_message": None,
+                }
+            ).encode("utf-8")
+        ]
+        self.closed = False
+        self.poll_timeouts: list[float] = []
+
+    def send_bytes(self, value: bytes) -> None:
+        assert value
+
+    def recv_bytes(self, maxlength: int | None = None) -> bytes:
+        assert maxlength is not None
+        if not self._responses:
+            raise EOFError
+        return self._responses.pop(0)
+
+    def poll(self, timeout: float = 0.0) -> bool:
+        self.poll_timeouts.append(timeout)
+        return bool(self._responses)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _StubbornProcess:
+    def __init__(self) -> None:
+        self.terminated = False
+
+    def is_alive(self) -> bool:
+        return not self.terminated
+
+    def join(self, timeout: float | None = None) -> None:
+        assert timeout is not None
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+
+def _send_raw_worker_operation(
+    capability: object,
+    *,
+    operation: str,
+    payload: object,
+) -> dict[str, object]:
+    transport = _worker_transport(capability)
+    transport.send_bytes(
+        json.dumps(
+            {
+                "request_id": "adversarial-request",
+                "operation": operation,
+                "payload": payload,
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    return _decode_raw_worker_response(transport.recv_bytes())
+
+
+def _worker_transport(capability: object) -> object:
+    transports = tuple(
+        (path, value)
+        for path, value in _walk_capability_graph(capability)
+        if type(value).__module__ == "multiprocessing.connection"
+        and all(callable(getattr(value, name, None)) for name in ("send", "recv", "close"))
+    )
+    assert len(transports) == 1, f"expected one role transport, found {transports!r}"
+    return transports[0][1]
+
+
+def _decode_raw_worker_response(raw_response: bytes) -> dict[str, object]:
+    decoded = json.loads(raw_response)
+    assert isinstance(decoded, dict)
+    return decoded
+
+
+def _capability_graph_violations(
+    capability: object,
+    allowed_operations: set[str],
+    forbidden_references: set[str] | None = None,
+) -> tuple[str, ...]:
+    forbidden_references = forbidden_references or set()
+    violations: list[str] = []
+    for path, value in _walk_capability_graph(capability):
+        if isinstance(value, str):
+            for reference in forbidden_references:
+                if reference and reference in value:
+                    violations.append(f"{path} exposes a configured storage reference")
+        if isinstance(value, _FORBIDDEN_CAPABILITY_TYPES):
+            violations.append(f"{path} exposes {type(value).__module__}.{type(value).__qualname__}")
+            continue
+        exposed_operations = {
+            operation for operation in _ROLE_OPERATIONS if callable(getattr(value, operation, None))
+        }
+        unexpected_operations = exposed_operations - allowed_operations
+        for operation in sorted(unexpected_operations):
+            violations.append(f"{path} exposes unintended operation {operation}")
+        if all(callable(getattr(value, name, None)) for name in ("add", "get", "list_all")):
+            violations.append(f"{path} exposes an unrestricted repository")
+    return tuple(dict.fromkeys(violations))
+
+
+def _walk_capability_graph(root: object) -> Iterator[tuple[str, object]]:
+    pending: list[tuple[str, object]] = [("root", root)]
+    visited: set[int] = set()
+    while pending:
+        path, value = pending.pop()
+        identity = id(value)
+        if identity in visited:
+            continue
+        visited.add(identity)
+        yield path, value
+        if isinstance(value, _GRAPH_TERMINAL_TYPES):
+            continue
+        if isinstance(value, Mapping):
+            pending.extend((f"{path}[{key!r}]", nested) for key, nested in value.items())
+        elif isinstance(value, (tuple, list, set, frozenset)):
+            pending.extend((f"{path}[{index}]", nested) for index, nested in enumerate(value))
+        if isinstance(value, partial):
+            pending.append((f"{path}.func", value.func))
+            pending.extend(
+                (f"{path}.args[{index}]", nested) for index, nested in enumerate(value.args)
+            )
+            if value.keywords:
+                pending.append((f"{path}.keywords", value.keywords))
+        bound_self = getattr(value, "__self__", None)
+        if bound_self is not None:
+            pending.append((f"{path}.__self__", bound_self))
+        if inspect.isfunction(value):
+            closure = value.__closure__ or ()
+            for index, cell in enumerate(closure):
+                try:
+                    nested = cell.cell_contents
+                except ValueError:
+                    continue
+                pending.append((f"{path}.__closure__[{index}]", nested))
+            defaults = value.__defaults__ or ()
+            pending.extend(
+                (f"{path}.__defaults__[{index}]", nested) for index, nested in enumerate(defaults)
+            )
+            if value.__kwdefaults__:
+                pending.append((f"{path}.__kwdefaults__", value.__kwdefaults__))
+        try:
+            attributes = vars(value)
+        except TypeError:
+            attributes = {}
+        pending.extend(
+            (f"{path}.{name}", nested)
+            for name, nested in attributes.items()
+            if name not in {"__dict__", "__weakref__"}
+        )
+        for owner in type(value).__mro__:
+            slots = owner.__dict__.get("__slots__", ())
+            if isinstance(slots, str):
+                slots = (slots,)
+            for slot in slots:
+                if slot in {"__dict__", "__weakref__"}:
+                    continue
+                try:
+                    nested = getattr(value, slot)
+                except AttributeError:
+                    continue
+                pending.append((f"{path}.{slot}", nested))
+
 
 def _seed_campaign(connection: object) -> None:
-    from sqlalchemy import Connection
-
     from super_scientist.providers.storage.domain_records import (
         HarnessCampaignRecord,
         HarnessCampaignRepository,
@@ -248,4 +890,19 @@ def _seed_campaign(connection: object) -> None:
         campaign.campaign_id,
         campaign,
         campaign.created_at,
+    )
+
+
+def _checker_result() -> ProtectedCheckerResult:
+    return ProtectedCheckerResult(
+        result_id="result-1",
+        campaign_id="campaign-1",
+        task_id="task-1",
+        expected_output_hash="a" * 64,
+        candidate_output_hash="b" * 64,
+        checker_id="checker-1",
+        checker_version="checker-v1",
+        outcome=AssessmentOutcome.PASSED,
+        metric_values=(MetricValue(metric_id="correctness", value=Decimal("1.0")),),
+        evaluated_at=datetime(2026, 7, 20, tzinfo=UTC),
     )

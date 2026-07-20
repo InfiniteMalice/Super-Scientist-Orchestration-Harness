@@ -41,6 +41,7 @@ from super_scientist.domain.improvement.models import (
     SelfImprovementMeasurementRecord,
 )
 from super_scientist.domain.primitives import (
+    GitObjectId,
     NonBlankText,
     Sha256Hex,
     StableIdentifier,
@@ -290,7 +291,7 @@ class HandbookVerificationRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     verification_id: StableIdentifier
     manifest_hash: Sha256Hex
-    repository_commit: Sha256Hex
+    repository_commit: GitObjectId
     source_hashes: tuple[Sha256Hex, ...] = Field(min_length=1)
     generated_artifact_hash: Sha256Hex
     stale_locations: tuple[NonBlankText, ...]

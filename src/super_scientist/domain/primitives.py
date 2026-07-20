@@ -31,6 +31,10 @@ Sha256Hex = Annotated[
     str,
     Field(strict=True, pattern=r"^[0-9a-f]{64}$"),
 ]
+GitObjectId = Annotated[
+    str,
+    Field(strict=True, pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"),
+]
 
 
 def require_utc(value: datetime) -> datetime:
