@@ -434,9 +434,10 @@ class TransactionCoordinator:
                     admitted_proposal,
                     connection,
                     stored_policy,
+                    self._artifact_store,
                 )
                 reads = rule_io
-                writes = rule_io
+                writes = cast(HandlerWriteCapability, rule_io)
             else:
                 adaptation_io = adaptation_capabilities(
                     admitted_proposal,

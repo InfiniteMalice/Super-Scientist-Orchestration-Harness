@@ -9,16 +9,21 @@ from super_scientist.domain.behavioral_rules.consolidation import (
     build_candidate_diff,
     classify_overlap,
     rule_actors_are_independent,
+    semantic_version_increases,
 )
 from super_scientist.domain.behavioral_rules.models import (
     BehavioralRuleVersion,
     OverlapClassification,
     ReviewerAssessment,
     RuleAction,
+    RuleAuthority,
     RuleConsolidationDecision,
     RuleIncident,
+    RuleRegressionCase,
     RuleStatus,
 )
+from super_scientist.domain.evidence.models import EvidenceRecord, VerificationState
+from super_scientist.domain.evidence_trails.authority import parse_external_grounding
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.improvement.classification import (
     ChangeTarget,
@@ -76,6 +81,8 @@ class _IncidentReadCapability(Protocol):
 
     def get_incident(self, incident_id: str) -> RuleIncident | None: ...
 
+    def get_retained_evidence(self, evidence_id: str) -> EvidenceRecord | None: ...
+
 
 class _RuleProposalReadCapability(Protocol):
     def policy_snapshot(self) -> PolicySnapshot: ...
@@ -86,6 +93,8 @@ class _RuleProposalReadCapability(Protocol):
 
     def get_incident(self, incident_id: str) -> RuleIncident | None: ...
 
+    def get_retained_evidence(self, evidence_id: str) -> EvidenceRecord | None: ...
+
 
 class _AssessmentReadCapability(Protocol):
     def policy_snapshot(self) -> PolicySnapshot: ...
@@ -95,6 +104,8 @@ class _AssessmentReadCapability(Protocol):
     def get_rule(self, rule_version_id: str) -> BehavioralRuleVersion | None: ...
 
     def get_incident(self, incident_id: str) -> RuleIncident | None: ...
+
+    def get_retained_evidence(self, evidence_id: str) -> EvidenceRecord | None: ...
 
     def reviewed_rule_proposal(self, proposal_id: str) -> ProposeBehavioralRule | None: ...
 
@@ -108,6 +119,32 @@ class _IntegratorReadCapability(_AssessmentReadCapability, Protocol):
 
     def get_head(self, rule_id: str) -> tuple[str, str, RuleStatus] | None: ...
 
+    def list_rules(self) -> tuple[BehavioralRuleVersion, ...]: ...
+
+    def list_heads(self) -> tuple[tuple[str, str, str, RuleStatus], ...]: ...
+
+
+class _IncidentWriteCapability(Protocol):
+    def append_incident(self, incident: RuleIncident) -> None: ...
+
+
+class _RuleProposalWriteCapability(Protocol):
+    def append_rule_proposal(self, rule: BehavioralRuleVersion) -> None: ...
+
+
+class _AssessmentWriteCapability(Protocol):
+    def append_assessment(self, assessment: ReviewerAssessment) -> None: ...
+
+
+class _IntegratorWriteCapability(Protocol):
+    def append_rule_version(self, rule: BehavioralRuleVersion) -> None: ...
+
+    def append_decision(self, decision: RuleConsolidationDecision) -> None: ...
+
+    def append_regression(self, regression: RuleRegressionCase) -> None: ...
+
+    def set_rule_head(self, rule: BehavioralRuleVersion) -> None: ...
+
 
 class _ContextModel(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
@@ -116,6 +153,7 @@ class _ContextModel(BaseModel):
 class _IncidentContext(_ContextModel):
     active_policy: PolicySnapshot
     existing: RuleIncident | None
+    evidence: tuple[EvidenceRecord | None, ...]
 
 
 class _RuleProposalContext(_ContextModel):
@@ -123,6 +161,7 @@ class _RuleProposalContext(_ContextModel):
     existing: BehavioralRuleVersion | None
     rules: tuple[BehavioralRuleVersion, ...]
     incidents: tuple[RuleIncident | None, ...]
+    evidence: tuple[EvidenceRecord | None, ...]
 
 
 class _AssessmentContext(_ContextModel):
@@ -130,6 +169,7 @@ class _AssessmentContext(_ContextModel):
     existing: ReviewerAssessment | None
     rules: tuple[BehavioralRuleVersion | None, ...]
     incidents: tuple[RuleIncident | None, ...]
+    evidence: tuple[EvidenceRecord | None, ...]
     reviewed_proposal: ProposeBehavioralRule | None
 
 
@@ -137,12 +177,16 @@ class _ConsolidationContext(_ContextModel):
     active_policy: PolicySnapshot
     existing_decision: RuleConsolidationDecision | None
     existing_candidate: BehavioralRuleVersion | None
+    rules: tuple[BehavioralRuleVersion, ...]
+    heads: tuple[tuple[str, str, str, RuleStatus], ...]
     assessments: tuple[ReviewerAssessment | None, ...]
     incidents: tuple[RuleIncident | None, ...]
+    evidence: tuple[EvidenceRecord | None, ...]
     predecessors: tuple[BehavioralRuleVersion | None, ...]
     measurement: SelfImprovementMeasurementRecord | None
     evaluator_audit: EvaluatorAuditRecord | None
     current_head: tuple[str, str, RuleStatus] | None
+    reviewed_proposal: ProposeBehavioralRule | None
 
 
 class RecordRuleIncidentHandler:
@@ -157,6 +201,10 @@ class RecordRuleIncidentHandler:
         return _IncidentContext(
             active_policy=capability.policy_snapshot(),
             existing=capability.get_incident(proposal.incident.incident_id),
+            evidence=tuple(
+                capability.get_retained_evidence(evidence_id)
+                for evidence_id in proposal.incident.evidence_ids
+            ),
         )
 
     def decide(
@@ -172,6 +220,14 @@ class RecordRuleIncidentHandler:
         )
         if rejection is not None:
             return rejection
+        evidence_rejection = _primary_evidence_rejection(
+            proposal.proposal_id,
+            incident.evidence_ids,
+            context.evidence,
+            "rule incident",
+        )
+        if evidence_rejection is not None:
+            return evidence_rejection
         if incident.reported_by != proposal.proposer:
             return _rejected(
                 proposal.proposal_id,
@@ -193,7 +249,8 @@ class RecordRuleIncidentHandler:
         decision: TransactionDecision,
         writes: HandlerWriteCapability,
     ) -> None:
-        _project_accepted(decision, writes, proposal.incident)
+        _require_accepted_projection(decision)
+        cast(_IncidentWriteCapability, writes).append_incident(proposal.incident)
 
 
 class ProposeBehavioralRuleHandler:
@@ -206,12 +263,17 @@ class ProposeBehavioralRuleHandler:
     ) -> _RuleProposalContext:
         capability = cast(_RuleProposalReadCapability, reads)
         rule = proposal.rule_version
+        incidents = tuple(
+            capability.get_incident(incident_id) for incident_id in rule.source_incident_ids
+        )
+        evidence_ids = _canonical_incident_evidence_ids(incidents)
         return _RuleProposalContext(
             active_policy=capability.policy_snapshot(),
             existing=capability.get_rule(rule.rule_version_id),
             rules=capability.list_rules(),
-            incidents=tuple(
-                capability.get_incident(incident_id) for incident_id in rule.source_incident_ids
+            incidents=incidents,
+            evidence=tuple(
+                capability.get_retained_evidence(evidence_id) for evidence_id in evidence_ids
             ),
         )
 
@@ -221,10 +283,27 @@ class ProposeBehavioralRuleHandler:
         context: _RuleProposalContext,
     ) -> TransactionDecision:
         rule = proposal.rule_version
+        relevant_rules = tuple(
+            existing
+            for existing in context.rules
+            if existing.rule_version_id != rule.rule_version_id
+            and (
+                existing.rule_id == rule.rule_id
+                or classify_overlap(rule, existing) is not OverlapClassification.NON_REDUNDANT
+            )
+        )
+        authority_actors = tuple(
+            (
+                rule.creator,
+                *(item.reported_by for item in context.incidents if item is not None),
+                *(item.creator for item in relevant_rules),
+                *(item.approver for item in relevant_rules if item.approver is not None),
+            )
+        )
         rejection = rule_authority_rejection(
             proposal,
             context.active_policy,
-            authority_actors=(rule.creator,),
+            authority_actors=authority_actors,
         )
         if rejection is not None:
             return rejection
@@ -250,6 +329,21 @@ class ProposeBehavioralRuleHandler:
                 RejectionCode.MISSING_ENTITY,
                 "behavioral rule must reference retained incidents",
             )
+        expected_evidence_ids = _canonical_incident_evidence_ids(context.incidents)
+        if rule.evidence_ids != expected_evidence_ids:
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.INSUFFICIENT_GROUNDING,
+                "behavioral rule must bind the exact incident evidence",
+            )
+        evidence_rejection = _primary_evidence_rejection(
+            proposal.proposal_id,
+            expected_evidence_ids,
+            context.evidence,
+            "behavioral rule",
+        )
+        if evidence_rejection is not None:
+            return evidence_rejection
         if (
             rule.status not in {RuleStatus.PROPOSED, RuleStatus.UNDER_REVIEW}
             or rule.approver is not None
@@ -288,7 +382,8 @@ class ProposeBehavioralRuleHandler:
         decision: TransactionDecision,
         writes: HandlerWriteCapability,
     ) -> None:
-        _project_accepted(decision, writes, proposal.rule_version)
+        _require_accepted_projection(decision)
+        cast(_RuleProposalWriteCapability, writes).append_rule_proposal(proposal.rule_version)
 
 
 class ImportReviewerAssessmentHandler:
@@ -301,6 +396,10 @@ class ImportReviewerAssessmentHandler:
     ) -> _AssessmentContext:
         capability = cast(_AssessmentReadCapability, reads)
         assessment = proposal.assessment
+        incidents = tuple(
+            capability.get_incident(incident_id) for incident_id in assessment.incident_ids
+        )
+        evidence_ids = _canonical_incident_evidence_ids(incidents)
         return _AssessmentContext(
             active_policy=capability.policy_snapshot(),
             existing=capability.get_assessment(assessment.assessment_id),
@@ -308,8 +407,9 @@ class ImportReviewerAssessmentHandler:
                 capability.get_rule(rule_version_id)
                 for rule_version_id in assessment.rule_version_ids
             ),
-            incidents=tuple(
-                capability.get_incident(incident_id) for incident_id in assessment.incident_ids
+            incidents=incidents,
+            evidence=tuple(
+                capability.get_retained_evidence(evidence_id) for evidence_id in evidence_ids
             ),
             reviewed_proposal=capability.reviewed_rule_proposal(assessment.proposal_id),
         )
@@ -359,6 +459,14 @@ class ImportReviewerAssessmentHandler:
                 RejectionCode.MISSING_ENTITY,
                 "reviewer assessment must reference an accepted rule proposal and retained records",
             )
+        quality_rejection = _assessment_quality_rejection(
+            proposal.proposal_id,
+            assessment,
+            context.incidents,
+            context.evidence,
+        )
+        if quality_rejection is not None:
+            return quality_rejection
         reviewed_rule = context.reviewed_proposal.rule_version
         if reviewed_rule.rule_version_id not in assessment.rule_version_ids:
             return _rejected(
@@ -383,7 +491,8 @@ class ImportReviewerAssessmentHandler:
         decision: TransactionDecision,
         writes: HandlerWriteCapability,
     ) -> None:
-        _project_accepted(decision, writes, proposal.assessment)
+        _require_accepted_projection(decision)
+        cast(_AssessmentWriteCapability, writes).append_assessment(proposal.assessment)
 
 
 class ConsolidateBehavioralRuleHandler:
@@ -397,16 +506,23 @@ class ConsolidateBehavioralRuleHandler:
         capability = cast(_IntegratorReadCapability, reads)
         consolidation = proposal.consolidation
         candidate = consolidation.candidate_rule
+        incidents = tuple(
+            capability.get_incident(incident_id) for incident_id in consolidation.incident_ids
+        )
+        evidence_ids = _canonical_incident_evidence_ids(incidents)
         return _ConsolidationContext(
             active_policy=capability.policy_snapshot(),
             existing_decision=capability.get_decision(consolidation.consolidation_decision_id),
             existing_candidate=capability.get_rule(candidate.rule_version_id),
+            rules=capability.list_rules(),
+            heads=capability.list_heads(),
             assessments=tuple(
                 capability.get_assessment(assessment_id)
                 for assessment_id in consolidation.assessment_ids
             ),
-            incidents=tuple(
-                capability.get_incident(incident_id) for incident_id in consolidation.incident_ids
+            incidents=incidents,
+            evidence=tuple(
+                capability.get_retained_evidence(evidence_id) for evidence_id in evidence_ids
             ),
             predecessors=tuple(
                 capability.get_rule(rule_version_id)
@@ -415,6 +531,7 @@ class ConsolidateBehavioralRuleHandler:
             measurement=capability.get_measurement(proposal.measurement_id),
             evaluator_audit=capability.get_evaluator_audit(proposal.evaluator_audit_id),
             current_head=capability.get_head(candidate.rule_id),
+            reviewed_proposal=capability.reviewed_rule_proposal(consolidation.review_proposal_id),
         )
 
     def decide(
@@ -472,22 +589,39 @@ class ConsolidateBehavioralRuleHandler:
                 "consolidation requires every assessment, incident, and predecessor",
             )
         assessments = cast(tuple[ReviewerAssessment, ...], context.assessments)
+        incidents = cast(tuple[RuleIncident, ...], context.incidents)
         predecessors = cast(tuple[BehavioralRuleVersion, ...], context.predecessors)
-        if proposal.rollback_rule_version_id not in candidate.supersedes_rule_version_ids:
+        lineage_rejection = _canonical_lineage_rejection(
+            proposal,
+            context,
+            predecessors,
+        )
+        if lineage_rejection is not None:
+            return lineage_rejection
+        expected_evidence_ids = _canonical_incident_evidence_ids(context.incidents)
+        if candidate.evidence_ids != expected_evidence_ids:
             return _rejected(
                 proposal.proposal_id,
-                RejectionCode.INVALID_LINEAGE,
-                "rollback version must be one of the retained predecessors",
+                RejectionCode.INSUFFICIENT_GROUNDING,
+                "candidate rule must bind the exact retained incident evidence",
             )
-        if any(
-            item.rule_id == candidate.rule_id and item.authority is not candidate.authority
-            for item in predecessors
-        ):
-            return _rejected(
+        evidence_rejection = _primary_evidence_rejection(
+            proposal.proposal_id,
+            expected_evidence_ids,
+            context.evidence,
+            "rule consolidation",
+        )
+        if evidence_rejection is not None:
+            return evidence_rejection
+        for assessment in assessments:
+            assessment_rejection = _assessment_quality_rejection(
                 proposal.proposal_id,
-                RejectionCode.PERMISSION_DENIED,
-                "consolidation cannot change a predecessor rule authority",
+                assessment,
+                context.incidents,
+                context.evidence,
             )
+            if assessment_rejection is not None:
+                return assessment_rejection
         if candidate.status is not _status_for_action(consolidation.action):
             return _rejected(
                 proposal.proposal_id,
@@ -497,7 +631,19 @@ class ConsolidateBehavioralRuleHandler:
         if (
             proposal.approval is None
             or candidate.approver != proposal.approval.approver
-            or candidate.approved_at is None
+            or candidate.approved_at != proposal.approval.approved_at
+            or candidate.created_at > consolidation.integrated_at
+            or consolidation.integrated_at > proposal.approval.approved_at
+            or any(
+                assessment.provenance.assessed_at > candidate.created_at
+                for assessment in assessments
+            )
+            or any(incident.recorded_at > candidate.created_at for incident in incidents)
+            or any(item.created_at > candidate.created_at for item in predecessors)
+            or context.measurement is None
+            or context.measurement.decided_at > consolidation.integrated_at
+            or context.evaluator_audit is None
+            or context.evaluator_audit.audited_at > context.measurement.decided_at
         ):
             return _rejected(
                 proposal.proposal_id,
@@ -519,6 +665,7 @@ class ConsolidateBehavioralRuleHandler:
                 action=consolidation.action,
                 recommendation_dispositions=consolidation.recommendation_dispositions,
                 separating_variable=consolidation.separating_variable,
+                separating_boundary_test_id=consolidation.separating_boundary_test_id,
                 recurrence_incident_ids=consolidation.recurrence_incident_ids,
                 recurrence_repairs=consolidation.recurrence_repairs,
                 integrator=consolidation.integrated_by,
@@ -550,15 +697,16 @@ class ConsolidateBehavioralRuleHandler:
     ) -> None:
         if not decision.accepted:
             raise ValueError("rejected rule consolidations cannot be projected")
+        capability = cast(_IntegratorWriteCapability, writes)
         consolidation = proposal.consolidation
         candidate = consolidation.candidate_rule
         if consolidation.action not in {RuleAction.REJECT, RuleAction.ESCALATE_TO_HUMAN}:
-            writes.append_authoritative(candidate)
-        writes.append_authoritative(rule_consolidation_decision(proposal))
+            capability.append_rule_version(candidate)
+        capability.append_decision(rule_consolidation_decision(proposal))
         if consolidation.action not in {RuleAction.REJECT, RuleAction.ESCALATE_TO_HUMAN}:
             for regression_case in consolidation.regression_cases:
-                writes.append_authoritative(regression_case)
-            writes.update_projection(candidate)
+                capability.append_regression(regression_case)
+            capability.set_rule_head(candidate)
 
 
 class RuleService:
@@ -633,13 +781,21 @@ def rule_authority_rejection(
     rollback_present = isinstance(proposal, ConsolidateBehavioralRule) and bool(
         proposal.rollback_rule_version_id
     )
-    if requirement.protected_evaluation_required and not protected_evaluation:
+    if (
+        isinstance(proposal, ConsolidateBehavioralRule)
+        and requirement.protected_evaluation_required
+        and not protected_evaluation
+    ):
         return _rejected(
             proposal.proposal_id,
             RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
             "protected evaluation required by active rule policy",
         )
-    if requirement.rollback_required and not rollback_present:
+    if (
+        isinstance(proposal, ConsolidateBehavioralRule)
+        and requirement.rollback_required
+        and not rollback_present
+    ):
         return _rejected(
             proposal.proposal_id,
             RejectionCode.INVALID_LINEAGE,
@@ -709,6 +865,230 @@ def _measurement_and_audit_bind(
     )
 
 
+_RULE_AUTHORITY_RANK = {
+    authority: index
+    for index, authority in enumerate(
+        (
+            RuleAuthority.CONSTITUTIONAL,
+            RuleAuthority.GOVERNANCE,
+            RuleAuthority.PROJECT,
+            RuleAuthority.DOMAIN,
+            RuleAuthority.COMPONENT,
+            RuleAuthority.TASK,
+            RuleAuthority.RUN_LOCAL,
+        )
+    )
+}
+
+
+def _canonical_lineage_rejection(
+    proposal: ConsolidateBehavioralRule,
+    context: _ConsolidationContext,
+    predecessors: tuple[BehavioralRuleVersion, ...],
+) -> TransactionDecision | None:
+    consolidation = proposal.consolidation
+    candidate = consolidation.candidate_rule
+    rules_by_version = {item.rule_version_id: item for item in context.rules}
+    head_rules: dict[str, BehavioralRuleVersion] = {}
+    for rule_id, rule_version_id, semantic_version, status in context.heads:
+        head_rule = rules_by_version.get(rule_version_id)
+        if (
+            head_rule is None
+            or head_rule.rule_id != rule_id
+            or head_rule.semantic_version != semantic_version
+            or head_rule.status is not status
+        ):
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.INVALID_LINEAGE,
+                "canonical rule registry contains an unresolved head",
+            )
+        head_rules[rule_id] = head_rule
+
+    current = head_rules.get(candidate.rule_id)
+    if context.current_head is None:
+        if current is not None:
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.INVALID_LINEAGE,
+                "candidate rule head read is inconsistent with the canonical registry",
+            )
+    elif current is None or context.current_head != (
+        current.rule_version_id,
+        current.semantic_version,
+        current.status,
+    ):
+        return _rejected(
+            proposal.proposal_id,
+            RejectionCode.INVALID_LINEAGE,
+            "candidate rule does not bind the exact canonical head",
+        )
+
+    active_head_rules = tuple(head_rules.values())
+    overlaps = {
+        item.rule_version_id: classify_overlap(candidate, item) for item in active_head_rules
+    }
+    if OverlapClassification.EXACT_DUPLICATE in overlaps.values():
+        return _rejected(
+            proposal.proposal_id,
+            RejectionCode.DUPLICATE_RULE,
+            "an exact duplicate cannot become a canonical active rule",
+        )
+    affected_other_heads = tuple(
+        item
+        for item in active_head_rules
+        if item.rule_id != candidate.rule_id
+        and overlaps[item.rule_version_id] is not OverlapClassification.NON_REDUNDANT
+    )
+    if affected_other_heads and consolidation.action is not RuleAction.MERGE_WITH_EXISTING:
+        return _rejected(
+            proposal.proposal_id,
+            RejectionCode.UNRESOLVED_RULE_CONFLICT,
+            "overlapping active rule heads require explicit merge consolidation",
+        )
+
+    reviewed_rule = (
+        None if context.reviewed_proposal is None else context.reviewed_proposal.rule_version
+    )
+    base = current if current is not None else reviewed_rule
+    if base is None:
+        return _rejected(
+            proposal.proposal_id,
+            RejectionCode.INVALID_LINEAGE,
+            "first canonical rule version must descend from the reviewed proposal",
+        )
+    expected_predecessor_ids = {
+        base.rule_version_id,
+        *(item.rule_version_id for item in affected_other_heads),
+    }
+    supplied_predecessor_ids = set(candidate.supersedes_rule_version_ids)
+    if (
+        supplied_predecessor_ids != expected_predecessor_ids
+        or {item.rule_version_id for item in predecessors} != expected_predecessor_ids
+        or proposal.rollback_rule_version_id != base.rule_version_id
+    ):
+        return _rejected(
+            proposal.proposal_id,
+            RejectionCode.INVALID_LINEAGE,
+            "candidate lineage must name the exact current and affected active heads",
+        )
+    if base.rule_id == candidate.rule_id and not semantic_version_increases(
+        candidate.semantic_version,
+        base.semantic_version,
+    ):
+        return _rejected(
+            proposal.proposal_id,
+            RejectionCode.INVALID_LINEAGE,
+            "candidate semantic version must increase the canonical predecessor",
+        )
+    authority_sources = tuple(
+        {item.rule_version_id: item for item in (base, *affected_other_heads)}.values()
+    )
+    if any(
+        _RULE_AUTHORITY_RANK[candidate.authority] > _RULE_AUTHORITY_RANK[item.authority]
+        for item in authority_sources
+    ):
+        return _rejected(
+            proposal.proposal_id,
+            RejectionCode.PERMISSION_DENIED,
+            "candidate cannot weaken predecessor constitutional authority",
+        )
+    return None
+
+
+def _canonical_incident_evidence_ids(
+    incidents: tuple[RuleIncident | None, ...],
+) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            evidence_id
+            for incident in incidents
+            if incident is not None
+            for evidence_id in incident.evidence_ids
+        )
+    )
+
+
+def _primary_evidence_rejection(
+    proposal_id: str,
+    expected_ids: tuple[str, ...],
+    evidence: tuple[EvidenceRecord | None, ...],
+    label: str,
+) -> TransactionDecision | None:
+    retained = tuple(item for item in evidence if item is not None)
+    if (
+        len(retained) != len(expected_ids)
+        or tuple(item.evidence_id for item in retained) != expected_ids
+        or len({item.evidence_id for item in retained}) != len(expected_ids)
+    ):
+        return _rejected(
+            proposal_id,
+            RejectionCode.INSUFFICIENT_GROUNDING,
+            f"{label} must resolve every evidence identifier exactly once",
+        )
+    try:
+        primary = all(
+            item.verification_state is VerificationState.HASH_VERIFIED
+            and parse_external_grounding(item) is ExternalGrounding.PRIMARY_SOURCE
+            for item in retained
+        )
+    except ValueError:
+        primary = False
+    if not primary:
+        return _rejected(
+            proposal_id,
+            RejectionCode.INSUFFICIENT_GROUNDING,
+            f"{label} requires hash-verified retained primary-source evidence",
+        )
+    return None
+
+
+def _assessment_quality_rejection(
+    proposal_id: str,
+    assessment: ReviewerAssessment,
+    available_incidents: tuple[RuleIncident | None, ...],
+    available_evidence: tuple[EvidenceRecord | None, ...],
+) -> TransactionDecision | None:
+    provenance = assessment.provenance
+    expected_check_id = f"{assessment.role.value.lower()}-review"
+    if (
+        provenance.category is not VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK
+        or provenance.deterministic_or_learned != "DETERMINISTIC"
+        or provenance.result is not AssessmentOutcome.PASSED
+        or provenance.meaningful_confidence is not None
+        or provenance.checks_run != (expected_check_id,)
+    ):
+        return _rejected(
+            proposal_id,
+            RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+            "review assessment requires the exact independent deterministic passed mechanism",
+        )
+    incidents_by_id = {
+        incident.incident_id: incident for incident in available_incidents if incident is not None
+    }
+    incidents = tuple(incidents_by_id.get(incident_id) for incident_id in assessment.incident_ids)
+    if any(incident is None for incident in incidents):
+        return _rejected(
+            proposal_id,
+            RejectionCode.MISSING_ENTITY,
+            "review assessment references evidence outside the retained incident set",
+        )
+    expected_evidence_ids = _canonical_incident_evidence_ids(incidents)
+    if provenance.evidence_ids != expected_evidence_ids:
+        return _rejected(
+            proposal_id,
+            RejectionCode.INSUFFICIENT_GROUNDING,
+            "review assessment must bind the exact evidence of its incidents",
+        )
+    evidence_by_id = {item.evidence_id: item for item in available_evidence if item is not None}
+    return _primary_evidence_rejection(
+        proposal_id,
+        expected_evidence_ids,
+        tuple(evidence_by_id.get(evidence_id) for evidence_id in expected_evidence_ids),
+        "review assessment",
+    )
+
+
 def rule_consolidation_decision(
     proposal: ConsolidateBehavioralRule,
 ) -> RuleConsolidationDecision:
@@ -773,14 +1153,9 @@ def _stable_record_decision(
     )
 
 
-def _project_accepted(
-    decision: TransactionDecision,
-    writes: HandlerWriteCapability,
-    record: BaseModel,
-) -> None:
+def _require_accepted_projection(decision: TransactionDecision) -> None:
     if not decision.accepted:
         raise ValueError("rejected behavioral-rule records cannot be projected")
-    writes.append_authoritative(record)
 
 
 def _policy_rejection(proposal_id: str, label: str) -> TransactionDecision:

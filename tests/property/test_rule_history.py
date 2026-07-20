@@ -6,7 +6,12 @@ import pytest
 from pydantic import ValidationError
 
 from super_scientist.domain.behavioral_rules.consolidation import build_candidate_diff
-from super_scientist.domain.behavioral_rules.models import RecurrenceRepair, RuleAction
+from super_scientist.domain.behavioral_rules.models import (
+    ConsolidationProposal,
+    RecurrenceRepair,
+    RuleAction,
+)
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from tests.rule_fixtures import (
     NOW,
     POLICY_HASH,
@@ -105,3 +110,42 @@ def test_rule_history_contracts_are_frozen_and_reject_duplicate_incidents() -> N
             baseline.model_dump(mode="python")
             | {"source_incident_ids": ("incident-1", "incident-1")}
         )
+
+
+def test_legacy_non_conflict_consolidation_payload_keeps_its_canonical_hash() -> None:
+    assessments = five_assessments()
+    integrator = actor("integrator")
+    proposal = build_candidate_diff(
+        consolidation_decision_id="decision-legacy",
+        review_proposal_id="proposal-rule-1",
+        assessments=assessments,
+        candidate_rule=rule(
+            "rule-1-v2",
+            semantic_version="1.1.0",
+            incidents=("incident-1", "incident-2"),
+            creator=integrator,
+        ),
+        regression_cases=(
+            regression("regression-1", "incident-1", creator=integrator),
+            regression("regression-2", "incident-2", creator=integrator),
+        ),
+        action=RuleAction.ACCEPT_WITH_REVISION,
+        recommendation_dispositions=dispositions(assessments),
+        separating_variable=None,
+        recurrence_incident_ids=(),
+        recurrence_repairs=(),
+        integrator=integrator,
+        integrated_at=NOW,
+        governing_policy_hash=POLICY_HASH,
+    )
+    legacy_payload = proposal.model_dump(mode="json")
+    assert "separating_boundary_test_id" not in legacy_payload
+    before = sha256_hex(canonical_json_bytes(legacy_payload))
+
+    decoded = ConsolidationProposal.model_validate_json(
+        canonical_json_bytes(legacy_payload),
+        strict=True,
+    )
+
+    assert decoded.separating_boundary_test_id is None
+    assert sha256_hex(canonical_json_bytes(decoded.model_dump(mode="json"))) == before

@@ -6,8 +6,12 @@ import pytest
 
 from super_scientist.application.rules.service import FIXED_RULE_CLASSIFICATION
 from super_scientist.application.transactions.rules import (
+    ReviewerAssessmentWriter,
     RuleIntegratorCapabilities,
+    RuleIntegratorReadFacade,
+    RuleIntegratorWriter,
     RuleReviewerImportCapabilities,
+    RuleReviewerReadFacade,
 )
 from super_scientist.domain.behavioral_rules.consolidation import (
     build_candidate_diff,
@@ -38,16 +42,47 @@ def test_reviewer_capability_has_no_rule_head_governance_or_quality_writer() -> 
     assert "quality_registry" not in names
     assert "decisions" not in names
     assert "regressions" not in names
-    assert names >= {"active_policy", "incidents", "rules", "assessments"}
+    assert names == {"active_policy", "reader", "writer"}
+    assert not names & {"incidents", "rules", "assessments", "transactions"}
 
 
 def test_only_integrator_capability_can_project_rule_head() -> None:
     reviewer_names = {item.name for item in fields(RuleReviewerImportCapabilities)}
     integrator_names = {item.name for item in fields(RuleIntegratorCapabilities)}
     assert "head" not in reviewer_names
-    assert "head" in integrator_names
+    assert integrator_names == {"active_policy", "reader", "writer"}
     assert "governance" not in integrator_names
     assert "quality_registry" not in integrator_names
+    assert not hasattr(ReviewerAssessmentWriter, "set_rule_head")
+    assert hasattr(RuleIntegratorWriter, "set_rule_head")
+
+
+@pytest.mark.parametrize(
+    "authority_type",
+    (
+        RuleReviewerReadFacade,
+        ReviewerAssessmentWriter,
+        RuleIntegratorReadFacade,
+        RuleIntegratorWriter,
+    ),
+)
+def test_nested_rule_authorities_expose_no_generic_repository_mutation(
+    authority_type: type,
+) -> None:
+    public_api = {name for name in dir(authority_type) if not name.startswith("_")}
+    assert not public_api & {"add", "update", "set", "delete", "execute"}
+
+
+@pytest.mark.parametrize(
+    "capability_type",
+    (RuleReviewerImportCapabilities, RuleIntegratorCapabilities),
+)
+def test_rule_role_capabilities_have_no_generic_write_escape(
+    capability_type: type,
+) -> None:
+    public_api = {name for name in dir(capability_type) if not name.startswith("_")}
+    assert "append_authoritative" not in public_api
+    assert "update_projection" not in public_api
 
 
 def test_dependent_reviewer_roles_cannot_form_a_candidate_diff() -> None:
@@ -140,6 +175,22 @@ def test_rule_reviewer_independence_checks_every_identity_dimension(
     right = right.model_copy(update={shared_field: shared_value})
 
     assert rule_actors_are_independent(left, right) is False
+
+
+@pytest.mark.parametrize(
+    "shared_field",
+    ("provider_id", "model_id", "adapter_id", "configuration_hash"),
+)
+def test_human_and_service_aliases_are_not_treated_as_independent(
+    shared_field: str,
+) -> None:
+    shared_value = POLICY_HASH if shared_field == "configuration_hash" else f"shared-{shared_field}"
+    human = actor("human-reviewer").model_copy(update={shared_field: shared_value})
+    service = actor("service-reviewer", ActorKind.SERVICE).model_copy(
+        update={shared_field: shared_value}
+    )
+
+    assert rule_actors_are_independent(human, service) is False
 
 
 def test_fixed_rule_classification_is_not_a_generic_authority_grant() -> None:

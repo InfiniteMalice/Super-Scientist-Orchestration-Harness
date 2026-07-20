@@ -303,6 +303,10 @@ class ConsolidationProposal(_StrictFrozenModel):
     overlap: OverlapClassification | None
     conflict: ConflictClassification | None
     separating_variable: NonBlankText | None
+    separating_boundary_test_id: StableIdentifier | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     recommendation_dispositions: tuple[RecommendationDisposition, ...] = Field(min_length=5)
     preserved_findings: tuple[NonBlankText, ...] = Field(min_length=1)
     preserved_dissent: tuple[NonBlankText, ...]
@@ -355,6 +359,25 @@ class ConsolidationProposal(_StrictFrozenModel):
                 or regression_case.governing_policy_hash != self.governing_policy_hash
             ):
                 raise ValueError("regression cases must bind the candidate, integrator, and policy")
+        regression_test_ids = tuple(item.test_id for item in self.regression_cases)
+        if len(set(regression_test_ids)) != len(regression_test_ids):
+            raise ValueError("regression cases must use unique test identifiers")
+        if not set(regression_test_ids).issubset(self.candidate_rule.regression_test_ids):
+            raise ValueError("every regression case test must be declared by the candidate")
+        if any(
+            not set(item.incident_ids).issubset(self.candidate_rule.source_incident_ids)
+            for item in self.regression_cases
+        ):
+            raise ValueError("regression cases must bind retained candidate incidents")
+        cases_by_test_id = {item.test_id: item for item in self.regression_cases}
+        if self.conflict is not None:
+            if (
+                self.separating_boundary_test_id is None
+                or self.separating_boundary_test_id not in cases_by_test_id
+            ):
+                raise ValueError("conflict consolidation requires a separating-boundary test")
+        elif self.separating_boundary_test_id is not None:
+            raise ValueError("non-conflict consolidation cannot name a separating-boundary test")
         if not set(self.recurrence_incident_ids).issubset(self.incident_ids):
             raise ValueError("recurrence incidents must remain in the candidate rule")
         if self.recurrence_incident_ids and not self.recurrence_repairs:

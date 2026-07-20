@@ -15,8 +15,18 @@ from super_scientist.domain.behavioral_rules.models import (
     RuleRegressionCase,
 )
 from super_scientist.domain.identity import ActorIdentity, ActorKind, are_independent
-from super_scientist.domain.improvement.models import ActorRelationship
+from super_scientist.domain.improvement.classification import VerificationLevel
+from super_scientist.domain.improvement.models import ActorRelationship, AssessmentOutcome
 from super_scientist.domain.primitives import UtcTimestamp
+
+REVIEWER_WORKFLOW_ORDER = (
+    ReviewerRole.SEMANTIC,
+    ReviewerRole.CONFLICT,
+    ReviewerRole.ABSTRACTION,
+    ReviewerRole.ADVERSARIAL,
+    ReviewerRole.VERIFICATION,
+)
+_REVIEWER_ORDER_INDEX = {role: index for index, role in enumerate(REVIEWER_WORKFLOW_ORDER)}
 
 
 def classify_overlap(
@@ -34,6 +44,8 @@ def classify_overlap(
     existing_triggers = _normalized_set(existing.triggers)
     candidate_actions = _action_signature(candidate)
     existing_actions = _action_signature(existing)
+    if not candidate_scope.intersection(existing_scope):
+        return OverlapClassification.NON_REDUNDANT
     if (
         candidate_scope == existing_scope
         and candidate_triggers == existing_triggers
@@ -69,6 +81,44 @@ def classify_overlap(
     return OverlapClassification.NON_REDUNDANT
 
 
+def semantic_version_increases(candidate: str, predecessor: str) -> bool:
+    """Compare strict SemVer precedence while ignoring build metadata."""
+
+    candidate_core, candidate_prerelease = _semantic_version_parts(candidate)
+    predecessor_core, predecessor_prerelease = _semantic_version_parts(predecessor)
+    if candidate_core != predecessor_core:
+        return candidate_core > predecessor_core
+    if candidate_prerelease is None:
+        return predecessor_prerelease is not None
+    if predecessor_prerelease is None:
+        return False
+    for candidate_part, predecessor_part in zip(
+        candidate_prerelease,
+        predecessor_prerelease,
+        strict=False,
+    ):
+        if candidate_part == predecessor_part:
+            continue
+        candidate_numeric = candidate_part.isdecimal()
+        predecessor_numeric = predecessor_part.isdecimal()
+        if candidate_numeric and predecessor_numeric:
+            return int(candidate_part) > int(predecessor_part)
+        if candidate_numeric != predecessor_numeric:
+            return not candidate_numeric
+        return candidate_part > predecessor_part
+    return len(candidate_prerelease) > len(predecessor_prerelease)
+
+
+def _semantic_version_parts(
+    value: str,
+) -> tuple[tuple[int, int, int], tuple[str, ...] | None]:
+    precedence = value.split("+", 1)[0]
+    core_text, separator, prerelease_text = precedence.partition("-")
+    major, minor, patch = core_text.split(".")
+    prerelease = tuple(prerelease_text.split(".")) if separator else None
+    return (int(major), int(minor), int(patch)), prerelease
+
+
 def build_candidate_diff(
     *,
     consolidation_decision_id: str,
@@ -79,6 +129,7 @@ def build_candidate_diff(
     action: RuleAction,
     recommendation_dispositions: tuple[RecommendationDisposition, ...],
     separating_variable: str | None,
+    separating_boundary_test_id: str | None = None,
     recurrence_incident_ids: tuple[str, ...],
     recurrence_repairs: tuple[RecurrenceRepair, ...],
     integrator: ActorIdentity,
@@ -87,7 +138,9 @@ def build_candidate_diff(
     prior_incident_ids: tuple[str, ...] = (),
     overlap: OverlapClassification | None = None,
 ) -> ConsolidationProposal:
-    ordered_assessments = tuple(sorted(assessments, key=lambda item: item.role.value))
+    ordered_assessments = tuple(
+        sorted(assessments, key=lambda item: _REVIEWER_ORDER_INDEX[item.role])
+    )
     roles = tuple(item.role for item in ordered_assessments)
     if len(ordered_assessments) != len(ReviewerRole) or set(roles) != set(ReviewerRole):
         raise ValueError("candidate diff requires exactly the five reviewer roles")
@@ -101,6 +154,8 @@ def build_candidate_diff(
         for item in ordered_assessments
     ):
         raise ValueError("review assessments must be independent and policy-bound")
+    if any(not _has_exact_review_quality(item) for item in ordered_assessments):
+        raise ValueError("review assessments require exact independent deterministic passed checks")
     reviewer_actors = tuple(item.provenance.actor for item in ordered_assessments)
     if any(
         not rule_actors_are_independent(left, right)
@@ -149,6 +204,17 @@ def build_candidate_diff(
         ):
             raise ValueError("recurrence consolidation must not delete prior incidents")
         raise ValueError("candidate rule must retain every reviewed incident")
+    regression_test_ids = tuple(item.test_id for item in regression_cases)
+    if len(set(regression_test_ids)) != len(regression_test_ids):
+        raise ValueError("regression cases must use unique test identifiers")
+    if not set(regression_test_ids).issubset(candidate_rule.regression_test_ids):
+        raise ValueError("every regression case test must be declared by the candidate")
+    if any(
+        not set(item.incident_ids).issubset(candidate_rule.source_incident_ids)
+        for item in regression_cases
+    ):
+        raise ValueError("regression cases must bind retained candidate incidents")
+    regression_by_test_id = {item.test_id: item for item in regression_cases}
     conflict = _single_conflict(ordered_assessments)
     if conflict is not None:
         if separating_variable is None or not separating_variable.strip():
@@ -163,12 +229,23 @@ def build_candidate_diff(
             if item.conflict is not None
             for incident_id in item.incident_ids
         }
-        covered = {incident_id for item in regression_cases for incident_id in item.incident_ids}
-        if len(reviewed_incidents) < 2 or not reviewed_incidents.issubset(covered):
+        boundary_case = (
+            None
+            if separating_boundary_test_id is None
+            else regression_by_test_id.get(separating_boundary_test_id)
+        )
+        if boundary_case is None:
+            raise ValueError("contradiction resolution requires a separating-boundary test")
+        if (
+            separating_boundary_test_id not in candidate_rule.regression_test_ids
+            or len(reviewed_incidents) < 2
+            or not reviewed_incidents.issubset(boundary_case.incident_ids)
+        ):
             raise ValueError(
-                "contradiction resolution requires a regression case for every "
-                "contradictory incident"
+                "separating-boundary regression must cover every contradictory incident"
             )
+    elif separating_boundary_test_id is not None:
+        raise ValueError("non-conflict consolidation cannot name a separating-boundary test")
 
     if recurrence_incident_ids:
         covered = {incident_id for item in regression_cases for incident_id in item.incident_ids}
@@ -206,6 +283,7 @@ def build_candidate_diff(
         overlap=overlap,
         conflict=conflict,
         separating_variable=separating_variable,
+        separating_boundary_test_id=separating_boundary_test_id,
         recommendation_dispositions=ordered_dispositions,
         preserved_findings=preserved_findings,
         preserved_dissent=preserved_dissent,
@@ -231,9 +309,9 @@ def _normalized_set(values: tuple[str, ...]) -> frozenset[str]:
 
 def _action_signature(rule: BehavioralRuleVersion) -> tuple[str, ...]:
     return (
-        *_normalized_tuple(rule.required_behavior),
+        *sorted(_normalized_tuple(rule.required_behavior)),
         "--prohibited--",
-        *_normalized_tuple(rule.prohibited_behavior),
+        *sorted(_normalized_tuple(rule.prohibited_behavior)),
     )
 
 
@@ -267,22 +345,28 @@ def rule_actors_are_independent(
 
     if not are_independent(left, right):
         return False
-    if (
-        left.configuration_hash is not None
-        and right.configuration_hash is not None
-        and left.configuration_hash == right.configuration_hash
-    ):
-        return False
-    if left.kind is not ActorKind.MODEL or right.kind is not ActorKind.MODEL:
-        return True
-    if left.configuration_hash is None or right.configuration_hash is None:
-        return False
     correlated_fields = (
         (left.provider_id, right.provider_id),
         (left.model_id, right.model_id),
         (left.adapter_id, right.adapter_id),
+        (left.configuration_hash, right.configuration_hash),
     )
-    return not any(
+    if any(
         left_value is not None and right_value is not None and left_value == right_value
         for left_value, right_value in correlated_fields
+    ):
+        return False
+    if left.kind is not ActorKind.MODEL or right.kind is not ActorKind.MODEL:
+        return True
+    return left.configuration_hash is not None and right.configuration_hash is not None
+
+
+def _has_exact_review_quality(assessment: ReviewerAssessment) -> bool:
+    provenance = assessment.provenance
+    return bool(
+        provenance.category is VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK
+        and provenance.deterministic_or_learned == "DETERMINISTIC"
+        and provenance.result is AssessmentOutcome.PASSED
+        and provenance.meaningful_confidence is None
+        and provenance.checks_run == (f"{assessment.role.value.lower()}-review",)
     )

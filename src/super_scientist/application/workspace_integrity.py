@@ -167,6 +167,8 @@ class _ValidatedAuditRecord:
 @dataclass(frozen=True)
 class _RuleReplayCapability:
     active_policy: PolicySnapshot
+    evidence: Mapping[str, EvidenceRecord]
+    artifact_store: ArtifactStore
     incidents: Mapping[str, RuleIncident]
     rules: Mapping[str, BehavioralRuleVersion]
     assessments: Mapping[str, ReviewerAssessment]
@@ -181,6 +183,12 @@ class _RuleReplayCapability:
 
     def get_incident(self, incident_id: str) -> RuleIncident | None:
         return self.incidents.get(incident_id)
+
+    def get_retained_evidence(self, evidence_id: str) -> EvidenceRecord | None:
+        record = self.evidence.get(evidence_id)
+        if record is not None:
+            verify_artifact_binding(record, self.artifact_store)
+        return record
 
     def get_rule(self, rule_version_id: str) -> BehavioralRuleVersion | None:
         return self.rules.get(rule_version_id)
@@ -213,6 +221,12 @@ class _RuleReplayCapability:
 
     def get_head(self, rule_id: str) -> tuple[str, str, RuleStatus] | None:
         return self.heads.get(rule_id)
+
+    def list_heads(self) -> tuple[tuple[str, str, str, RuleStatus], ...]:
+        return tuple(
+            (rule_id, rule_version_id, semantic_version, status)
+            for rule_id, (rule_version_id, semantic_version, status) in sorted(self.heads.items())
+        )
 
 
 def verify_workspace(
@@ -1028,6 +1042,8 @@ def _require_projection_consistency(
         ):
             rule_capability = _RuleReplayCapability(
                 active_policy=historical_policy,
+                evidence=expected_evidence,
+                artifact_store=artifact_store,
                 incidents=expected_rule_incidents,
                 rules=expected_rule_versions,
                 assessments=expected_rule_assessments,
