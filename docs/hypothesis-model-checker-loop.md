@@ -30,8 +30,11 @@ Every stage uses the same workspace-integrity, idempotency, policy-attribution, 
 and atomic-commit boundary as the rest of the kernel. A downstream proposal names an
 accepted receipt containing the exact upstream proposal hash, audit event identifier,
 and audit event hash. The coordinator resolves that receipt from committed transaction
-and audit history. Caller-authored timestamps are descriptive metadata; receipt audit
-sequence establishes chronology.
+and audit history. Caller-authored record and approval timestamps are metadata, not
+authority: each must fall between the trusted causal bound of its committed
+dependencies and the current transaction's persistence time. Committed transaction and
+audit times establish those bounds; audit sequence preserves durable stage order and
+breaks ties between equal causal bounds.
 
 Hypothesis versions and stage records are append-only. `HypothesisHead` is a derived
 projection. Revisions preserve the failed predecessor and append a contiguous successor

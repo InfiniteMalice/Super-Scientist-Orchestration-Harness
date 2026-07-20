@@ -165,4 +165,5 @@ def test_simulation_service_rejects_a_policy_hash_not_bound_to_the_model() -> No
             simulation_result_id="wrong-policy-result",
             output_id="wrong-policy-output",
             governing_policy_hash="f" * 64 if HASH != "f" * 64 else "e" * 64,
+            completed_at=NOW,
         )

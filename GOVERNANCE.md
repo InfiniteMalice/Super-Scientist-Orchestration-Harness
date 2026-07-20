@@ -70,7 +70,9 @@ authority. Only the admission projector can advance a hypothesis head.
 Learned judges may contribute explicitly learned records, but cannot claim formal or
 deterministic provenance and cannot satisfy the deterministic counterexample-search
 gate by confidence or agreement. Caller-provided timestamps are not governance
-authority; committed audit sequence establishes stage order.
+authority. They must nevertheless respect the trusted lower bound of committed
+dependencies and the trusted upper bound of the current transaction persistence time;
+audit sequence preserves durable order and breaks equal-time ties.
 
 ## Quality Policy Protection
 

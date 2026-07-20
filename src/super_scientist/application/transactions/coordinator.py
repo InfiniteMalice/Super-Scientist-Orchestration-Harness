@@ -399,6 +399,7 @@ class TransactionCoordinator:
                 )
                 return decision
 
+        transaction_created_at = self._clock.now()
         reads: HandlerReadCapability
         writes: HandlerWriteCapability
         if isinstance(admitted_proposal, InvalidProposal):
@@ -499,6 +500,7 @@ class TransactionCoordinator:
                     connection,
                     stored_policy,
                     self._artifact_store,
+                    current_transaction_created_at=transaction_created_at,
                 )
                 reads = hypothesis_io.reads
                 writes = hypothesis_io.writes
@@ -523,7 +525,7 @@ class TransactionCoordinator:
         repositories.transactions.add(
             proposal,
             decision,
-            self._clock.now(),
+            transaction_created_at,
             intent_fingerprint=intent_fingerprint,
         )
         self._audit(

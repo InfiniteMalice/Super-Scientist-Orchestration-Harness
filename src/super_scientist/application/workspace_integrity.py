@@ -126,7 +126,7 @@ from super_scientist.domain.improvement.models import (
     EvaluatorAuditRecord,
     SelfImprovementMeasurementRecord,
 )
-from super_scientist.domain.primitives import Sha256Hex, canonical_json_bytes
+from super_scientist.domain.primitives import Sha256Hex, UtcTimestamp, canonical_json_bytes
 from super_scientist.domain.progress.calculations import (
     calculate_progress,
     current_progress_plan,
@@ -430,6 +430,7 @@ class _ReplayPrimitiveResolver:
 @dataclass(frozen=True)
 class _HypothesisReplayCapability:
     active_policy: PolicySnapshot
+    current_transaction_created_at: UtcTimestamp
     artifact_store: ArtifactStore
     receipts: Mapping[str, HypothesisReceipt]
     versions: dict[str, HypothesisVersionRecord]
@@ -449,6 +450,9 @@ class _HypothesisReplayCapability:
 
     def policy_snapshot(self) -> PolicySnapshot:
         return self.active_policy
+
+    def current_transaction_time(self) -> UtcTimestamp:
+        return self.current_transaction_created_at
 
     def resolve_receipt(
         self,
@@ -1511,6 +1515,7 @@ def _require_projection_consistency(
         ):
             hypothesis_capability = _HypothesisReplayCapability(
                 active_policy=historical_policy,
+                current_transaction_created_at=transaction.created_at,
                 artifact_store=artifact_store,
                 receipts=available_hypothesis_receipts,
                 versions=expected_hypothesis_versions,
@@ -1952,13 +1957,55 @@ def _require_projection_consistency(
         == expected_primitive_heads,
         "primitive heads do not match accepted admission transactions",
     )
-    hypothesis_ids = {item.hypothesis_id for item in expected_hypothesis_versions.values()}
-    hypothesis_version_ids = set(expected_hypothesis_versions)
+    representation_result_ids = {
+        result_id
+        for evaluation in expected_primitive_evaluations.values()
+        for result_id in evaluation.verification_result_ids
+    }
+    representation_result_ids.update(
+        record.verification_result_id
+        for record in hypotheses.results
+        if record.model_spec_id is None
+        and not record.simulation_result_ids
+        and record.verification_result_id not in expected_hypothesis_results
+    )
+    representation_result_records = tuple(
+        verification_results[result_id]
+        for result_id in representation_result_ids
+        if result_id in verification_results
+    )
+    representation_mechanism_ids = {
+        record.mechanism_spec_id for record in representation_result_records
+    }
+    representation_simulation_ids = {
+        simulation_id
+        for record in representation_result_records
+        for simulation_id in record.simulation_result_ids
+    }
+    representation_model_ids = {
+        record.model_spec_id
+        for record in representation_result_records
+        if record.model_spec_id is not None
+    }
+    representation_hypothesis_version_ids = {
+        record.hypothesis_version_id for record in representation_result_records
+    }
+    representation_hypothesis_version_ids.update(
+        record.hypothesis_version_id
+        for record in hypotheses.simulations
+        if record.simulation_result_id in representation_simulation_ids
+    )
+    representation_mechanism_ids.update(
+        verification_results[result_id].mechanism_spec_id
+        for result_id in representation_result_ids
+        if result_id in verification_results
+    )
     _require(
         {
             record.hypothesis_version_id: record
             for record in hypotheses.versions
-            if record.hypothesis_id in hypothesis_ids
+            if record.hypothesis_version_id not in representation_hypothesis_version_ids
+            or record.hypothesis_version_id in expected_hypothesis_versions
         }
         == expected_hypothesis_versions,
         "hypothesis version projections do not match accepted transactions",
@@ -1967,7 +2014,8 @@ def _require_projection_consistency(
         {
             record.model_spec_id: record
             for record in hypotheses.models
-            if record.hypothesis_version_id in hypothesis_version_ids
+            if record.model_spec_id not in representation_model_ids
+            or record.model_spec_id in expected_models
         }
         == expected_models,
         "model specification projections do not match accepted transactions",
@@ -1976,7 +2024,8 @@ def _require_projection_consistency(
         {
             record.mechanism_spec_id: record
             for record in hypotheses.mechanisms
-            if record.hypothesis_version_id in hypothesis_version_ids
+            if record.mechanism_spec_id not in representation_mechanism_ids
+            or record.mechanism_spec_id in expected_hypothesis_mechanisms
         }
         == expected_hypothesis_mechanisms,
         "hypothesis mechanism projections do not match accepted transactions",
@@ -1985,7 +2034,8 @@ def _require_projection_consistency(
         {
             record.simulation_result_id: record
             for record in hypotheses.simulations
-            if record.hypothesis_version_id in hypothesis_version_ids
+            if record.simulation_result_id not in representation_simulation_ids
+            or record.simulation_result_id in expected_simulations
         }
         == expected_simulations,
         "simulation projections do not match accepted transactions",
@@ -1994,35 +2044,23 @@ def _require_projection_consistency(
         {
             record.verification_result_id: record
             for record in hypotheses.results
-            if record.hypothesis_version_id in hypothesis_version_ids
+            if record.verification_result_id not in representation_result_ids
+            or record.verification_result_id in expected_hypothesis_results
         }
         == expected_hypothesis_results,
         "hypothesis verification projections do not match accepted transactions",
     )
     _require(
-        {
-            record.counterexample_id: record
-            for record in hypotheses.counterexamples
-            if record.hypothesis_version_id in hypothesis_version_ids
-        }
+        {record.counterexample_id: record for record in hypotheses.counterexamples}
         == expected_counterexamples,
         "counterexample projections do not match accepted transactions",
     )
     _require(
-        {
-            record.revision_id: record
-            for record in hypotheses.revisions
-            if record.hypothesis_id in hypothesis_ids
-        }
-        == expected_revisions,
+        {record.revision_id: record for record in hypotheses.revisions} == expected_revisions,
         "hypothesis revision projections do not match accepted transactions",
     )
     _require(
-        {
-            record.admission_decision_id: record
-            for record in hypotheses.admissions
-            if record.hypothesis_id in hypothesis_ids
-        }
+        {record.admission_decision_id: record for record in hypotheses.admissions}
         == expected_admissions,
         "hypothesis admission projections do not match accepted transactions",
     )
@@ -2030,7 +2068,6 @@ def _require_projection_consistency(
         {
             hypothesis_id: (version_id, version, status)
             for hypothesis_id, version_id, version, status in hypotheses.heads
-            if hypothesis_id in hypothesis_ids
         }
         == expected_hypothesis_heads,
         "hypothesis heads do not match accepted admission transactions",

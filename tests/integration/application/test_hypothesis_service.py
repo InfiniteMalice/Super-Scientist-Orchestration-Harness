@@ -15,8 +15,16 @@ from super_scientist.application.hypothesis_testing.service import (
 )
 from super_scientist.application.transactions.coordinator import TransactionCoordinator
 from super_scientist.application.transactions.hypotheses import (
+    admission_to_storage,
+    counterexample_to_storage,
     fixed_hypothesis_handlers,
     hypothesis_capabilities,
+    hypothesis_to_storage,
+    mechanism_to_storage,
+    model_to_storage,
+    revision_to_storage,
+    simulation_to_storage,
+    verification_to_storage,
 )
 from super_scientist.application.workspace_integrity import verify_workspace
 from super_scientist.config.loader import policy_hash
@@ -90,6 +98,7 @@ from super_scientist.providers.storage.database import (
 from super_scientist.providers.storage.domain_records import (
     CounterexampleRecordRepository,
     ExecutableModelSpecRepository,
+    HypothesisAdmissionDecisionRepository,
     HypothesisHeadRepository,
     HypothesisRevisionRepository,
     HypothesisVersionRepository,
@@ -230,6 +239,7 @@ def test_live_capabilities_expose_one_narrow_writer_per_stage(
             uow.connection,
             runtime.policy,
             runtime.artifacts,
+            current_transaction_created_at=runtime.clock.current,
         )
         assert _public_methods(capabilities.writes) == {"append_hypothesis"}
         assert "append" not in _public_methods(capabilities.reads)
@@ -256,6 +266,7 @@ def test_every_live_hypothesis_stage_has_only_its_one_typed_writer(
         simulation_result_id="capability-simulation",
         output_id="capability-output",
         governing_policy_hash=runtime.policy.policy_hash,
+        completed_at=runtime.clock.current,
     )
     simulation_receipt = _placeholder_receipt(
         SimulationResultReceiptRef,
@@ -293,7 +304,7 @@ def test_every_live_hypothesis_stage_has_only_its_one_typed_writer(
         observed_output_hash=sha256_hex(b"capability-observed"),
         expected_output_hash=sha256_hex(b"capability-expected"),
         discovered_by=runtime.checker,
-        discovered_at=BASE,
+        discovered_at=runtime.clock.current,
         governing_policy_hash=runtime.policy.policy_hash,
     )
     counterexample_receipt = _placeholder_receipt(
@@ -414,6 +425,7 @@ def test_every_live_hypothesis_stage_has_only_its_one_typed_writer(
                 uow.connection,
                 runtime.policy,
                 runtime.artifacts,
+                current_transaction_created_at=runtime.clock.current,
             )
             assert _public_methods(capabilities.writes) == {expected_writer}
             assert not {
@@ -450,6 +462,7 @@ def test_metadata_only_model_is_retained_but_service_refuses_execution(
             simulation_result_id="forbidden-simulation",
             output_id="forbidden-output",
             governing_policy_hash=runtime.policy.policy_hash,
+            completed_at=runtime.clock.current,
         )
 
 
@@ -659,7 +672,7 @@ def test_cross_scope_model_lineage_is_rejected(
 
 
 @pytest.mark.integration
-def test_caller_backdating_never_substitutes_for_committed_receipt_order(
+def test_simulation_timestamp_cannot_predate_committed_dependencies(
     hypothesis_runtime: HypothesisRuntime,
 ) -> None:
     runtime = hypothesis_runtime
@@ -674,6 +687,7 @@ def test_caller_backdating_never_substitutes_for_committed_receipt_order(
         simulation_result_id="backdated-simulation",
         output_id="backdated-output",
         governing_policy_hash=runtime.policy.policy_hash,
+        completed_at=runtime.clock.current,
     ).model_copy(update={"completed_at": BASE - timedelta(days=365)})
     proposal = RecordSimulationResult(
         proposal_id="record-backdated-simulation",
@@ -681,7 +695,7 @@ def test_caller_backdating_never_substitutes_for_committed_receipt_order(
         proposer=model.registered_by,
         approval=Approval(
             approver=_actor("backdated-approval"),
-            approved_at=BASE - timedelta(days=730),
+            approved_at=runtime.clock.current,
         ),
         classification=FIXED_HYPOTHESIS_CLASSIFICATION,
         hypothesis_receipt=receipt,
@@ -689,13 +703,272 @@ def test_caller_backdating_never_substitutes_for_committed_receipt_order(
         simulation_result=simulation,
     )
 
-    assert runtime.service.record_simulation(proposal).accepted
+    decision = runtime.service.record_simulation(proposal)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
     with runtime.uow_factory() as uow:
         assert uow.connection is not None
         assert (
-            SimulationResultRepository(uow.connection).get(simulation.simulation_result_id)
-            is not None
+            SimulationResultRepository(uow.connection).get(simulation.simulation_result_id) is None
         )
+
+
+@pytest.mark.integration
+def test_stage_approval_cannot_predate_committed_dependencies(
+    hypothesis_runtime: HypothesisRuntime,
+) -> None:
+    runtime = hypothesis_runtime
+    hypothesis, receipt = _stage_hypothesis(runtime, 1)
+    model = _model(runtime, hypothesis, 1)
+    model_proposal = _model_proposal(runtime, receipt, model, "approval-chronology")
+    assert runtime.service.register_model(model_proposal).accepted
+    model_receipt = _receipt(runtime, model_proposal.proposal_id, ModelSpecReceiptRef)
+    simulation = runtime.service.simulate(
+        model,
+        _thermal_input(model.deterministic_seed),
+        simulation_result_id="approval-chronology-simulation",
+        output_id="approval-chronology-output",
+        governing_policy_hash=runtime.policy.policy_hash,
+        completed_at=runtime.clock.current,
+    ).model_copy(update={"completed_at": runtime.clock.current})
+    proposal = RecordSimulationResult(
+        proposal_id="record-approval-chronology-simulation",
+        idempotency_key="intent-record-approval-chronology-simulation",
+        proposer=model.registered_by,
+        approval=Approval(
+            approver=_actor("approval-chronology-reviewer"),
+            approved_at=BASE - timedelta(days=365),
+        ),
+        classification=FIXED_HYPOTHESIS_CLASSIFICATION,
+        hypothesis_receipt=receipt,
+        model_receipt=model_receipt,
+        simulation_result=simulation,
+    )
+
+    decision = runtime.service.record_simulation(proposal)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("future_field", ["record", "approval"])
+def test_caller_timestamp_cannot_follow_current_transaction_time(
+    hypothesis_runtime: HypothesisRuntime,
+    future_field: str,
+) -> None:
+    runtime = hypothesis_runtime
+    hypothesis, receipt = _stage_hypothesis(runtime, 1)
+    model = _model(runtime, hypothesis, 1)
+    model_proposal = _model_proposal(runtime, receipt, model, f"future-{future_field}")
+    assert runtime.service.register_model(model_proposal).accepted
+    model_receipt = _receipt(runtime, model_proposal.proposal_id, ModelSpecReceiptRef)
+    current = runtime.clock.current
+    simulation = runtime.service.simulate(
+        model,
+        _thermal_input(model.deterministic_seed),
+        simulation_result_id=f"future-{future_field}-simulation",
+        output_id=f"future-{future_field}-output",
+        governing_policy_hash=runtime.policy.policy_hash,
+        completed_at=current,
+    ).model_copy(
+        update={
+            "completed_at": current + timedelta(days=1) if future_field == "record" else current
+        }
+    )
+    proposal = RecordSimulationResult(
+        proposal_id=f"record-future-{future_field}-simulation",
+        idempotency_key=f"intent-record-future-{future_field}-simulation",
+        proposer=model.registered_by,
+        approval=Approval(
+            approver=_actor(f"future-{future_field}-reviewer"),
+            approved_at=current + timedelta(days=1) if future_field == "approval" else current,
+        ),
+        classification=FIXED_HYPOTHESIS_CLASSIFICATION,
+        hypothesis_receipt=receipt,
+        model_receipt=model_receipt,
+        simulation_result=simulation,
+    )
+
+    decision = runtime.service.record_simulation(proposal)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("stage", ["model", "mechanism"])
+def test_registered_stage_timestamp_cannot_predate_hypothesis_receipt(
+    hypothesis_runtime: HypothesisRuntime,
+    stage: str,
+) -> None:
+    runtime = hypothesis_runtime
+    hypothesis, receipt = _stage_hypothesis(runtime, 1)
+    if stage == "model":
+        model = _model(runtime, hypothesis, 1).model_copy(
+            update={"created_at": BASE - timedelta(days=365)}
+        )
+        decision = runtime.service.register_model(
+            _model_proposal(runtime, receipt, model, "predated-model")
+        )
+    else:
+        mechanism = _mechanism(runtime, hypothesis, "predated").model_copy(
+            update={"created_at": BASE - timedelta(days=365)}
+        )
+        decision = runtime.service.register_verification_mechanism(
+            RegisterVerificationMechanism(
+                proposal_id="register-predated-mechanism",
+                idempotency_key="intent-register-predated-mechanism",
+                proposer=mechanism.created_by,
+                approval=Approval(
+                    approver=_actor("predated-mechanism-reviewer"),
+                    approved_at=runtime.clock.current,
+                ),
+                classification=FIXED_HYPOTHESIS_CLASSIFICATION,
+                hypothesis_receipt=receipt,
+                mechanism_spec=mechanism,
+            )
+        )
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
+
+
+@pytest.mark.integration
+def test_verification_result_cannot_predate_its_retained_inputs(
+    hypothesis_runtime: HypothesisRuntime,
+) -> None:
+    runtime = hypothesis_runtime
+    hypothesis, receipt = _stage_hypothesis(runtime, 1)
+    prepared = _prepare_checked_candidate(runtime, hypothesis, receipt)
+    result = prepared.result.model_copy(
+        update={
+            "verification_result_id": "predated-verification-result",
+            "provenance": prepared.result.provenance.model_copy(
+                update={"assessed_at": BASE - timedelta(days=365)}
+            ),
+        }
+    )
+    proposal = RecordVerificationResult(
+        proposal_id="record-predated-verification-result",
+        idempotency_key="intent-record-predated-verification-result",
+        proposer=result.provenance.actor,
+        approval=Approval(
+            approver=_actor("predated-result-reviewer"),
+            approved_at=runtime.clock.current,
+        ),
+        classification=FIXED_HYPOTHESIS_CLASSIFICATION,
+        hypothesis_receipt=prepared.hypothesis_receipt,
+        mechanism_receipt=prepared.mechanism_receipt,
+        model_receipt=prepared.model_receipt,
+        simulation_receipts=(prepared.simulation_receipt,),
+        verification_result=result,
+    )
+
+    decision = runtime.service.record_verification(proposal)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
+
+
+@pytest.mark.integration
+def test_revision_timestamp_cannot_predate_triggering_history(
+    hypothesis_runtime: HypothesisRuntime,
+) -> None:
+    runtime = hypothesis_runtime
+    prior, prior_receipt = _stage_hypothesis(runtime, 1)
+    prepared = _prepare_checked_candidate(runtime, prior, prior_receipt)
+    _admit_candidate(runtime, prepared, rollback=None)
+    failed, failed_receipt, counterexample_receipt = _record_failed_counterexample(
+        runtime,
+        prepared,
+    )
+    resulting = _hypothesis(runtime, 2).model_copy(update={"created_at": runtime.clock.current})
+    revision = _revision(runtime, prior, resulting, failed).model_copy(
+        update={"revised_at": BASE - timedelta(days=365)}
+    )
+    proposal = ReviseHypothesis(
+        proposal_id="revise-predated-hypothesis",
+        idempotency_key="intent-revise-predated-hypothesis",
+        proposer=revision.author,
+        approval=Approval(
+            approver=_actor("predated-revision-reviewer"),
+            approved_at=runtime.clock.current,
+        ),
+        classification=FIXED_HYPOTHESIS_CLASSIFICATION,
+        prior_hypothesis_receipt=prior_receipt,
+        triggering_result_receipts=(failed_receipt,),
+        counterexample_receipts=(counterexample_receipt,),
+        resulting_hypothesis=resulting,
+        revision=revision,
+    )
+
+    decision = runtime.service.revise(proposal)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("timestamp_field", ["integrated_at", "decided_at", "approved_at"])
+def test_admission_timestamps_cannot_predate_supporting_history(
+    hypothesis_runtime: HypothesisRuntime,
+    timestamp_field: str,
+) -> None:
+    runtime = hypothesis_runtime
+    hypothesis, receipt = _stage_hypothesis(runtime, 1)
+    prepared = _prepare_checked_candidate(runtime, hypothesis, receipt)
+    support = _record_admission_support(
+        runtime,
+        prepared,
+        rollback=None,
+        suffix=f"chronology-{timestamp_field}",
+    )
+    current = runtime.clock.current
+    proposal = _admission_proposal(
+        runtime,
+        prepared,
+        support,
+        rollback=None,
+        suffix=f"chronology-{timestamp_field}",
+    ).model_copy(
+        update={
+            "integrated_at": current,
+            "approval": Approval(
+                approver=runtime.approver,
+                approved_at=current,
+            ),
+            "admission_decision": _admission_proposal(
+                runtime,
+                prepared,
+                support,
+                rollback=None,
+                suffix=f"chronology-{timestamp_field}",
+            ).admission_decision.model_copy(update={"decided_at": current}),
+        }
+    )
+    backdated = BASE - timedelta(days=365)
+    if timestamp_field == "integrated_at":
+        proposal = proposal.model_copy(update={"integrated_at": backdated})
+    elif timestamp_field == "decided_at":
+        proposal = proposal.model_copy(
+            update={
+                "admission_decision": proposal.admission_decision.model_copy(
+                    update={"decided_at": backdated}
+                )
+            }
+        )
+    else:
+        assert proposal.approval is not None
+        proposal = proposal.model_copy(
+            update={"approval": proposal.approval.model_copy(update={"approved_at": backdated})}
+        )
+
+    decision = runtime.service.admit(proposal)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
 
 
 @pytest.mark.integration
@@ -743,6 +1016,40 @@ def test_workspace_replay_detects_a_deleted_hypothesis_head(
     assert verification.valid is False
     assert verification.reason is not None
     assert "hypothesis heads" in verification.reason
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "family",
+    [
+        "versions",
+        "models",
+        "mechanisms",
+        "simulations",
+        "results",
+        "counterexamples",
+        "revisions",
+        "admissions",
+        "heads",
+    ],
+)
+def test_workspace_replay_rejects_every_unlogged_hypothesis_snapshot_family(
+    hypothesis_runtime: HypothesisRuntime,
+    family: str,
+) -> None:
+    runtime = hypothesis_runtime
+    _stage_hypothesis(runtime, 1)
+    with runtime.uow_factory() as uow:
+        baseline = verify_workspace(uow.repositories(), runtime.artifacts)
+    assert baseline.valid, baseline.reason
+
+    _insert_unlogged_hypothesis_scope(runtime, family)
+
+    with runtime.uow_factory() as uow:
+        verification = verify_workspace(uow.repositories(), runtime.artifacts)
+    assert verification.valid is False
+    assert verification.reason is not None
+    assert "hypothesis" in verification.reason or family in verification.reason
 
 
 @pytest.mark.integration
@@ -988,13 +1295,18 @@ def test_stage_rejections_and_exact_duplicate_projection_are_durable(
             }
         )
     ).accepted
+    changed_completed_at = simulation.completed_at + timedelta(seconds=1)
+    assert simulation_template.approval is not None
     decision = runtime.service.record_simulation(
         simulation_template.model_copy(
             update={
                 "proposal_id": "record-conflicting-simulation",
                 "idempotency_key": "intent-record-conflicting-simulation",
                 "simulation_result": simulation.model_copy(
-                    update={"completed_at": simulation.completed_at + timedelta(seconds=1)}
+                    update={"completed_at": changed_completed_at}
+                ),
+                "approval": simulation_template.approval.model_copy(
+                    update={"approved_at": changed_completed_at}
                 ),
             }
         )
@@ -1472,6 +1784,7 @@ def _prepare_checked_candidate(
         simulation_result_id=f"simulation-{suffix}",
         output_id=f"output-{suffix}",
         governing_policy_hash=runtime.policy.policy_hash,
+        completed_at=runtime.clock.current,
     )
     simulation_proposal = RecordSimulationResult(
         proposal_id=f"record-simulation-{suffix}",
@@ -1571,7 +1884,7 @@ def _record_failed_counterexample(
         observed_output_hash=sha256_hex(b"counterexample-observed"),
         expected_output_hash=sha256_hex(b"counterexample-expected"),
         discovered_by=runtime.checker,
-        discovered_at=BASE,
+        discovered_at=runtime.clock.current,
         governing_policy_hash=runtime.policy.policy_hash,
     )
     counterexample_proposal = RecordCounterexample(
@@ -1644,6 +1957,7 @@ def _record_admission_support(
             "candidate_producer": runtime.author,
             "evidence_ids": ("hypothesis-evidence",),
             "checks_run": (prepared.result.verification_result_id,),
+            "audited_at": runtime.clock.current,
             "governing_policy_hash": runtime.policy.policy_hash,
         }
     )
@@ -1677,6 +1991,7 @@ def _record_admission_support(
             "rollback_target_id": rollback or prepared.hypothesis.hypothesis_version_id,
             "evaluator_audit_id": audit.evaluator_audit_id,
             "decision_authority": runtime.approver,
+            "decided_at": runtime.clock.current,
             "governing_policy_hash": runtime.policy.policy_hash,
         }
     )
@@ -1684,7 +1999,7 @@ def _record_admission_support(
         proposal_id=f"record-hypothesis-measurement-{suffix}",
         idempotency_key=f"intent-record-hypothesis-measurement-{suffix}",
         proposer=runtime.author,
-        approval=Approval(approver=runtime.approver, approved_at=BASE),
+        approval=Approval(approver=runtime.approver, approved_at=runtime.clock.current),
         measurement=measurement,
     )
     assert runtime.coordinator.submit(measurement_proposal).accepted
@@ -1728,14 +2043,14 @@ def _admission_proposal(
         outcome=AdmissionOutcome.ACCEPT,
         rationale="Exact retained deterministic, transfer, review, and policy gates passed.",
         decided_by=runtime.integrator,
-        decided_at=BASE,
+        decided_at=runtime.clock.current,
         governing_policy_hash=runtime.policy.policy_hash,
     )
     return AdmitHypothesis(
         proposal_id=f"admit-hypothesis-{suffix}",
         idempotency_key=f"intent-admit-hypothesis-{suffix}",
         proposer=runtime.integrator,
-        approval=Approval(approver=runtime.approver, approved_at=BASE),
+        approval=Approval(approver=runtime.approver, approved_at=runtime.clock.current),
         classification=FIXED_HYPOTHESIS_CLASSIFICATION,
         hypothesis_receipt=prepared.hypothesis_receipt,
         model_receipts=(prepared.model_receipt,),
@@ -1745,7 +2060,7 @@ def _admission_proposal(
         evaluator_audit_receipt=support.audit_receipt,
         measurement_receipt=support.measurement_receipt,
         rollback_hypothesis_version_id=rollback,
-        integrated_at=BASE,
+        integrated_at=runtime.clock.current,
         admission_decision=decision,
     )
 
@@ -1767,7 +2082,7 @@ def _hypothesis(runtime: HypothesisRuntime, version: int) -> HypothesisSpec:
         evidence_ids=("hypothesis-evidence",),
         imported_pattern_status=ImportedPatternStatus.TRANSFER_VALIDATED,
         proposer=runtime.author,
-        created_at=BASE,
+        created_at=runtime.clock.current,
         governing_policy_hash=runtime.policy.policy_hash,
     )
 
@@ -1807,7 +2122,7 @@ def _model(
         max_steps=10,
         max_state_bytes=4_096,
         registered_by=_actor(f"model-registrar-v{version}"),
-        created_at=BASE,
+        created_at=runtime.clock.current,
         governing_policy_hash=runtime.policy.policy_hash,
     )
 
@@ -1844,7 +2159,7 @@ def _mechanism(
         input_schema_id="thermal-chamber-output-v1",
         output_schema_id="verification-result-v1",
         created_by=runtime.checker,
-        created_at=BASE,
+        created_at=runtime.clock.current,
         governing_policy_hash=runtime.policy.policy_hash,
         checked_invariants=("registered-prediction", "bounded-counterexample-search"),
     )
@@ -1892,7 +2207,7 @@ def _provenance(
         limitations=("Bounded source-controlled fixture coverage only.",),
         result=outcome,
         meaningful_confidence=None,
-        assessed_at=BASE,
+        assessed_at=runtime.clock.current,
         governing_policy_hash=runtime.policy.policy_hash,
     )
 
@@ -1923,9 +2238,198 @@ def _revision(
         changed_predictions=resulting.predictions,
         changed_falsification_conditions=resulting.falsification_conditions,
         author=_actor("hypothesis-revision-author"),
-        revised_at=BASE,
+        revised_at=runtime.clock.current,
         governing_policy_hash=runtime.policy.policy_hash,
     )
+
+
+def _insert_unlogged_hypothesis_scope(
+    runtime: HypothesisRuntime,
+    family: str,
+) -> None:
+    suffix = f"unlogged-{family}"
+    retained_at = runtime.clock.current
+    hypothesis = _hypothesis(runtime, 1).model_copy(
+        update={
+            "hypothesis_version_id": f"{suffix}-hypothesis-v1",
+            "hypothesis_id": f"{suffix}-hypothesis",
+            "created_at": retained_at,
+        }
+    )
+    hypothesis_record = hypothesis_to_storage(hypothesis)
+    with runtime.uow_factory() as uow:
+        assert uow.connection is not None
+        versions = HypothesisVersionRepository(uow.connection)
+        versions.add(
+            hypothesis_record.hypothesis_version_id,
+            hypothesis_record,
+            hypothesis_record.created_at,
+        )
+        if family == "versions":
+            return
+
+        model = _model(runtime, hypothesis, 1).model_copy(
+            update={
+                "model_spec_id": f"{suffix}-model",
+                "created_at": retained_at,
+            }
+        )
+        model_record = model_to_storage(model)
+        ExecutableModelSpecRepository(uow.connection).add(
+            model_record.model_spec_id,
+            model_record,
+            model_record.created_at,
+        )
+        if family == "models":
+            return
+
+        mechanism = _mechanism(runtime, hypothesis, suffix).model_copy(
+            update={
+                "mechanism_spec_id": f"{suffix}-mechanism",
+                "created_at": retained_at,
+            }
+        )
+        mechanism_record = mechanism_to_storage(mechanism)
+        VerificationMechanismSpecRepository(uow.connection).add(
+            mechanism_record.mechanism_spec_id,
+            mechanism_record,
+            mechanism_record.created_at,
+        )
+        if family == "mechanisms":
+            return
+
+        simulation = runtime.service.simulate(
+            model,
+            _thermal_input(model.deterministic_seed),
+            simulation_result_id=f"{suffix}-simulation",
+            output_id=f"{suffix}-output",
+            governing_policy_hash=runtime.policy.policy_hash,
+            completed_at=retained_at,
+        ).model_copy(update={"completed_at": retained_at})
+        simulation_record = simulation_to_storage(simulation)
+        SimulationResultRepository(uow.connection).add(
+            simulation_record.simulation_result_id,
+            simulation_record,
+            simulation_record.completed_at,
+        )
+        if family == "simulations":
+            return
+
+        result = _result(
+            runtime,
+            hypothesis,
+            model,
+            mechanism,
+            simulation.simulation_result_id,
+            suffix,
+        ).model_copy(
+            update={
+                "provenance": _provenance(
+                    runtime,
+                    mechanism.mechanism_spec_id,
+                    outcome=AssessmentOutcome.FAILED,
+                ).model_copy(update={"assessed_at": retained_at}),
+                "outcome": VerificationOutcome.FAIL,
+                "counterexample_found": True,
+            }
+        )
+        result_record = verification_to_storage(result, model_record)
+        VerificationResultRepository(uow.connection).add(
+            result_record.verification_result_id,
+            result_record,
+            result_record.completed_at,
+        )
+        if family == "results":
+            return
+
+        counterexample = CounterexampleRecord(
+            counterexample_id=f"{suffix}-counterexample",
+            hypothesis_version_id=hypothesis.hypothesis_version_id,
+            model_spec_id=model.model_spec_id,
+            simulation_result_ids=(simulation.simulation_result_id,),
+            verification_result_ids=(result.verification_result_id,),
+            evidence_ids=("hypothesis-evidence",),
+            description="An unlogged repository mutation must never evade replay.",
+            input_hash=sha256_hex(f"{suffix}-input".encode()),
+            observed_output_hash=sha256_hex(f"{suffix}-observed".encode()),
+            expected_output_hash=sha256_hex(f"{suffix}-expected".encode()),
+            discovered_by=runtime.checker,
+            discovered_at=retained_at,
+            governing_policy_hash=runtime.policy.policy_hash,
+        )
+        counterexample_record = counterexample_to_storage(counterexample, model_record)
+        CounterexampleRecordRepository(uow.connection).add(
+            counterexample_record.counterexample_id,
+            counterexample_record,
+            counterexample_record.discovered_at,
+        )
+        if family == "counterexamples":
+            return
+
+        resulting = _hypothesis(runtime, 2).model_copy(
+            update={
+                "hypothesis_version_id": f"{suffix}-hypothesis-v2",
+                "hypothesis_id": hypothesis.hypothesis_id,
+                "created_at": retained_at,
+            }
+        )
+        resulting_record = hypothesis_to_storage(resulting)
+        versions.add(
+            resulting_record.hypothesis_version_id,
+            resulting_record,
+            resulting_record.created_at,
+        )
+        revision = _revision(runtime, hypothesis, resulting, result).model_copy(
+            update={
+                "revision_id": f"{suffix}-revision",
+                "considered_counterexample_ids": (counterexample.counterexample_id,),
+                "revised_at": retained_at,
+            }
+        )
+        revision_record = revision_to_storage(revision)
+        HypothesisRevisionRepository(uow.connection).add(
+            revision_record.revision_id,
+            revision_record,
+            revision_record.revised_at,
+        )
+        if family == "revisions":
+            return
+
+        admission = HypothesisAdmissionDecision(
+            admission_decision_id=f"{suffix}-admission",
+            hypothesis_version_id=resulting.hypothesis_version_id,
+            hypothesis_id=resulting.hypothesis_id,
+            version=resulting.version,
+            imported_pattern_status=ImportedPatternStatus.TRANSFER_VALIDATED,
+            model_spec_ids=(model.model_spec_id,),
+            verification_result_ids=(result.verification_result_id,),
+            counterexample_search_result_ids=(result.verification_result_id,),
+            counterexample_ids=(counterexample.counterexample_id,),
+            revision_ids=(revision.revision_id,),
+            evaluator_audit_id=f"{suffix}-audit",
+            measurement_id=f"{suffix}-measurement",
+            rollback_hypothesis_version_id=hypothesis.hypothesis_version_id,
+            outcome=AdmissionOutcome.ACCEPT,
+            rationale="Direct unlogged state must be reconciled as a complete snapshot.",
+            decided_by=runtime.integrator,
+            decided_at=retained_at,
+            governing_policy_hash=runtime.policy.policy_hash,
+        )
+        admission_record = admission_to_storage(admission)
+        HypothesisAdmissionDecisionRepository(uow.connection).add(
+            admission_record.admission_decision_id,
+            admission_record,
+            admission_record.decided_at,
+        )
+        if family == "admissions":
+            return
+
+        HypothesisHeadRepository(uow.connection).set(
+            resulting.hypothesis_id,
+            resulting.hypothesis_version_id,
+            resulting.version,
+            admission_record.admission_status,
+        )
 
 
 def _thermal_input(seed: int) -> ModelInput:
@@ -2018,7 +2522,7 @@ def _seed_evidence(runtime: HypothesisRuntime, evidence_id: str) -> None:
 
 
 def _approval(runtime: HypothesisRuntime, identifier: str) -> Approval:
-    return Approval(approver=_actor(identifier), approved_at=BASE)
+    return Approval(approver=_actor(identifier), approved_at=runtime.clock.current)
 
 
 def _actor(identifier: str, kind: ActorKind = ActorKind.HUMAN) -> ActorIdentity:

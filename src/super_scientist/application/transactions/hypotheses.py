@@ -142,6 +142,16 @@ type HypothesisReceiptProposal = (
     | RecordEvaluatorAudit
     | RecordSelfImprovementMeasurement
 )
+type HypothesisMutationProposal = (
+    ProposeHypothesisVersion
+    | RegisterExecutableModel
+    | RegisterVerificationMechanism
+    | RecordSimulationResult
+    | RecordVerificationResult
+    | RecordCounterexample
+    | ReviseHypothesis
+    | AdmitHypothesis
+)
 
 PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
 SHA256_ADAPTER: TypeAdapter[Sha256Hex] = TypeAdapter(Sha256Hex)
@@ -253,6 +263,7 @@ class RetainedHypothesisEvidenceReader:
 @dataclass(frozen=True, slots=True)
 class HypothesisReader:
     active_policy: PolicySnapshot
+    current_transaction_created_at: UtcTimestamp
     receipts: HypothesisReceiptReader
     versions: HypothesisVersionRepository
     models: ExecutableModelSpecRepository
@@ -270,6 +281,9 @@ class HypothesisReader:
 
     def policy_snapshot(self) -> PolicySnapshot:
         return self.active_policy
+
+    def current_transaction_time(self) -> UtcTimestamp:
+        return self.current_transaction_created_at
 
     def resolve_receipt(self, reference: AcceptedHypothesisReceiptRef) -> HypothesisReceipt | None:
         return self.receipts.resolve(reference)
@@ -655,6 +669,8 @@ def admission_to_storage(
 class _HypothesisReadCapability(Protocol):
     def policy_snapshot(self) -> PolicySnapshot: ...
 
+    def current_transaction_time(self) -> UtcTimestamp: ...
+
     def resolve_receipt(
         self, reference: AcceptedHypothesisReceiptRef
     ) -> HypothesisReceipt | None: ...
@@ -728,6 +744,7 @@ class _StageContext(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     active_policy: PolicySnapshot
+    current_transaction_created_at: UtcTimestamp
     existing: HypothesisVersionRecord | None
     retained: tuple[HypothesisVersionRecord, ...]
     evidence: tuple[EvidenceRecord | None, ...]
@@ -738,6 +755,7 @@ class _ModelContext(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     active_policy: PolicySnapshot
+    current_transaction_created_at: UtcTimestamp
     candidate_receipt: HypothesisReceipt | None
     stored_candidate: HypothesisVersionRecord | None
     existing: ExecutableModelSpecRecord | None
@@ -747,6 +765,7 @@ class _MechanismContext(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     active_policy: PolicySnapshot
+    current_transaction_created_at: UtcTimestamp
     candidate_receipt: HypothesisReceipt | None
     stored_candidate: HypothesisVersionRecord | None
     existing: VerificationMechanismSpecRecord | None
@@ -756,6 +775,7 @@ class _SimulationContext(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     active_policy: PolicySnapshot
+    current_transaction_created_at: UtcTimestamp
     candidate_receipt: HypothesisReceipt | None
     model_receipt: HypothesisReceipt | None
     stored_candidate: HypothesisVersionRecord | None
@@ -767,6 +787,7 @@ class _VerificationContext(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     active_policy: PolicySnapshot
+    current_transaction_created_at: UtcTimestamp
     candidate_receipt: HypothesisReceipt | None
     mechanism_receipt: HypothesisReceipt | None
     model_receipt: HypothesisReceipt | None
@@ -783,6 +804,7 @@ class _CounterexampleContext(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     active_policy: PolicySnapshot
+    current_transaction_created_at: UtcTimestamp
     candidate_receipt: HypothesisReceipt | None
     model_receipt: HypothesisReceipt | None
     simulation_receipts: tuple[HypothesisReceipt | None, ...]
@@ -799,6 +821,7 @@ class _RevisionContext(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     active_policy: PolicySnapshot
+    current_transaction_created_at: UtcTimestamp
     prior_receipt: HypothesisReceipt | None
     result_receipts: tuple[HypothesisReceipt | None, ...]
     counterexample_receipts: tuple[HypothesisReceipt | None, ...]
@@ -814,6 +837,7 @@ class _AdmissionContext(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     active_policy: PolicySnapshot
+    current_transaction_created_at: UtcTimestamp
     candidate_receipt: HypothesisReceipt | None
     model_receipts: tuple[HypothesisReceipt | None, ...]
     result_receipts: tuple[HypothesisReceipt | None, ...]
@@ -848,6 +872,7 @@ class ProposeHypothesisVersionHandler:
         hypothesis = proposal.hypothesis
         return _StageContext(
             active_policy=capability.policy_snapshot(),
+            current_transaction_created_at=capability.current_transaction_time(),
             existing=capability.get_hypothesis(hypothesis.hypothesis_version_id),
             retained=capability.list_hypotheses(),
             evidence=tuple(capability.get_evidence(item) for item in hypothesis.evidence_ids),
@@ -877,6 +902,14 @@ class ProposeHypothesisVersionHandler:
         )
         if policy is not None:
             return policy
+        chronology = _causal_timestamp_rejection(
+            proposal,
+            context.current_transaction_created_at,
+            label="hypothesis version",
+            record_times=(hypothesis.created_at,),
+        )
+        if chronology is not None:
+            return chronology
         expected = hypothesis_to_storage(hypothesis)
         if context.existing is not None:
             if context.existing == expected:
@@ -924,6 +957,7 @@ class RegisterExecutableModelHandler:
         candidate = _candidate_from_receipt(candidate_receipt)
         return _ModelContext(
             active_policy=capability.policy_snapshot(),
+            current_transaction_created_at=capability.current_transaction_time(),
             candidate_receipt=candidate_receipt,
             stored_candidate=(
                 None
@@ -962,6 +996,15 @@ class RegisterExecutableModelHandler:
         )
         if lineage is not None:
             return lineage
+        chronology = _causal_timestamp_rejection(
+            proposal,
+            context.current_transaction_created_at,
+            label="model specification",
+            record_times=(model.created_at,),
+            dependency_receipts=(context.candidate_receipt,),
+        )
+        if chronology is not None:
+            return chronology
         try:
             expected = model_to_storage(model)
             if model.execution_mode is ExecutionMode.BUILTIN_DETERMINISTIC_SIMULATOR:
@@ -1001,6 +1044,7 @@ class RegisterVerificationMechanismHandler:
         candidate = _candidate_from_receipt(receipt)
         return _MechanismContext(
             active_policy=capability.policy_snapshot(),
+            current_transaction_created_at=capability.current_transaction_time(),
             candidate_receipt=receipt,
             stored_candidate=(
                 None
@@ -1039,6 +1083,15 @@ class RegisterVerificationMechanismHandler:
         )
         if lineage is not None:
             return lineage
+        chronology = _causal_timestamp_rejection(
+            proposal,
+            context.current_transaction_created_at,
+            label="verification mechanism",
+            record_times=(mechanism.created_at,),
+            dependency_receipts=(context.candidate_receipt,),
+        )
+        if chronology is not None:
+            return chronology
         expected = mechanism_to_storage(mechanism)
         if context.existing is not None:
             if context.existing == expected:
@@ -1071,6 +1124,7 @@ class RecordSimulationResultHandler:
         model = _model_from_receipt(model_receipt)
         return _SimulationContext(
             active_policy=capability.policy_snapshot(),
+            current_transaction_created_at=capability.current_transaction_time(),
             candidate_receipt=candidate_receipt,
             model_receipt=model_receipt,
             stored_candidate=(
@@ -1141,6 +1195,15 @@ class RecordSimulationResultHandler:
                 RejectionCode.INVALID_LINEAGE,
                 "simulation must exactly bind the retained candidate, model, schemas, and bounds",
             )
+        chronology = _causal_timestamp_rejection(
+            proposal,
+            context.current_transaction_created_at,
+            label="simulation result",
+            record_times=(result.completed_at,),
+            dependency_receipts=(context.candidate_receipt, context.model_receipt),
+        )
+        if chronology is not None:
+            return chronology
         try:
             expected_output = SimulatorRegistry().execute(
                 model,
@@ -1201,6 +1264,7 @@ class RecordVerificationResultHandler:
         result = proposal.verification_result
         return _VerificationContext(
             active_policy=capability.policy_snapshot(),
+            current_transaction_created_at=capability.current_transaction_time(),
             candidate_receipt=candidate_receipt,
             mechanism_receipt=mechanism_receipt,
             model_receipt=model_receipt,
@@ -1299,6 +1363,21 @@ class RecordVerificationResultHandler:
                 RejectionCode.INVALID_LINEAGE,
                 "verification must exactly bind retained candidate, mechanism, model, and runs",
             )
+        dependency_receipts = (
+            context.candidate_receipt,
+            context.mechanism_receipt,
+            *(() if context.model_receipt is None else (context.model_receipt,)),
+            *cast(tuple[HypothesisReceipt, ...], context.simulation_receipts),
+        )
+        chronology = _causal_timestamp_rejection(
+            proposal,
+            context.current_transaction_created_at,
+            label="verification result",
+            record_times=(result.provenance.assessed_at,),
+            dependency_receipts=dependency_receipts,
+        )
+        if chronology is not None:
+            return chronology
         quality = _verification_quality_rejection(
             proposal.proposal_id,
             result,
@@ -1354,6 +1433,7 @@ class RecordCounterexampleHandler:
         counterexample = proposal.counterexample
         return _CounterexampleContext(
             active_policy=capability.policy_snapshot(),
+            current_transaction_created_at=capability.current_transaction_time(),
             candidate_receipt=candidate_receipt,
             model_receipt=model_receipt,
             simulation_receipts=simulation_receipts,
@@ -1456,6 +1536,20 @@ class RecordCounterexampleHandler:
         )
         if not chronology:
             return _chronology_rejection(proposal.proposal_id, "counterexample receipts")
+        timestamp_chronology = _causal_timestamp_rejection(
+            proposal,
+            context.current_transaction_created_at,
+            label="counterexample",
+            record_times=(counterexample.discovered_at,),
+            dependency_receipts=(
+                context.candidate_receipt,
+                *(() if context.model_receipt is None else (context.model_receipt,)),
+                *cast(tuple[HypothesisReceipt, ...], context.simulation_receipts),
+                *cast(tuple[HypothesisReceipt, ...], context.result_receipts),
+            ),
+        )
+        if timestamp_chronology is not None:
+            return timestamp_chronology
         grounding = _evidence_rejection(
             proposal.proposal_id,
             counterexample.evidence_ids,
@@ -1505,6 +1599,7 @@ class ReviseHypothesisHandler:
         revision = proposal.revision
         return _RevisionContext(
             active_policy=capability.policy_snapshot(),
+            current_transaction_created_at=capability.current_transaction_time(),
             prior_receipt=prior_receipt,
             result_receipts=result_receipts,
             counterexample_receipts=counterexample_receipts,
@@ -1639,6 +1734,19 @@ class ReviseHypothesisHandler:
             *(item for item in context.counterexample_receipts if item is not None),
         ):
             return _chronology_rejection(proposal.proposal_id, "hypothesis revision receipts")
+        timestamp_chronology = _causal_timestamp_rejection(
+            proposal,
+            context.current_transaction_created_at,
+            label="hypothesis revision",
+            record_times=(resulting.created_at, revision.revised_at),
+            dependency_receipts=(
+                context.prior_receipt,
+                *cast(tuple[HypothesisReceipt, ...], context.result_receipts),
+                *cast(tuple[HypothesisReceipt, ...], context.counterexample_receipts),
+            ),
+        )
+        if timestamp_chronology is not None:
+            return timestamp_chronology
         expected_hypothesis = hypothesis_to_storage(resulting)
         expected_revision = revision_to_storage(revision)
         if context.existing_resulting is not None or context.existing_revision is not None:
@@ -1694,6 +1802,7 @@ class AdmitHypothesisHandler:
         measurement = _measurement_from_receipt(measurement_receipt)
         return _AdmissionContext(
             active_policy=capability.policy_snapshot(),
+            current_transaction_created_at=capability.current_transaction_time(),
             candidate_receipt=candidate_receipt,
             model_receipts=model_receipts,
             result_receipts=result_receipts,
@@ -1881,6 +1990,24 @@ class AdmitHypothesisHandler:
         )
         if not _strict_stage_order(*receipts):
             return _chronology_rejection(proposal.proposal_id, "hypothesis admission receipts")
+        timestamp_chronology = _causal_timestamp_rejection(
+            proposal,
+            context.current_transaction_created_at,
+            label="hypothesis admission",
+            record_times=(decision.decided_at, proposal.integrated_at),
+            dependency_receipts=(
+                context.candidate_receipt,
+                *cast(tuple[HypothesisReceipt, ...], context.model_receipts),
+                *cast(tuple[HypothesisReceipt, ...], context.result_receipts),
+                *cast(tuple[HypothesisReceipt, ...], context.search_receipts),
+                *cast(tuple[HypothesisReceipt, ...], context.revision_receipts),
+                context.audit_receipt,
+                context.measurement_receipt,
+            ),
+            approval_follows_records=False,
+        )
+        if timestamp_chronology is not None:
+            return timestamp_chronology
         expected = admission_to_storage(decision)
         if context.existing is not None:
             if context.existing == expected:
@@ -1918,9 +2045,12 @@ def hypothesis_capabilities(
     connection: Connection,
     active_policy: PolicySnapshot,
     artifact_store: ArtifactStore,
+    *,
+    current_transaction_created_at: UtcTimestamp,
 ) -> HypothesisCapabilitySet:
     reader = HypothesisReader(
         active_policy=active_policy,
+        current_transaction_created_at=current_transaction_created_at,
         receipts=HypothesisReceiptReader(connection),
         versions=HypothesisVersionRepository(connection),
         models=ExecutableModelSpecRepository(connection),
@@ -2377,9 +2507,77 @@ def _other_actors(
     return tuple(retained)
 
 
+def _receipt_record_times(receipt: HypothesisReceipt) -> tuple[UtcTimestamp, ...]:
+    proposal = receipt.proposal
+    if isinstance(proposal, ProposeHypothesisVersion):
+        return (proposal.hypothesis.created_at,)
+    if isinstance(proposal, RegisterExecutableModel):
+        return (proposal.model_spec.created_at,)
+    if isinstance(proposal, RegisterVerificationMechanism):
+        return (proposal.mechanism_spec.created_at,)
+    if isinstance(proposal, RecordSimulationResult):
+        return (proposal.simulation_result.completed_at,)
+    if isinstance(proposal, RecordVerificationResult):
+        return (proposal.verification_result.provenance.assessed_at,)
+    if isinstance(proposal, RecordCounterexample):
+        return (proposal.counterexample.discovered_at,)
+    if isinstance(proposal, ReviseHypothesis):
+        return (
+            proposal.resulting_hypothesis.created_at,
+            proposal.revision.revised_at,
+        )
+    if isinstance(proposal, RecordEvaluatorAudit):
+        return (proposal.evaluator_audit.audited_at,)
+    return (proposal.measurement.decided_at,)
+
+
+def _receipt_causal_bound(receipt: HypothesisReceipt) -> UtcTimestamp:
+    return max(
+        receipt.transaction_created_at,
+        receipt.audit_occurred_at,
+        *_receipt_record_times(receipt),
+    )
+
+
+def _causal_timestamp_rejection(
+    proposal: HypothesisMutationProposal,
+    current_transaction_created_at: UtcTimestamp,
+    *,
+    label: str,
+    record_times: tuple[UtcTimestamp, ...],
+    dependency_receipts: tuple[HypothesisReceipt, ...] = (),
+    approval_follows_records: bool = True,
+) -> TransactionDecision | None:
+    dependency_times = tuple(_receipt_causal_bound(item) for item in dependency_receipts)
+    lower_bound = max(dependency_times) if dependency_times else None
+    if any(
+        timestamp > current_transaction_created_at
+        or (lower_bound is not None and timestamp < lower_bound)
+        for timestamp in record_times
+    ):
+        return _causal_time_rejection(proposal.proposal_id, label)
+    approval = proposal.approval
+    if approval is None:
+        return None
+    approval_dependencies = (
+        (*dependency_times, *record_times) if approval_follows_records else dependency_times
+    )
+    if approval.approved_at > current_transaction_created_at or any(
+        timestamp > approval.approved_at for timestamp in approval_dependencies
+    ):
+        return _causal_time_rejection(proposal.proposal_id, f"{label} approval")
+    return None
+
+
 def _strict_stage_order(*receipts: HypothesisReceipt) -> bool:
     sequences = tuple(item.audit_sequence for item in receipts)
-    return len(sequences) == len(set(sequences)) and sequences == tuple(sorted(sequences))
+    chronology = tuple((_receipt_causal_bound(item), item.audit_sequence) for item in receipts)
+    return bool(
+        len(sequences) == len(set(sequences))
+        and sequences == tuple(sorted(sequences))
+        and all(item.transaction_created_at <= item.audit_occurred_at for item in receipts)
+        and chronology == tuple(sorted(chronology))
+    )
 
 
 def _is_receipt_proposal(value: Proposal) -> TypeGuard[HypothesisReceiptProposal]:
@@ -2520,6 +2718,14 @@ def _chronology_rejection(proposal_id: str, label: str) -> TransactionDecision:
         proposal_id,
         RejectionCode.INVALID_LINEAGE,
         f"{label} are not in committed audit chronology",
+    )
+
+
+def _causal_time_rejection(proposal_id: str, label: str) -> TransactionDecision:
+    return _rejected(
+        proposal_id,
+        RejectionCode.INVALID_LINEAGE,
+        f"{label} timestamps do not respect retained committed history",
     )
 
 

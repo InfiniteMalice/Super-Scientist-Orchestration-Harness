@@ -126,9 +126,11 @@ transition records and effective-state projection, is adapted conceptually from
 transactional workflow validation [S12]. The transaction model is project-specific,
 does not reproduce Mnemosyne, and does not make scientific-truth guarantees.
 
-Hypothesis stages additionally bind exact accepted upstream receipts. Receipt audit
-sequence, not caller timestamps, establishes stage chronology. A fixed registry can
-execute only the source-controlled thermal-chamber and exponential-decay simulators;
+Hypothesis stages additionally bind exact accepted upstream receipts. Trusted committed
+transaction and audit times bound caller-authored record and approval times: they may
+neither predate retained dependencies nor exceed the current transaction's persistence
+time. Audit sequence preserves durable order and breaks equal-time ties. A fixed registry
+can execute only the source-controlled thermal-chamber and exponential-decay simulators;
 metadata-only model artifacts remain inert. Admission alone can advance a hypothesis
 head after transfer validation, exact evidence and revision lineage, deterministic
 counterexample search, evaluator audit, self-improvement measurement, primitive-use

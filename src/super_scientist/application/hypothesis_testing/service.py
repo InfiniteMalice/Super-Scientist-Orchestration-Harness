@@ -21,6 +21,7 @@ from super_scientist.domain.improvement.classification import (
     VerificationLevel,
 )
 from super_scientist.domain.improvement.models import ChangeClassification
+from super_scientist.domain.primitives import UtcTimestamp
 from super_scientist.kernel.admission.engine import AdmissionEngine
 from super_scientist.kernel.transactions.models import (
     AdmitHypothesis,
@@ -177,6 +178,7 @@ class HypothesisTestingService:
         simulation_result_id: str,
         output_id: str,
         governing_policy_hash: str,
+        completed_at: UtcTimestamp,
     ) -> SimulationResult:
         if model.governing_policy_hash != governing_policy_hash:
             raise ValueError("simulation must name the model's governing policy")
@@ -189,7 +191,7 @@ class HypothesisTestingService:
             model_input=model_input,
             model_output=output,
             deterministic_seed=model.deterministic_seed,
-            completed_at=model.created_at,
+            completed_at=completed_at,
             governing_policy_hash=governing_policy_hash,
         )
 

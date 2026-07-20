@@ -102,11 +102,14 @@ Exact replay does not readmit under current policy, but it fails closed when tha
 registration or active pointer is missing or inconsistent.
 
 Hypothesis downstream stages require exact accepted transaction and audit receipts.
-Receipt hashes and audit sequence bind content and chronology; caller timestamps do
-not. Workspace verification replays accepted hypothesis mutations using the same fixed
-handlers and compares rebuilt records and heads with storage. Deleted or altered stage
-records, forged receipts, non-reproducible simulations, unresolved counterexamples, and
-tampered hypothesis heads therefore fail closed.
+Receipt hashes and trusted committed transaction and audit times bind content and causal
+bounds. Caller timestamps confer no authority, cannot predate retained dependencies,
+and cannot exceed the current transaction's persistence time; audit sequence preserves
+durable order and breaks equal-time ties. Workspace verification replays accepted
+hypothesis mutations using the same fixed handlers and compares rebuilt records and
+heads with storage. Deleted or altered stage records, forged receipts,
+non-reproducible simulations, unresolved counterexamples, and tampered hypothesis heads
+therefore fail closed.
 
 The kernel has no secret store, credential broker, runtime redaction service, or
 dedicated secret scanner. Do not put API keys, credentials, private tokens, or regulated

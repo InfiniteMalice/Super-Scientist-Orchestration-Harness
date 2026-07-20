@@ -2,10 +2,12 @@
 
 ## Outcome
 
-Task 12 is complete on `feat/governed-adaptation-and-harness-evolution`, based on
-`2504c038006fcaeab75dd3bd2cb11deb4078acf0`. It adds the domain-neutral, governed
-hypothesis/model/checker/revision loop without adding arbitrary execution authority,
-dependencies, a migration, CLI behavior, network access, or runtime plugin discovery.
+Task 12 is complete on `feat/governed-adaptation-and-harness-evolution`. The original
+feature commit is `9a9c4eba43368003220976afdc20d2479c5336b5`, based on
+`2504c038006fcaeab75dd3bd2cb11deb4078acf0`. This canonical-review reconciliation closes
+the remaining whole-workspace projection and causal-chronology gaps without adding
+arbitrary execution authority, dependencies, a migration, CLI behavior, network access,
+or runtime plugin discovery.
 
 The implementation contributes the eight fixed proposal kinds required by the task:
 
@@ -18,7 +20,9 @@ The implementation contributes the eight fixed proposal kinds required by the ta
 7. `revise_hypothesis`
 8. `admit_hypothesis`
 
-The required commit subject is `feat: add safe hypothesis revision loop`.
+The original feature commit subject is `feat: add safe hypothesis revision loop`. The
+canonical-review correction uses the required subject
+`fix: reconcile hypothesis history and chronology`.
 
 ## Test-driven implementation evidence
 
@@ -37,11 +41,20 @@ The required commit subject is `feat: add safe hypothesis revision loop`.
 - Full repository collection exposed a real pytest module-name collision and a stale fixed
   `ProposalKind` assertion. A leaf test package and an assertion covering all eight new kinds made
   collection clean at **1,379 tests** and restored the full shard.
-- The first combined full-inventory report was a real coverage failure at **89.065592%**. No
+- The original feature delivery's first combined full-inventory report was a real coverage
+  failure at **89.065592%**. No
   coverage pragma, exclusion, dead test, or assertion-free filler was added. Meaningful contract,
   policy, runtime-boundary, coordinator, rejection, replay, projection, and storage assertions
   raised exact combined branch coverage to **90.406742%**.
-- The final post-format affected Task 12 suite is **86 passed in 147.24s**.
+- The original feature delivery's final post-format affected suite was **86 passed in 147.24s**.
+- Canonical review began with a strict regression matrix that was RED at **20 failed, 15
+  deselected in 87.19s**: eleven invalid timestamp histories were accepted and all nine
+  wholly separate unlogged projection families were hidden. The service API regression
+  was independently RED at **1 failed in 7.12s** because simulation completion time was
+  not explicit.
+- The same focused matrix is now GREEN at **20 passed**: **11 chronology cases in 97.07s**
+  and **9 projection-family cases in 61.81s**. The explicit simulation-time contract and
+  regression pair is GREEN at **2 passed in 10.81s**.
 
 ## Implemented boundaries
 
@@ -65,8 +78,11 @@ The required commit subject is `feat: add safe hypothesis revision loop`.
 
 - Added eight focused handlers to the fixed coordinator router. Each live handler receives one
   read facade and exactly one typed write capability.
-- Downstream stages bind exact accepted proposal hashes plus audit event IDs and hashes. The
-  database audit sequence, never caller-authored timestamps, establishes stage chronology.
+- Downstream stages bind exact accepted proposal hashes plus audit event IDs and hashes. Trusted
+  committed transaction, audit, and retained-record times provide the causal lower bound, while
+  the current transaction's persistence time provides the upper bound. Caller-authored record and
+  approval timestamps confer no authority and must remain inside those bounds. Audit sequence
+  preserves durable order and breaks equal-time ties.
 - All mutation stages require the exact classification
   `RESEARCH_PROCESS / HUMAN_IN_LOOP / RUN_LOCAL /
   INDEPENDENT_DETERMINISTIC_CHECK / CONTROLLED_EXPERIMENT / EMPIRICAL_MEASUREMENT`, a matching V2
@@ -76,8 +92,12 @@ The required commit subject is `feat: add safe hypothesis revision loop`.
 - Workspace verification builds a receipt index from transaction/audit history, replays accepted
   hypothesis transactions through the same fixed handlers in audit order, and compares exact
   rebuilt append-only records and hypothesis heads with storage.
+- The comparison covers all nine Task 12 projection families: hypothesis versions, models,
+  mechanisms, simulations, results, counterexamples, revisions, admissions, and heads. The
+  pre-existing Task 10/11 primitive-verification support rows remain outside Task 12 ownership;
+  other missing, extra, or changed rows fail closed even when they use a wholly separate scope.
 - Deleted heads, missing or forged receipts, altered records, invalid chronology, and projection
-  disagreement fail closed.
+  disagreement fail closed in both live validation and replay.
 
 ### Verification, counterexamples, revision, and admission
 
@@ -114,32 +134,37 @@ The required commit subject is `feat: add safe hypothesis revision loop`.
 ### Focused and adjacent
 
 - Initial adjacent Task 10/11 baseline: **19 passed**.
-- Final post-format Task 12 affected suite: **86 passed in 147.24s**.
-- Adjacent representation, policy, migration, workspace-integrity, coordinator, and governance
-  transition checkpoint before the full inventory: **171 passed in 153.14s**.
+- Canonical chronology matrix: **11 passed, 24 deselected in 97.07s**.
+- Canonical nine-family workspace matrix: **9 passed, 26 deselected in 61.81s**.
+- Explicit simulation-time contract and regression pair: **2 passed in 10.81s**.
+- Complete hypothesis application integration: **35 passed in 184.18s** after correcting one
+  stale conflict-fixture approval exposed by the new causal bound.
+- Remaining Task 12 unit, evaluation, adversarial, storage, and property checkpoint:
+  **123 passed in 63.83s**.
+- Adjacent representation, workspace, coordinator, and governance checkpoint:
+  **99 passed in 85.47s**.
 
 ### Bounded full inventory
 
-The complete non-overlapping inventory ran after the production implementation and before the
-test-only coverage-hardening additions:
+The complete fresh non-overlapping inventory ran after the canonical-review implementation:
 
-- Unit, adversarial, e2e, and evaluation: **773 passed in 30.95s**.
-- Application integration: **262 passed in 720.21s**.
-- CLI and storage integration: **136 passed, 3 skipped in 203.16s**.
-- Property suite: **205 passed in 474.31s**.
-- Combined result: **1,376 passed, 3 skipped**.
+- Unit, adversarial, e2e, and evaluation: **791 passed in 31.71s**.
+- Application integration: **283 passed** across four successful coverage shards: **35**, **48**,
+  **109**, and **91** passed.
+- CLI and storage integration: **136 passed, 3 skipped in 315.19s**.
+- Property suite: **205 passed in 598.94s**.
+- Combined result: **1,415 passed, 3 skipped**.
 
-No production source changed after that full inventory. The subsequent changes were meaningful
-test-only coverage hardening, followed by the complete 86-test affected-suite rerun above.
+No production source changed after this full inventory.
 
 ### Coverage and quality
 
-- Combined full-inventory plus final affected-test branch coverage: **90.406742%** over **10,859
-  statements and 2,786 branches**; `coverage report --fail-under=90` passed.
-- `src/super_scientist/application/transactions/hypotheses.py` itself reports **90%** branch-aware
+- Combined fresh full-inventory branch coverage: **90.448867%** over **10,944 statements and 2,824
+  branches**; `coverage report --fail-under=90` passed.
+- `src/super_scientist/application/transactions/hypotheses.py` itself reports **91%** branch-aware
   coverage.
 - Repository-wide Ruff lint: **all checks passed**.
-- All **19 changed Python files** are Ruff-format clean. A repository-wide format claim is not
+- All **6 changed Python files** are Ruff-format clean. A repository-wide format claim is not
   made because the branch retains the previously documented untouched baseline format backlog.
 - Strict mypy: **success, 80 source files**.
 - `git diff --check`: passed, with only configured LF-to-CRLF notices.
@@ -148,6 +173,10 @@ test-only coverage hardening, followed by the complete 86-test affected-suite re
   expected.
 - Isolated sdist and wheel build: passed.
 - Twine checks: passed for both artifacts.
+- The built wheel installed with dependencies into a fresh short-path virtual environment; package
+  import and the installed `scientist-harness --help` CLI smoke check passed. A first disposable
+  nested-path attempt was discarded after Windows reported `WinError 206` during `ensurepip`.
+- Post-documentation checkpoint: **2 passed in 0.57s**.
 
 ## Files and scope
 
