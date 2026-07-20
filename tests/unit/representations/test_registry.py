@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from inspect import signature
 
 import pytest
 from pydantic import ValidationError
 
+from super_scientist.application.representations import records as representation_records
 from super_scientist.application.representations.records import (
     primitive_evaluation_from_storage,
     primitive_evaluation_to_storage,
+    primitive_version_to_storage,
 )
 from super_scientist.application.representations.service import primitive_use_rejection
 from super_scientist.domain.identity import ActorIdentity, ActorKind
@@ -17,7 +21,7 @@ from super_scientist.domain.improvement.models import (
     AssessmentOutcome,
     AssessmentProvenance,
 )
-from super_scientist.domain.primitives import sha256_hex
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.domain.representations.models import (
     NewFrameEvaluation,
     OldFrameEvaluation,
@@ -31,6 +35,7 @@ from super_scientist.domain.representations.models import (
     validate_semantic_version_change,
 )
 from super_scientist.kernel.transactions.models import RejectionCode
+from super_scientist.providers.storage.domain_records import PrimitiveVersionRecord
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 POLICY_HASH = sha256_hex(b"task-11-policy")
@@ -229,6 +234,81 @@ def test_exact_and_semantic_duplicates_are_classified_without_learned_authority(
     assert classify_concept_overlap(semantic, (original,)).value == "SEMANTIC_DUPLICATE"
 
 
+def test_primitive_version_storage_contract_retains_full_domain_identity() -> None:
+    primitive = _version()
+
+    stored = primitive_version_to_storage(primitive)
+    payload = stored.model_dump(mode="json")
+
+    assert "transformation_kind" in payload
+    assert payload["transformation_kind"] == primitive.transformation_kind.value
+    assert "proposer" in payload
+    assert payload["proposer"] == primitive.proposer.model_dump(mode="json")
+    inverse = getattr(representation_records, "primitive_version_from_storage", None)
+    assert callable(inverse)
+    assert inverse(stored) == primitive
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("actor_id", "alternate-primitive-author"),
+        ("kind", ActorKind.TOOL),
+        ("created_at", NOW + timedelta(seconds=1)),
+        ("provider_id", "alternate-provider"),
+        ("model_id", "alternate-model"),
+        ("adapter_id", "alternate-adapter"),
+        ("configuration_hash", sha256_hex(b"alternate-configuration")),
+    ),
+)
+def test_primitive_storage_hash_distinguishes_every_proposer_identity_dimension(
+    field: str,
+    value: object,
+) -> None:
+    primitive = _version()
+    changed = primitive.model_copy(
+        update={"proposer": primitive.proposer.model_copy(update={field: value})}
+    )
+
+    original_record = primitive_version_to_storage(primitive)
+    changed_record = primitive_version_to_storage(changed)
+
+    assert changed_record != original_record
+    assert sha256_hex(canonical_json_bytes(changed_record.model_dump(mode="json"))) != sha256_hex(
+        canonical_json_bytes(original_record.model_dump(mode="json"))
+    )
+
+
+def test_primitive_storage_hash_distinguishes_transformation_kind() -> None:
+    primitive = _version()
+    changed = primitive.model_copy(
+        update={"transformation_kind": TransformationKind.INTRA_SPACE_TRANSFORMATION}
+    )
+
+    original_record = primitive_version_to_storage(primitive)
+    changed_record = primitive_version_to_storage(changed)
+
+    assert changed_record != original_record
+    assert sha256_hex(canonical_json_bytes(changed_record.model_dump(mode="json"))) != sha256_hex(
+        canonical_json_bytes(original_record.model_dump(mode="json"))
+    )
+
+
+@pytest.mark.parametrize("tamper_nested_identity", (False, True))
+def test_primitive_storage_contract_reconciles_redundant_proposer_id(
+    tamper_nested_identity: bool,
+) -> None:
+    stored = primitive_version_to_storage(_version())
+    payload = stored.model_dump(mode="python")
+    if tamper_nested_identity:
+        payload["proposer"] = stored.proposer.model_copy(update={"actor_id": "forged-author"})
+    else:
+        payload["proposer_id"] = "forged-author"
+
+    with pytest.raises(ValidationError, match="proposer_id"):
+        type(stored).model_validate(payload)
+
+
 @pytest.mark.parametrize("old_frame", (True, False))
 def test_typed_evaluations_round_trip_exactly_through_0005_storage(old_frame: bool) -> None:
     evaluation = _evaluation(old_frame=old_frame)
@@ -248,37 +328,82 @@ def test_storage_round_trip_rejects_typed_payload_column_disagreement() -> None:
         primitive_evaluation_from_storage(stored)
 
 
+@dataclass(frozen=True)
+class _PrimitiveResolver:
+    record: PrimitiveVersionRecord | None
+    head: tuple[str, str, PrimitiveStatus] | None
+
+    def get_stored_version(self, version_id: str) -> PrimitiveVersionRecord | None:
+        if self.record is None or self.record.primitive_version_id != version_id:
+            return None
+        return self.record
+
+    def get_head(self, primitive_id: str) -> tuple[str, str, PrimitiveStatus] | None:
+        if self.record is None or self.record.primitive_id != primitive_id:
+            return None
+        return self.head
+
+
 @pytest.mark.parametrize("use", tuple(PrimitiveUse))
-def test_experimental_or_orphan_primitive_cannot_leave_quarantine(use: PrimitiveUse) -> None:
-    primitive = _version(status=PrimitiveStatus.EXPERIMENTAL)
-
-    experimental = primitive_use_rejection(
-        primitive,
-        head=(primitive.primitive_version_id, primitive.semantic_version, primitive.status),
-        use=use,
+def test_storage_resolved_quarantine_rejects_orphan_fabricated_and_tampered_state(
+    use: PrimitiveUse,
+) -> None:
+    assert "resolver" in signature(primitive_use_rejection).parameters
+    primitive = _version(status=PrimitiveStatus.STABILIZED)
+    stored = primitive_version_to_storage(primitive)
+    exact_head = (
+        primitive.primitive_version_id,
+        primitive.semantic_version,
+        primitive.status,
     )
-    orphan = primitive_use_rejection(primitive, head=None, use=use)
+    orphan = _PrimitiveResolver(record=None, head=exact_head)
+    fabricated_head = _PrimitiveResolver(
+        record=stored,
+        head=(primitive.primitive_version_id, "2.0.0", primitive.status),
+    )
+    tampered_record = _PrimitiveResolver(
+        record=stored.model_copy(update={"proposer_id": "forged-author"}),
+        head=exact_head,
+    )
 
-    assert experimental is RejectionCode.EXPERIMENTAL_PRIMITIVE_QUARANTINED
-    assert orphan is RejectionCode.EXPERIMENTAL_PRIMITIVE_QUARANTINED
+    for resolver in (orphan, fabricated_head, tampered_record):
+        assert (
+            primitive_use_rejection(
+                primitive.primitive_version_id,
+                resolver=resolver,
+                use=use,
+            )
+            is RejectionCode.EXPERIMENTAL_PRIMITIVE_QUARANTINED
+        )
 
 
-def test_promotable_status_is_not_authority_without_exact_canonical_head() -> None:
+@pytest.mark.parametrize("use", tuple(PrimitiveUse))
+def test_caller_supplied_head_tuple_is_never_primitive_use_authority(use: PrimitiveUse) -> None:
     primitive = _version(status=PrimitiveStatus.STABILIZED)
 
-    assert (
-        primitive_use_rejection(
-            primitive,
-            head=("different-version", "1.0.0", PrimitiveStatus.STABILIZED),
-            use=PrimitiveUse.CANONICAL_CLAIM_SCHEMA,
-        )
-        is RejectionCode.EXPERIMENTAL_PRIMITIVE_QUARANTINED
-    )
-    assert (
-        primitive_use_rejection(
+    with pytest.raises(TypeError):
+        primitive_use_rejection(  # type: ignore[call-arg,arg-type]
             primitive,
             head=(primitive.primitive_version_id, primitive.semantic_version, primitive.status),
-            use=PrimitiveUse.CANONICAL_CLAIM_SCHEMA,
+            use=use,
+        )
+
+
+@pytest.mark.parametrize("use", tuple(PrimitiveUse))
+def test_storage_resolved_exact_promotable_head_can_leave_quarantine(use: PrimitiveUse) -> None:
+    assert "resolver" in signature(primitive_use_rejection).parameters
+    primitive = _version(status=PrimitiveStatus.STABILIZED)
+    stored = primitive_version_to_storage(primitive)
+    resolver = _PrimitiveResolver(
+        record=stored,
+        head=(primitive.primitive_version_id, primitive.semantic_version, primitive.status),
+    )
+
+    assert (
+        primitive_use_rejection(
+            primitive.primitive_version_id,
+            resolver=resolver,
+            use=use,
         )
         is None
     )

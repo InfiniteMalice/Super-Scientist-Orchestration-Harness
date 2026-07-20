@@ -19,6 +19,13 @@ counterexamples, construction method, expected uses, predecessors, dependencies,
 falsification tests, ambiguity, the complete proposer identity, status, time, and governing
 policy. Versions are append only.
 
+The 0005 primitive-version record retains the transformation kind and the complete typed
+`ActorIdentity` of the proposer in its content-hashed payload. Its redundant `proposer_id` must
+exactly equal `proposer.actor_id`, and the storage decoder reconstructs the complete domain
+version without accepting caller-supplied replacements. Changing either the transformation kind
+or any proposer identity dimension therefore changes the record hash; even a rehashed edit is
+rejected by historical replay because it no longer reconciles with the accepted transaction.
+
 `PrimitiveEvaluation` retains one typed frame evaluation, exact deterministic verification-result
 IDs, artifact-verified controlled-experiment evidence, the complete evaluator and check-actor
 identities, assessment provenance, findings, outcome, time, and governing policy. An
@@ -87,16 +94,23 @@ semantic version, and status exactly equal the canonical primitive head. The sam
 used for canonical claim schemas, governance, active evaluators, adapter data, and public
 conclusions.
 
+The shared gate accepts only a candidate version ID and a read-only retention resolver. It loads
+and decodes the exact retained version and resolves that primitive's current head itself. Orphan,
+tampered, fabricated-head, stale-head, and non-promotable candidates fail closed; callers cannot
+authorize use by supplying a domain object or head tuple.
+
 The primitive author, both evaluators, every deterministic check actor, and the admission
 approver must be pairwise independent. Independence is recomputed from actor ID and, when
 present, provider, model, adapter, and configuration hash. Reusing an identity or any of those
 model/configuration identities produces `CIRCULAR_EVALUATOR_APPROVAL`; a declaration of
 independence cannot override the retained identities.
 
-Capabilities are narrow. Staging can append/read versions and read heads; evaluation can append
-evaluations and read only its exact receipts and supporting records; admission alone receives the
-primitive-head writer. None receives generic repository, governance, quality-registry, protected
-test, or arbitrary transaction authority.
+Capabilities are narrow and split into separate read and write objects. Staging receives a
+read-only stage view and a writer exposing only `append_version`; evaluation receives its exact
+receipt/support view and a writer exposing only `append_evaluation`; admission receives its
+support/head view and a writer exposing only `set_head_from_candidate_receipt`. Concrete mutable
+repositories remain private behind these facades. No handler receives generic repository,
+governance, quality-registry, protected-test, or arbitrary transaction authority.
 
 ## Replay and recovery
 
@@ -105,7 +119,8 @@ order. It reruns the same three live handlers under each transaction's historica
 uses only exact accepted receipts and records available at that point. It then compares the
 reconstructed projections with 0005 storage.
 
-Wrong historical authority, broken receipt chronology, changed stable content, missing typed
-evaluations, extra records, duplicate admission, or a rewound/tampered primitive head invalidates
-the workspace before the next mutation. Recovery restores authoritative transaction and audit
-history and rebuilds projections; editing append-only primitive history is not supported.
+Wrong historical authority, broken receipt chronology, changed stable content, a rehashed change
+to transformation kind or proposer identity, missing typed evaluations, extra records, duplicate
+admission, or a rewound/tampered primitive head invalidates the workspace before the next
+mutation. Recovery restores authoritative transaction and audit history and rebuilds projections;
+editing append-only primitive history is not supported.

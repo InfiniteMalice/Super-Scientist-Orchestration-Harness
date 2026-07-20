@@ -11,7 +11,9 @@ from pydantic import ValidationError
 from sqlalchemy import Connection, insert, select, text
 from sqlalchemy.exc import IntegrityError
 
+from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
+from super_scientist.domain.representations.models import TransformationKind
 from super_scientist.providers.storage import domain_records, schema
 from super_scientist.providers.storage.database import (
     create_database_engine,
@@ -1034,6 +1036,7 @@ def _records() -> _Records:
         primitive_version_id="primitive-1-v1",
         primitive_id="primitive-1",
         semantic_version="1.0.0",
+        transformation_kind=TransformationKind.GENERATIVE_REPRESENTATION_PROPOSAL,
         definition="A retained experimental vocabulary unit.",
         motivation="Test whether the representation adds explanatory utility.",
         parent_vocabulary=("existing-vocabulary",),
@@ -1047,6 +1050,15 @@ def _records() -> _Records:
         measurement_ids=(),
         falsification_tests=("fails to produce a distinct prediction",),
         ambiguity=("boundary remains experimental",),
+        proposer=ActorIdentity(
+            actor_id="proposer-1",
+            kind=ActorKind.MODEL,
+            provider_id="provider-1",
+            model_id="proposer-model-1",
+            adapter_id="proposer-adapter-1",
+            configuration_hash=sha256_hex(b"proposer-configuration-1"),
+            created_at=NOW,
+        ),
         proposer_id="proposer-1",
         status=PrimitiveStatus.PROPOSED,
         created_at=NOW,

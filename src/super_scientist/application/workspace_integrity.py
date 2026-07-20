@@ -12,6 +12,12 @@ from super_scientist.application.evidence_verification import (
     verified_artifact_bytes,
     verify_artifact_binding,
 )
+from super_scientist.application.representations.records import (
+    primitive_evaluation_to_storage,
+    primitive_version_from_storage,
+    primitive_version_to_storage,
+)
+from super_scientist.application.representations.service import projected_primitive_status
 from super_scientist.application.rules.service import (
     ConsolidateBehavioralRuleHandler,
     ImportReviewerAssessmentHandler,
@@ -111,8 +117,10 @@ from super_scientist.domain.progress.models import (
 )
 from super_scientist.domain.representations.models import (
     AcceptedPrimitiveReceiptRef,
+    PrimitiveEvaluation,
     PrimitiveStatus,
     PrimitiveVersion,
+    PrimitiveVersionReceiptRef,
 )
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 from super_scientist.evaluation.claim_drift.deterministic import run_deterministic_checks
@@ -159,6 +167,9 @@ from super_scientist.providers.storage.domain_records import (
     PrimitiveVersionRecord,
     VerificationMechanismSpecRecord,
     VerificationResultRecord,
+)
+from super_scientist.providers.storage.domain_records import (
+    PrimitiveStatus as StoredPrimitiveStatus,
 )
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
@@ -308,7 +319,14 @@ class _RepresentationReplayCapability:
     def get_head(self, primitive_id: str) -> tuple[str, str, PrimitiveStatus] | None:
         return self.heads.get(primitive_id)
 
-    def append_version(self, record: PrimitiveVersionRecord) -> None:
+    def append_version(self, primitive: PrimitiveVersion) -> None:
+        if primitive.primitive_version_id in self.versions:
+            return
+        status = projected_primitive_status(primitive, self.list_staged_versions())
+        record = primitive_version_to_storage(
+            primitive,
+            status=StoredPrimitiveStatus(status.value),
+        )
         _add_stable(
             self.versions,
             record.primitive_version_id,
@@ -316,7 +334,8 @@ class _RepresentationReplayCapability:
             "primitive version projection",
         )
 
-    def append_evaluation(self, record: PrimitiveEvaluationRecord) -> None:
+    def append_evaluation(self, evaluation: PrimitiveEvaluation) -> None:
+        record = primitive_evaluation_to_storage(evaluation)
         _add_stable(
             self.evaluations,
             record.primitive_evaluation_id,
@@ -324,11 +343,23 @@ class _RepresentationReplayCapability:
             "primitive evaluation projection",
         )
 
-    def set_head(self, primitive: PrimitiveVersion) -> None:
-        self.heads[primitive.primitive_id] = (
-            primitive.primitive_version_id,
-            primitive.semantic_version,
-            primitive.status,
+    def set_head_from_candidate_receipt(self, reference: PrimitiveVersionReceiptRef) -> None:
+        receipt = self.resolve_receipt(reference)
+        candidate_proposal = None if receipt is None else receipt.proposal
+        if not isinstance(candidate_proposal, ProposePrimitiveVersion):
+            raise ValueError("accepted primitive admission lost its candidate receipt")
+        candidate = candidate_proposal.primitive_version
+        stored = self.versions.get(candidate.primitive_version_id)
+        if (
+            stored is None
+            or primitive_version_to_storage(candidate, status=stored.status) != stored
+        ):
+            raise ValueError("accepted primitive admission lost its retained candidate")
+        retained = primitive_version_from_storage(stored)
+        self.heads[retained.primitive_id] = (
+            retained.primitive_version_id,
+            retained.semantic_version,
+            PrimitiveStatus(stored.status.value),
         )
 
 

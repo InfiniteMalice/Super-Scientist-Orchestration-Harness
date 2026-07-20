@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from itertools import combinations
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
+from super_scientist.application.representations.records import primitive_version_from_storage
 from super_scientist.config.models import GovernancePolicyV2, PolicySnapshot
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.improvement.classification import (
@@ -29,6 +30,8 @@ from super_scientist.kernel.transactions.models import (
     RejectionCode,
     TransactionDecision,
 )
+from super_scientist.providers.storage.domain_records import PrimitiveVersionRecord
+from super_scientist.providers.storage.repositories import StorageIntegrityError
 
 if TYPE_CHECKING:
     from super_scientist.application.transactions.coordinator import TransactionCoordinator
@@ -55,19 +58,36 @@ type PrimitiveMutationProposal = (
 )
 
 
+class PrimitiveRetentionResolver(Protocol):
+    def get_stored_version(self, version_id: str) -> PrimitiveVersionRecord | None: ...
+
+    def get_head(self, primitive_id: str) -> tuple[str, str, PrimitiveStatus] | None: ...
+
+
 def primitive_use_rejection(
-    primitive: PrimitiveVersion,
+    candidate_version_id: str,
     *,
-    head: tuple[str, str, PrimitiveStatus] | None,
+    resolver: PrimitiveRetentionResolver,
     use: PrimitiveUse,
 ) -> RejectionCode | None:
     del use
-    exact_head = (
-        primitive.primitive_version_id,
-        primitive.semantic_version,
-        primitive.status,
-    )
-    if head != exact_head or primitive.status not in _PROMOTABLE_STATUSES:
+    try:
+        stored = resolver.get_stored_version(candidate_version_id)
+        if stored is None:
+            return RejectionCode.EXPERIMENTAL_PRIMITIVE_QUARANTINED
+        retained = primitive_version_from_storage(stored)
+        head = resolver.get_head(retained.primitive_id)
+        stored_status = PrimitiveStatus(stored.status.value)
+    except (StorageIntegrityError, TypeError, ValueError):
+        return RejectionCode.EXPERIMENTAL_PRIMITIVE_QUARANTINED
+    exact_head = (stored.primitive_version_id, stored.semantic_version, stored_status)
+    if (
+        retained.primitive_version_id != candidate_version_id
+        or retained.semantic_version != stored.semantic_version
+        or retained.status is not stored_status
+        or head != exact_head
+        or retained.status not in _PROMOTABLE_STATUSES
+    ):
         return RejectionCode.EXPERIMENTAL_PRIMITIVE_QUARANTINED
     return None
 

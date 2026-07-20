@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
 from sqlalchemy import Engine, update
 
 from super_scientist.application.representations.service import (
@@ -14,7 +15,11 @@ from super_scientist.application.representations.service import (
     primitive_use_rejection,
 )
 from super_scientist.application.transactions.coordinator import TransactionCoordinator
-from super_scientist.application.transactions.representations import fixed_representation_handlers
+from super_scientist.application.transactions.representations import (
+    fixed_representation_handlers,
+    representation_capabilities,
+    stored_primitive_resolver,
+)
 from super_scientist.application.workspace_integrity import verify_workspace
 from super_scientist.config.loader import policy_hash
 from super_scientist.config.models import (
@@ -39,7 +44,7 @@ from super_scientist.domain.improvement.models import (
     EvaluatorAuditRecord,
     SelfImprovementMeasurementRecord,
 )
-from super_scientist.domain.primitives import sha256_hex
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.domain.representations.models import (
     AcceptedPrimitiveReceiptRef,
     EvaluatorAuditReceiptRef,
@@ -88,7 +93,7 @@ from super_scientist.providers.storage.domain_records import (
     VerificationResultRepository,
 )
 from super_scientist.providers.storage.repositories import PolicyRepository
-from super_scientist.providers.storage.schema import primitive_heads
+from super_scientist.providers.storage.schema import primitive_heads, primitive_versions
 from tests.integration.application.test_adaptation_foundation import (
     _audit as base_audit,
 )
@@ -197,12 +202,131 @@ def test_representation_handlers_are_fixed_and_focused() -> None:
     assert FIXED_PRIMITIVE_CLASSIFICATION.signal is ImprovementSignal.EMPIRICAL_MEASUREMENT
 
 
-def test_handler_capabilities_do_not_expose_generic_repository_or_head_authority() -> None:
-    annotations = fixed_representation_handlers.__annotations__
-    rendered = repr(annotations)
+@pytest.mark.integration
+def test_live_handler_capabilities_expose_only_role_specific_authority(
+    representation_runtime: RepresentationRuntime,
+) -> None:
+    runtime = representation_runtime
+    candidate = _primitive(runtime, "capability-version", "capability-primitive")
+    stage = _stage_proposal(runtime, candidate, "capability-stage")
+    candidate_receipt = PrimitiveVersionReceiptRef(
+        proposal_id=stage.proposal_id,
+        proposal_hash="1" * 64,
+        audit_event_id="capability-stage-audit",
+        audit_event_hash="2" * 64,
+    )
+    evaluation = _evaluation(runtime, candidate, "old", BASE + timedelta(seconds=15))
+    evaluate = _evaluation_proposal(runtime, candidate_receipt, evaluation)
+    admit = AdmitPrimitiveVersion(
+        proposal_id="capability-admission",
+        idempotency_key="intent-capability-admission",
+        proposer=runtime.integrator,
+        approval=Approval(
+            approver=runtime.admission_approver,
+            approved_at=BASE + timedelta(seconds=31),
+        ),
+        classification=FIXED_PRIMITIVE_CLASSIFICATION,
+        candidate_receipt=candidate_receipt,
+        old_frame_evaluation_receipt=PrimitiveEvaluationReceiptRef(
+            proposal_id="capability-old-evaluation",
+            proposal_hash="3" * 64,
+            audit_event_id="capability-old-audit",
+            audit_event_hash="4" * 64,
+        ),
+        new_frame_evaluation_receipt=PrimitiveEvaluationReceiptRef(
+            proposal_id="capability-new-evaluation",
+            proposal_hash="5" * 64,
+            audit_event_id="capability-new-audit",
+            audit_event_hash="6" * 64,
+        ),
+        evaluator_audit_receipt=EvaluatorAuditReceiptRef(
+            proposal_id="capability-evaluator-audit",
+            proposal_hash="7" * 64,
+            audit_event_id="capability-evaluator-audit-event",
+            audit_event_hash="8" * 64,
+        ),
+        measurement_receipt=SelfImprovementMeasurementReceiptRef(
+            proposal_id="capability-measurement",
+            proposal_hash="9" * 64,
+            audit_event_id="capability-measurement-audit",
+            audit_event_hash="a" * 64,
+        ),
+        rollback_primitive_version_id="capability-rollback",
+        integrated_at=BASE + timedelta(seconds=30),
+    )
+    with runtime.uow_factory() as uow:
+        assert uow.connection is not None
+        capability_sets = (
+            (
+                representation_capabilities(
+                    stage,
+                    uow.connection,
+                    runtime.policy,
+                    runtime.artifacts,
+                ),
+                {"append_version"},
+            ),
+            (
+                representation_capabilities(
+                    evaluate,
+                    uow.connection,
+                    runtime.policy,
+                    runtime.artifacts,
+                ),
+                {"append_evaluation"},
+            ),
+            (
+                representation_capabilities(
+                    admit,
+                    uow.connection,
+                    runtime.policy,
+                    runtime.artifacts,
+                ),
+                {"set_head_from_candidate_receipt"},
+            ),
+        )
 
-    assert "RepositorySet" not in rendered
-    assert "GovernanceRepository" not in rendered
+        for capabilities, expected_writer_methods in capability_sets:
+            reads = getattr(capabilities, "reads", None)
+            writes = getattr(capabilities, "writes", None)
+            assert reads is not None
+            assert writes is not None
+            assert _public_callable_names(writes) == expected_writer_methods
+            for item in (*_public_object_graph(reads), *_public_object_graph(writes)):
+                assert not ({"add", "set", "add_and_activate"} & _public_callable_names(item))
+
+
+def _public_callable_names(value: object) -> set[str]:
+    return {
+        name
+        for name in dir(value)
+        if not name.startswith("_") and callable(getattr(value, name, None))
+    }
+
+
+def _public_object_graph(root: object) -> tuple[object, ...]:
+    pending = [root]
+    seen: set[int] = set()
+    values: list[object] = []
+    while pending:
+        value = pending.pop()
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        if isinstance(value, BaseModel):
+            continue
+        values.append(value)
+        if is_dataclass(value) and not isinstance(value, type):
+            pending.extend(
+                getattr(value, field.name)
+                for field in fields(value)
+                if not field.name.startswith("_")
+            )
+            continue
+        attributes = getattr(value, "__dict__", {})
+        if isinstance(attributes, Mapping):
+            pending.extend(item for name, item in attributes.items() if not name.startswith("_"))
+    return tuple(values)
 
 
 @pytest.mark.integration
@@ -402,8 +526,8 @@ def test_full_two_frame_promotion_sets_only_exact_admitted_head_and_replays(
         assert head[2].value == prepared.candidate.status.value
         assert (
             primitive_use_rejection(
-                prepared.candidate,
-                head=(head[0], head[1], PrimitiveStatus(head[2].value)),
+                prepared.candidate.primitive_version_id,
+                resolver=stored_primitive_resolver(uow.connection),
                 use=PrimitiveUse.PUBLIC_CONCLUSION,
             )
             is None
@@ -557,6 +681,45 @@ def test_workspace_replay_detects_primitive_head_tampering(
         verification = verify_workspace(uow.repositories(), representation_runtime.artifacts)
         assert verification.valid is False
         assert "primitive" in (verification.reason or "")
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("field", ("transformation_kind", "proposer"))
+def test_workspace_replay_rejects_rehashed_primitive_identity_tampering(
+    representation_runtime: RepresentationRuntime,
+    field: str,
+) -> None:
+    runtime = representation_runtime
+    primitive = _primitive(runtime, "primitive-tamper-v0", "primitive-tamper")
+    assert runtime.service.propose(
+        _stage_proposal(runtime, primitive, "stage-primitive-tamper")
+    ).accepted
+    with runtime.uow_factory() as uow:
+        assert uow.connection is not None
+        stored = PrimitiveVersionRepository(uow.connection).get(primitive.primitive_version_id)
+        assert stored is not None
+    update_value: object = TransformationKind.INTRA_SPACE_TRANSFORMATION
+    if field == "proposer":
+        update_value = stored.proposer.model_copy(
+            update={"configuration_hash": sha256_hex(b"forged-proposer-configuration")}
+        )
+    tampered = stored.model_copy(update={field: update_value})
+    record_json = canonical_json_bytes(tampered.model_dump(mode="json")).decode("utf-8")
+    with runtime.engine.begin() as connection:
+        connection.exec_driver_sql("DROP TRIGGER primitive_versions_no_update")
+        connection.execute(
+            update(primitive_versions)
+            .where(primitive_versions.c.primitive_version_id == primitive.primitive_version_id)
+            .values(
+                record_json=record_json,
+                content_hash=sha256_hex(record_json.encode("utf-8")),
+            )
+        )
+
+    with runtime.uow_factory() as uow:
+        verification = verify_workspace(uow.repositories(), runtime.artifacts)
+        assert verification.valid is False
+        assert "primitive version" in (verification.reason or "")
 
 
 @dataclass(frozen=True)

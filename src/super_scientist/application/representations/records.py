@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from super_scientist.domain.improvement.models import AssessmentOutcome
 from super_scientist.domain.primitives import canonical_json_bytes
-from super_scientist.domain.representations.models import PrimitiveEvaluation, PrimitiveVersion
+from super_scientist.domain.representations.models import (
+    PrimitiveEvaluation,
+    PrimitiveStatus,
+    PrimitiveVersion,
+)
 from super_scientist.providers.storage.domain_records import (
     EvaluationOutcome,
     PrimitiveEvaluationFrame,
@@ -25,6 +29,7 @@ def primitive_version_to_storage(
         primitive_version_id=primitive.primitive_version_id,
         primitive_id=primitive.primitive_id,
         semantic_version=primitive.semantic_version,
+        transformation_kind=primitive.transformation_kind,
         definition=primitive.definition,
         motivation=primitive.motivation,
         parent_vocabulary=primitive.parent_vocabulary,
@@ -38,11 +43,41 @@ def primitive_version_to_storage(
         measurement_ids=primitive.measurement_ids,
         falsification_tests=primitive.falsification_tests,
         ambiguity=primitive.ambiguity,
+        proposer=primitive.proposer,
         proposer_id=primitive.proposer.actor_id,
         status=status or StoredPrimitiveStatus(primitive.status.value),
         created_at=primitive.created_at,
         governing_policy_hash=primitive.governing_policy_hash,
     )
+
+
+def primitive_version_from_storage(record: PrimitiveVersionRecord) -> PrimitiveVersion:
+    primitive = PrimitiveVersion(
+        primitive_version_id=record.primitive_version_id,
+        primitive_id=record.primitive_id,
+        semantic_version=record.semantic_version,
+        transformation_kind=record.transformation_kind,
+        definition=record.definition,
+        motivation=record.motivation,
+        parent_vocabulary=record.parent_vocabulary,
+        contrasts=record.contrasts,
+        examples=record.examples,
+        counterexamples=record.counterexamples,
+        construction_method=record.construction_method,
+        expected_uses=record.expected_uses,
+        predecessor_primitive_version_ids=record.predecessor_primitive_version_ids,
+        dependency_primitive_version_ids=record.dependency_primitive_version_ids,
+        measurement_ids=record.measurement_ids,
+        falsification_tests=record.falsification_tests,
+        ambiguity=record.ambiguity,
+        proposer=record.proposer,
+        status=PrimitiveStatus(record.status.value),
+        created_at=record.created_at,
+        governing_policy_hash=record.governing_policy_hash,
+    )
+    if primitive_version_to_storage(primitive) != record:
+        raise ValueError("primitive version storage record does not round-trip exactly")
+    return primitive
 
 
 def primitive_evaluation_to_storage(

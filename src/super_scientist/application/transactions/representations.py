@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from sqlalchemy import Connection
@@ -9,6 +9,7 @@ from sqlalchemy import Connection
 from super_scientist.application.evidence_verification import verify_artifact_binding
 from super_scientist.application.representations.records import (
     primitive_evaluation_to_storage,
+    primitive_version_from_storage,
     primitive_version_to_storage,
 )
 from super_scientist.application.representations.service import (
@@ -17,7 +18,11 @@ from super_scientist.application.representations.service import (
     projected_primitive_status,
     status_is_promotable,
 )
-from super_scientist.application.transactions.contracts import ProposalHandler
+from super_scientist.application.transactions.contracts import (
+    HandlerReadCapability,
+    HandlerWriteCapability,
+    ProposalHandler,
+)
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.evidence.models import EvidenceRecord, VerificationState
 from super_scientist.domain.evidence_trails.authority import parse_external_grounding
@@ -84,12 +89,6 @@ from super_scientist.providers.storage.repositories import (
     StoredTransaction,
     TransactionRepository,
 )
-
-if TYPE_CHECKING:
-    from super_scientist.application.transactions.contracts import (
-        HandlerReadCapability,
-        HandlerWriteCapability,
-    )
 
 type FixedRepresentationHandler = ProposalHandler[BaseModel, BaseModel]
 type ReceiptProposal = (
@@ -213,22 +212,31 @@ class RetainedRepresentationEvidenceReader:
         return evidence
 
 
-@dataclass(frozen=True)
-class PrimitiveStageCapabilities:
-    active_policy: PolicySnapshot
-    versions: PrimitiveVersionRepository
-    transactions: TransactionRepository
-    heads: PrimitiveHeadRepository
-
-    def policy_snapshot(self) -> PolicySnapshot:
-        return self.active_policy
+@dataclass(frozen=True, slots=True)
+class StoredPrimitiveResolver:
+    _versions: PrimitiveVersionRepository
+    _heads: PrimitiveHeadRepository
 
     def get_stored_version(self, version_id: str) -> PrimitiveVersionRecord | None:
-        return self.versions.get(version_id)
+        return self._versions.get(version_id)
+
+    def get_head(self, primitive_id: str) -> tuple[str, str, PrimitiveStatus] | None:
+        head = self._heads.get(primitive_id)
+        return None if head is None else (head[0], head[1], PrimitiveStatus(head[2].value))
+
+
+@dataclass(frozen=True, slots=True)
+class PrimitiveStageReader:
+    _versions: PrimitiveVersionRepository
+    _transactions: TransactionRepository
+    _heads: PrimitiveHeadRepository
+
+    def get_stored_version(self, version_id: str) -> PrimitiveVersionRecord | None:
+        return self._versions.get(version_id)
 
     def list_staged_versions(self) -> tuple[PrimitiveVersion, ...]:
         staged: dict[str, PrimitiveVersion] = {}
-        for transaction in self.transactions.list_all():
+        for transaction in self._transactions.list_all():
             proposal = transaction.proposal
             if transaction.decision.accepted and isinstance(proposal, ProposePrimitiveVersion):
                 primitive = proposal.primitive_version
@@ -236,109 +244,232 @@ class PrimitiveStageCapabilities:
         return tuple(staged.values())
 
     def get_head(self, primitive_id: str) -> tuple[str, str, PrimitiveStatus] | None:
-        head = self.heads.get(primitive_id)
+        head = self._heads.get(primitive_id)
         return None if head is None else (head[0], head[1], PrimitiveStatus(head[2].value))
 
-    def append_version(self, record: PrimitiveVersionRecord) -> None:
-        if self.versions.get(record.primitive_version_id) == record:
-            return
-        self.versions.add(record.primitive_version_id, record, record.created_at)
 
-
-@dataclass(frozen=True)
-class PrimitiveEvaluationCapabilities:
-    active_policy: PolicySnapshot
-    receipts: RepresentationReceiptReader
-    versions: PrimitiveVersionRepository
-    evaluations: PrimitiveEvaluationRepository
-    results: VerificationResultRepository
-    mechanisms: VerificationMechanismSpecRepository
-    evidence: RetainedRepresentationEvidenceReader
-
-    def policy_snapshot(self) -> PolicySnapshot:
-        return self.active_policy
+@dataclass(frozen=True, slots=True)
+class PrimitiveEvaluationReader:
+    _receipts: RepresentationReceiptReader
+    _versions: PrimitiveVersionRepository
+    _evaluations: PrimitiveEvaluationRepository
+    _results: VerificationResultRepository
+    _mechanisms: VerificationMechanismSpecRepository
+    _evidence: RetainedRepresentationEvidenceReader
 
     def resolve_receipt(
         self,
         reference: AcceptedPrimitiveReceiptRef,
     ) -> RepresentationReceipt | None:
-        return self.receipts.resolve(reference)
+        return self._receipts.resolve(reference)
 
     def get_stored_version(self, version_id: str) -> PrimitiveVersionRecord | None:
-        return self.versions.get(version_id)
+        return self._versions.get(version_id)
 
     def get_evaluation(self, evaluation_id: str) -> PrimitiveEvaluationRecord | None:
-        return self.evaluations.get(evaluation_id)
+        return self._evaluations.get(evaluation_id)
 
     def get_result(self, result_id: str) -> VerificationResultRecord | None:
-        return self.results.get(result_id)
+        return self._results.get(result_id)
 
     def get_mechanism(self, mechanism_id: str) -> VerificationMechanismSpecRecord | None:
-        return self.mechanisms.get(mechanism_id)
+        return self._mechanisms.get(mechanism_id)
 
     def get_evidence(self, evidence_id: str) -> EvidenceRecord | None:
-        return self.evidence.get(evidence_id)
-
-    def append_evaluation(self, record: PrimitiveEvaluationRecord) -> None:
-        if self.evaluations.get(record.primitive_evaluation_id) == record:
-            return
-        self.evaluations.add(record.primitive_evaluation_id, record, record.evaluated_at)
+        return self._evidence.get(evidence_id)
 
 
-@dataclass(frozen=True)
-class PrimitiveAdmissionCapabilities:
-    active_policy: PolicySnapshot
-    receipts: RepresentationReceiptReader
-    versions: PrimitiveVersionRepository
-    evaluations: PrimitiveEvaluationRepository
-    results: VerificationResultRepository
-    mechanisms: VerificationMechanismSpecRepository
-    evidence: RetainedRepresentationEvidenceReader
-    measurements: SelfImprovementMeasurementRepository
-    evaluator_audits: EvaluatorAuditRepository
-    heads: PrimitiveHeadRepository
-
-    def policy_snapshot(self) -> PolicySnapshot:
-        return self.active_policy
+@dataclass(frozen=True, slots=True)
+class PrimitiveAdmissionReader:
+    _evaluation: PrimitiveEvaluationReader
+    _measurements: SelfImprovementMeasurementRepository
+    _evaluator_audits: EvaluatorAuditRepository
+    _heads: PrimitiveHeadRepository
 
     def resolve_receipt(
         self,
         reference: AcceptedPrimitiveReceiptRef,
     ) -> RepresentationReceipt | None:
-        return self.receipts.resolve(reference)
+        return self._evaluation.resolve_receipt(reference)
 
     def get_stored_version(self, version_id: str) -> PrimitiveVersionRecord | None:
-        return self.versions.get(version_id)
+        return self._evaluation.get_stored_version(version_id)
 
     def get_evaluation(self, evaluation_id: str) -> PrimitiveEvaluationRecord | None:
-        return self.evaluations.get(evaluation_id)
+        return self._evaluation.get_evaluation(evaluation_id)
 
     def get_result(self, result_id: str) -> VerificationResultRecord | None:
-        return self.results.get(result_id)
+        return self._evaluation.get_result(result_id)
 
     def get_mechanism(self, mechanism_id: str) -> VerificationMechanismSpecRecord | None:
-        return self.mechanisms.get(mechanism_id)
+        return self._evaluation.get_mechanism(mechanism_id)
 
     def get_evidence(self, evidence_id: str) -> EvidenceRecord | None:
-        return self.evidence.get(evidence_id)
+        return self._evaluation.get_evidence(evidence_id)
 
     def get_measurement(self, measurement_id: str) -> SelfImprovementMeasurementRecord | None:
-        return self.measurements.get(measurement_id)
+        return self._measurements.get(measurement_id)
 
     def get_evaluator_audit(self, audit_id: str) -> EvaluatorAuditRecord | None:
-        return self.evaluator_audits.get(audit_id)
+        return self._evaluator_audits.get(audit_id)
 
     def get_head(self, primitive_id: str) -> tuple[str, str, PrimitiveStatus] | None:
-        head = self.heads.get(primitive_id)
+        head = self._heads.get(primitive_id)
         return None if head is None else (head[0], head[1], PrimitiveStatus(head[2].value))
 
-    def set_head(self, primitive: PrimitiveVersion) -> None:
-        self.heads.set(
-            primitive.primitive_id,
-            primitive.primitive_version_id,
-            primitive.semantic_version,
-            StoredPrimitiveStatus(primitive.status.value),
+
+@dataclass(frozen=True, slots=True)
+class PrimitiveStageCapabilities:
+    active_policy: PolicySnapshot
+    reader: PrimitiveStageReader
+
+    def policy_snapshot(self) -> PolicySnapshot:
+        return self.active_policy
+
+    def get_stored_version(self, version_id: str) -> PrimitiveVersionRecord | None:
+        return self.reader.get_stored_version(version_id)
+
+    def list_staged_versions(self) -> tuple[PrimitiveVersion, ...]:
+        return self.reader.list_staged_versions()
+
+    def get_head(self, primitive_id: str) -> tuple[str, str, PrimitiveStatus] | None:
+        return self.reader.get_head(primitive_id)
+
+
+@dataclass(frozen=True, slots=True)
+class PrimitiveEvaluationCapabilities:
+    active_policy: PolicySnapshot
+    reader: PrimitiveEvaluationReader
+
+    def policy_snapshot(self) -> PolicySnapshot:
+        return self.active_policy
+
+    def resolve_receipt(
+        self,
+        reference: AcceptedPrimitiveReceiptRef,
+    ) -> RepresentationReceipt | None:
+        return self.reader.resolve_receipt(reference)
+
+    def get_stored_version(self, version_id: str) -> PrimitiveVersionRecord | None:
+        return self.reader.get_stored_version(version_id)
+
+    def get_evaluation(self, evaluation_id: str) -> PrimitiveEvaluationRecord | None:
+        return self.reader.get_evaluation(evaluation_id)
+
+    def get_result(self, result_id: str) -> VerificationResultRecord | None:
+        return self.reader.get_result(result_id)
+
+    def get_mechanism(self, mechanism_id: str) -> VerificationMechanismSpecRecord | None:
+        return self.reader.get_mechanism(mechanism_id)
+
+    def get_evidence(self, evidence_id: str) -> EvidenceRecord | None:
+        return self.reader.get_evidence(evidence_id)
+
+
+@dataclass(frozen=True, slots=True)
+class PrimitiveAdmissionCapabilities:
+    active_policy: PolicySnapshot
+    reader: PrimitiveAdmissionReader
+
+    def policy_snapshot(self) -> PolicySnapshot:
+        return self.active_policy
+
+    def resolve_receipt(
+        self,
+        reference: AcceptedPrimitiveReceiptRef,
+    ) -> RepresentationReceipt | None:
+        return self.reader.resolve_receipt(reference)
+
+    def get_stored_version(self, version_id: str) -> PrimitiveVersionRecord | None:
+        return self.reader.get_stored_version(version_id)
+
+    def get_evaluation(self, evaluation_id: str) -> PrimitiveEvaluationRecord | None:
+        return self.reader.get_evaluation(evaluation_id)
+
+    def get_result(self, result_id: str) -> VerificationResultRecord | None:
+        return self.reader.get_result(result_id)
+
+    def get_mechanism(self, mechanism_id: str) -> VerificationMechanismSpecRecord | None:
+        return self.reader.get_mechanism(mechanism_id)
+
+    def get_evidence(self, evidence_id: str) -> EvidenceRecord | None:
+        return self.reader.get_evidence(evidence_id)
+
+    def get_measurement(self, measurement_id: str) -> SelfImprovementMeasurementRecord | None:
+        return self.reader.get_measurement(measurement_id)
+
+    def get_evaluator_audit(self, audit_id: str) -> EvaluatorAuditRecord | None:
+        return self.reader.get_evaluator_audit(audit_id)
+
+    def get_head(self, primitive_id: str) -> tuple[str, str, PrimitiveStatus] | None:
+        return self.reader.get_head(primitive_id)
+
+
+@dataclass(frozen=True, slots=True)
+class PrimitiveVersionAppender:
+    _versions: PrimitiveVersionRepository
+    _stages: PrimitiveStageReader
+
+    def append_version(self, primitive: PrimitiveVersion) -> None:
+        if self._versions.get(primitive.primitive_version_id) is not None:
+            return
+        status = projected_primitive_status(primitive, self._stages.list_staged_versions())
+        record = primitive_version_to_storage(
+            primitive,
+            status=StoredPrimitiveStatus(status.value),
         )
+        self._versions.add(record.primitive_version_id, record, record.created_at)
+
+
+@dataclass(frozen=True, slots=True)
+class PrimitiveEvaluationAppender:
+    _evaluations: PrimitiveEvaluationRepository
+
+    def append_evaluation(self, evaluation: PrimitiveEvaluation) -> None:
+        record = primitive_evaluation_to_storage(evaluation)
+        if self._evaluations.get(record.primitive_evaluation_id) == record:
+            return
+        self._evaluations.add(record.primitive_evaluation_id, record, record.evaluated_at)
+
+
+@dataclass(frozen=True, slots=True)
+class PrimitiveHeadSetter:
+    _receipts: RepresentationReceiptReader
+    _versions: PrimitiveVersionRepository
+    _heads: PrimitiveHeadRepository
+
+    def set_head_from_candidate_receipt(self, reference: PrimitiveVersionReceiptRef) -> None:
+        receipt = self._receipts.resolve(reference)
+        candidate_proposal = None if receipt is None else receipt.proposal
+        if not isinstance(candidate_proposal, ProposePrimitiveVersion):
+            raise ValueError("accepted primitive admission lost its candidate receipt")
+        candidate = candidate_proposal.primitive_version
+        stored = self._versions.get(candidate.primitive_version_id)
+        if (
+            stored is None
+            or primitive_version_to_storage(candidate, status=stored.status) != stored
+        ):
+            raise ValueError("accepted primitive admission lost its retained candidate")
+        retained = primitive_version_from_storage(stored)
+        self._heads.set(
+            retained.primitive_id,
+            retained.primitive_version_id,
+            retained.semantic_version,
+            stored.status,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RepresentationCapabilitySet:
+    reads: HandlerReadCapability
+    writes: HandlerWriteCapability
+
+
+def stored_primitive_resolver(connection: Connection) -> StoredPrimitiveResolver:
+    return StoredPrimitiveResolver(
+        _versions=PrimitiveVersionRepository(connection),
+        _heads=PrimitiveHeadRepository(connection),
+    )
 
 
 class _StageReadCapability(Protocol):
@@ -379,15 +510,15 @@ class _AdmissionReadCapability(_EvaluationReadCapability, Protocol):
 
 
 class _StageWriteCapability(Protocol):
-    def append_version(self, record: PrimitiveVersionRecord) -> None: ...
+    def append_version(self, primitive: PrimitiveVersion) -> None: ...
 
 
 class _EvaluationWriteCapability(Protocol):
-    def append_evaluation(self, record: PrimitiveEvaluationRecord) -> None: ...
+    def append_evaluation(self, evaluation: PrimitiveEvaluation) -> None: ...
 
 
 class _AdmissionWriteCapability(Protocol):
-    def set_head(self, primitive: PrimitiveVersion) -> None: ...
+    def set_head_from_candidate_receipt(self, reference: PrimitiveVersionReceiptRef) -> None: ...
 
 
 class _StageContext(BaseModel):
@@ -517,20 +648,7 @@ class ProposePrimitiveVersionHandler:
         writes: HandlerWriteCapability,
     ) -> None:
         _require_accepted(decision)
-        capability = cast(_StageWriteCapability, writes)
-        reads = cast(_StageReadCapability, writes)
-        if reads.get_stored_version(proposal.primitive_version.primitive_version_id) is not None:
-            return
-        status = projected_primitive_status(
-            proposal.primitive_version,
-            reads.list_staged_versions(),
-        )
-        capability.append_version(
-            primitive_version_to_storage(
-                proposal.primitive_version,
-                status=StoredPrimitiveStatus(status.value),
-            )
-        )
+        cast(_StageWriteCapability, writes).append_version(proposal.primitive_version)
 
 
 class RecordPrimitiveEvaluationHandler:
@@ -643,9 +761,7 @@ class RecordPrimitiveEvaluationHandler:
         writes: HandlerWriteCapability,
     ) -> None:
         _require_accepted(decision)
-        cast(_EvaluationWriteCapability, writes).append_evaluation(
-            primitive_evaluation_to_storage(proposal.evaluation)
-        )
+        cast(_EvaluationWriteCapability, writes).append_evaluation(proposal.evaluation)
 
 
 class AdmitPrimitiveVersionHandler:
@@ -895,12 +1011,9 @@ class AdmitPrimitiveVersionHandler:
         writes: HandlerWriteCapability,
     ) -> None:
         _require_accepted(decision)
-        capability = cast(_AdmissionReadCapability, writes)
-        receipt = capability.resolve_receipt(proposal.candidate_receipt)
-        candidate_proposal = None if receipt is None else receipt.proposal
-        if not isinstance(candidate_proposal, ProposePrimitiveVersion):
-            raise ValueError("accepted primitive admission lost its candidate receipt")
-        cast(_AdmissionWriteCapability, writes).set_head(candidate_proposal.primitive_version)
+        cast(_AdmissionWriteCapability, writes).set_head_from_candidate_receipt(
+            proposal.candidate_receipt
+        )
 
 
 def fixed_representation_handlers() -> tuple[FixedRepresentationHandler, ...]:
@@ -916,41 +1029,74 @@ def representation_capabilities(
     connection: Connection,
     active_policy: PolicySnapshot,
     artifact_store: ArtifactStore,
-) -> PrimitiveStageCapabilities | PrimitiveEvaluationCapabilities | PrimitiveAdmissionCapabilities:
+) -> RepresentationCapabilitySet:
     if isinstance(proposal, ProposePrimitiveVersion):
-        return PrimitiveStageCapabilities(
+        versions = PrimitiveVersionRepository(connection)
+        reader = PrimitiveStageReader(
+            _versions=versions,
+            _transactions=TransactionRepository(connection),
+            _heads=PrimitiveHeadRepository(connection),
+        )
+        stage_reads = PrimitiveStageCapabilities(
             active_policy=active_policy,
-            versions=PrimitiveVersionRepository(connection),
-            transactions=TransactionRepository(connection),
-            heads=PrimitiveHeadRepository(connection),
+            reader=reader,
+        )
+        writes = PrimitiveVersionAppender(
+            _versions=versions,
+            _stages=reader,
+        )
+        return RepresentationCapabilitySet(
+            reads=cast(HandlerReadCapability, stage_reads),
+            writes=cast(HandlerWriteCapability, writes),
         )
     evidence = RetainedRepresentationEvidenceReader(
         _evidence=EvidenceRepository(connection),
         _artifacts=artifact_store,
     )
     receipt_reader = RepresentationReceiptReader(connection)
+    versions = PrimitiveVersionRepository(connection)
+    evaluations = PrimitiveEvaluationRepository(connection)
+    evaluation_reader = PrimitiveEvaluationReader(
+        _receipts=receipt_reader,
+        _versions=versions,
+        _evaluations=evaluations,
+        _results=VerificationResultRepository(connection),
+        _mechanisms=VerificationMechanismSpecRepository(connection),
+        _evidence=evidence,
+    )
     if isinstance(proposal, RecordPrimitiveEvaluation):
-        return PrimitiveEvaluationCapabilities(
+        evaluation_reads = PrimitiveEvaluationCapabilities(
             active_policy=active_policy,
-            receipts=receipt_reader,
-            versions=PrimitiveVersionRepository(connection),
-            evaluations=PrimitiveEvaluationRepository(connection),
-            results=VerificationResultRepository(connection),
-            mechanisms=VerificationMechanismSpecRepository(connection),
-            evidence=evidence,
+            reader=evaluation_reader,
+        )
+        return RepresentationCapabilitySet(
+            reads=cast(HandlerReadCapability, evaluation_reads),
+            writes=cast(
+                HandlerWriteCapability,
+                PrimitiveEvaluationAppender(_evaluations=evaluations),
+            ),
         )
     if isinstance(proposal, AdmitPrimitiveVersion):
-        return PrimitiveAdmissionCapabilities(
+        heads = PrimitiveHeadRepository(connection)
+        admission_reads = PrimitiveAdmissionCapabilities(
             active_policy=active_policy,
-            receipts=receipt_reader,
-            versions=PrimitiveVersionRepository(connection),
-            evaluations=PrimitiveEvaluationRepository(connection),
-            results=VerificationResultRepository(connection),
-            mechanisms=VerificationMechanismSpecRepository(connection),
-            evidence=evidence,
-            measurements=SelfImprovementMeasurementRepository(connection),
-            evaluator_audits=EvaluatorAuditRepository(connection),
-            heads=PrimitiveHeadRepository(connection),
+            reader=PrimitiveAdmissionReader(
+                _evaluation=evaluation_reader,
+                _measurements=SelfImprovementMeasurementRepository(connection),
+                _evaluator_audits=EvaluatorAuditRepository(connection),
+                _heads=heads,
+            ),
+        )
+        return RepresentationCapabilitySet(
+            reads=cast(HandlerReadCapability, admission_reads),
+            writes=cast(
+                HandlerWriteCapability,
+                PrimitiveHeadSetter(
+                    _receipts=receipt_reader,
+                    _versions=versions,
+                    _heads=heads,
+                ),
+            ),
         )
     raise TypeError(f"no fixed representation capability for proposal: {type(proposal)!r}")
 

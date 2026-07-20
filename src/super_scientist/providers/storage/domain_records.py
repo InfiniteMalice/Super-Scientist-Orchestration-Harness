@@ -33,6 +33,7 @@ from super_scientist.domain.evidence_trails.models import (
     TrailAssessment,
     TrailCheckResult,
 )
+from super_scientist.domain.identity import ActorIdentity
 from super_scientist.domain.improvement.models import (
     EvaluatorAuditRecord,
     SelfImprovementMeasurementRecord,
@@ -53,6 +54,7 @@ from super_scientist.domain.progress.models import (
     ProgressValidationEvent,
     RunCheckpoint,
 )
+from super_scientist.domain.representations.models import TransformationKind
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 from super_scientist.providers.storage.repositories import StorageIntegrityError
 from super_scientist.providers.storage.schema import (
@@ -228,6 +230,7 @@ class PrimitiveVersionRecord(_StrictFrozenStorageRecord):
     primitive_version_id: StableIdentifier
     primitive_id: StableIdentifier
     semantic_version: SemanticVersion
+    transformation_kind: TransformationKind
     definition: NonBlankText
     motivation: NonBlankText
     parent_vocabulary: tuple[NonBlankText, ...]
@@ -241,6 +244,7 @@ class PrimitiveVersionRecord(_StrictFrozenStorageRecord):
     measurement_ids: tuple[StableIdentifier, ...]
     falsification_tests: tuple[NonBlankText, ...] = Field(min_length=1)
     ambiguity: tuple[NonBlankText, ...]
+    proposer: ActorIdentity
     proposer_id: StableIdentifier
     status: PrimitiveStatus
     created_at: UtcTimestamp
@@ -261,6 +265,12 @@ class PrimitiveVersionRecord(_StrictFrozenStorageRecord):
             value,
             str(getattr(info, "field_name", "references")),
         )
+
+    @model_validator(mode="after")
+    def require_exact_proposer_identity(self) -> Self:
+        if self.proposer_id != self.proposer.actor_id:
+            raise ValueError("proposer_id must match the retained proposer identity")
+        return self
 
 
 class PrimitiveEvaluationRecord(_StrictFrozenStorageRecord):

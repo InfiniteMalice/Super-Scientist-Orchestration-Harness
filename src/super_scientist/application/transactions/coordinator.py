@@ -463,8 +463,8 @@ class TransactionCoordinator:
                     stored_policy,
                     self._artifact_store,
                 )
-                reads = representation_io
-                writes = cast(HandlerWriteCapability, representation_io)
+                reads = representation_io.reads
+                writes = representation_io.writes
             else:
                 adaptation_io = adaptation_capabilities(
                     admitted_proposal,
