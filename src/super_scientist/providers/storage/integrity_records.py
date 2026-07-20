@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from super_scientist.domain.behavioral_rules.models import (
     BehavioralRuleVersion,
@@ -37,6 +38,15 @@ from super_scientist.domain.progress.models import (
     RunCheckpoint,
 )
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
+
+if TYPE_CHECKING:
+    from super_scientist.providers.storage.domain_records import (
+        PrimitiveEvaluationRecord,
+        PrimitiveStatus,
+        PrimitiveVersionRecord,
+        VerificationMechanismSpecRecord,
+        VerificationResultRecord,
+    )
 
 
 @dataclass(frozen=True)
@@ -91,3 +101,14 @@ class RuleIntegritySnapshot:
     decisions: tuple[RuleConsolidationDecision, ...]
     regressions: tuple[RuleRegressionCase, ...]
     heads: tuple[tuple[str, str, str, RuleStatus], ...]
+
+
+@dataclass(frozen=True)
+class RepresentationIntegritySnapshot:
+    """Fixed read-only representation view used only for transaction replay."""
+
+    versions: tuple[PrimitiveVersionRecord, ...]
+    evaluations: tuple[PrimitiveEvaluationRecord, ...]
+    verification_mechanisms: tuple[VerificationMechanismSpecRecord, ...]
+    verification_results: tuple[VerificationResultRecord, ...]
+    heads: tuple[tuple[str, str, str, PrimitiveStatus], ...]

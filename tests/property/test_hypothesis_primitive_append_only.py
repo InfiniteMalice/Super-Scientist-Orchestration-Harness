@@ -213,6 +213,32 @@ def test_verification_result_category_must_match_mechanism_category() -> None:
         )
 
 
+@pytest.mark.integration
+def test_model_independent_verification_result_round_trips_without_scope_columns(
+    tmp_path: Path,
+) -> None:
+    engine, connection = _connection(tmp_path, "model-independent-verification.db")
+    records = _records()
+    result = records.verification.model_copy(
+        update={
+            "verification_result_id": "verification-model-independent",
+            "model_spec_id": None,
+            "model_execution_mode": None,
+            "simulation_result_ids": (),
+        }
+    )
+    try:
+        _add_records(connection, records)
+        repository = VerificationResultRepository(connection)
+        repository.add(result.verification_result_id, result, result.completed_at)
+
+        assert repository.get(result.verification_result_id) == result
+    finally:
+        connection.rollback()
+        connection.close()
+        engine.dispose()
+
+
 def test_version_and_reference_contracts_reject_gaps_duplicates_and_invalid_lineage() -> None:
     records = _records()
     with pytest.raises(ValidationError, match="version"):

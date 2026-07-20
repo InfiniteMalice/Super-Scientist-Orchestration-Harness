@@ -26,6 +26,7 @@ from super_scientist.kernel.transactions.models import Proposal, TransactionDeci
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
     ProgressIntegritySnapshot,
+    RepresentationIntegritySnapshot,
     RuleIntegritySnapshot,
     TrailIntegritySnapshot,
 )
@@ -49,6 +50,9 @@ from super_scientist.providers.storage.schema import (
     evidence_trail_versions,
     governance_policies,
     governance_state,
+    primitive_evaluations,
+    primitive_heads,
+    primitive_versions,
     progress_events,
     progress_heads,
     progress_plans,
@@ -95,6 +99,9 @@ _STRICT_JSON_PROPOSAL_TYPES = frozenset(
         "propose_behavioral_rule",
         "import_reviewer_assessment",
         "consolidate_behavioral_rule",
+        "propose_primitive_version",
+        "record_primitive_evaluation",
+        "admit_primitive_version",
     }
 )
 
@@ -1005,6 +1012,25 @@ class RepositorySet:
             heads=BehavioralRuleHeadRepository(self._connection).list_all(),
         )
 
+    def representation_integrity_snapshot(self) -> RepresentationIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            PrimitiveEvaluationRepository,
+            PrimitiveHeadRepository,
+            PrimitiveVersionRepository,
+            VerificationMechanismSpecRepository,
+            VerificationResultRepository,
+        )
+
+        return RepresentationIntegritySnapshot(
+            versions=PrimitiveVersionRepository(self._connection).list_all(),
+            evaluations=PrimitiveEvaluationRepository(self._connection).list_all(),
+            verification_mechanisms=VerificationMechanismSpecRepository(
+                self._connection
+            ).list_all(),
+            verification_results=VerificationResultRepository(self._connection).list_all(),
+            heads=PrimitiveHeadRepository(self._connection).list_all(),
+        )
+
     def has_durable_state(self) -> bool:
         tables = (
             governance_policies,
@@ -1038,6 +1064,9 @@ class RepositorySet:
             evidence_trail_assessments,
             report_sentence_bindings,
             evidence_trail_heads,
+            primitive_versions,
+            primitive_evaluations,
+            primitive_heads,
         )
         return any(
             self._connection.execute(select(table).limit(1)).first() is not None for table in tables

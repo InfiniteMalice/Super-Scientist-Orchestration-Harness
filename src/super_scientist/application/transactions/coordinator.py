@@ -20,6 +20,10 @@ from super_scientist.application.transactions.progress import (
     fixed_progress_handlers,
     progress_capabilities,
 )
+from super_scientist.application.transactions.representations import (
+    fixed_representation_handlers,
+    representation_capabilities,
+)
 from super_scientist.application.transactions.router import ProposalRouter
 from super_scientist.application.transactions.rules import (
     fixed_rule_handlers,
@@ -44,6 +48,7 @@ from super_scientist.kernel.admission.engine import AdmissionContext, AdmissionE
 from super_scientist.kernel.audit.chain import append_event
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
+    AdmitPrimitiveVersion,
     AppendProgressEvent,
     BindReportSentence,
     ConsolidateBehavioralRule,
@@ -58,7 +63,9 @@ from super_scientist.kernel.transactions.models import (
     ProposeEvidenceTrailNodes,
     ProposeEvidenceTrailRelations,
     ProposeGovernancePolicyTransition,
+    ProposePrimitiveVersion,
     RecordEvidenceTrailVersion,
+    RecordPrimitiveEvaluation,
     RecordProgressPlan,
     RecordRuleIncident,
     RecordRunBudget,
@@ -185,6 +192,9 @@ class TransactionCoordinator:
             (handler.proposal_type, handler) for handler in fixed_trail_handlers()
         )
         rule_handlers = tuple((handler.proposal_type, handler) for handler in fixed_rule_handlers())
+        representation_handlers = tuple(
+            (handler.proposal_type, handler) for handler in fixed_representation_handlers()
+        )
         self._router = ProposalRouter(
             (
                 *compatibility_handlers,
@@ -192,6 +202,7 @@ class TransactionCoordinator:
                 *progress_handlers,
                 *trail_handlers,
                 *rule_handlers,
+                *representation_handlers,
             )
         )
 
@@ -438,6 +449,22 @@ class TransactionCoordinator:
                 )
                 reads = rule_io
                 writes = cast(HandlerWriteCapability, rule_io)
+            elif isinstance(
+                admitted_proposal,
+                (
+                    ProposePrimitiveVersion,
+                    RecordPrimitiveEvaluation,
+                    AdmitPrimitiveVersion,
+                ),
+            ):
+                representation_io = representation_capabilities(
+                    admitted_proposal,
+                    connection,
+                    stored_policy,
+                    self._artifact_store,
+                )
+                reads = representation_io
+                writes = cast(HandlerWriteCapability, representation_io)
             else:
                 adaptation_io = adaptation_capabilities(
                     admitted_proposal,
@@ -533,6 +560,9 @@ def _normalize_proposal(value: object) -> Proposal | TransactionDecision:
                 ProposeBehavioralRule,
                 ImportReviewerAssessment,
                 ConsolidateBehavioralRule,
+                ProposePrimitiveVersion,
+                RecordPrimitiveEvaluation,
+                AdmitPrimitiveVersion,
             ),
         ):
             return PROPOSAL_ADAPTER.validate_json(

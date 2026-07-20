@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 
 from pydantic import TypeAdapter
 from sqlalchemy.exc import SQLAlchemyError
@@ -27,6 +28,14 @@ from super_scientist.application.trails.service import (
     FIXED_TRAIL_CLASSIFICATION,
     trail_authority_rejection,
     trail_receipt_rejection,
+)
+from super_scientist.application.transactions.contracts import HandlerWriteCapability
+from super_scientist.application.transactions.representations import (
+    AdmitPrimitiveVersionHandler,
+    ProposePrimitiveVersionHandler,
+    RecordPrimitiveEvaluationHandler,
+    RepresentationReceipt,
+    representation_receipts,
 )
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.behavioral_rules.models import (
@@ -100,6 +109,11 @@ from super_scientist.domain.progress.models import (
     TerminationReason,
     progress_actors_are_independent,
 )
+from super_scientist.domain.representations.models import (
+    AcceptedPrimitiveReceiptRef,
+    PrimitiveStatus,
+    PrimitiveVersion,
+)
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 from super_scientist.evaluation.claim_drift.deterministic import run_deterministic_checks
 from super_scientist.evaluation.claim_drift.models import CheckOutcome
@@ -110,6 +124,7 @@ from super_scientist.kernel.audit.models import (
 )
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
+    AdmitPrimitiveVersion,
     AppendProgressEvent,
     AppendResearchRunEvent,
     BindReportSentence,
@@ -125,9 +140,11 @@ from super_scientist.kernel.transactions.models import (
     ProposeEvidenceTrailNodes,
     ProposeEvidenceTrailRelations,
     ProposeGovernancePolicyTransition,
+    ProposePrimitiveVersion,
     RecordConfigurationVersion,
     RecordEvaluatorAudit,
     RecordEvidenceTrailVersion,
+    RecordPrimitiveEvaluation,
     RecordProgressPlan,
     RecordRuleIncident,
     RecordRunBudget,
@@ -137,9 +154,16 @@ from super_scientist.kernel.transactions.models import (
     TransitionClaim,
 )
 from super_scientist.providers.storage.artifacts import ArtifactStore
+from super_scientist.providers.storage.domain_records import (
+    PrimitiveEvaluationRecord,
+    PrimitiveVersionRecord,
+    VerificationMechanismSpecRecord,
+    VerificationResultRecord,
+)
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
     ProgressIntegritySnapshot,
+    RepresentationIntegritySnapshot,
     RuleIntegritySnapshot,
     TrailIntegritySnapshot,
 )
@@ -229,6 +253,85 @@ class _RuleReplayCapability:
         )
 
 
+@dataclass(frozen=True)
+class _RepresentationReplayCapability:
+    active_policy: PolicySnapshot
+    artifact_store: ArtifactStore
+    receipts: Mapping[str, RepresentationReceipt]
+    versions: dict[str, PrimitiveVersionRecord]
+    evaluations: dict[str, PrimitiveEvaluationRecord]
+    staged_proposals: dict[str, ProposePrimitiveVersion]
+    verification_results: Mapping[str, VerificationResultRecord]
+    verification_mechanisms: Mapping[str, VerificationMechanismSpecRecord]
+    evidence: Mapping[str, EvidenceRecord]
+    measurements: Mapping[str, SelfImprovementMeasurementRecord]
+    evaluator_audits: Mapping[str, EvaluatorAuditRecord]
+    heads: dict[str, tuple[str, str, PrimitiveStatus]]
+
+    def policy_snapshot(self) -> PolicySnapshot:
+        return self.active_policy
+
+    def resolve_receipt(
+        self,
+        reference: AcceptedPrimitiveReceiptRef,
+    ) -> RepresentationReceipt | None:
+        receipt = self.receipts.get(reference.proposal_id)
+        return receipt if receipt is not None and receipt.reference == reference else None
+
+    def get_stored_version(self, version_id: str) -> PrimitiveVersionRecord | None:
+        return self.versions.get(version_id)
+
+    def list_staged_versions(self) -> tuple[PrimitiveVersion, ...]:
+        return tuple(item.primitive_version for item in self.staged_proposals.values())
+
+    def get_evaluation(self, evaluation_id: str) -> PrimitiveEvaluationRecord | None:
+        return self.evaluations.get(evaluation_id)
+
+    def get_result(self, result_id: str) -> VerificationResultRecord | None:
+        return self.verification_results.get(result_id)
+
+    def get_mechanism(self, mechanism_id: str) -> VerificationMechanismSpecRecord | None:
+        return self.verification_mechanisms.get(mechanism_id)
+
+    def get_evidence(self, evidence_id: str) -> EvidenceRecord | None:
+        item = self.evidence.get(evidence_id)
+        if item is not None:
+            verify_artifact_binding(item, self.artifact_store)
+        return item
+
+    def get_measurement(self, measurement_id: str) -> SelfImprovementMeasurementRecord | None:
+        return self.measurements.get(measurement_id)
+
+    def get_evaluator_audit(self, audit_id: str) -> EvaluatorAuditRecord | None:
+        return self.evaluator_audits.get(audit_id)
+
+    def get_head(self, primitive_id: str) -> tuple[str, str, PrimitiveStatus] | None:
+        return self.heads.get(primitive_id)
+
+    def append_version(self, record: PrimitiveVersionRecord) -> None:
+        _add_stable(
+            self.versions,
+            record.primitive_version_id,
+            record,
+            "primitive version projection",
+        )
+
+    def append_evaluation(self, record: PrimitiveEvaluationRecord) -> None:
+        _add_stable(
+            self.evaluations,
+            record.primitive_evaluation_id,
+            record,
+            "primitive evaluation projection",
+        )
+
+    def set_head(self, primitive: PrimitiveVersion) -> None:
+        self.heads[primitive.primitive_id] = (
+            primitive.primitive_version_id,
+            primitive.semantic_version,
+            primitive.status,
+        )
+
+
 def verify_workspace(
     repositories: RepositorySet,
     artifact_store: ArtifactStore,
@@ -243,6 +346,7 @@ def verify_workspace(
         progress = repositories.progress_integrity_snapshot()
         trails = repositories.trail_integrity_snapshot()
         rules = repositories.rule_integrity_snapshot()
+        representations = repositories.representation_integrity_snapshot()
         transactions = repositories.transactions.list_all()
         events = repositories.audit.list_all()
         _require(
@@ -260,6 +364,7 @@ def verify_workspace(
             progress,
             trails,
             rules,
+            representations,
             policies,
             active_policy,
             artifact_store,
@@ -413,6 +518,7 @@ def _require_projection_consistency(
     progress: ProgressIntegritySnapshot,
     trails: TrailIntegritySnapshot,
     rules: RuleIntegritySnapshot,
+    representations: RepresentationIntegritySnapshot,
     policies: tuple[PolicySnapshot, ...],
     active_policy: PolicySnapshot | None,
     artifact_store: ArtifactStore,
@@ -451,9 +557,21 @@ def _require_projection_consistency(
     expected_rule_regressions: dict[str, RuleRegressionCase] = {}
     expected_rule_heads: dict[str, tuple[str, str, RuleStatus]] = {}
     accepted_rule_proposals: dict[str, ProposeBehavioralRule] = {}
+    expected_primitive_versions: dict[str, PrimitiveVersionRecord] = {}
+    expected_primitive_evaluations: dict[str, PrimitiveEvaluationRecord] = {}
+    expected_primitive_heads: dict[str, tuple[str, str, PrimitiveStatus]] = {}
+    accepted_primitive_proposals: dict[str, ProposePrimitiveVersion] = {}
     accepted_evaluator_succession = False
     transitions: list[tuple[ProposeGovernancePolicyTransition, str]] = []
     receipt_index = accepted_proposal_receipts(transactions, events)
+    representation_receipt_index = representation_receipts(transactions, events)
+    available_representation_receipts: dict[str, RepresentationReceipt] = {}
+    verification_results = {
+        record.verification_result_id: record for record in representations.verification_results
+    }
+    verification_mechanisms = {
+        record.mechanism_spec_id: record for record in representations.verification_mechanisms
+    }
     policy_by_hash = {snapshot.policy_hash: snapshot for snapshot in policies}
     _require_historical_policy_sequence(audit_records, policy_by_hash, active_policy)
     transactions_by_id = {
@@ -1034,6 +1152,80 @@ def _require_projection_consistency(
         elif isinstance(
             proposal,
             (
+                ProposePrimitiveVersion,
+                RecordPrimitiveEvaluation,
+                AdmitPrimitiveVersion,
+            ),
+        ):
+            representation_capability = _RepresentationReplayCapability(
+                active_policy=historical_policy,
+                artifact_store=artifact_store,
+                receipts=available_representation_receipts,
+                versions=expected_primitive_versions,
+                evaluations=expected_primitive_evaluations,
+                staged_proposals=accepted_primitive_proposals,
+                verification_results=verification_results,
+                verification_mechanisms=verification_mechanisms,
+                evidence=expected_evidence,
+                measurements=expected_measurements,
+                evaluator_audits=expected_audits,
+                heads=expected_primitive_heads,
+            )
+            representation_writes = cast(
+                HandlerWriteCapability,
+                representation_capability,
+            )
+            if isinstance(proposal, ProposePrimitiveVersion):
+                stage_handler = ProposePrimitiveVersionHandler()
+                representation_decision = stage_handler.decide(
+                    proposal,
+                    stage_handler.build_context(proposal, representation_capability),
+                )
+                _require(
+                    representation_decision.accepted,
+                    "primitive-stage historical authority validation failed",
+                )
+                stage_handler.project(
+                    proposal,
+                    representation_decision,
+                    representation_writes,
+                )
+                accepted_primitive_proposals[proposal.primitive_version.primitive_version_id] = (
+                    proposal
+                )
+            elif isinstance(proposal, RecordPrimitiveEvaluation):
+                evaluation_handler = RecordPrimitiveEvaluationHandler()
+                representation_decision = evaluation_handler.decide(
+                    proposal,
+                    evaluation_handler.build_context(proposal, representation_capability),
+                )
+                _require(
+                    representation_decision.accepted,
+                    "primitive-evaluation historical authority validation failed",
+                )
+                evaluation_handler.project(
+                    proposal,
+                    representation_decision,
+                    representation_writes,
+                )
+            else:
+                admission_handler = AdmitPrimitiveVersionHandler()
+                representation_decision = admission_handler.decide(
+                    proposal,
+                    admission_handler.build_context(proposal, representation_capability),
+                )
+                _require(
+                    representation_decision.accepted,
+                    "primitive-admission historical authority validation failed",
+                )
+                admission_handler.project(
+                    proposal,
+                    representation_decision,
+                    representation_writes,
+                )
+        elif isinstance(
+            proposal,
+            (
                 RecordRuleIncident,
                 ProposeBehavioralRule,
                 ImportReviewerAssessment,
@@ -1231,6 +1423,22 @@ def _require_projection_consistency(
                 expected_measurements,
             )
             transitions.append((proposal, audit_record.governing_policy_hash))
+        if isinstance(
+            proposal,
+            (
+                ProposePrimitiveVersion,
+                RecordPrimitiveEvaluation,
+                RecordEvaluatorAudit,
+                RecordSelfImprovementMeasurement,
+            ),
+        ):
+            representation_receipt = representation_receipt_index.get(proposal.proposal_id)
+            _require(
+                representation_receipt is not None,
+                "accepted representation support transaction has no exact receipt",
+            )
+            if representation_receipt is not None:
+                available_representation_receipts[proposal.proposal_id] = representation_receipt
 
     actual_evidence = {record.evidence_id: record for record in evidence}
     _require(actual_evidence == expected_evidence, "evidence projections do not match transactions")
@@ -1385,6 +1593,30 @@ def _require_projection_consistency(
         }
         == expected_rule_heads,
         "behavioral rule heads do not match accepted transactions",
+    )
+    _require(
+        {record.primitive_version_id: record for record in representations.versions}
+        == expected_primitive_versions,
+        "primitive version projections do not match accepted transactions",
+    )
+    _require(
+        {record.primitive_evaluation_id: record for record in representations.evaluations}
+        == expected_primitive_evaluations,
+        "primitive evaluation projections do not match accepted transactions",
+    )
+    _require(
+        {
+            primitive_id: (
+                primitive_version_id,
+                semantic_version,
+                PrimitiveStatus(status.value),
+            )
+            for primitive_id, primitive_version_id, semantic_version, status in (
+                representations.heads
+            )
+        }
+        == expected_primitive_heads,
+        "primitive heads do not match accepted admission transactions",
     )
     if accepted_evaluator_succession:
         _require(

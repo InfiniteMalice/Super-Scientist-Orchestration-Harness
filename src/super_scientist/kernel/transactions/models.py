@@ -52,6 +52,14 @@ from super_scientist.domain.progress.models import (
     ProgressValidationEvent,
     RunCheckpoint,
 )
+from super_scientist.domain.representations.models import (
+    EvaluatorAuditReceiptRef,
+    PrimitiveEvaluation,
+    PrimitiveEvaluationReceiptRef,
+    PrimitiveVersion,
+    PrimitiveVersionReceiptRef,
+    SelfImprovementMeasurementReceiptRef,
+)
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 
 type ProposalKind = Literal[
@@ -79,6 +87,9 @@ type ProposalKind = Literal[
     "propose_behavioral_rule",
     "import_reviewer_assessment",
     "consolidate_behavioral_rule",
+    "propose_primitive_version",
+    "record_primitive_evaluation",
+    "admit_primitive_version",
 ]
 
 
@@ -304,6 +315,31 @@ class ConsolidateBehavioralRule(ProposalBase):
     rollback_rule_version_id: StableIdentifier
 
 
+class ProposePrimitiveVersion(ProposalBase):
+    proposal_type: Literal["propose_primitive_version"] = "propose_primitive_version"
+    classification: ChangeClassification
+    primitive_version: PrimitiveVersion
+
+
+class RecordPrimitiveEvaluation(ProposalBase):
+    proposal_type: Literal["record_primitive_evaluation"] = "record_primitive_evaluation"
+    classification: ChangeClassification
+    candidate_receipt: PrimitiveVersionReceiptRef
+    evaluation: PrimitiveEvaluation
+
+
+class AdmitPrimitiveVersion(ProposalBase):
+    proposal_type: Literal["admit_primitive_version"] = "admit_primitive_version"
+    classification: ChangeClassification
+    candidate_receipt: PrimitiveVersionReceiptRef
+    old_frame_evaluation_receipt: PrimitiveEvaluationReceiptRef
+    new_frame_evaluation_receipt: PrimitiveEvaluationReceiptRef
+    evaluator_audit_receipt: EvaluatorAuditReceiptRef | None
+    measurement_receipt: SelfImprovementMeasurementReceiptRef | None
+    rollback_primitive_version_id: StableIdentifier
+    integrated_at: UtcTimestamp
+
+
 class InvalidProposal(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
@@ -340,6 +376,9 @@ Proposal = Annotated[
     | ProposeBehavioralRule
     | ImportReviewerAssessment
     | ConsolidateBehavioralRule
+    | ProposePrimitiveVersion
+    | RecordPrimitiveEvaluation
+    | AdmitPrimitiveVersion
     | InvalidProposal,
     Field(discriminator="proposal_type"),
 ]

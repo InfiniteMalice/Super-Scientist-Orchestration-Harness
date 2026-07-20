@@ -1000,8 +1000,10 @@ class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
         )
         for binding in self._reference_bindings:
             expected = _canonical_reference_tuple(record, binding.record_field)
-            expected_scope = tuple(
-                _stored_string(row, column_name) for column_name in binding.scope_columns
+            expected_scope = (
+                tuple(_stored_string(row, column_name) for column_name in binding.scope_columns)
+                if expected
+                else ()
             )
             stored_rows = self._connection.execute(
                 select(
