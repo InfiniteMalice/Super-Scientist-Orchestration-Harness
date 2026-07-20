@@ -41,9 +41,16 @@ from super_scientist.domain.research_runs.models import ResearchRun, ResearchRun
 
 if TYPE_CHECKING:
     from super_scientist.providers.storage.domain_records import (
+        CounterexampleRecord,
+        ExecutableModelSpecRecord,
+        HypothesisAdmissionDecisionRecord,
+        HypothesisAdmissionStatus,
+        HypothesisRevisionRecord,
+        HypothesisVersionRecord,
         PrimitiveEvaluationRecord,
         PrimitiveStatus,
         PrimitiveVersionRecord,
+        SimulationResultRecord,
         VerificationMechanismSpecRecord,
         VerificationResultRecord,
     )
@@ -112,3 +119,18 @@ class RepresentationIntegritySnapshot:
     verification_mechanisms: tuple[VerificationMechanismSpecRecord, ...]
     verification_results: tuple[VerificationResultRecord, ...]
     heads: tuple[tuple[str, str, str, PrimitiveStatus], ...]
+
+
+@dataclass(frozen=True)
+class HypothesisIntegritySnapshot:
+    """Fixed read-only hypothesis-loop view used only for transaction replay."""
+
+    versions: tuple[HypothesisVersionRecord, ...]
+    models: tuple[ExecutableModelSpecRecord, ...]
+    mechanisms: tuple[VerificationMechanismSpecRecord, ...]
+    simulations: tuple[SimulationResultRecord, ...]
+    results: tuple[VerificationResultRecord, ...]
+    counterexamples: tuple[CounterexampleRecord, ...]
+    revisions: tuple[HypothesisRevisionRecord, ...]
+    admissions: tuple[HypothesisAdmissionDecisionRecord, ...]
+    heads: tuple[tuple[str, str, int, HypothesisAdmissionStatus], ...]

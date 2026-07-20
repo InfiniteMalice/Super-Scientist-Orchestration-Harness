@@ -16,6 +16,10 @@ from super_scientist.application.transactions.contracts import (
     HandlerReadCapability,
     HandlerWriteCapability,
 )
+from super_scientist.application.transactions.hypotheses import (
+    fixed_hypothesis_handlers,
+    hypothesis_capabilities,
+)
 from super_scientist.application.transactions.progress import (
     fixed_progress_handlers,
     progress_capabilities,
@@ -48,6 +52,7 @@ from super_scientist.kernel.admission.engine import AdmissionContext, AdmissionE
 from super_scientist.kernel.audit.chain import append_event
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
+    AdmitHypothesis,
     AdmitPrimitiveVersion,
     AppendProgressEvent,
     BindReportSentence,
@@ -63,14 +68,21 @@ from super_scientist.kernel.transactions.models import (
     ProposeEvidenceTrailNodes,
     ProposeEvidenceTrailRelations,
     ProposeGovernancePolicyTransition,
+    ProposeHypothesisVersion,
     ProposePrimitiveVersion,
+    RecordCounterexample,
     RecordEvidenceTrailVersion,
     RecordPrimitiveEvaluation,
     RecordProgressPlan,
     RecordRuleIncident,
     RecordRunBudget,
     RecordRunCheckpoint,
+    RecordSimulationResult,
+    RecordVerificationResult,
+    RegisterExecutableModel,
+    RegisterVerificationMechanism,
     RejectionCode,
+    ReviseHypothesis,
     TransactionDecision,
     TransitionClaim,
 )
@@ -195,6 +207,9 @@ class TransactionCoordinator:
         representation_handlers = tuple(
             (handler.proposal_type, handler) for handler in fixed_representation_handlers()
         )
+        hypothesis_handlers = tuple(
+            (handler.proposal_type, handler) for handler in fixed_hypothesis_handlers()
+        )
         self._router = ProposalRouter(
             (
                 *compatibility_handlers,
@@ -203,6 +218,7 @@ class TransactionCoordinator:
                 *trail_handlers,
                 *rule_handlers,
                 *representation_handlers,
+                *hypothesis_handlers,
             )
         )
 
@@ -465,6 +481,27 @@ class TransactionCoordinator:
                 )
                 reads = representation_io.reads
                 writes = representation_io.writes
+            elif isinstance(
+                admitted_proposal,
+                (
+                    ProposeHypothesisVersion,
+                    RegisterExecutableModel,
+                    RegisterVerificationMechanism,
+                    RecordSimulationResult,
+                    RecordVerificationResult,
+                    RecordCounterexample,
+                    ReviseHypothesis,
+                    AdmitHypothesis,
+                ),
+            ):
+                hypothesis_io = hypothesis_capabilities(
+                    admitted_proposal,
+                    connection,
+                    stored_policy,
+                    self._artifact_store,
+                )
+                reads = hypothesis_io.reads
+                writes = hypothesis_io.writes
             else:
                 adaptation_io = adaptation_capabilities(
                     admitted_proposal,
@@ -563,6 +600,14 @@ def _normalize_proposal(value: object) -> Proposal | TransactionDecision:
                 ProposePrimitiveVersion,
                 RecordPrimitiveEvaluation,
                 AdmitPrimitiveVersion,
+                ProposeHypothesisVersion,
+                RegisterExecutableModel,
+                RegisterVerificationMechanism,
+                RecordSimulationResult,
+                RecordVerificationResult,
+                RecordCounterexample,
+                ReviseHypothesis,
+                AdmitHypothesis,
             ),
         ):
             return PROPOSAL_ADAPTER.validate_json(

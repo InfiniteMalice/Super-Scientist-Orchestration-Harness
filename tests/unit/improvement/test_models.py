@@ -252,7 +252,7 @@ def test_new_rejection_codes_are_appended_with_stable_values() -> None:
     )
 
 
-def test_proposal_union_has_twenty_four_fixed_additive_persistent_kinds() -> None:
+def test_proposal_union_has_thirty_two_fixed_additive_persistent_kinds() -> None:
     proposal_types = (
         CreateResearchRun,
         AppendResearchRunEvent,
@@ -278,6 +278,14 @@ def test_proposal_union_has_twenty_four_fixed_additive_persistent_kinds() -> Non
         transaction_models.ProposePrimitiveVersion,
         transaction_models.RecordPrimitiveEvaluation,
         transaction_models.AdmitPrimitiveVersion,
+        transaction_models.ProposeHypothesisVersion,
+        transaction_models.RegisterExecutableModel,
+        transaction_models.RegisterVerificationMechanism,
+        transaction_models.RecordSimulationResult,
+        transaction_models.RecordVerificationResult,
+        transaction_models.RecordCounterexample,
+        transaction_models.ReviseHypothesis,
+        transaction_models.AdmitHypothesis,
     )
     expected = (
         "create_research_run",
@@ -304,6 +312,14 @@ def test_proposal_union_has_twenty_four_fixed_additive_persistent_kinds() -> Non
         "propose_primitive_version",
         "record_primitive_evaluation",
         "admit_primitive_version",
+        "propose_hypothesis_version",
+        "register_executable_model",
+        "register_verification_mechanism",
+        "record_simulation_result",
+        "record_verification_result",
+        "record_counterexample",
+        "revise_hypothesis",
+        "admit_hypothesis",
     )
     legacy = ("add_evidence", "propose_claim", "transition_claim")
 

@@ -32,6 +32,21 @@ eight fixed source-controlled argument vectors and exposes no arbitrary command,
 selection, skip, or threshold input. Its dependency audit may use network access. This
 fixed developer tooling is not research-run execution authority.
 
+## Model Execution Boundary
+
+Hypothesis model records are data, not executable authority. `METADATA_ONLY` records
+require content-addressed artifact metadata and are never executed. The only executable
+mode selects one of two immutable, source-controlled deterministic simulators by fixed
+identifier. Unknown identifiers reject. Records cannot provide import paths, entry
+points, source text, argument vectors, shell commands, filesystem paths, or network
+locations.
+
+Built-in simulation accepts strict numeric input, exact schemas and seeds, and bounded
+step and state sizes. It uses in-memory state and has no filesystem, network,
+subprocess, dynamic-import, `eval`, or `exec` path. A submitted simulation result is
+re-executed through the fixed registry before it can be retained. Model type describes
+metadata and never broadens this boundary.
+
 ## Filesystem And Artifact Boundary
 
 Artifact references are SHA-256-derived relative paths beneath the configured root.
@@ -85,6 +100,13 @@ checked against registered snapshots. Unregistered stale-service configuration i
 recorded as authoritative policy attribution.
 Exact replay does not readmit under current policy, but it fails closed when that policy
 registration or active pointer is missing or inconsistent.
+
+Hypothesis downstream stages require exact accepted transaction and audit receipts.
+Receipt hashes and audit sequence bind content and chronology; caller timestamps do
+not. Workspace verification replays accepted hypothesis mutations using the same fixed
+handlers and compares rebuilt records and heads with storage. Deleted or altered stage
+records, forged receipts, non-reproducible simulations, unresolved counterexamples, and
+tampered hypothesis heads therefore fail closed.
 
 The kernel has no secret store, credential broker, runtime redaction service, or
 dedicated secret scanner. Do not put API keys, credentials, private tokens, or regulated

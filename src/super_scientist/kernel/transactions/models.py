@@ -32,6 +32,29 @@ from super_scientist.domain.evidence_trails.models import (
     TrailAssessment,
     TrailCheckResult,
 )
+from super_scientist.domain.hypotheses.models import (
+    CounterexampleReceiptRef,
+    CounterexampleRecord,
+    ExecutableModelSpec,
+    HypothesisAdmissionDecision,
+    HypothesisCandidateReceiptRef,
+    HypothesisRevisionReceiptRef,
+    HypothesisSpec,
+    ModelSpecReceiptRef,
+    RevisionRecord,
+    SimulationResult,
+    SimulationResultReceiptRef,
+    VerificationMechanismReceiptRef,
+    VerificationMechanismSpec,
+    VerificationResult,
+    VerificationResultReceiptRef,
+)
+from super_scientist.domain.hypotheses.models import (
+    EvaluatorAuditReceiptRef as HypothesisEvaluatorAuditReceiptRef,
+)
+from super_scientist.domain.hypotheses.models import (
+    SelfImprovementMeasurementReceiptRef as HypothesisMeasurementReceiptRef,
+)
 from super_scientist.domain.identity import ActorIdentity
 from super_scientist.domain.improvement.models import (
     ChangeClassification,
@@ -90,6 +113,14 @@ type ProposalKind = Literal[
     "propose_primitive_version",
     "record_primitive_evaluation",
     "admit_primitive_version",
+    "propose_hypothesis_version",
+    "register_executable_model",
+    "register_verification_mechanism",
+    "record_simulation_result",
+    "record_verification_result",
+    "record_counterexample",
+    "revise_hypothesis",
+    "admit_hypothesis",
 ]
 
 
@@ -340,6 +371,79 @@ class AdmitPrimitiveVersion(ProposalBase):
     integrated_at: UtcTimestamp
 
 
+class ProposeHypothesisVersion(ProposalBase):
+    proposal_type: Literal["propose_hypothesis_version"] = "propose_hypothesis_version"
+    classification: ChangeClassification
+    hypothesis: HypothesisSpec
+
+
+class RegisterExecutableModel(ProposalBase):
+    proposal_type: Literal["register_executable_model"] = "register_executable_model"
+    classification: ChangeClassification
+    hypothesis_receipt: HypothesisCandidateReceiptRef
+    model_spec: ExecutableModelSpec
+
+
+class RegisterVerificationMechanism(ProposalBase):
+    proposal_type: Literal["register_verification_mechanism"] = "register_verification_mechanism"
+    classification: ChangeClassification
+    hypothesis_receipt: HypothesisCandidateReceiptRef
+    mechanism_spec: VerificationMechanismSpec
+
+
+class RecordSimulationResult(ProposalBase):
+    proposal_type: Literal["record_simulation_result"] = "record_simulation_result"
+    classification: ChangeClassification
+    hypothesis_receipt: HypothesisCandidateReceiptRef
+    model_receipt: ModelSpecReceiptRef
+    simulation_result: SimulationResult
+
+
+class RecordVerificationResult(ProposalBase):
+    proposal_type: Literal["record_verification_result"] = "record_verification_result"
+    classification: ChangeClassification
+    hypothesis_receipt: HypothesisCandidateReceiptRef
+    mechanism_receipt: VerificationMechanismReceiptRef
+    model_receipt: ModelSpecReceiptRef | None
+    simulation_receipts: tuple[SimulationResultReceiptRef, ...]
+    verification_result: VerificationResult
+
+
+class RecordCounterexample(ProposalBase):
+    proposal_type: Literal["record_counterexample"] = "record_counterexample"
+    classification: ChangeClassification
+    hypothesis_receipt: HypothesisCandidateReceiptRef
+    model_receipt: ModelSpecReceiptRef | None
+    simulation_receipts: tuple[SimulationResultReceiptRef, ...]
+    verification_result_receipts: tuple[VerificationResultReceiptRef, ...] = Field(min_length=1)
+    counterexample: CounterexampleRecord
+
+
+class ReviseHypothesis(ProposalBase):
+    proposal_type: Literal["revise_hypothesis"] = "revise_hypothesis"
+    classification: ChangeClassification
+    prior_hypothesis_receipt: HypothesisCandidateReceiptRef
+    triggering_result_receipts: tuple[VerificationResultReceiptRef, ...] = Field(min_length=1)
+    counterexample_receipts: tuple[CounterexampleReceiptRef, ...]
+    resulting_hypothesis: HypothesisSpec
+    revision: RevisionRecord
+
+
+class AdmitHypothesis(ProposalBase):
+    proposal_type: Literal["admit_hypothesis"] = "admit_hypothesis"
+    classification: ChangeClassification
+    hypothesis_receipt: HypothesisCandidateReceiptRef
+    model_receipts: tuple[ModelSpecReceiptRef, ...] = Field(min_length=1)
+    verification_result_receipts: tuple[VerificationResultReceiptRef, ...] = Field(min_length=1)
+    counterexample_search_receipts: tuple[VerificationResultReceiptRef, ...] = Field(min_length=1)
+    revision_receipts: tuple[HypothesisRevisionReceiptRef, ...]
+    evaluator_audit_receipt: HypothesisEvaluatorAuditReceiptRef
+    measurement_receipt: HypothesisMeasurementReceiptRef
+    rollback_hypothesis_version_id: StableIdentifier | None
+    integrated_at: UtcTimestamp
+    admission_decision: HypothesisAdmissionDecision
+
+
 class InvalidProposal(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
@@ -379,6 +483,14 @@ Proposal = Annotated[
     | ProposePrimitiveVersion
     | RecordPrimitiveEvaluation
     | AdmitPrimitiveVersion
+    | ProposeHypothesisVersion
+    | RegisterExecutableModel
+    | RegisterVerificationMechanism
+    | RecordSimulationResult
+    | RecordVerificationResult
+    | RecordCounterexample
+    | ReviseHypothesis
+    | AdmitHypothesis
     | InvalidProposal,
     Field(discriminator="proposal_type"),
 ]

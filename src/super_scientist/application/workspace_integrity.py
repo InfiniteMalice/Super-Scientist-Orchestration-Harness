@@ -17,7 +17,10 @@ from super_scientist.application.representations.records import (
     primitive_version_from_storage,
     primitive_version_to_storage,
 )
-from super_scientist.application.representations.service import projected_primitive_status
+from super_scientist.application.representations.service import (
+    primitive_use_rejection,
+    projected_primitive_status,
+)
 from super_scientist.application.rules.service import (
     ConsolidateBehavioralRuleHandler,
     ImportReviewerAssessmentHandler,
@@ -36,6 +39,25 @@ from super_scientist.application.trails.service import (
     trail_receipt_rejection,
 )
 from super_scientist.application.transactions.contracts import HandlerWriteCapability
+from super_scientist.application.transactions.hypotheses import (
+    AdmitHypothesisHandler,
+    HypothesisReceipt,
+    ProposeHypothesisVersionHandler,
+    RecordCounterexampleHandler,
+    RecordSimulationResultHandler,
+    RecordVerificationResultHandler,
+    RegisterExecutableModelHandler,
+    RegisterVerificationMechanismHandler,
+    ReviseHypothesisHandler,
+    counterexample_to_storage,
+    hypothesis_receipts,
+    hypothesis_to_storage,
+    mechanism_to_storage,
+    model_to_storage,
+    revision_to_storage,
+    simulation_to_storage,
+    verification_to_storage,
+)
 from super_scientist.application.transactions.representations import (
     AdmitPrimitiveVersionHandler,
     ProposePrimitiveVersionHandler,
@@ -81,6 +103,18 @@ from super_scientist.domain.evidence_trails.validation import (
     validate_report_binding,
     validate_trail,
 )
+from super_scientist.domain.hypotheses.models import (
+    AcceptedHypothesisReceiptRef,
+    ExecutableModelSpec,
+    HypothesisSpec,
+    RevisionRecord,
+    SimulationResult,
+    VerificationMechanismSpec,
+    VerificationResult,
+)
+from super_scientist.domain.hypotheses.models import (
+    CounterexampleRecord as DomainCounterexampleRecord,
+)
 from super_scientist.domain.identity import ActorIdentity
 from super_scientist.domain.improvement.classification import (
     ExternalGrounding,
@@ -119,6 +153,7 @@ from super_scientist.domain.representations.models import (
     AcceptedPrimitiveReceiptRef,
     PrimitiveEvaluation,
     PrimitiveStatus,
+    PrimitiveUse,
     PrimitiveVersion,
     PrimitiveVersionReceiptRef,
 )
@@ -132,6 +167,7 @@ from super_scientist.kernel.audit.models import (
 )
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
+    AdmitHypothesis,
     AdmitPrimitiveVersion,
     AppendProgressEvent,
     AppendResearchRunEvent,
@@ -148,8 +184,10 @@ from super_scientist.kernel.transactions.models import (
     ProposeEvidenceTrailNodes,
     ProposeEvidenceTrailRelations,
     ProposeGovernancePolicyTransition,
+    ProposeHypothesisVersion,
     ProposePrimitiveVersion,
     RecordConfigurationVersion,
+    RecordCounterexample,
     RecordEvaluatorAudit,
     RecordEvidenceTrailVersion,
     RecordPrimitiveEvaluation,
@@ -158,13 +196,26 @@ from super_scientist.kernel.transactions.models import (
     RecordRunBudget,
     RecordRunCheckpoint,
     RecordSelfImprovementMeasurement,
+    RecordSimulationResult,
+    RecordVerificationResult,
+    RegisterExecutableModel,
+    RegisterVerificationMechanism,
+    RejectionCode,
+    ReviseHypothesis,
     TransactionDecision,
     TransitionClaim,
 )
 from super_scientist.providers.storage.artifacts import ArtifactStore
 from super_scientist.providers.storage.domain_records import (
+    CounterexampleRecord,
+    ExecutableModelSpecRecord,
+    HypothesisAdmissionDecisionRecord,
+    HypothesisAdmissionStatus,
+    HypothesisRevisionRecord,
+    HypothesisVersionRecord,
     PrimitiveEvaluationRecord,
     PrimitiveVersionRecord,
+    SimulationResultRecord,
     VerificationMechanismSpecRecord,
     VerificationResultRecord,
 )
@@ -173,6 +224,7 @@ from super_scientist.providers.storage.domain_records import (
 )
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
+    HypothesisIntegritySnapshot,
     ProgressIntegritySnapshot,
     RepresentationIntegritySnapshot,
     RuleIntegritySnapshot,
@@ -363,6 +415,182 @@ class _RepresentationReplayCapability:
         )
 
 
+@dataclass(frozen=True)
+class _ReplayPrimitiveResolver:
+    versions: Mapping[str, PrimitiveVersionRecord]
+    heads: Mapping[str, tuple[str, str, PrimitiveStatus]]
+
+    def get_stored_version(self, version_id: str) -> PrimitiveVersionRecord | None:
+        return self.versions.get(version_id)
+
+    def get_head(self, primitive_id: str) -> tuple[str, str, PrimitiveStatus] | None:
+        return self.heads.get(primitive_id)
+
+
+@dataclass(frozen=True)
+class _HypothesisReplayCapability:
+    active_policy: PolicySnapshot
+    artifact_store: ArtifactStore
+    receipts: Mapping[str, HypothesisReceipt]
+    versions: dict[str, HypothesisVersionRecord]
+    models: dict[str, ExecutableModelSpecRecord]
+    mechanisms: dict[str, VerificationMechanismSpecRecord]
+    simulations: dict[str, SimulationResultRecord]
+    results: dict[str, VerificationResultRecord]
+    counterexamples: dict[str, CounterexampleRecord]
+    revisions: dict[str, HypothesisRevisionRecord]
+    admissions: dict[str, HypothesisAdmissionDecisionRecord]
+    heads: dict[str, tuple[str, int, HypothesisAdmissionStatus]]
+    evidence: Mapping[str, EvidenceRecord]
+    measurements: Mapping[str, SelfImprovementMeasurementRecord]
+    evaluator_audits: Mapping[str, EvaluatorAuditRecord]
+    primitive_versions: Mapping[str, PrimitiveVersionRecord]
+    primitive_heads: Mapping[str, tuple[str, str, PrimitiveStatus]]
+
+    def policy_snapshot(self) -> PolicySnapshot:
+        return self.active_policy
+
+    def resolve_receipt(
+        self,
+        reference: AcceptedHypothesisReceiptRef,
+    ) -> HypothesisReceipt | None:
+        receipt = self.receipts.get(reference.proposal_id)
+        return receipt if receipt is not None and receipt.reference == reference else None
+
+    def get_hypothesis(self, identifier: str) -> HypothesisVersionRecord | None:
+        return self.versions.get(identifier)
+
+    def list_hypotheses(self) -> tuple[HypothesisVersionRecord, ...]:
+        return tuple(self.versions.values())
+
+    def get_model(self, identifier: str) -> ExecutableModelSpecRecord | None:
+        return self.models.get(identifier)
+
+    def get_mechanism(self, identifier: str) -> VerificationMechanismSpecRecord | None:
+        return self.mechanisms.get(identifier)
+
+    def get_simulation(self, identifier: str) -> SimulationResultRecord | None:
+        return self.simulations.get(identifier)
+
+    def get_result(self, identifier: str) -> VerificationResultRecord | None:
+        return self.results.get(identifier)
+
+    def get_counterexample(self, identifier: str) -> CounterexampleRecord | None:
+        return self.counterexamples.get(identifier)
+
+    def list_counterexamples(self) -> tuple[CounterexampleRecord, ...]:
+        return tuple(self.counterexamples.values())
+
+    def get_revision(self, identifier: str) -> HypothesisRevisionRecord | None:
+        return self.revisions.get(identifier)
+
+    def list_revisions(self) -> tuple[HypothesisRevisionRecord, ...]:
+        return tuple(self.revisions.values())
+
+    def get_admission(self, identifier: str) -> HypothesisAdmissionDecisionRecord | None:
+        return self.admissions.get(identifier)
+
+    def get_head(
+        self,
+        hypothesis_id: str,
+    ) -> tuple[str, int, HypothesisAdmissionStatus] | None:
+        return self.heads.get(hypothesis_id)
+
+    def get_evidence(self, evidence_id: str) -> EvidenceRecord | None:
+        item = self.evidence.get(evidence_id)
+        if item is not None:
+            verify_artifact_binding(item, self.artifact_store)
+        return item
+
+    def get_measurement(self, identifier: str) -> SelfImprovementMeasurementRecord | None:
+        return self.measurements.get(identifier)
+
+    def get_evaluator_audit(self, identifier: str) -> EvaluatorAuditRecord | None:
+        return self.evaluator_audits.get(identifier)
+
+    def primitive_use_code(self, primitive_version_id: str) -> RejectionCode | None:
+        return primitive_use_rejection(
+            primitive_version_id,
+            resolver=_ReplayPrimitiveResolver(self.primitive_versions, self.primitive_heads),
+            use=PrimitiveUse.PUBLIC_CONCLUSION,
+        )
+
+    def append_hypothesis(self, hypothesis: HypothesisSpec) -> None:
+        record = hypothesis_to_storage(hypothesis)
+        _add_stable(
+            self.versions,
+            record.hypothesis_version_id,
+            record,
+            "hypothesis version projection",
+        )
+
+    def append_model(self, model: ExecutableModelSpec) -> None:
+        record = model_to_storage(model)
+        _add_stable(self.models, record.model_spec_id, record, "model specification projection")
+
+    def append_mechanism(self, mechanism: VerificationMechanismSpec) -> None:
+        record = mechanism_to_storage(mechanism)
+        _add_stable(
+            self.mechanisms,
+            record.mechanism_spec_id,
+            record,
+            "verification mechanism projection",
+        )
+
+    def append_simulation(self, simulation: SimulationResult) -> None:
+        record = simulation_to_storage(simulation)
+        _add_stable(
+            self.simulations,
+            record.simulation_result_id,
+            record,
+            "simulation result projection",
+        )
+
+    def append_result(self, result: VerificationResult) -> None:
+        model = None if result.model_spec_id is None else self.models.get(result.model_spec_id)
+        record = verification_to_storage(result, model)
+        _add_stable(
+            self.results,
+            record.verification_result_id,
+            record,
+            "verification result projection",
+        )
+
+    def append_counterexample(self, counterexample: DomainCounterexampleRecord) -> None:
+        model = (
+            None
+            if counterexample.model_spec_id is None
+            else self.models.get(counterexample.model_spec_id)
+        )
+        record = counterexample_to_storage(counterexample, model)
+        _add_stable(
+            self.counterexamples,
+            record.counterexample_id,
+            record,
+            "counterexample projection",
+        )
+
+    def append_revision(self, hypothesis: HypothesisSpec, revision: RevisionRecord) -> None:
+        self.append_hypothesis(hypothesis)
+        record = revision_to_storage(revision)
+        _add_stable(self.revisions, record.revision_id, record, "hypothesis revision projection")
+
+    def admit_hypothesis(self, decision: object) -> None:
+        if not isinstance(decision, HypothesisAdmissionDecisionRecord):
+            raise TypeError("hypothesis replay requires a fixed admission decision")
+        _add_stable(
+            self.admissions,
+            decision.admission_decision_id,
+            decision,
+            "hypothesis admission projection",
+        )
+        self.heads[decision.hypothesis_id] = (
+            decision.hypothesis_version_id,
+            decision.version,
+            decision.admission_status,
+        )
+
+
 def verify_workspace(
     repositories: RepositorySet,
     artifact_store: ArtifactStore,
@@ -378,6 +606,7 @@ def verify_workspace(
         trails = repositories.trail_integrity_snapshot()
         rules = repositories.rule_integrity_snapshot()
         representations = repositories.representation_integrity_snapshot()
+        hypotheses = repositories.hypothesis_integrity_snapshot()
         transactions = repositories.transactions.list_all()
         events = repositories.audit.list_all()
         _require(
@@ -396,6 +625,7 @@ def verify_workspace(
             trails,
             rules,
             representations,
+            hypotheses,
             policies,
             active_policy,
             artifact_store,
@@ -550,6 +780,7 @@ def _require_projection_consistency(
     trails: TrailIntegritySnapshot,
     rules: RuleIntegritySnapshot,
     representations: RepresentationIntegritySnapshot,
+    hypotheses: HypothesisIntegritySnapshot,
     policies: tuple[PolicySnapshot, ...],
     active_policy: PolicySnapshot | None,
     artifact_store: ArtifactStore,
@@ -592,11 +823,22 @@ def _require_projection_consistency(
     expected_primitive_evaluations: dict[str, PrimitiveEvaluationRecord] = {}
     expected_primitive_heads: dict[str, tuple[str, str, PrimitiveStatus]] = {}
     accepted_primitive_proposals: dict[str, ProposePrimitiveVersion] = {}
+    expected_hypothesis_versions: dict[str, HypothesisVersionRecord] = {}
+    expected_models: dict[str, ExecutableModelSpecRecord] = {}
+    expected_hypothesis_mechanisms: dict[str, VerificationMechanismSpecRecord] = {}
+    expected_simulations: dict[str, SimulationResultRecord] = {}
+    expected_hypothesis_results: dict[str, VerificationResultRecord] = {}
+    expected_counterexamples: dict[str, CounterexampleRecord] = {}
+    expected_revisions: dict[str, HypothesisRevisionRecord] = {}
+    expected_admissions: dict[str, HypothesisAdmissionDecisionRecord] = {}
+    expected_hypothesis_heads: dict[str, tuple[str, int, HypothesisAdmissionStatus]] = {}
     accepted_evaluator_succession = False
     transitions: list[tuple[ProposeGovernancePolicyTransition, str]] = []
     receipt_index = accepted_proposal_receipts(transactions, events)
     representation_receipt_index = representation_receipts(transactions, events)
     available_representation_receipts: dict[str, RepresentationReceipt] = {}
+    hypothesis_receipt_index = hypothesis_receipts(transactions, events)
+    available_hypothesis_receipts: dict[str, HypothesisReceipt] = {}
     verification_results = {
         record.verification_result_id: record for record in representations.verification_results
     }
@@ -1257,6 +1499,46 @@ def _require_projection_consistency(
         elif isinstance(
             proposal,
             (
+                ProposeHypothesisVersion,
+                RegisterExecutableModel,
+                RegisterVerificationMechanism,
+                RecordSimulationResult,
+                RecordVerificationResult,
+                RecordCounterexample,
+                ReviseHypothesis,
+                AdmitHypothesis,
+            ),
+        ):
+            hypothesis_capability = _HypothesisReplayCapability(
+                active_policy=historical_policy,
+                artifact_store=artifact_store,
+                receipts=available_hypothesis_receipts,
+                versions=expected_hypothesis_versions,
+                models=expected_models,
+                mechanisms=expected_hypothesis_mechanisms,
+                simulations=expected_simulations,
+                results=expected_hypothesis_results,
+                counterexamples=expected_counterexamples,
+                revisions=expected_revisions,
+                admissions=expected_admissions,
+                heads=expected_hypothesis_heads,
+                evidence=expected_evidence,
+                measurements=expected_measurements,
+                evaluator_audits=expected_audits,
+                primitive_versions=expected_primitive_versions,
+                primitive_heads=expected_primitive_heads,
+            )
+            hypothesis_decision = _replay_hypothesis_proposal(
+                proposal,
+                hypothesis_capability,
+            )
+            _require(
+                hypothesis_decision.accepted,
+                "hypothesis historical authority validation failed",
+            )
+        elif isinstance(
+            proposal,
+            (
                 RecordRuleIncident,
                 ProposeBehavioralRule,
                 ImportReviewerAssessment,
@@ -1470,6 +1752,27 @@ def _require_projection_consistency(
             )
             if representation_receipt is not None:
                 available_representation_receipts[proposal.proposal_id] = representation_receipt
+        if isinstance(
+            proposal,
+            (
+                ProposeHypothesisVersion,
+                RegisterExecutableModel,
+                RegisterVerificationMechanism,
+                RecordSimulationResult,
+                RecordVerificationResult,
+                RecordCounterexample,
+                ReviseHypothesis,
+                RecordEvaluatorAudit,
+                RecordSelfImprovementMeasurement,
+            ),
+        ):
+            hypothesis_receipt = hypothesis_receipt_index.get(proposal.proposal_id)
+            _require(
+                hypothesis_receipt is not None,
+                "accepted hypothesis support transaction has no exact receipt",
+            )
+            if hypothesis_receipt is not None:
+                available_hypothesis_receipts[proposal.proposal_id] = hypothesis_receipt
 
     actual_evidence = {record.evidence_id: record for record in evidence}
     _require(actual_evidence == expected_evidence, "evidence projections do not match transactions")
@@ -1649,6 +1952,89 @@ def _require_projection_consistency(
         == expected_primitive_heads,
         "primitive heads do not match accepted admission transactions",
     )
+    hypothesis_ids = {item.hypothesis_id for item in expected_hypothesis_versions.values()}
+    hypothesis_version_ids = set(expected_hypothesis_versions)
+    _require(
+        {
+            record.hypothesis_version_id: record
+            for record in hypotheses.versions
+            if record.hypothesis_id in hypothesis_ids
+        }
+        == expected_hypothesis_versions,
+        "hypothesis version projections do not match accepted transactions",
+    )
+    _require(
+        {
+            record.model_spec_id: record
+            for record in hypotheses.models
+            if record.hypothesis_version_id in hypothesis_version_ids
+        }
+        == expected_models,
+        "model specification projections do not match accepted transactions",
+    )
+    _require(
+        {
+            record.mechanism_spec_id: record
+            for record in hypotheses.mechanisms
+            if record.hypothesis_version_id in hypothesis_version_ids
+        }
+        == expected_hypothesis_mechanisms,
+        "hypothesis mechanism projections do not match accepted transactions",
+    )
+    _require(
+        {
+            record.simulation_result_id: record
+            for record in hypotheses.simulations
+            if record.hypothesis_version_id in hypothesis_version_ids
+        }
+        == expected_simulations,
+        "simulation projections do not match accepted transactions",
+    )
+    _require(
+        {
+            record.verification_result_id: record
+            for record in hypotheses.results
+            if record.hypothesis_version_id in hypothesis_version_ids
+        }
+        == expected_hypothesis_results,
+        "hypothesis verification projections do not match accepted transactions",
+    )
+    _require(
+        {
+            record.counterexample_id: record
+            for record in hypotheses.counterexamples
+            if record.hypothesis_version_id in hypothesis_version_ids
+        }
+        == expected_counterexamples,
+        "counterexample projections do not match accepted transactions",
+    )
+    _require(
+        {
+            record.revision_id: record
+            for record in hypotheses.revisions
+            if record.hypothesis_id in hypothesis_ids
+        }
+        == expected_revisions,
+        "hypothesis revision projections do not match accepted transactions",
+    )
+    _require(
+        {
+            record.admission_decision_id: record
+            for record in hypotheses.admissions
+            if record.hypothesis_id in hypothesis_ids
+        }
+        == expected_admissions,
+        "hypothesis admission projections do not match accepted transactions",
+    )
+    _require(
+        {
+            hypothesis_id: (version_id, version, status)
+            for hypothesis_id, version_id, version, status in hypotheses.heads
+            if hypothesis_id in hypothesis_ids
+        }
+        == expected_hypothesis_heads,
+        "hypothesis heads do not match accepted admission transactions",
+    )
     if accepted_evaluator_succession:
         _require(
             adaptation.evaluator_head == expected_evaluator_head,
@@ -1672,6 +2058,93 @@ def _require_projection_consistency(
         active_policy,
         tuple(transitions),
     )
+
+
+def _replay_hypothesis_proposal(
+    proposal: (
+        ProposeHypothesisVersion
+        | RegisterExecutableModel
+        | RegisterVerificationMechanism
+        | RecordSimulationResult
+        | RecordVerificationResult
+        | RecordCounterexample
+        | ReviseHypothesis
+        | AdmitHypothesis
+    ),
+    capability: _HypothesisReplayCapability,
+) -> TransactionDecision:
+    writes = cast(HandlerWriteCapability, capability)
+    if isinstance(proposal, ProposeHypothesisVersion):
+        stage_handler = ProposeHypothesisVersionHandler()
+        decision = stage_handler.decide(
+            proposal,
+            stage_handler.build_context(proposal, capability),
+        )
+        if decision.accepted:
+            stage_handler.project(proposal, decision, writes)
+        return decision
+    if isinstance(proposal, RegisterExecutableModel):
+        model_handler = RegisterExecutableModelHandler()
+        decision = model_handler.decide(
+            proposal,
+            model_handler.build_context(proposal, capability),
+        )
+        if decision.accepted:
+            model_handler.project(proposal, decision, writes)
+        return decision
+    if isinstance(proposal, RegisterVerificationMechanism):
+        mechanism_handler = RegisterVerificationMechanismHandler()
+        decision = mechanism_handler.decide(
+            proposal,
+            mechanism_handler.build_context(proposal, capability),
+        )
+        if decision.accepted:
+            mechanism_handler.project(proposal, decision, writes)
+        return decision
+    if isinstance(proposal, RecordSimulationResult):
+        simulation_handler = RecordSimulationResultHandler()
+        decision = simulation_handler.decide(
+            proposal,
+            simulation_handler.build_context(proposal, capability),
+        )
+        if decision.accepted:
+            simulation_handler.project(proposal, decision, writes)
+        return decision
+    if isinstance(proposal, RecordVerificationResult):
+        result_handler = RecordVerificationResultHandler()
+        decision = result_handler.decide(
+            proposal,
+            result_handler.build_context(proposal, capability),
+        )
+        if decision.accepted:
+            result_handler.project(proposal, decision, writes)
+        return decision
+    if isinstance(proposal, RecordCounterexample):
+        counterexample_handler = RecordCounterexampleHandler()
+        decision = counterexample_handler.decide(
+            proposal,
+            counterexample_handler.build_context(proposal, capability),
+        )
+        if decision.accepted:
+            counterexample_handler.project(proposal, decision, writes)
+        return decision
+    if isinstance(proposal, ReviseHypothesis):
+        revision_handler = ReviseHypothesisHandler()
+        decision = revision_handler.decide(
+            proposal,
+            revision_handler.build_context(proposal, capability),
+        )
+        if decision.accepted:
+            revision_handler.project(proposal, decision, writes)
+        return decision
+    admission_handler = AdmitHypothesisHandler()
+    decision = admission_handler.decide(
+        proposal,
+        admission_handler.build_context(proposal, capability),
+    )
+    if decision.accepted:
+        admission_handler.project(proposal, decision, writes)
+    return decision
 
 
 def _rule_replay_decision(

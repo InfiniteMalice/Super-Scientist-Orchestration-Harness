@@ -25,6 +25,7 @@ from super_scientist.kernel.audit.models import AuditEvent
 from super_scientist.kernel.transactions.models import Proposal, TransactionDecision
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
+    HypothesisIntegritySnapshot,
     ProgressIntegritySnapshot,
     RepresentationIntegritySnapshot,
     RuleIntegritySnapshot,
@@ -36,6 +37,7 @@ from super_scientist.providers.storage.schema import (
     claim_versions,
     completion_decisions,
     configuration_versions,
+    counterexample_records,
     evaluator_audits,
     evaluator_collapse_records,
     evaluator_heads,
@@ -48,8 +50,13 @@ from super_scientist.providers.storage.schema import (
     evidence_trail_nodes,
     evidence_trail_relations,
     evidence_trail_versions,
+    executable_model_specs,
     governance_policies,
     governance_state,
+    hypothesis_admission_decisions,
+    hypothesis_heads,
+    hypothesis_revisions,
+    hypothesis_versions,
     primitive_evaluations,
     primitive_heads,
     primitive_versions,
@@ -64,7 +71,10 @@ from super_scientist.providers.storage.schema import (
     run_budgets,
     run_checkpoints,
     self_improvement_measurements,
+    simulation_results,
     transactions,
+    verification_mechanism_specs,
+    verification_results,
 )
 
 PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
@@ -102,6 +112,14 @@ _STRICT_JSON_PROPOSAL_TYPES = frozenset(
         "propose_primitive_version",
         "record_primitive_evaluation",
         "admit_primitive_version",
+        "propose_hypothesis_version",
+        "register_executable_model",
+        "register_verification_mechanism",
+        "record_simulation_result",
+        "record_verification_result",
+        "record_counterexample",
+        "revise_hypothesis",
+        "admit_hypothesis",
     }
 )
 
@@ -1031,6 +1049,31 @@ class RepositorySet:
             heads=PrimitiveHeadRepository(self._connection).list_all(),
         )
 
+    def hypothesis_integrity_snapshot(self) -> HypothesisIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            CounterexampleRecordRepository,
+            ExecutableModelSpecRepository,
+            HypothesisAdmissionDecisionRepository,
+            HypothesisHeadRepository,
+            HypothesisRevisionRepository,
+            HypothesisVersionRepository,
+            SimulationResultRepository,
+            VerificationMechanismSpecRepository,
+            VerificationResultRepository,
+        )
+
+        return HypothesisIntegritySnapshot(
+            versions=HypothesisVersionRepository(self._connection).list_all(),
+            models=ExecutableModelSpecRepository(self._connection).list_all(),
+            mechanisms=VerificationMechanismSpecRepository(self._connection).list_all(),
+            simulations=SimulationResultRepository(self._connection).list_all(),
+            results=VerificationResultRepository(self._connection).list_all(),
+            counterexamples=CounterexampleRecordRepository(self._connection).list_all(),
+            revisions=HypothesisRevisionRepository(self._connection).list_all(),
+            admissions=HypothesisAdmissionDecisionRepository(self._connection).list_all(),
+            heads=HypothesisHeadRepository(self._connection).list_all(),
+        )
+
     def has_durable_state(self) -> bool:
         tables = (
             governance_policies,
@@ -1067,6 +1110,15 @@ class RepositorySet:
             primitive_versions,
             primitive_evaluations,
             primitive_heads,
+            hypothesis_versions,
+            executable_model_specs,
+            verification_mechanism_specs,
+            simulation_results,
+            verification_results,
+            counterexample_records,
+            hypothesis_revisions,
+            hypothesis_admission_decisions,
+            hypothesis_heads,
         )
         return any(
             self._connection.execute(select(table).limit(1)).first() is not None for table in tables

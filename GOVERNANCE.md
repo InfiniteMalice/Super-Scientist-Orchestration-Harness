@@ -49,6 +49,29 @@ approval. Those proposal types and their approval workflow are not implemented i
 slice. The current CLI rejects active-policy changes instead of bypassing that future
 human boundary. Operators must not mutate the SQLite policy tables directly.
 
+## Hypothesis Mutation Boundary
+
+Hypothesis, model, checker, simulation, counterexample, revision, and admission
+proposals use one exact classification: `RESEARCH_PROCESS`, `HUMAN_IN_LOOP`,
+`RUN_LOCAL`, `INDEPENDENT_DETERMINISTIC_CHECK`, `CONTROLLED_EXPERIMENT`, and
+`EMPIRICAL_MEASUREMENT`. The active V2 policy must contain the matching adaptation
+requirement and must not apply promotion-only protected-evaluation or rollback flags to
+these run-local stages. Every stage requires an independent human approval and exact
+active-policy attribution.
+
+Stage approval does not admit a hypothesis. Admission separately requires a
+`TRANSFER_VALIDATED` candidate, exact committed receipts and audit chronology, passing
+deterministic verification with retained counterexample search, no candidate
+counterexample, complete revision lineage, controlled-experiment evidence, exact
+admitted primitive heads, a passed evaluator audit, an accepted self-improvement
+measurement, rollback metadata for a successor, and an independent human decision
+authority. Only the admission projector can advance a hypothesis head.
+
+Learned judges may contribute explicitly learned records, but cannot claim formal or
+deterministic provenance and cannot satisfy the deterministic counterexample-search
+gate by confidence or agreement. Caller-provided timestamps are not governance
+authority; committed audit sequence establishes stage order.
+
 ## Quality Policy Protection
 
 `scientist-harness quality-gate` has a source-controlled registry of exactly eight

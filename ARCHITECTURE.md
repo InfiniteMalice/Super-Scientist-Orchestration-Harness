@@ -2,10 +2,11 @@
 
 ## Scope
 
-This document describes only the implemented epistemic-kernel vertical slice. The
-slice accepts typed evidence and claim proposals, makes deterministic decisions, and
-persists records locally. It has no orchestration loop, hypothesis or experiment model,
-research-run state machine, learned memory, model provider, or training subsystem.
+This document describes the implemented transactional epistemic-kernel slice. The
+slice accepts typed evidence, claim, governed-adaptation, and hypothesis-loop proposals,
+makes deterministic decisions, and persists records locally. It has no autonomous
+orchestration loop, live experiment control, arbitrary model provider, learned memory,
+or training subsystem.
 
 ## Dependency Rule
 
@@ -14,9 +15,10 @@ policy:
 
 ```text
 CLI and composition
-    -> application transaction service
-        -> admission, audit, transactions, claim checks
-            -> evidence, claims, identity, canonical primitives
+    -> bounded domain application services
+        -> shared transaction coordinator and fixed proposal router
+            -> domain admission handlers and narrow projectors
+                -> audit, transactions, evidence, identity, canonical primitives
 
 SQLite and filesystem providers
     -> typed domain and kernel records
@@ -36,7 +38,9 @@ learned projection and does not reproduce HarnessBridge.
 ## Storage Boundaries
 
 SQLite stores policy snapshots, the active policy reference, evidence metadata, claim
-versions and heads, proposals and decisions, and audit events. Alembic owns the schema.
+versions and heads, governed-adaptation records, hypothesis/model/checker/revision
+records and hypothesis heads, proposals and decisions, and audit events. Alembic owns
+the schema.
 Each application submission opens `BEGIN IMMEDIATE`; accepted projection changes, the
 transaction decision, and the audit append commit or roll back together. Append-only
 tables have SQLite triggers that reject update and delete. Claim heads and the active
@@ -57,11 +61,15 @@ projects a `HASH_VERIFIED` copy. Failure is a durable audited
 
 ## Proposal And Admission Flow
 
-The public proposal union is `AddEvidence`, `ProposeClaim`, and `TransitionClaim`;
-`InvalidProposal` is an internal durable rejection envelope. Every normal proposal
-carries a proposal identifier, idempotency key, proposer identity, and optional
-approval. Intent submission first supplies a typed `ProposalAttempt` containing stable
-proposal/idempotency identifiers, proposer identity, and expected proposal kind.
+The public proposal union includes the original evidence and claim operations plus the
+fixed governed-adaptation domains. The hypothesis slice contributes exactly eight
+operations: propose a hypothesis version, register a model, register a verification
+mechanism, record a simulation, record a verification, record a counterexample, revise,
+and admit. `InvalidProposal` remains an internal durable rejection envelope. Every
+normal proposal carries a proposal identifier, idempotency key, proposer identity, and
+optional approval. Intent submission first supplies a typed `ProposalAttempt`
+containing stable proposal/idempotency identifiers, proposer identity, and expected
+proposal kind.
 Submission follows this flow:
 
 ```text
@@ -118,6 +126,15 @@ transition records and effective-state projection, is adapted conceptually from
 transactional workflow validation [S12]. The transaction model is project-specific,
 does not reproduce Mnemosyne, and does not make scientific-truth guarantees.
 
+Hypothesis stages additionally bind exact accepted upstream receipts. Receipt audit
+sequence, not caller timestamps, establishes stage chronology. A fixed registry can
+execute only the source-controlled thermal-chamber and exponential-decay simulators;
+metadata-only model artifacts remain inert. Admission alone can advance a hypothesis
+head after transfer validation, exact evidence and revision lineage, deterministic
+counterexample search, evaluator audit, self-improvement measurement, primitive-use
+checks, rollback binding, and independent human authority. See
+`docs/hypothesis-model-checker-loop.md` for the complete boundary.
+
 ## Audit Chain
 
 Each durably attributable non-replayed decision produces an immutable audit event
@@ -133,6 +150,12 @@ authoritative evidence artifact. `scientist-harness audit verify` exposes that w
 workspace check through a storage-only runtime and returns nonzero for corruption even
 when a missing active policy prevents normal service construction; an empty chain in a
 genuinely empty or initialized workspace is valid.
+
+For hypothesis state, verification also replays accepted transactions in audit order
+through the same fixed handlers with only their narrow write capabilities, then compares
+the rebuilt append-only records and heads with storage. A forged or missing receipt,
+record, or head therefore fails integrity verification rather than becoming a new
+authority source.
 
 Workspace verification decodes every registered governance policy, not only the active
 or audit-referenced rows, and requires exactly zero or one `governance_state` row with
