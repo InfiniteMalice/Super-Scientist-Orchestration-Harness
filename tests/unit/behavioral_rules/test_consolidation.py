@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from super_scientist.domain.behavioral_rules import consolidation as consolidation_module
 from super_scientist.domain.behavioral_rules.consolidation import (
     build_candidate_diff,
     classify_overlap,
@@ -116,6 +117,38 @@ def test_disjoint_scope_is_non_redundant_even_with_identical_trigger_and_action(
     )
 
     assert classify_overlap(disjoint, existing) is OverlapClassification.NON_REDUNDANT
+
+
+def test_canonical_overlap_priority_is_explicit_and_registry_order_independent() -> None:
+    selector = getattr(consolidation_module, "canonical_overlap_classification", None)
+    assert selector is not None
+    candidate = rule(statement="Canonical candidate wording.")
+    exact = candidate.model_copy(
+        update={"rule_version_id": "rule-exact-v1", "rule_id": "rule-exact"}
+    )
+    semantic = candidate.model_copy(
+        update={
+            "rule_version_id": "rule-semantic-v1",
+            "rule_id": "rule-semantic",
+            "canonical_statement": "Equivalent canonical behavior in other words.",
+        }
+    )
+    non_redundant = candidate.model_copy(
+        update={
+            "rule_version_id": "rule-disjoint-v1",
+            "rule_id": "rule-disjoint",
+            "canonical_statement": "A disjoint rule.",
+            "scope": ("disjoint scope",),
+        }
+    )
+    active_rules = (non_redundant, semantic, exact)
+
+    assert selector(candidate, ()) is None
+    assert selector(candidate, (non_redundant,)) is OverlapClassification.NON_REDUNDANT
+    assert selector(candidate, active_rules) is OverlapClassification.EXACT_DUPLICATE
+    assert selector(candidate, tuple(reversed(active_rules))) is (
+        OverlapClassification.EXACT_DUPLICATE
+    )
 
 
 @pytest.mark.parametrize(

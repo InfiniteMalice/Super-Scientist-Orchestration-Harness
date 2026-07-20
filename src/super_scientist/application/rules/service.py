@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict
 from super_scientist.config.models import GovernancePolicyV2, PolicySnapshot
 from super_scientist.domain.behavioral_rules.consolidation import (
     build_candidate_diff,
+    canonical_overlap_classification,
     classify_overlap,
     rule_actors_are_independent,
     semantic_version_increases,
@@ -474,6 +475,22 @@ class ImportReviewerAssessmentHandler:
                 RejectionCode.INVALID_LINEAGE,
                 "reviewer assessment does not include the reviewed rule version",
             )
+        rules = cast(tuple[BehavioralRuleVersion, ...], context.rules)
+        incidents = cast(tuple[RuleIncident, ...], context.incidents)
+        reviewed_approval = context.reviewed_proposal.approval
+        assessed_at = assessment.provenance.assessed_at
+        if (
+            any(item.recorded_at > assessed_at for item in incidents)
+            or any(item.created_at > assessed_at for item in rules)
+            or reviewed_rule.created_at > assessed_at
+            or (reviewed_approval is not None and reviewed_approval.approved_at > assessed_at)
+        ):
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.INVALID_LINEAGE,
+                "reviewer assessment cannot predate retained incidents, rule versions, "
+                "or the reviewed proposal",
+            )
         if assessment.provenance.proposer_relationship is not ActorRelationship.INDEPENDENT or any(
             not rule_actors_are_independent(assessment.provenance.actor, actor)
             for actor in authority_actors
@@ -641,6 +658,7 @@ class ConsolidateBehavioralRuleHandler:
             or any(incident.recorded_at > candidate.created_at for incident in incidents)
             or any(item.created_at > candidate.created_at for item in predecessors)
             or context.measurement is None
+            or candidate.created_at > context.measurement.decided_at
             or context.measurement.decided_at > consolidation.integrated_at
             or context.evaluator_audit is None
             or context.evaluator_audit.audited_at > context.measurement.decided_at
@@ -933,6 +951,13 @@ def _canonical_lineage_rejection(
             proposal.proposal_id,
             RejectionCode.DUPLICATE_RULE,
             "an exact duplicate cannot become a canonical active rule",
+        )
+    canonical_overlap = canonical_overlap_classification(candidate, active_head_rules)
+    if consolidation.overlap is not canonical_overlap:
+        return _rejected(
+            proposal.proposal_id,
+            RejectionCode.UNRESOLVED_RULE_CONFLICT,
+            "consolidation overlap must equal the authoritative active-registry classification",
         )
     affected_other_heads = tuple(
         item

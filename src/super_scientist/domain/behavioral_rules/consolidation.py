@@ -27,6 +27,19 @@ REVIEWER_WORKFLOW_ORDER = (
     ReviewerRole.VERIFICATION,
 )
 _REVIEWER_ORDER_INDEX = {role: index for index, role in enumerate(REVIEWER_WORKFLOW_ORDER)}
+CANONICAL_OVERLAP_PRIORITY = (
+    OverlapClassification.EXACT_DUPLICATE,
+    OverlapClassification.SEMANTIC_DUPLICATE,
+    OverlapClassification.NARROWER_INSTANCE,
+    OverlapClassification.BROADER_REFORMULATION,
+    OverlapClassification.PARTIAL_OVERLAP,
+    OverlapClassification.SAME_TRIGGER_DIFFERENT_ACTION,
+    OverlapClassification.DIFFERENT_TRIGGER_SAME_ACTION,
+    OverlapClassification.NON_REDUNDANT,
+)
+_CANONICAL_OVERLAP_PRIORITY_INDEX = {
+    classification: index for index, classification in enumerate(CANONICAL_OVERLAP_PRIORITY)
+}
 
 
 def classify_overlap(
@@ -79,6 +92,21 @@ def classify_overlap(
     ):
         return OverlapClassification.PARTIAL_OVERLAP
     return OverlapClassification.NON_REDUNDANT
+
+
+def canonical_overlap_classification(
+    candidate: BehavioralRuleVersion,
+    active_rules: tuple[BehavioralRuleVersion, ...],
+) -> OverlapClassification | None:
+    """Select one authoritative overlap independent of active-registry iteration order."""
+
+    if not active_rules:
+        return None
+    classifications = tuple(classify_overlap(candidate, item) for item in active_rules)
+    return min(
+        classifications,
+        key=_CANONICAL_OVERLAP_PRIORITY_INDEX.__getitem__,
+    )
 
 
 def semantic_version_increases(candidate: str, predecessor: str) -> bool:

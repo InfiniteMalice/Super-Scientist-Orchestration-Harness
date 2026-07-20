@@ -24,6 +24,7 @@ from super_scientist.config.models import (
 )
 from super_scientist.domain.behavioral_rules.consolidation import build_candidate_diff
 from super_scientist.domain.behavioral_rules.models import (
+    BehavioralRuleVersion,
     OverlapClassification,
     RecurrenceRepair,
     RuleAction,
@@ -455,6 +456,61 @@ def test_consolidation_requires_exact_approval_timestamp_and_valid_chronology(
 
 
 @pytest.mark.integration
+def test_consolidation_rejects_candidate_created_after_its_measurement(
+    rule_runtime: RuleRuntime,
+) -> None:
+    assessments = _seed_complete_review(rule_runtime)
+    _seed_measurement(rule_runtime)
+    after_measurement = NOW + timedelta(seconds=1)
+    _, consolidation = _consolidation(
+        rule_runtime,
+        assessments,
+        candidate_updates={
+            "created_at": after_measurement,
+            "approved_at": after_measurement,
+        },
+    )
+    consolidation = consolidation.model_copy(update={"integrated_at": after_measurement})
+    proposal = _consolidation_proposal(rule_runtime, consolidation).model_copy(
+        update={
+            "approval": Approval(
+                approver=rule_runtime.approver,
+                approved_at=after_measurement,
+            )
+        }
+    )
+
+    decision = rule_runtime.service.consolidate(proposal)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "late_artifact",
+    ("incident", "rule-version", "review-proposal"),
+)
+def test_review_rejects_assessment_that_predates_each_reviewed_artifact(
+    rule_runtime: RuleRuntime,
+    late_artifact: str,
+) -> None:
+    _seed_rule_for_review_with_late_artifact(rule_runtime, late_artifact)
+    assessment = _assessment(five_assessments()[0], rule_runtime)
+
+    decision = rule_runtime.service.import_assessment(
+        _assessment_proposal(
+            assessment,
+            rule_runtime,
+            f"proposal-review-predates-{late_artifact}",
+        )
+    )
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
+
+
+@pytest.mark.integration
 def test_followup_consolidation_must_advance_the_exact_current_head(
     rule_runtime: RuleRuntime,
 ) -> None:
@@ -500,6 +556,35 @@ def test_final_active_registry_rejects_exact_duplicate_candidate(
 
     assert decision.accepted is False
     assert decision.reasons[0].code is RejectionCode.DUPLICATE_RULE
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("overlap", "expected_accepted"),
+    (
+        (None, True),
+        (OverlapClassification.NON_REDUNDANT, False),
+        (OverlapClassification.EXACT_DUPLICATE, False),
+    ),
+)
+def test_consolidation_overlap_must_match_authoritative_active_registry(
+    rule_runtime: RuleRuntime,
+    overlap: OverlapClassification | None,
+    expected_accepted: bool,
+) -> None:
+    assessments = _seed_complete_review(rule_runtime)
+    _seed_measurement(rule_runtime)
+    _, consolidation = _consolidation(rule_runtime, assessments)
+    proposal = _consolidation_proposal(
+        rule_runtime,
+        consolidation.model_copy(update={"overlap": overlap}),
+    )
+
+    decision = rule_runtime.service.consolidate(proposal)
+
+    assert decision.accepted is expected_accepted
+    if not expected_accepted:
+        assert decision.reasons[0].code is RejectionCode.UNRESOLVED_RULE_CONFLICT
 
 
 @pytest.mark.integration
@@ -763,6 +848,119 @@ def test_workspace_replay_rejects_historically_accepted_stale_rule_head(
 
 
 @pytest.mark.integration
+def test_workspace_replay_rejects_candidate_created_after_its_measurement(
+    rule_runtime: RuleRuntime,
+) -> None:
+    assessments = _seed_complete_review(rule_runtime)
+    _seed_measurement(rule_runtime)
+    after_measurement = NOW + timedelta(seconds=1)
+    candidate, consolidation = _consolidation(
+        rule_runtime,
+        assessments,
+        candidate_updates={
+            "created_at": after_measurement,
+            "approved_at": after_measurement,
+        },
+    )
+    consolidation = consolidation.model_copy(update={"integrated_at": after_measurement})
+    proposal = _consolidation_proposal(rule_runtime, consolidation).model_copy(
+        update={
+            "approval": Approval(
+                approver=rule_runtime.approver,
+                approved_at=after_measurement,
+            )
+        }
+    )
+    _persist_forged_accepted_consolidation(rule_runtime, candidate, proposal)
+
+    with rule_runtime.engine.connect() as connection:
+        result = verify_workspace(RepositorySet(connection), rule_runtime.artifacts)
+
+    assert result.valid is False
+    assert "behavioral-rule historical authority" in (result.reason or "")
+
+
+@pytest.mark.integration
+def test_workspace_replay_rejects_assessment_that_predates_reviewed_history(
+    rule_runtime: RuleRuntime,
+) -> None:
+    _seed_rule_for_review(rule_runtime)
+    valid = _assessment(five_assessments()[0], rule_runtime)
+    invalid = valid.model_copy(
+        update={
+            "provenance": valid.provenance.model_copy(
+                update={"assessed_at": NOW - timedelta(seconds=1)}
+            )
+        }
+    )
+    proposal = _assessment_proposal(
+        invalid,
+        rule_runtime,
+        "proposal-review-predates-history",
+    )
+    accepted = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+    with DatabaseUnitOfWork(rule_runtime.engine) as unit_of_work:
+        repositories = unit_of_work.repositories()
+        connection = unit_of_work.connection
+        assert connection is not None
+        ReviewerAssessmentRepository(connection).add(
+            invalid.assessment_id,
+            invalid,
+            invalid.provenance.assessed_at,
+        )
+        repositories.transactions.add(proposal, accepted, NOW + timedelta(seconds=20))
+        repositories.audit.add(
+            append_event(
+                repositories.audit.last(),
+                "transaction_decision",
+                {
+                    "proposal": proposal.model_dump(mode="json"),
+                    "decision": accepted.model_dump(mode="json"),
+                    "policy_hash": rule_runtime.policy.policy_hash,
+                    "stored_policy_hash": rule_runtime.policy.policy_hash,
+                    "configured_policy_hash": rule_runtime.policy.policy_hash,
+                    "transaction_persisted": True,
+                },
+                NOW + timedelta(seconds=21),
+            )
+        )
+
+    with rule_runtime.engine.connect() as connection:
+        result = verify_workspace(RepositorySet(connection), rule_runtime.artifacts)
+
+    assert result.valid is False
+    assert "behavioral-rule historical authority" in (result.reason or "")
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "forged_overlap",
+    (
+        OverlapClassification.NON_REDUNDANT,
+        OverlapClassification.EXACT_DUPLICATE,
+    ),
+)
+def test_workspace_replay_rejects_caller_mutated_consolidation_overlap(
+    rule_runtime: RuleRuntime,
+    forged_overlap: OverlapClassification,
+) -> None:
+    assessments = _seed_complete_review(rule_runtime)
+    _seed_measurement(rule_runtime)
+    candidate, consolidation = _consolidation(rule_runtime, assessments)
+    proposal = _consolidation_proposal(
+        rule_runtime,
+        consolidation.model_copy(update={"overlap": forged_overlap}),
+    )
+    _persist_forged_accepted_consolidation(rule_runtime, candidate, proposal)
+
+    with rule_runtime.engine.connect() as connection:
+        result = verify_workspace(RepositorySet(connection), rule_runtime.artifacts)
+
+    assert result.valid is False
+    assert "behavioral-rule historical authority" in (result.reason or "")
+
+
+@pytest.mark.integration
 def test_rule_incident_requires_retained_hash_verified_primary_evidence(
     rule_runtime: RuleRuntime,
 ) -> None:
@@ -992,6 +1190,33 @@ def _seed_rule_for_review(runtime: RuleRuntime) -> None:
     ).accepted
 
 
+def _seed_rule_for_review_with_late_artifact(
+    runtime: RuleRuntime,
+    late_artifact: str,
+) -> None:
+    after_review = NOW + timedelta(seconds=1)
+    for identifier in ("incident-1", "incident-2"):
+        _seed_evidence(f"evidence-{identifier}", runtime)
+        record = _incident(identifier, runtime)
+        if late_artifact == "incident" and identifier == "incident-1":
+            record = record.model_copy(update={"recorded_at": after_review})
+        assert runtime.service.record_incident(_incident_proposal(record, runtime)).accepted
+    reviewed_rule = _rule("rule-1-v1", runtime)
+    if late_artifact == "rule-version":
+        reviewed_rule = reviewed_rule.model_copy(update={"created_at": after_review})
+    proposal = _rule_proposal(reviewed_rule, runtime)
+    if late_artifact == "review-proposal":
+        proposal = proposal.model_copy(
+            update={
+                "approval": Approval(
+                    approver=runtime.approver,
+                    approved_at=after_review,
+                )
+            }
+        )
+    assert runtime.service.propose_rule(proposal).accepted
+
+
 def _seed_evidence(
     evidence_id: str,
     runtime: RuleRuntime,
@@ -1163,7 +1388,7 @@ def _followup_consolidation(
         integrated_at=NOW,
         governing_policy_hash=runtime.policy.policy_hash,
         prior_incident_ids=("incident-1", "incident-2"),
-        overlap=OverlapClassification.PARTIAL_OVERLAP,
+        overlap=OverlapClassification.SEMANTIC_DUPLICATE,
     )
     return candidate, ConsolidateBehavioralRule(
         proposal_id="proposal-consolidate-followup",
@@ -1303,6 +1528,7 @@ def _measurement(
             "rollback_target_id": "rule-1-v1",
             "evaluator_audit_id": audit.evaluator_audit_id,
             "decision_authority": runtime.approver,
+            "decided_at": NOW,
             "governing_policy_hash": runtime.policy.policy_hash,
         }
     )
@@ -1346,7 +1572,7 @@ def _consolidation(
         integrated_at=NOW,
         governing_policy_hash=runtime.policy.policy_hash,
         prior_incident_ids=("incident-1",),
-        overlap=OverlapClassification.PARTIAL_OVERLAP,
+        overlap=None,
     )
     return candidate, consolidation
 
@@ -1366,3 +1592,58 @@ def _consolidation_proposal(
         evaluator_audit_id="audit-rule-1",
         rollback_rule_version_id="rule-1-v1",
     )
+
+
+def _persist_forged_accepted_consolidation(
+    runtime: RuleRuntime,
+    candidate: BehavioralRuleVersion,
+    proposal: ConsolidateBehavioralRule,
+) -> None:
+    accepted = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+    decision = rule_consolidation_decision(proposal)
+    with DatabaseUnitOfWork(runtime.engine) as unit_of_work:
+        repositories = unit_of_work.repositories()
+        connection = unit_of_work.connection
+        assert connection is not None
+        BehavioralRuleVersionRepository(connection).add(
+            candidate.rule_version_id,
+            candidate,
+            candidate.created_at,
+        )
+        RuleConsolidationDecisionRepository(connection).add(
+            decision.consolidation_decision_id,
+            decision,
+            decision.decided_at,
+        )
+        for regression_case in proposal.consolidation.regression_cases:
+            RuleRegressionCaseRepository(connection).add(
+                regression_case.regression_case_id,
+                regression_case,
+                regression_case.created_at,
+            )
+        BehavioralRuleHeadRepository(connection).set(
+            candidate.rule_id,
+            candidate.rule_version_id,
+            candidate.semantic_version,
+            candidate.status,
+        )
+        repositories.transactions.add(
+            proposal,
+            accepted,
+            NOW + timedelta(seconds=30),
+        )
+        repositories.audit.add(
+            append_event(
+                repositories.audit.last(),
+                "transaction_decision",
+                {
+                    "proposal": proposal.model_dump(mode="json"),
+                    "decision": accepted.model_dump(mode="json"),
+                    "policy_hash": runtime.policy.policy_hash,
+                    "stored_policy_hash": runtime.policy.policy_hash,
+                    "configured_policy_hash": runtime.policy.policy_hash,
+                    "transaction_persisted": True,
+                },
+                NOW + timedelta(seconds=31),
+            )
+        )
