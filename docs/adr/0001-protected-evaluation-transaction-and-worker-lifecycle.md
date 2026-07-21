@@ -23,8 +23,10 @@ objects and authority:
 1. An evaluator-facing spawned result validator accepts strict JSON, validates a
    `ProtectedCheckerResult`, and returns only that validated DTO. Its parent boundary
    accepts only the exact DTO type, never a subclass or duck-typed object whose
-   serialization could carry protected fields. It owns no main database object or
-   protected-store path.
+   serialization could carry protected fields. Even an exact instance is revalidated
+   into a fresh canonical DTO before serialization, because Pydantic `model_copy()`
+   updates and `model_construct()` do not validate field values. The validator owns no
+   main database object or protected-store path.
 2. `ProtectedResultGateway` remains the coordinator-facing API. Its implementation is
    a local adapter over the supplied active SQLAlchemy connection and appends through
    that exact transaction. It necessarily owns coordinator repository/connection
@@ -41,7 +43,8 @@ objects and authority:
    text, filesystem paths, answer data, or inherited child tracebacks.
 6. Rejected checker-result objects and malformed worker payloads raise only fixed safe
    errors with no retained validation cause or formatted exception chain containing
-   input values or paths.
+   input values or paths. Coordinator record or repository validation failures use the
+   same cause-free mapping as a defense behind the DTO boundary.
 
 ## Consequences
 
@@ -66,8 +69,9 @@ Regression coverage must include:
 - committed-campaign append and rollback inside `DatabaseUnitOfWork`;
 - a 32-thread shared reader and concurrent coordinator gateway appends;
 - timeout/desynchronization poison behavior and concurrent idempotent close;
-- answer-bearing result subclasses/malformed DTOs and malformed reader, auditor, and
-  validator payloads with no cause-chain leakage or channel reuse;
+- answer-bearing result subclasses, malformed DTOs, exact results produced by
+  `model_copy()`/`model_construct()`, and malformed reader, auditor, and validator
+  payloads with no cause-chain leakage or channel reuse;
 - portable weak-registry and closed-process checks plus Windows handle counts;
 - structurally corrupt protected SQLite and unavailable artifacts with no path,
   answer, exception, or traceback leakage; and

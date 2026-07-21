@@ -255,6 +255,38 @@ def test_result_validator_rejects_answer_bearing_subclass_without_exception_leak
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("construction", ("model_copy", "model_construct"))
+def test_result_validator_revalidates_exact_instances_before_serializing(
+    construction: str,
+) -> None:
+    secret = f"validator-{construction}-held-out-answer"
+    malformed = _unchecked_checker_result(
+        construction,
+        expected_output_hash=secret.encode() + b"\xff",
+    )
+    validator = protected_evaluation_module.create_protected_result_validator()
+    try:
+        with pytest.raises(ProtectedCapabilityError) as captured:
+            validator.validate_result(malformed)
+        _assert_fixed_non_leaking_result_error(
+            captured.value,
+            sensitive_values=(secret,),
+        )
+    finally:
+        validator.close()
+
+
+def test_exact_checker_result_revalidation_returns_fresh_canonical_dto() -> None:
+    original = _checker_result()
+
+    canonical = protected_evaluation_module._require_exact_checker_result(original)
+
+    assert type(canonical) is ProtectedCheckerResult
+    assert canonical == original
+    assert canonical is not original
+
+
+@pytest.mark.integration
 def test_result_gateway_rejects_malformed_dto_without_exception_leak(tmp_path: Path) -> None:
     secret = b"gateway-held-out-answer"
     protected_path = str(tmp_path / "protected" / "answers.bin")
@@ -274,6 +306,41 @@ def test_result_gateway_rejects_malformed_dto_without_exception_leak(tmp_path: P
                     captured.value,
                     sensitive_values=(secret.decode(), protected_path),
                 )
+            finally:
+                gateway.close()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("construction", ("model_copy", "model_construct"))
+def test_result_gateway_revalidates_exact_instances_before_record_construction(
+    tmp_path: Path,
+    construction: str,
+) -> None:
+    protected_path = Path("protected") / f"{construction}-held-out-answer.bin"
+    malformed = _unchecked_checker_result(
+        construction,
+        evaluated_at=protected_path,
+    )
+    main_url = f"sqlite+pysqlite:///{(tmp_path / 'main.db').as_posix()}"
+    upgrade_database(main_url)
+    engine = create_database_engine(main_url)
+    try:
+        with engine.begin() as connection:
+            _seed_campaign(connection)
+        with DatabaseUnitOfWork(engine) as unit_of_work:
+            connection = unit_of_work.connection
+            assert connection is not None
+            gateway = create_protected_result_gateway(connection)
+            try:
+                with pytest.raises(ProtectedCapabilityError) as captured:
+                    gateway.append_result(malformed)
+                _assert_fixed_non_leaking_result_error(
+                    captured.value,
+                    sensitive_values=("held-out-answer.bin",),
+                )
+                assert HarnessMetricRepository(connection).get("result-1") is None
             finally:
                 gateway.close()
     finally:
@@ -1010,7 +1077,18 @@ def test_coordinator_gateway_duplicate_rejection_is_typed_and_non_leaking(
                 with pytest.raises(ProtectedCapabilityError) as duplicate:
                     gateway.append_result(_checker_result())
                 assert duplicate.value.code == "RESULT_APPEND_REJECTED"
-                assert "result-1" not in str(duplicate.value)
+                assert duplicate.value.args == ("protected checker result append was rejected",)
+                assert duplicate.value.__cause__ is None
+                assert duplicate.value.__context__ is None
+                formatted = "".join(
+                    traceback.format_exception(
+                        type(duplicate.value),
+                        duplicate.value,
+                        duplicate.value.__traceback__,
+                        chain=True,
+                    )
+                )
+                assert "result-1" not in formatted
                 gateway.append_result(_checker_result(result_id="result-2"))
             finally:
                 gateway.close()
@@ -1422,3 +1500,17 @@ def _checker_result(*, result_id: str = "result-1") -> ProtectedCheckerResult:
         metric_values=(MetricValue(metric_id="correctness", value=Decimal("1.0")),),
         evaluated_at=datetime(2026, 7, 20, tzinfo=UTC),
     )
+
+
+def _unchecked_checker_result(
+    construction: str,
+    **updates: object,
+) -> ProtectedCheckerResult:
+    valid = _checker_result()
+    if construction == "model_copy":
+        return valid.model_copy(update=updates)
+    payload = {
+        field_name: getattr(valid, field_name) for field_name in ProtectedCheckerResult.model_fields
+    }
+    payload.update(updates)
+    return ProtectedCheckerResult.model_construct(**payload)

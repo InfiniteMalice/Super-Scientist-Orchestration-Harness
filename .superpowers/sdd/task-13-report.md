@@ -7,7 +7,9 @@ storage`) and first hardened in `287b796` (`fix: enforce protected storage capab
 boundaries`). A second, separate review-reconciliation commit uses the required subject
 `fix: reconcile protected worker transactions and lifecycle` (`70bbc3b`). The closure
 fix is a third separate commit with the required subject
-`fix: seal protected response error paths`.
+`fix: seal protected response error paths`. The final Pydantic normalization correction
+is a fourth separate commit with the required subject
+`fix: revalidate protected result instances`.
 
 The final design keeps protected answers in a physically separate store and sends only
 strict typed hashes, aggregates, and checker outcomes into ordinary campaign storage.
@@ -62,6 +64,28 @@ objects before invoking their methods. The complete exchange now includes role p
 decoding under the same lock and poison transition; invalid responses retain no
 validation cause/context or sensitive formatted chain.
 
+A final DTO-correctness review found that exact-class instances created by Pydantic's
+non-validating `model_copy(update=...)` and `model_construct(...)` paths still passed
+the exact-type helper unchanged. At the validator, held-out non-UTF-8 bytes then reached
+`model_dump(mode="json")` and escaped as a raw `UnicodeDecodeError`. At the coordinator
+gateway, a held-out path reached `HarnessMetricRecord` validation and was retained in
+the chained Pydantic cause and formatted traceback.
+
+The exact final RED slice selected five cases and failed all five (43 deselected) in
+12.22 seconds: both construction methods at both public boundaries plus a legitimate
+instance freshness regression. A tightened gateway-only RED selected two and failed
+both (46 deselected) in 5.53 seconds, explicitly displaying `held-out-answer.bin` in
+each formatted cause chain. After the correction, the identical five-case slice passed
+5 of 5 (43 deselected) in 10.69 seconds.
+
+All protected strict frozen DTOs now opt into Pydantic instance revalidation. The
+boundary helper still rejects subclasses and other objects, but it also revalidates an
+exact instance into a fresh canonical `ProtectedCheckerResult` before either
+serialization or storage-record construction. Validation failures are suppressed and
+replaced outside their exception context with the existing fixed
+`INVALID_CHECKER_RESULT` error. The coordinator's downstream record/repository failure
+mapping is likewise cause-free as a defense in depth.
+
 ## Transaction and authority model
 
 Evaluator validation and coordinator persistence are separate authorities:
@@ -69,8 +93,9 @@ Evaluator validation and coordinator persistence are separate authorities:
 - `ProtectedResultValidator` is a spawned evaluator-facing capability. It accepts
   strict JSON, reconstructs a `ProtectedCheckerResult`, and returns only that validated
   DTO. Its parent entry point requires that exact DTO type rather than accepting
-  subclasses or duck-typed serializers. It owns no SQLAlchemy object, database URL,
-  protected path, or repository.
+  subclasses or duck-typed serializers, then revalidates even that exact instance into
+  a fresh canonical DTO. It owns no SQLAlchemy object, database URL, protected path, or
+  repository.
 - `ProtectedResultGateway` remains the coordinator-facing persistence protocol. Its
   implementation is a local adapter over the caller's supplied active SQLAlchemy
   connection. It uses repositories bound to that exact connection and never creates
@@ -121,6 +146,12 @@ Answer-bearing checker-result subclasses, malformed DTOs, and malformed reader/a
 validator success payloads additionally prove fixed error args, absent causes/contexts,
 non-leaking formatted chains, and no post-failure channel reuse.
 
+Exact checker results forged through Pydantic's non-validating copy and construct APIs
+now receive the same fixed error before parent-side serialization or coordinator record
+construction. A valid exact instance is rebuilt as an equal but distinct canonical DTO.
+Duplicate repository writes additionally prove that defense-in-depth gateway mapping
+retains no storage exception as a cause or context.
+
 ## Existing Task 13 storage retained
 
 Migration `0006_handbook_and_harness_evaluation` still provides append-only behavior
@@ -169,6 +200,25 @@ Closure-source verification adds:
 - complete storage integration: 154 passed, 3 skipped in 378.88 seconds; and
 - complete property tests: 213 passed in 605.20 seconds.
 
+Final DTO-normalization verification adds:
+
+- exact RED slice: 5 failed, 43 deselected in 12.22 seconds;
+- exact gateway leakage RED: 2 failed, 46 deselected in 5.53 seconds;
+- identical focused GREEN: 5 passed, 43 deselected in 10.69 seconds;
+- final normalization and downstream-mapping regression slice: 6 passed, 42
+  deselected in 21.66 seconds;
+- complete protected-evaluation file: 48 passed in 121.46 seconds;
+- protected coverage run: 48 passed in 162.27 seconds with 94.27% branch-aware
+  coverage over 524 statements and 104 branches;
+- adjacent migration 0006 and harness append-only properties: 13 passed in 19.35
+  seconds;
+- repository Ruff lint and strict mypy: passed, with mypy checking 81 source files;
+- owned-file Ruff formatting/lint, recursive Bandit medium-or-higher security scan,
+  dependency audit, and `git diff --check`: passed; and
+- the default Bandit scan reported only three pre-existing low-severity B105 `PASS`
+  enum false positives, while repository-wide Ruff formatting reported 18 unrelated
+  pre-existing files after the owned file was formatted.
+
 ## Release gates
 
 - Repository Ruff lint: passed.
@@ -187,6 +237,14 @@ Closure-source verification adds:
   all three malformed role-payload poison paths, a 32-thread spawned answer reader,
   spawned result validator, real-unit-of-work gateway, and installed
   `scientist-harness --help` all passed.
+
+The final DTO correction also produced fresh isolated sdist and wheel artifacts. Both
+passed Twine; the wheel contains migration 0006, `protected_evaluation.py`, and
+`domain_records.py`. A fresh short-path install resolved the protected module from
+`C:\c13revalidate\Lib\site-packages`; installed-wheel smoke rejected `model_copy` and
+`model_construct` attacks at both public boundaries without cause/context or held-out
+value leakage, accepted a valid spawned-validator call, persisted a valid gateway
+result, and ran installed `scientist-harness --help`.
 
 ## Files in the closure fix
 

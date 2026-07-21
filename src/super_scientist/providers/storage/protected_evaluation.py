@@ -79,7 +79,12 @@ _protected_expected_outputs = Table(
 
 
 class _StrictFrozenModel(BaseModel):
-    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    model_config = ConfigDict(
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        revalidate_instances="always",
+    )
 
 
 class ProtectedCapabilityError(ValueError):
@@ -508,11 +513,14 @@ class _CoordinatorProtectedResultGateway:
                 self._metrics.add(record.result_id, record, record.evaluated_at)
             except ProtectedCapabilityError:
                 raise
-            except (SQLAlchemyError, StorageIntegrityError, TypeError, ValueError) as error:
-                raise ProtectedCapabilityError(
-                    "RESULT_APPEND_REJECTED",
-                    "protected checker result append was rejected",
-                ) from error
+            except (SQLAlchemyError, StorageIntegrityError, TypeError, ValueError):
+                pass
+            else:
+                return
+            raise ProtectedCapabilityError(
+                "RESULT_APPEND_REJECTED",
+                "protected checker result append was rejected",
+            ) from None
 
     def close(self) -> None:
         with self._lock:
@@ -520,12 +528,16 @@ class _CoordinatorProtectedResultGateway:
 
 
 def _require_exact_checker_result(result: object) -> ProtectedCheckerResult:
-    if not isinstance(result, ProtectedCheckerResult) or type(result) is not ProtectedCheckerResult:
+    validated: ProtectedCheckerResult | None = None
+    if isinstance(result, ProtectedCheckerResult) and type(result) is ProtectedCheckerResult:
+        with suppress(TypeError, ValueError):
+            validated = ProtectedCheckerResult.model_validate(result)
+    if validated is None:
         raise ProtectedCapabilityError(
             "INVALID_CHECKER_RESULT",
             "protected checker result is invalid",
         ) from None
-    return result
+    return validated
 
 
 def _decode_expected_output_payload(payload: object | None) -> bytes:
