@@ -158,6 +158,103 @@ def test_repository_paths_use_one_host_independent_canonical_syntax(
         verify_handbook(root, declared)
 
 
+@pytest.mark.parametrize("invalid_character", ("<", ">", '"', "|", "?", "*"))
+@pytest.mark.parametrize(
+    "path_template",
+    (
+        "src/bad{character}segment.py",
+        "src/bad{character}segment/inside.py",
+    ),
+)
+def test_every_win32_invalid_filename_character_is_rejected_in_every_segment(
+    tmp_path: Path,
+    invalid_character: str,
+    path_template: str,
+) -> None:
+    root = _repository(tmp_path)
+    payload = json.loads(_manifest(root).model_dump_json())
+    payload["behaviors"][0]["source_bindings"][0]["relative_path"] = path_template.format(
+        character=invalid_character
+    )
+    declared = BehaviorManifest.model_validate_json(json.dumps(payload))
+
+    with pytest.raises(PathContainmentError, match="canonical forward-slash"):
+        verify_handbook(root, declared)
+
+
+@pytest.mark.parametrize(
+    "reserved_segment",
+    tuple(
+        variant
+        for prefix in ("COM", "LPT")
+        for digit in ("¹", "²", "³")
+        for variant in (
+            f"{prefix}{digit}",
+            f"{prefix.lower()}{digit}.py",
+            f"{prefix.title()}{digit}.",
+            f"{prefix.swapcase()}{digit} ",
+        )
+    ),
+)
+@pytest.mark.parametrize(
+    "path_template",
+    (
+        "{segment}/inside.py",
+        "src/{segment}/inside.py",
+    ),
+)
+def test_superscript_win32_device_aliases_are_rejected_case_insensitively(
+    tmp_path: Path,
+    reserved_segment: str,
+    path_template: str,
+) -> None:
+    root = _repository(tmp_path)
+    payload = json.loads(_manifest(root).model_dump_json())
+    payload["behaviors"][0]["source_bindings"][0]["relative_path"] = path_template.format(
+        segment=reserved_segment
+    )
+    declared = BehaviorManifest.model_validate_json(json.dumps(payload))
+
+    with pytest.raises(PathContainmentError, match="canonical forward-slash"):
+        verify_handbook(root, declared)
+
+
+@pytest.mark.parametrize(
+    "reserved_segment",
+    tuple(
+        variant
+        for prefix in ("COM", "LPT")
+        for digit in ("¹", "²", "³")
+        for variant in (f"{prefix}{digit}", f"{prefix.lower()}{digit}.py")
+    ),
+)
+def test_superscript_win32_device_aliases_are_rejected_as_final_segments(
+    tmp_path: Path,
+    reserved_segment: str,
+) -> None:
+    root = _repository(tmp_path)
+    payload = json.loads(_manifest(root).model_dump_json())
+    payload["behaviors"][0]["source_bindings"][0]["relative_path"] = f"src/{reserved_segment}"
+    declared = BehaviorManifest.model_validate_json(json.dumps(payload))
+
+    with pytest.raises(PathContainmentError, match="canonical forward-slash"):
+        verify_handbook(root, declared)
+
+
+def test_unrelated_safe_unicode_repository_names_remain_valid(tmp_path: Path) -> None:
+    root = _repository(tmp_path)
+    relative_path = "src/naïve_研究_Δ_model¹_COM⁴.py"
+    source = root / relative_path
+    source.write_bytes(b"def declared() -> str:\n    return 'portable unicode'\n")
+    _git(root, "add", relative_path)
+    _git(root, "commit", "--quiet", "-m", "safe Unicode path fixture")
+
+    built = build_handbook(root, _manifest(root, path=relative_path))
+
+    assert built.source_locations[0].relative_path == relative_path
+    assert built.source_locations[0].symbol == "declared"
+
+
 @pytest.mark.parametrize(
     ("field_path", "malicious_text"),
     (

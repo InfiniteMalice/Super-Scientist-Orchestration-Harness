@@ -27,10 +27,10 @@ not silently substituted for a Git contract. The initial manifest binds sources 
 real Git commit `c5de7d14f530e172216f35d8a5453057aa257f61`. Generated artifacts live in
 a later commit, so this is deliberately a source-snapshot identifier rather than an
 impossible self-reference to the commit containing the generated files. Verification
-requires that the bound repository-canonical source bytes still match both that commit
-and the manifest hashes. Python source is hashed after the same CRLF-to-LF text
-normalization Git applies, so Windows and POSIX checkouts reproduce the same artifact;
-all other bytes remain exact.
+requires that the bound repository-canonical source still match both that commit and
+the manifest hashes. Each `source_hash` is the SHA-256 of the exact committed
+regular-blob bytes. Checkout equivalence and staleness are evaluated through Git's
+clean/filter semantics; the handbook does not unconditionally normalize CRLF bytes.
 
 ## Deterministic build and verification
 

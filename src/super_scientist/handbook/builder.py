@@ -40,8 +40,11 @@ _WINDOWS_RESERVED_PATH_NAMES = frozenset(
         "PRN",
         *(f"COM{number}" for number in range(1, 10)),
         *(f"LPT{number}" for number in range(1, 10)),
+        *(f"COM{number}" for number in ("¹", "²", "³")),
+        *(f"LPT{number}" for number in ("¹", "²", "³")),
     }
 )
+_WINDOWS_INVALID_FILENAME_CHARACTERS = frozenset('<>"|?*')
 
 
 @dataclass(frozen=True, slots=True)
@@ -800,6 +803,7 @@ def _is_noncanonical_path_segment(segment: str) -> bool:
     return (
         segment in {"", ".", ".."}
         or segment.endswith((".", " "))
+        or any(character in segment for character in _WINDOWS_INVALID_FILENAME_CHARACTERS)
         or windows_basename in _WINDOWS_RESERVED_PATH_NAMES
     )
 
