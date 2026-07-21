@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-COMMIT = "1" * 40
+
+def _git(root: Path, *arguments: str) -> bytes:
+    return subprocess.run(
+        ("git", *arguments),
+        cwd=root,
+        check=True,
+        capture_output=True,
+    ).stdout
+
+
+def _repository_commit(root: Path) -> str:
+    return _git(root, "rev-parse", "HEAD").decode("ascii").strip()
 
 
 @pytest.fixture
@@ -43,6 +55,11 @@ def repository_root(tmp_path: Path) -> Path:
         encoding="utf-8",
         newline="\n",
     )
+    _git(root, "init", "--quiet")
+    _git(root, "config", "user.name", "Handbook Fixture")
+    _git(root, "config", "user.email", "handbook@example.invalid")
+    _git(root, "add", "src/sample.py", "tests/test_sample.py")
+    _git(root, "commit", "--quiet", "-m", "fixture snapshot")
     return root
 
 
@@ -55,14 +72,14 @@ def source_binding(
     *,
     path: str = "src/sample.py",
     symbol: str = "public_function",
-    repository_commit: str = COMMIT,
+    repository_commit: str | None = None,
     source_hash: str | None = None,
 ) -> Any:
     from super_scientist.handbook import SourceBinding
 
     target = root / Path(path)
     return SourceBinding(
-        repository_commit=repository_commit,
+        repository_commit=repository_commit or _repository_commit(root),
         relative_path=path,
         symbol=symbol,
         source_hash=source_hash or digest(target),
@@ -104,12 +121,13 @@ def behavior_entry(
     )
 
 
-def manifest(root: Path, *behaviors: Any, repository_commit: str = COMMIT) -> Any:
+def manifest(root: Path, *behaviors: Any, repository_commit: str | None = None) -> Any:
     from super_scientist.handbook import BehaviorManifest
 
     entries = behaviors or (behavior_entry(root),)
+    resolved_commit = repository_commit or _repository_commit(root)
     return BehaviorManifest(
         repository="fixture-repository",
-        repository_commit=repository_commit,
+        repository_commit=resolved_commit,
         behaviors=entries,
     )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -209,26 +210,50 @@ def test_source_hashes_are_reproducible_across_git_checkout_line_endings(
 ) -> None:
     source_lf = b"def public_function(value: int) -> int:\n    return value + 1\n"
     canonical_hash = sha256_hex(source_lf)
-    builds = []
-    for name, source_bytes in (("lf", source_lf), ("crlf", source_lf.replace(b"\n", b"\r\n"))):
-        root = tmp_path / name
-        (root / "src").mkdir(parents=True)
-        (root / "tests").mkdir()
-        (root / "src" / "sample.py").write_bytes(source_bytes)
-        (root / "tests" / "test_sample.py").write_bytes(b"def test_sample():\n    pass\n")
-        declared = manifest(
-            root,
-            behavior_entry(
-                root,
-                bindings=(source_binding(root, source_hash=canonical_hash),),
-            ),
-        )
-        builds.append(build_handbook(root, declared))
+    seed = tmp_path / "seed"
+    (seed / "src").mkdir(parents=True)
+    (seed / "tests").mkdir()
+    (seed / "src" / "sample.py").write_bytes(source_lf)
+    (seed / "tests" / "test_sample.py").write_bytes(b"def test_sample():\n    pass\n")
+    for arguments in (
+        ("init", "--quiet"),
+        ("config", "user.name", "Handbook Fixture"),
+        ("config", "user.email", "handbook@example.invalid"),
+        ("add", "src/sample.py", "tests/test_sample.py"),
+        ("commit", "--quiet", "-m", "canonical source"),
+    ):
+        subprocess.run(("git", *arguments), cwd=seed, check=True, capture_output=True)
+    declared = manifest(
+        seed,
+        behavior_entry(
+            seed,
+            bindings=(source_binding(seed, source_hash=canonical_hash),),
+        ),
+    )
+    lf_build = build_handbook(seed, declared)
 
-    assert builds[0].source_tree_hash == builds[1].source_tree_hash
-    assert builds[0].source_hashes == builds[1].source_hashes == (canonical_hash,)
-    assert builds[0].json_bytes == builds[1].json_bytes
-    assert builds[0].markdown_bytes == builds[1].markdown_bytes
+    clone = tmp_path / "autocrlf-clone"
+    subprocess.run(
+        (
+            "git",
+            "-c",
+            "core.autocrlf=true",
+            "clone",
+            "--quiet",
+            "--no-hardlinks",
+            str(seed),
+            str(clone),
+        ),
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    autocrlf_build = build_handbook(clone, declared)
+
+    assert lf_build.source_tree_hash == autocrlf_build.source_tree_hash
+    assert lf_build.source_hashes == autocrlf_build.source_hashes == (canonical_hash,)
+    assert lf_build.json_bytes == autocrlf_build.json_bytes
+    assert lf_build.markdown_bytes == autocrlf_build.markdown_bytes
 
 
 def test_build_fails_closed_when_verification_has_findings(repository_root: Path) -> None:

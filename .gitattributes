@@ -1,0 +1,3 @@
+docs/handbook/*.json text eol=lf
+docs/handbook/*.md text eol=lf
+docs/behavior-handbook.md text eol=lf

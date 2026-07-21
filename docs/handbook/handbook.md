@@ -12,19 +12,19 @@
 
 ### `artifact-containment`
 
-Persist and retrieve immutable artifacts without allowing static path escapes.
+Persist and retrieve immutable artifacts without allowing static path escapes\.
 
 ### `protected-evaluation-separation`
 
-Keep held-out expected outputs physically and capability-wise separate from candidates and ordinary storage.
+Keep held\-out expected outputs physically and capability\-wise separate from candidates and ordinary storage\.
 
 ### `transactional-admission-coordination`
 
-Coordinate governed domain proposals while preserving exact replay, audit, and atomicity.
+Coordinate governed domain proposals while preserving exact replay\, audit\, and atomicity\.
 
 ### `workspace-integrity-verification`
 
-Reconcile the complete workspace against deterministic replay before durable operations.
+Reconcile the complete workspace against deterministic replay before durable operations\.
 
 ## Level 2: Contracts, dependencies, and governing rules
 
@@ -32,8 +32,8 @@ Reconcile the complete workspace against deterministic replay before durable ope
 
 Contracts:
 
-- Content-addressed artifacts remain beneath the configured trusted root.
-- Static symlink and Windows reparse-point escapes fail closed.
+- Content\-addressed artifacts remain beneath the configured trusted root\.
+- Static symlink and Windows reparse\-point escapes fail closed\.
 
 Dependencies:
 
@@ -47,8 +47,8 @@ Governing rule versions:
 
 Contracts:
 
-- Only strict hashes, aggregates, and checker outcomes cross the evaluator boundary.
-- Protected expected outputs remain outside the ordinary repository set and main database.
+- Only strict hashes\, aggregates\, and checker outcomes cross the evaluator boundary\.
+- Protected expected outputs remain outside the ordinary repository set and main database\.
 
 Dependencies:
 
@@ -62,8 +62,8 @@ Governing rule versions:
 
 Contracts:
 
-- Every durable proposal is normalized, governed, projected, decided, and audited in one transaction.
-- Exact replay resolves before new proposal execution and retains original authority.
+- Every durable proposal is normalized\, governed\, projected\, decided\, and audited in one transaction\.
+- Exact replay resolves before new proposal execution and retains original authority\.
 
 Dependencies:
 
@@ -77,8 +77,8 @@ Governing rule versions:
 
 Contracts:
 
-- Reconstruct authoritative state and compare every governed projection before mutation or replay.
-- Reject tampered, orphaned, causally impossible, or unsupported durable records.
+- Reconstruct authoritative state and compare every governed projection before mutation or replay\.
+- Reject tampered\, orphaned\, causally impossible\, or unsupported durable records\.
 
 Dependencies:
 

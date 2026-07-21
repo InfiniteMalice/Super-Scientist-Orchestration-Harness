@@ -3,11 +3,15 @@ from __future__ import annotations
 import ast
 import json
 import stat
+import string
+
+# Git's object database and clean-filter semantics are the provenance authority.
+import subprocess  # nosec B404
 import tokenize
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
@@ -23,6 +27,20 @@ from super_scientist.handbook.models import (
     SourceBehaviorLink,
     SourceLocation,
     SourceSymbolKind,
+)
+
+_WINDOWS_RESERVED_PATH_NAMES = frozenset(
+    {
+        "AUX",
+        "CLOCK$",
+        "CON",
+        "CONIN$",
+        "CONOUT$",
+        "NUL",
+        "PRN",
+        *(f"COM{number}" for number in range(1, 10)),
+        *(f"LPT{number}" for number in range(1, 10)),
+    }
 )
 
 
@@ -41,6 +59,7 @@ class _Inspection:
     expected_source_tree_hash: str
     actual_source_tree_hash: str
     source_hashes: tuple[str, ...]
+    provenance_verified: bool
 
 
 class _SymbolInventory(ast.NodeVisitor):
@@ -127,8 +146,10 @@ def _inspect_manifest(
     expected_by_path: dict[str, str] = {}
     inventory_by_path: dict[str, dict[str, _SymbolFact]] = {}
     parse_failure_by_path: dict[str, HandbookFindingCode] = {}
+    provenance_verified = repository_commit == manifest.repository_commit
+    commit_verified = False
 
-    if repository_commit != manifest.repository_commit:
+    if not provenance_verified:
         findings.append(
             HandbookFinding(
                 code=HandbookFindingCode.REPOSITORY_COMMIT_MISMATCH,
@@ -137,6 +158,30 @@ def _inspect_manifest(
                 location=None,
             )
         )
+    else:
+        object_type = _git_object_type(root, repository_commit)
+        if object_type is None:
+            findings.append(
+                HandbookFinding(
+                    code=HandbookFindingCode.REPOSITORY_COMMIT_NOT_FOUND,
+                    message="declared repository commit is unavailable in the Git object database",
+                    behavior_id=None,
+                    location=None,
+                )
+            )
+            provenance_verified = False
+        elif object_type != "commit":
+            findings.append(
+                HandbookFinding(
+                    code=HandbookFindingCode.REPOSITORY_OBJECT_NOT_COMMIT,
+                    message="declared repository object is not a commit",
+                    behavior_id=None,
+                    location=None,
+                )
+            )
+            provenance_verified = False
+        else:
+            commit_verified = True
 
     for behavior in sorted(manifest.behaviors, key=lambda item: item.behavior_id):
         for binding in sorted(
@@ -147,8 +192,13 @@ def _inspect_manifest(
             expected_by_path[binding.relative_path] = binding.source_hash
             source_path = _contained_path(root, binding.relative_path)
             if binding.relative_path not in actual_by_path:
-                _inspect_source_file(
-                    source_path,
+                committed_bytes = (
+                    _committed_source_bytes(root, repository_commit, binding.relative_path)
+                    if commit_verified
+                    else None
+                )
+                _inspect_source_bytes(
+                    committed_bytes,
                     binding.relative_path,
                     actual_by_path,
                     inventory_by_path,
@@ -164,8 +214,7 @@ def _inspect_manifest(
                         "declared source file is unavailable",
                     )
                 )
-                continue
-            if not _is_regular_file(source_path):
+            elif not _is_regular_file(source_path):
                 findings.append(
                     _finding(
                         HandbookFindingCode.SOURCE_NOT_REGULAR_FILE,
@@ -174,7 +223,6 @@ def _inspect_manifest(
                         "declared source path is not a regular file",
                     )
                 )
-                continue
             if source_path.suffix != ".py":
                 findings.append(
                     _finding(
@@ -184,9 +232,46 @@ def _inspect_manifest(
                         "declared source path is not a Python source file",
                     )
                 )
-                continue
 
             actual_hash = actual_by_path[binding.relative_path]
+            if commit_verified and actual_hash is None:
+                findings.append(
+                    _finding(
+                        HandbookFindingCode.COMMIT_SOURCE_MISMATCH,
+                        behavior,
+                        label,
+                        "declared source is not a regular blob at the repository commit",
+                    )
+                )
+                provenance_verified = False
+                continue
+            if commit_verified and actual_hash != binding.source_hash:
+                findings.append(
+                    _finding(
+                        HandbookFindingCode.COMMIT_SOURCE_MISMATCH,
+                        behavior,
+                        label,
+                        "declared source hash does not match the exact committed blob bytes",
+                    )
+                )
+                provenance_verified = False
+            if commit_verified and not _git_checkout_path_is_clean(
+                root,
+                repository_commit,
+                binding.relative_path,
+            ):
+                findings.append(
+                    _finding(
+                        HandbookFindingCode.CHECKOUT_SOURCE_STALE,
+                        behavior,
+                        label,
+                        "current checkout does not match the declared committed source",
+                    )
+                )
+            _assert_no_link_or_reparse(source_path)
+
+            if source_path.suffix != ".py" or actual_hash is None:
+                continue
             parse_failure = parse_failure_by_path.get(binding.relative_path)
             if parse_failure is not None:
                 message = (
@@ -195,26 +280,8 @@ def _inspect_manifest(
                     else "declared Python source could not be parsed"
                 )
                 findings.append(_finding(parse_failure, behavior, label, message))
-                if actual_hash != binding.source_hash:
-                    findings.append(
-                        _finding(
-                            HandbookFindingCode.SOURCE_HASH_MISMATCH,
-                            behavior,
-                            label,
-                            "declared source hash does not match current source bytes",
-                        )
-                    )
                 continue
 
-            if actual_hash != binding.source_hash:
-                findings.append(
-                    _finding(
-                        HandbookFindingCode.SOURCE_HASH_MISMATCH,
-                        behavior,
-                        label,
-                        "declared source hash does not match current source bytes",
-                    )
-                )
             fact = inventory_by_path[binding.relative_path].get(binding.symbol)
             if fact is None:
                 findings.append(
@@ -225,8 +292,6 @@ def _inspect_manifest(
                         "declared symbol was not found in the Python AST",
                     )
                 )
-                continue
-            if actual_hash is None:
                 continue
             locations.append(
                 SourceLocation(
@@ -283,25 +348,25 @@ def _inspect_manifest(
         expected_source_tree_hash=_source_tree_hash(expected_by_path),
         actual_source_tree_hash=_source_tree_hash(actual_by_path),
         source_hashes=retained_hashes,
+        provenance_verified=provenance_verified,
     )
 
 
-def _inspect_source_file(
-    source_path: Path,
+def _inspect_source_bytes(
+    source_bytes: bytes | None,
     relative_path: str,
     actual_by_path: dict[str, str | None],
     inventory_by_path: dict[str, dict[str, _SymbolFact]],
     parse_failure_by_path: dict[str, HandbookFindingCode],
 ) -> None:
-    if not source_path.exists() or not _is_regular_file(source_path):
+    if source_bytes is None:
         actual_by_path[relative_path] = None
         inventory_by_path[relative_path] = {}
         return
-    source_bytes = _repository_source_bytes(_read_static_file(source_path))
     actual_hash = sha256_hex(source_bytes)
     actual_by_path[relative_path] = actual_hash
     inventory_by_path[relative_path] = {}
-    if source_path.suffix != ".py":
+    if PurePosixPath(relative_path).suffix != ".py":
         return
     try:
         source_text = _decode_python(source_bytes)
@@ -323,6 +388,64 @@ def _inspect_source_file(
         source_hash=actual_hash,
     )
     inventory_by_path[relative_path] = inventory.facts
+
+
+def _git_object_type(root: Path, object_id: str) -> str | None:
+    completed = _run_git(root, "cat-file", "-t", object_id)
+    if completed.returncode != 0:
+        return None
+    try:
+        return completed.stdout.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return None
+
+
+def _committed_source_bytes(root: Path, commit: str, relative_path: str) -> bytes | None:
+    pathspec = f":(literal){relative_path}"
+    listed = _run_git(root, "ls-tree", "-z", commit, "--", pathspec)
+    if listed.returncode != 0:
+        return None
+    entries = tuple(entry for entry in listed.stdout.split(b"\x00") if entry)
+    if len(entries) != 1 or b"\t" not in entries[0]:
+        return None
+    header, returned_path = entries[0].split(b"\t", 1)
+    header_parts = header.split(b" ")
+    if len(header_parts) != 3:
+        return None
+    mode, object_type, object_id = header_parts
+    if (
+        mode not in {b"100644", b"100755"}
+        or object_type != b"blob"
+        or returned_path != relative_path.encode("utf-8")
+    ):
+        return None
+    blob = _run_git(root, "cat-file", "blob", object_id.decode("ascii"))
+    return blob.stdout if blob.returncode == 0 else None
+
+
+def _git_checkout_path_is_clean(root: Path, commit: str, relative_path: str) -> bool:
+    completed = _run_git(
+        root,
+        "diff",
+        "--quiet",
+        "--no-ext-diff",
+        commit,
+        "--",
+        f":(literal){relative_path}",
+    )
+    return completed.returncode == 0
+
+
+def _run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+    # Arguments are fixed Git operations plus validated OIDs/literal paths; the shell is disabled.
+    return subprocess.run(  # nosec B603
+        ("git", *arguments),
+        cwd=root,
+        check=False,
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        shell=False,
+    )
 
 
 def _render_build(manifest: BehaviorManifest, inspection: _Inspection) -> HandbookBuildResult:
@@ -471,20 +594,27 @@ def _render_markdown(
         "> This is a deterministic derived index of human-authored behavior declarations.",
         "> Python syntax verifies locations only and does not infer behavioral truth.",
         "",
-        f"- Repository: `{manifest.repository}`",
-        f"- Repository commit: `{manifest.repository_commit}`",
-        f"- Manifest SHA-256: `{manifest_hash}`",
-        f"- Source-tree SHA-256: `{inspection.actual_source_tree_hash}`",
+        f"- Repository: {_code_span(manifest.repository)}",
+        f"- Repository commit: {_code_span(manifest.repository_commit)}",
+        f"- Manifest SHA-256: {_code_span(manifest_hash)}",
+        f"- Source-tree SHA-256: {_code_span(inspection.actual_source_tree_hash)}",
         "",
         "## Level 1: Summary",
         "",
     ]
     for behavior in behaviors:
-        lines.extend((f"### `{behavior['behavior_id']}`", "", str(behavior["summary"]), ""))
+        lines.extend(
+            (
+                f"### {_code_span(str(behavior['behavior_id']))}",
+                "",
+                _escape_markdown_text(str(behavior["summary"])),
+                "",
+            )
+        )
     lines.extend(("## Level 2: Contracts, dependencies, and governing rules", ""))
     for behavior in behaviors:
-        lines.extend((f"### `{behavior['behavior_id']}`", "", "Contracts:", ""))
-        lines.extend(f"- {item}" for item in behavior["contracts"])
+        lines.extend((f"### {_code_span(str(behavior['behavior_id']))}", "", "Contracts:", ""))
+        lines.extend(f"- {_escape_markdown_text(str(item))}" for item in behavior["contracts"])
         lines.extend(("", "Dependencies:", ""))
         lines.extend(_markdown_values(behavior["dependencies"]))
         lines.extend(("", "Governing rule versions:", ""))
@@ -492,26 +622,31 @@ def _render_markdown(
         lines.append("")
     lines.extend(("## Level 3: Modules and symbols", ""))
     for behavior in behaviors:
-        lines.extend((f"### `{behavior['behavior_id']}`", ""))
+        lines.extend((f"### {_code_span(str(behavior['behavior_id']))}", ""))
         for location in behavior["source_locations"]:
-            lines.append(f"- `{location['module']}` — `{location['symbol']}` ({location['kind']})")
+            lines.append(
+                f"- {_code_span(str(location['module']))} — "
+                f"{_code_span(str(location['symbol']))} "
+                f"({_escape_markdown_text(str(location['kind']))})"
+            )
         lines.append("")
     lines.extend(("## Level 4: Exact commit, path, lines, and hashes", ""))
     for behavior in behaviors:
-        lines.extend((f"### `{behavior['behavior_id']}`", ""))
+        lines.extend((f"### {_code_span(str(behavior['behavior_id']))}", ""))
         for location in behavior["source_locations"]:
+            source_reference = f"{location['relative_path']}:{location['start_line']}"
             lines.extend(
                 (
-                    f"- Commit: `{location['repository_commit']}`",
-                    f"  - Source: `{location['relative_path']}:{location['start_line']}` "
+                    f"- Commit: {_code_span(str(location['repository_commit']))}",
+                    f"  - Source: {_code_span(source_reference)} "
                     f"through line {location['end_line']}",
-                    f"  - Symbol: `{location['symbol']}`",
-                    f"  - File SHA-256: `{location['source_hash']}`",
-                    f"  - Symbol SHA-256: `{location['symbol_source_hash']}`",
+                    f"  - Symbol: {_code_span(str(location['symbol']))}",
+                    f"  - File SHA-256: {_code_span(str(location['source_hash']))}",
+                    f"  - Symbol SHA-256: {_code_span(str(location['symbol_source_hash']))}",
                 )
             )
         lines.extend(("", "Tests:", ""))
-        lines.extend(f"- `{item}`" for item in behavior["test_paths"])
+        lines.extend(f"- {_code_span(str(item))}" for item in behavior["test_paths"])
         lines.append("")
     return ("\n".join(lines).rstrip() + "\n").encode("utf-8")
 
@@ -622,11 +757,8 @@ def _repository_root(repository_root: Path) -> Path:
 
 
 def _contained_path(root: Path, relative_value: str) -> Path:
-    if "\x00" in relative_value:
-        raise PathContainmentError("declared path escapes repository root")
-    relative = Path(relative_value)
-    if relative.is_absolute() or relative.drive or ".." in relative.parts:
-        raise PathContainmentError("declared path escapes repository root")
+    _validate_repository_relative_path(relative_value)
+    relative = Path(*relative_value.split("/"))
     candidate = root.joinpath(relative)
     try:
         candidate.absolute().relative_to(root)
@@ -640,6 +772,36 @@ def _contained_path(root: Path, relative_value: str) -> Path:
         raise PathContainmentError("declared path escapes repository root") from None
     _assert_no_link_or_reparse(candidate)
     return candidate
+
+
+def _validate_repository_relative_path(relative_value: str) -> None:
+    posix_path = PurePosixPath(relative_value)
+    windows_path = PureWindowsPath(relative_value)
+    segments = relative_value.split("/")
+    if (
+        not relative_value
+        or "\\" in relative_value
+        or ":" in relative_value
+        or relative_value.startswith("/")
+        or posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or bool(windows_path.root)
+        or any(_is_noncanonical_path_segment(segment) for segment in segments)
+        or posix_path.as_posix() != relative_value
+    ):
+        raise PathContainmentError(
+            "declared path must use canonical forward-slash repository-relative syntax"
+        )
+
+
+def _is_noncanonical_path_segment(segment: str) -> bool:
+    windows_basename = segment.split(".", 1)[0].upper()
+    return (
+        segment in {"", ".", ".."}
+        or segment.endswith((".", " "))
+        or windows_basename in _WINDOWS_RESERVED_PATH_NAMES
+    )
 
 
 def _assert_no_link_or_reparse(path: Path) -> None:
@@ -673,31 +835,14 @@ def _is_regular_directory(path: Path) -> bool:
         return False
 
 
-def _read_static_file(path: Path) -> bytes:
-    _assert_no_link_or_reparse(path)
-    if not _is_regular_file(path):
-        raise PathContainmentError("declared path must remain a regular file")
-    data = path.read_bytes()
-    _assert_no_link_or_reparse(path)
-    if not _is_regular_file(path):
-        raise PathContainmentError("declared path must remain a regular file")
-    return data
-
-
 def _decode_python(source_bytes: bytes) -> str:
     readline = iter(source_bytes.splitlines(keepends=True)).__next__
     encoding, _ = tokenize.detect_encoding(readline)
     return source_bytes.decode(encoding)
 
 
-def _repository_source_bytes(source_bytes: bytes) -> bytes:
-    """Return Git's platform-independent text representation for Python source."""
-
-    return source_bytes.replace(b"\r\n", b"\n")
-
-
 def _module_name(relative_path: str) -> str:
-    return ".".join(Path(relative_path).with_suffix("").parts)
+    return ".".join(PurePosixPath(relative_path).with_suffix("").parts)
 
 
 def _pretty_json_bytes(value: Any) -> bytes:
@@ -714,7 +859,34 @@ def _pretty_json_bytes(value: Any) -> bytes:
 
 
 def _markdown_values(values: list[str]) -> list[str]:
-    return [*(f"- `{item}`" for item in values)] or ["- None"]
+    return [*(f"- {_code_span(item)}" for item in values)] or ["- None"]
+
+
+def _escape_markdown_text(value: str) -> str:
+    return "".join(
+        f"\\{character}" if character in string.punctuation else character for character in value
+    )
+
+
+def _code_span(value: str) -> str:
+    longest_run = max((len(run) for run in _backtick_runs(value)), default=0)
+    delimiter = "`" * (longest_run + 1)
+    padding = " " if value.startswith(("`", " ")) or value.endswith(("`", " ")) else ""
+    return f"{delimiter}{padding}{value}{padding}{delimiter}"
+
+
+def _backtick_runs(value: str) -> tuple[str, ...]:
+    retained: list[str] = []
+    current = ""
+    for character in value:
+        if character == "`":
+            current += character
+        elif current:
+            retained.append(current)
+            current = ""
+    if current:
+        retained.append(current)
+    return tuple(retained) or ("",)
 
 
 __all__ = ["build_handbook", "manifest_schema_bytes"]

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from conftest import behavior_entry, manifest, source_binding
+from conftest import _git, behavior_entry, manifest, source_binding
 
 from super_scientist.domain.improvement.models import AssessmentOutcome
 from super_scientist.handbook import (
@@ -37,11 +37,11 @@ def test_source_change_marks_behavior_stale_and_identifies_rules(repository_root
 
     result = verify_handbook(repository_root, declared)
     assert result.valid is False
-    assert built.source_tree_hash != result.actual_source_tree_hash
+    assert built.source_tree_hash == result.actual_source_tree_hash
     assert result.stale_locations == ("src/sample.py:public_function",)
     assert result.affected_behavior_ids == ("behavior-alpha",)
     assert result.affected_rule_version_ids == ("rule-version-alpha",)
-    assert "SOURCE_HASH_MISMATCH" in result.finding_codes
+    assert result.finding_codes == ("CHECKOUT_SOURCE_STALE",)
 
 
 def test_repository_commit_mismatch_is_a_stable_finding(repository_root: Path) -> None:
@@ -141,13 +141,20 @@ def test_missing_source_and_test_are_reported_without_becoming_behavioral_truth(
     )
     result = verify_handbook(repository_root, declared)
     assert result.valid is False
-    assert result.finding_codes == ("SOURCE_NOT_FOUND", "TEST_NOT_FOUND")
+    assert result.finding_codes == (
+        "SOURCE_NOT_FOUND",
+        "COMMIT_SOURCE_MISMATCH",
+        "TEST_NOT_FOUND",
+    )
+    assert result.provenance_verified is False
     assert result.affected_behavior_ids == ("behavior-alpha",)
 
 
 def test_invalid_python_is_a_fixed_syntax_finding(repository_root: Path) -> None:
     source = repository_root / "src" / "sample.py"
     source.write_text("def broken(:\n", encoding="utf-8")
+    _git(repository_root, "add", "src/sample.py")
+    _git(repository_root, "commit", "--quiet", "-m", "invalid Python fixture")
     declared = manifest(
         repository_root,
         behavior_entry(
@@ -155,7 +162,6 @@ def test_invalid_python_is_a_fixed_syntax_finding(repository_root: Path) -> None
             bindings=(
                 source_binding(
                     repository_root,
-                    source_hash="0" * 64,
                 ),
             ),
         ),

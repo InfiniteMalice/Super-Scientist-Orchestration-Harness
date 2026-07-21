@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
 from super_scientist.handbook import (
+    BehaviorEntry,
     BehaviorManifest,
+    SourceBinding,
     build_handbook,
     create_verification_record,
     manifest_schema_bytes,
@@ -17,6 +20,15 @@ from super_scientist.providers.storage.domain_records import HandbookVerificatio
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 HANDBOOK_ROOT = REPOSITORY_ROOT / "docs" / "handbook"
+
+
+def _git(root: Path, *arguments: str) -> bytes:
+    return subprocess.run(
+        ("git", *arguments),
+        cwd=root,
+        check=True,
+        capture_output=True,
+    ).stdout
 
 
 def _repository_manifest() -> BehaviorManifest:
@@ -143,3 +155,104 @@ def test_human_handbook_document_states_derived_authority_and_failure_modes() ->
         "symlink",
     ):
         assert statement in documentation
+
+
+def test_fresh_autocrlf_clone_regenerates_byte_identical_handbook_artifacts(
+    tmp_path: Path,
+) -> None:
+    attributes_path = REPOSITORY_ROOT / ".gitattributes"
+    attributes = attributes_path.read_text(encoding="utf-8")
+    for declaration in (
+        "docs/handbook/*.json text eol=lf",
+        "docs/handbook/*.md text eol=lf",
+        "docs/behavior-handbook.md text eol=lf",
+    ):
+        assert declaration in attributes
+
+    seed = tmp_path / "seed"
+    (seed / "src").mkdir(parents=True)
+    (seed / "tests").mkdir()
+    (seed / "docs" / "handbook").mkdir(parents=True)
+    source_bytes = b"def declared(value: int) -> int:\n    return value + 1\n"
+    (seed / "src" / "sample.py").write_bytes(source_bytes)
+    (seed / "tests" / "test_sample.py").write_bytes(
+        b"def test_sample() -> None:\n    assert True\n"
+    )
+    (seed / ".gitattributes").write_bytes(attributes_path.read_bytes())
+    _git(seed, "init", "--quiet")
+    _git(seed, "config", "user.name", "Handbook Fixture")
+    _git(seed, "config", "user.email", "handbook@example.invalid")
+    _git(seed, "add", ".gitattributes", "src/sample.py", "tests/test_sample.py")
+    _git(seed, "commit", "--quiet", "-m", "source snapshot")
+    commit = _git(seed, "rev-parse", "HEAD").decode("ascii").strip()
+    declared = BehaviorManifest(
+        repository="fresh-clone-fixture",
+        repository_commit=commit,
+        behaviors=(
+            BehaviorEntry(
+                behavior_id="fresh-clone-behavior",
+                summary="Artifacts remain byte-identical across checkout policy.",
+                contracts=("Generated files always use LF bytes.",),
+                inputs=(),
+                outputs=(),
+                preconditions=(),
+                postconditions=(),
+                failure_modes=(),
+                state_read=(),
+                state_written=(),
+                tools=("Git.",),
+                permissions=("Repository read only.",),
+                dependencies=(),
+                governing_rule_version_ids=("rule-portable-rendering-v1",),
+                source_bindings=(
+                    SourceBinding(
+                        repository_commit=commit,
+                        relative_path="src/sample.py",
+                        symbol="declared",
+                        source_hash=hashlib.sha256(source_bytes).hexdigest(),
+                    ),
+                ),
+                test_paths=("tests/test_sample.py",),
+                related_behaviors=(),
+            ),
+        ),
+    )
+    built = build_handbook(seed, declared)
+    generated = {
+        "docs/handbook/behaviors.json": (
+            declared.model_dump_json(indent=2).encode("utf-8") + b"\n"
+        ),
+        "docs/handbook/manifest.schema.json": manifest_schema_bytes(),
+        "docs/handbook/handbook.json": built.json_bytes,
+        "docs/handbook/handbook.md": built.markdown_bytes,
+        "docs/behavior-handbook.md": b"# Behavior handbook\n\nGenerated artifacts use LF.\n",
+    }
+    for relative_path, contents in generated.items():
+        (seed / relative_path).write_bytes(contents)
+    _git(seed, "add", "docs")
+    _git(seed, "commit", "--quiet", "-m", "generated handbook")
+
+    clone = tmp_path / "autocrlf-clone"
+    _git(
+        tmp_path,
+        "-c",
+        "core.autocrlf=true",
+        "clone",
+        "--quiet",
+        "--no-hardlinks",
+        str(seed),
+        str(clone),
+    )
+    cloned_manifest = BehaviorManifest.model_validate_json(
+        (clone / "docs" / "handbook" / "behaviors.json").read_bytes()
+    )
+    cloned_build = build_handbook(clone, cloned_manifest)
+
+    assert cloned_build.json_bytes == (clone / "docs" / "handbook" / "handbook.json").read_bytes()
+    assert cloned_build.markdown_bytes == (clone / "docs" / "handbook" / "handbook.md").read_bytes()
+    assert (
+        manifest_schema_bytes()
+        == (clone / "docs" / "handbook" / "manifest.schema.json").read_bytes()
+    )
+    for relative_path, contents in generated.items():
+        assert (clone / relative_path).read_bytes() == contents

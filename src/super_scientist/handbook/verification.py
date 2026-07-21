@@ -74,7 +74,12 @@ def verify_handbook(
             {
                 finding.location
                 for finding in retained_findings
-                if finding.code is HandbookFindingCode.SOURCE_HASH_MISMATCH
+                if finding.code
+                in {
+                    HandbookFindingCode.COMMIT_SOURCE_MISMATCH,
+                    HandbookFindingCode.CHECKOUT_SOURCE_STALE,
+                    HandbookFindingCode.SOURCE_HASH_MISMATCH,
+                }
                 and finding.location is not None
             }
         )
@@ -91,6 +96,7 @@ def verify_handbook(
     )
     return HandbookVerificationResult(
         valid=not retained_findings,
+        provenance_verified=inspection.provenance_verified,
         repository_commit=manifest.repository_commit,
         manifest_hash=_manifest_hash(manifest),
         expected_source_tree_hash=inspection.expected_source_tree_hash,
@@ -114,6 +120,9 @@ def create_verification_record(
     governing_policy_hash: str,
 ) -> HandbookVerificationRecord:
     """Project a verification result into Task 13's canonical append-only record."""
+
+    if not result.provenance_verified:
+        raise ValueError("a durable handbook record requires verified provenance")
 
     return HandbookVerificationRecord(
         verification_id=verification_id,
@@ -149,6 +158,8 @@ def _affected_behaviors(
         finding.code
         in {
             HandbookFindingCode.REPOSITORY_COMMIT_MISMATCH,
+            HandbookFindingCode.REPOSITORY_COMMIT_NOT_FOUND,
+            HandbookFindingCode.REPOSITORY_OBJECT_NOT_COMMIT,
             HandbookFindingCode.GENERATED_ARTIFACT_MISMATCH,
         }
         for finding in findings

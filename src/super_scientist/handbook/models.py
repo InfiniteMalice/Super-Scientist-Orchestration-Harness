@@ -1,16 +1,33 @@
 from __future__ import annotations
 
+import unicodedata
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from super_scientist.domain.primitives import (
     GitObjectId,
-    NonBlankText,
     Sha256Hex,
-    StableIdentifier,
 )
+
+
+def _require_handbook_text(value: str) -> str:
+    if value != value.strip() or any(
+        unicodedata.category(character).startswith("C")
+        or unicodedata.category(character) in {"Zl", "Zp"}
+        for character in value
+    ):
+        raise ValueError("handbook text must be single-line and control-free")
+    return value
+
+
+HandbookText = Annotated[
+    str,
+    Field(strict=True, min_length=1),
+    AfterValidator(_require_handbook_text),
+]
+HandbookIdentifier = HandbookText
 
 
 class _StrictFrozenModel(BaseModel):
@@ -21,31 +38,31 @@ class SourceBinding(_StrictFrozenModel):
     """A human-authored claim that a behavior is implemented at one source symbol."""
 
     repository_commit: GitObjectId
-    relative_path: NonBlankText
-    symbol: NonBlankText
+    relative_path: HandbookText
+    symbol: HandbookText
     source_hash: Sha256Hex
 
 
 class BehaviorEntry(_StrictFrozenModel):
     """Human-authored behavior truth; source syntax never fills these fields."""
 
-    behavior_id: StableIdentifier
-    summary: NonBlankText
-    contracts: tuple[NonBlankText, ...] = Field(min_length=1)
-    inputs: tuple[NonBlankText, ...]
-    outputs: tuple[NonBlankText, ...]
-    preconditions: tuple[NonBlankText, ...]
-    postconditions: tuple[NonBlankText, ...]
-    failure_modes: tuple[NonBlankText, ...]
-    state_read: tuple[NonBlankText, ...]
-    state_written: tuple[NonBlankText, ...]
-    tools: tuple[NonBlankText, ...]
-    permissions: tuple[NonBlankText, ...]
-    dependencies: tuple[StableIdentifier, ...]
-    governing_rule_version_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    behavior_id: HandbookIdentifier
+    summary: HandbookText
+    contracts: tuple[HandbookText, ...] = Field(min_length=1)
+    inputs: tuple[HandbookText, ...]
+    outputs: tuple[HandbookText, ...]
+    preconditions: tuple[HandbookText, ...]
+    postconditions: tuple[HandbookText, ...]
+    failure_modes: tuple[HandbookText, ...]
+    state_read: tuple[HandbookText, ...]
+    state_written: tuple[HandbookText, ...]
+    tools: tuple[HandbookText, ...]
+    permissions: tuple[HandbookText, ...]
+    dependencies: tuple[HandbookIdentifier, ...]
+    governing_rule_version_ids: tuple[HandbookIdentifier, ...] = Field(min_length=1)
     source_bindings: tuple[SourceBinding, ...] = Field(min_length=1)
-    test_paths: tuple[NonBlankText, ...] = Field(min_length=1)
-    related_behaviors: tuple[StableIdentifier, ...]
+    test_paths: tuple[HandbookText, ...] = Field(min_length=1)
+    related_behaviors: tuple[HandbookIdentifier, ...]
 
     @field_validator(
         "contracts",
@@ -84,7 +101,7 @@ class BehaviorEntry(_StrictFrozenModel):
 
 class BehaviorManifest(_StrictFrozenModel):
     schema_version: Literal[1] = 1
-    repository: NonBlankText
+    repository: HandbookText
     repository_commit: GitObjectId
     behaviors: tuple[BehaviorEntry, ...] = Field(min_length=1)
 
@@ -94,12 +111,20 @@ class BehaviorManifest(_StrictFrozenModel):
         if len(set(behavior_ids)) != len(behavior_ids):
             raise ValueError("behaviors must contain unique behavior_id values")
         known_behaviors = set(behavior_ids)
+        source_hashes_by_path: dict[str, str] = {}
         for behavior in self.behaviors:
             if any(
                 binding.repository_commit != self.repository_commit
                 for binding in behavior.source_bindings
             ):
                 raise ValueError("every source binding must name the manifest repository_commit")
+            for binding in behavior.source_bindings:
+                prior_hash = source_hashes_by_path.setdefault(
+                    binding.relative_path,
+                    binding.source_hash,
+                )
+                if prior_hash != binding.source_hash:
+                    raise ValueError("every binding for one source path must declare the same hash")
             references = set(behavior.dependencies) | set(behavior.related_behaviors)
             unknown = references - known_behaviors
             if unknown:
@@ -119,11 +144,11 @@ class SourceSymbolKind(StrEnum):
 
 
 class SourceLocation(_StrictFrozenModel):
-    behavior_id: StableIdentifier
+    behavior_id: HandbookIdentifier
     repository_commit: GitObjectId
-    relative_path: NonBlankText
-    module: NonBlankText
-    symbol: NonBlankText
+    relative_path: HandbookText
+    module: HandbookText
+    symbol: HandbookText
     kind: SourceSymbolKind
     start_line: int = Field(strict=True, ge=1)
     end_line: int = Field(strict=True, ge=1)
@@ -140,14 +165,14 @@ class SourceLocation(_StrictFrozenModel):
 
 
 class SourceBehaviorLink(_StrictFrozenModel):
-    relative_path: NonBlankText
-    symbol: NonBlankText
-    behavior_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    relative_path: HandbookText
+    symbol: HandbookText
+    behavior_ids: tuple[HandbookIdentifier, ...] = Field(min_length=1)
 
 
 class RuleBehaviorLink(_StrictFrozenModel):
-    rule_version_id: StableIdentifier
-    behavior_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    rule_version_id: HandbookIdentifier
+    behavior_ids: tuple[HandbookIdentifier, ...] = Field(min_length=1)
 
 
 class HandbookBuildResult(_StrictFrozenModel):
@@ -166,6 +191,10 @@ class HandbookBuildResult(_StrictFrozenModel):
 
 class HandbookFindingCode(StrEnum):
     REPOSITORY_COMMIT_MISMATCH = "REPOSITORY_COMMIT_MISMATCH"
+    REPOSITORY_COMMIT_NOT_FOUND = "REPOSITORY_COMMIT_NOT_FOUND"
+    REPOSITORY_OBJECT_NOT_COMMIT = "REPOSITORY_OBJECT_NOT_COMMIT"
+    COMMIT_SOURCE_MISMATCH = "COMMIT_SOURCE_MISMATCH"
+    CHECKOUT_SOURCE_STALE = "CHECKOUT_SOURCE_STALE"
     SOURCE_NOT_FOUND = "SOURCE_NOT_FOUND"
     SOURCE_NOT_REGULAR_FILE = "SOURCE_NOT_REGULAR_FILE"
     SOURCE_NOT_PYTHON = "SOURCE_NOT_PYTHON"
@@ -180,14 +209,15 @@ class HandbookFindingCode(StrEnum):
 
 class HandbookFinding(_StrictFrozenModel):
     code: HandbookFindingCode
-    message: NonBlankText
-    behavior_id: StableIdentifier | None
-    location: NonBlankText | None
+    message: HandbookText
+    behavior_id: HandbookIdentifier | None
+    location: HandbookText | None
 
 
 class HandbookVerificationResult(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     valid: bool
+    provenance_verified: bool
     repository_commit: GitObjectId
     manifest_hash: Sha256Hex
     expected_source_tree_hash: Sha256Hex
@@ -196,10 +226,10 @@ class HandbookVerificationResult(_StrictFrozenModel):
     generated_artifact_hash: Sha256Hex
     findings: tuple[HandbookFinding, ...]
     finding_codes: tuple[HandbookFindingCode, ...]
-    stale_locations: tuple[NonBlankText, ...]
-    missing_symbols: tuple[NonBlankText, ...]
-    affected_behavior_ids: tuple[StableIdentifier, ...]
-    affected_rule_version_ids: tuple[StableIdentifier, ...]
+    stale_locations: tuple[HandbookText, ...]
+    missing_symbols: tuple[HandbookText, ...]
+    affected_behavior_ids: tuple[HandbookIdentifier, ...]
+    affected_rule_version_ids: tuple[HandbookIdentifier, ...]
 
     @model_validator(mode="after")
     def require_result_consistency(self) -> Self:
@@ -208,6 +238,8 @@ class HandbookVerificationResult(_StrictFrozenModel):
             raise ValueError("finding_codes must exactly project findings")
         if self.valid != (not self.findings):
             raise ValueError("valid must exactly reflect whether findings are absent")
+        if self.valid and not self.provenance_verified:
+            raise ValueError("valid verification requires verified provenance")
         return self
 
 

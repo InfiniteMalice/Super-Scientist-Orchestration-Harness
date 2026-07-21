@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from super_scientist.handbook import (
     BehaviorEntry,
@@ -15,7 +18,18 @@ from super_scientist.handbook import (
     verify_handbook,
 )
 
-COMMIT = "a" * 40
+
+def _git(root: Path, *arguments: str) -> bytes:
+    return subprocess.run(
+        ("git", *arguments),
+        cwd=root,
+        check=True,
+        capture_output=True,
+    ).stdout
+
+
+def _head(root: Path) -> str:
+    return _git(root, "rev-parse", "HEAD").decode("ascii").strip()
 
 
 def _digest(path: Path) -> str:
@@ -34,6 +48,11 @@ def _repository(tmp_path: Path) -> Path:
         "def test_inside() -> None:\n    assert True\n",
         encoding="utf-8",
     )
+    _git(root, "init", "--quiet")
+    _git(root, "config", "user.name", "Handbook Fixture")
+    _git(root, "config", "user.email", "handbook@example.invalid")
+    _git(root, "add", "src/inside.py", "tests/test_inside.py")
+    _git(root, "commit", "--quiet", "-m", "fixture snapshot")
     return root
 
 
@@ -46,15 +65,16 @@ def _manifest(
     test_paths: tuple[str, ...] = ("tests/test_inside.py",),
 ) -> BehaviorManifest:
     target = root / Path(path)
+    commit = _head(root)
     binding = SourceBinding(
-        repository_commit=COMMIT,
+        repository_commit=commit,
         relative_path=path,
         symbol=symbol,
         source_hash=source_hash or (_digest(target) if target.is_file() else "f" * 64),
     )
     return BehaviorManifest(
         repository="adversarial-fixture",
-        repository_commit=COMMIT,
+        repository_commit=commit,
         behaviors=(
             BehaviorEntry(
                 behavior_id="contained-behavior",
@@ -95,6 +115,115 @@ def test_manifest_cannot_escape_repository(tmp_path: Path, escape: str) -> None:
     (tmp_path / "outside.py").write_text("def declared() -> None:\n    pass\n", encoding="utf-8")
     with pytest.raises(PathContainmentError):
         verify_handbook(root, _manifest(root, path=escape, source_hash="f" * 64))
+
+
+@pytest.mark.parametrize(
+    "noncanonical_path",
+    (
+        "",
+        ".",
+        "./src/inside.py",
+        "src/./inside.py",
+        "src/../inside.py",
+        "src//inside.py",
+        "src/inside.py/",
+        "src\\inside.py",
+        "C:/outside.py",
+        "C:\\outside.py",
+        "/absolute/outside.py",
+        "//server/share/outside.py",
+        "\\\\server\\share\\outside.py",
+        "\\\\?\\C:\\outside.py",
+        "\\\\.\\C:\\outside.py",
+        "CON",
+        "src/NUL.py",
+        "src/COM1",
+        "src/LPT9.txt",
+        "src:inside.py",
+        "src/trailing./inside.py",
+        "src/trailing /inside.py",
+        " src/inside.py",
+        "src/inside.py ",
+    ),
+)
+def test_repository_paths_use_one_host_independent_canonical_syntax(
+    tmp_path: Path,
+    noncanonical_path: str,
+) -> None:
+    root = _repository(tmp_path)
+    payload = json.loads(_manifest(root).model_dump_json())
+    payload["behaviors"][0]["source_bindings"][0]["relative_path"] = noncanonical_path
+    with pytest.raises((ValidationError, PathContainmentError)):
+        declared = BehaviorManifest.model_validate_json(json.dumps(payload))
+        verify_handbook(root, declared)
+
+
+@pytest.mark.parametrize(
+    ("field_path", "malicious_text"),
+    (
+        (("repository",), "repository\n## injected"),
+        (("behaviors", 0, "summary"), "summary\r## injected"),
+        (("behaviors", 0, "outputs", 0), "output\u2028## injected"),
+        (("behaviors", 0, "contracts", 0), "contract\x00hidden"),
+        (("behaviors", 0, "inputs", 0), "input\x1bhidden"),
+        (
+            ("behaviors", 0, "governing_rule_version_ids", 0),
+            "rule-safe\u202eunsafe",
+        ),
+        (
+            ("behaviors", 0, "source_bindings", 0, "relative_path"),
+            "src/in\nside.py",
+        ),
+        (("behaviors", 0, "source_bindings", 0, "symbol"), "declared\n### injected"),
+        (("behaviors", 0, "test_paths", 0), "tests/test_inside.py\rinjected"),
+    ),
+)
+def test_every_renderable_manifest_string_is_single_line_and_control_free(
+    tmp_path: Path,
+    field_path: tuple[str | int, ...],
+    malicious_text: str,
+) -> None:
+    payload = json.loads(_manifest(_repository(tmp_path)).model_dump_json())
+    target: object = payload
+    for component in field_path[:-1]:
+        target = target[component]  # type: ignore[index]
+    target[field_path[-1]] = malicious_text  # type: ignore[index]
+
+    with pytest.raises(ValidationError, match="single-line and control-free"):
+        BehaviorManifest.model_validate_json(json.dumps(payload))
+
+
+def test_markdown_escapes_valid_structural_punctuation_without_new_headings(
+    tmp_path: Path,
+) -> None:
+    root = _repository(tmp_path)
+    base = _manifest(root).behaviors[0]
+    dangerous_behavior = BehaviorEntry.model_validate(
+        base.model_dump(mode="python")
+        | {
+            "behavior_id": "behavior`[pipe|marker]",
+            "summary": "Summary # heading | pipe `ticks` [label](target)!",
+            "contracts": ("Contract *emphasis* | `code` [link](target).",),
+            "governing_rule_version_ids": ("rule`[pipe|marker]",),
+        }
+    )
+    declared = BehaviorManifest(
+        repository="repository`[pipe|marker]",
+        repository_commit=_head(root),
+        behaviors=(dangerous_behavior,),
+    )
+
+    markdown = build_handbook(root, declared).markdown_bytes.decode("utf-8")
+
+    assert [line for line in markdown.splitlines() if line.startswith("## ")] == [
+        "## Level 1: Summary",
+        "## Level 2: Contracts, dependencies, and governing rules",
+        "## Level 3: Modules and symbols",
+        "## Level 4: Exact commit, path, lines, and hashes",
+    ]
+    assert "### ``behavior`[pipe|marker]``" in markdown
+    assert r"Summary \# heading \| pipe \`ticks\` \[label\]\(target\)\!" in markdown
+    assert r"Contract \*emphasis\* \| \`code\` \[link\]\(target\)\." in markdown
 
 
 def test_symlinked_source_parent_escape_is_rejected(tmp_path: Path) -> None:
@@ -166,6 +295,8 @@ def test_ast_inventory_never_imports_or_executes_declared_source(tmp_path: Path)
         "    return 'syntax only'\n",
         encoding="utf-8",
     )
+    _git(root, "add", "src/inside.py")
+    _git(root, "commit", "--quiet", "-m", "static AST fixture")
     built = build_handbook(root, _manifest(root))
     assert built.source_locations[0].symbol == "declared"
     assert not marker.exists()
