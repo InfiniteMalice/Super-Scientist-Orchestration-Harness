@@ -9,7 +9,9 @@ boundaries`). A second, separate review-reconciliation commit uses the required 
 fix is a third separate commit with the required subject
 `fix: seal protected response error paths`. The final Pydantic normalization correction
 is a fourth separate commit with the required subject
-`fix: revalidate protected result instances`.
+`fix: revalidate protected result instances`. The final type-check ordering correction
+is a fifth separate commit with the required subject
+`fix: order exact protected result type checks`.
 
 The final design keeps protected answers in a physically separate store and sends only
 strict typed hashes, aggregates, and checker outcomes into ordinary campaign storage.
@@ -86,6 +88,20 @@ replaced outside their exception context with the existing fixed
 `INVALID_CHECKER_RESULT` error. The coordinator's downstream record/repository failure
 mapping is likewise cause-free as a defense in depth.
 
+One final ordering review found that the exact-type helper still called `isinstance()`
+before `type()`. Python may consult an ordinary object's dynamic `__class__` attribute
+for `isinstance()`, so an object whose property raised could escape both public
+boundaries as a raw attacker-controlled exception before the exact-type check ran.
+
+The focused RED selected two boundary cases and failed both (48 deselected) in 8.77
+seconds. Validator and gateway each displayed their distinctive held-out value in a raw
+`RuntimeError` raised by the dynamic `__class__` property. After the correction, the
+identical slice passed 2 of 2 (48 deselected) in 6.90 seconds. The helper's first and
+sole type precondition is now built-in identity via
+`type(result) is ProtectedCheckerResult`; it performs no `isinstance()`, serialization,
+attribute access, or other input operation before rejecting a non-exact object. Exact
+instances continue through the same fresh Pydantic revalidation path.
+
 ## Transaction and authority model
 
 Evaluator validation and coordinator persistence are separate authorities:
@@ -93,9 +109,9 @@ Evaluator validation and coordinator persistence are separate authorities:
 - `ProtectedResultValidator` is a spawned evaluator-facing capability. It accepts
   strict JSON, reconstructs a `ProtectedCheckerResult`, and returns only that validated
   DTO. Its parent entry point requires that exact DTO type rather than accepting
-  subclasses or duck-typed serializers, then revalidates even that exact instance into
-  a fresh canonical DTO. It owns no SQLAlchemy object, database URL, protected path, or
-  repository.
+  subclasses or duck-typed serializers, using built-in type identity before any dynamic
+  object protocol, then revalidates even that exact instance into a fresh canonical
+  DTO. It owns no SQLAlchemy object, database URL, protected path, or repository.
 - `ProtectedResultGateway` remains the coordinator-facing persistence protocol. Its
   implementation is a local adapter over the caller's supplied active SQLAlchemy
   connection. It uses repositories bound to that exact connection and never creates
@@ -151,6 +167,10 @@ now receive the same fixed error before parent-side serialization or coordinator
 construction. A valid exact instance is rebuilt as an equal but distinct canonical DTO.
 Duplicate repository writes additionally prove that defense-in-depth gateway mapping
 retains no storage exception as a cause or context.
+
+Ordinary objects with raising dynamic `__class__` properties are rejected before that
+property can execute. Validator and gateway regressions prove the fixed error retains
+no property exception, cause, context, traceback chain, or held-out value.
 
 ## Existing Task 13 storage retained
 
@@ -219,6 +239,22 @@ Final DTO-normalization verification adds:
   enum false positives, while repository-wide Ruff formatting reported 18 unrelated
   pre-existing files after the owned file was formatted.
 
+Final exact-type ordering verification adds:
+
+- dynamic-`__class__` RED: 2 failed, 48 deselected in 8.77 seconds;
+- identical focused GREEN: 2 passed, 48 deselected in 6.90 seconds;
+- final ordering and normalization regression slice: 7 passed, 43 deselected in
+  20.64 seconds;
+- complete protected-evaluation file: 50 passed in 119.99 seconds;
+- boundary/reviewer selection: 21 passed, 29 deselected in 29.77 seconds;
+- protected coverage run: 50 passed in 161.39 seconds with 94.28% branch-aware
+  coverage over 525 statements and 104 branches;
+- adjacent migration 0006 and harness append-only properties: 13 passed in 14.18
+  seconds; and
+- repository Ruff lint, owned-file Ruff formatting, strict mypy across 81 source
+  files, owned default-severity Bandit, recursive medium-or-higher Bandit, and
+  `git diff --check`: passed.
+
 ## Release gates
 
 - Repository Ruff lint: passed.
@@ -245,6 +281,15 @@ passed Twine; the wheel contains migration 0006, `protected_evaluation.py`, and
 `model_construct` attacks at both public boundaries without cause/context or held-out
 value leakage, accepted a valid spawned-validator call, persisted a valid gateway
 result, and ran installed `scientist-harness --help`.
+
+The exact-type ordering correction produced another fresh isolated sdist and wheel;
+both passed Twine and the wheel retained migration 0006 plus the protected storage
+modules. A fresh short-path install resolved the protected module from
+`C:\c13typeorder\Lib\site-packages`. Installed-wheel smoke rejected the raising
+dynamic-`__class__` object through both public boundaries without evaluating its
+property, retained valid exact-instance freshness, validated a legitimate spawned
+result, persisted a legitimate gateway result, and ran installed
+`scientist-harness --help`.
 
 ## Files in the closure fix
 

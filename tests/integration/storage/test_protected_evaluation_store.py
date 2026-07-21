@@ -255,6 +255,22 @@ def test_result_validator_rejects_answer_bearing_subclass_without_exception_leak
 
 
 @pytest.mark.integration
+def test_result_validator_checks_exact_type_before_dynamic_class_access() -> None:
+    secret = "validator-dynamic-class-held-out-answer"
+    malformed = _RaisingDynamicClassObject(secret)
+    validator = protected_evaluation_module.create_protected_result_validator()
+    try:
+        with pytest.raises(ProtectedCapabilityError) as captured:
+            validator.validate_result(malformed)  # type: ignore[arg-type]
+        _assert_fixed_non_leaking_result_error(
+            captured.value,
+            sensitive_values=(secret,),
+        )
+    finally:
+        validator.close()
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize("construction", ("model_copy", "model_construct"))
 def test_result_validator_revalidates_exact_instances_before_serializing(
     construction: str,
@@ -305,6 +321,31 @@ def test_result_gateway_rejects_malformed_dto_without_exception_leak(tmp_path: P
                 _assert_fixed_non_leaking_result_error(
                     captured.value,
                     sensitive_values=(secret.decode(), protected_path),
+                )
+            finally:
+                gateway.close()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_result_gateway_checks_exact_type_before_dynamic_class_access(tmp_path: Path) -> None:
+    secret = "gateway-dynamic-class-held-out-answer"
+    malformed = _RaisingDynamicClassObject(secret)
+    main_url = f"sqlite+pysqlite:///{(tmp_path / 'main.db').as_posix()}"
+    upgrade_database(main_url)
+    engine = create_database_engine(main_url)
+    try:
+        with DatabaseUnitOfWork(engine) as unit_of_work:
+            connection = unit_of_work.connection
+            assert connection is not None
+            gateway = create_protected_result_gateway(connection)
+            try:
+                with pytest.raises(ProtectedCapabilityError) as captured:
+                    gateway.append_result(malformed)  # type: ignore[arg-type]
+                _assert_fixed_non_leaking_result_error(
+                    captured.value,
+                    sensitive_values=(secret,),
                 )
             finally:
                 gateway.close()
@@ -1173,6 +1214,15 @@ class _MalformedProtectedCheckerResult:
         payload["answer_bytes"] = self._secret
         payload["answer_path"] = self._protected_path
         return payload
+
+
+class _RaisingDynamicClassObject:
+    def __init__(self, secret: str) -> None:
+        self._secret = secret
+
+    @property
+    def __class__(self) -> type[object]:
+        raise RuntimeError(self._secret)
 
 
 def _assert_fixed_non_leaking_result_error(

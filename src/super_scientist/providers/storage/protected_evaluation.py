@@ -528,10 +528,14 @@ class _CoordinatorProtectedResultGateway:
 
 
 def _require_exact_checker_result(result: object) -> ProtectedCheckerResult:
+    if type(result) is not ProtectedCheckerResult:
+        raise ProtectedCapabilityError(
+            "INVALID_CHECKER_RESULT",
+            "protected checker result is invalid",
+        ) from None
     validated: ProtectedCheckerResult | None = None
-    if isinstance(result, ProtectedCheckerResult) and type(result) is ProtectedCheckerResult:
-        with suppress(TypeError, ValueError):
-            validated = ProtectedCheckerResult.model_validate(result)
+    with suppress(TypeError, ValueError):
+        validated = ProtectedCheckerResult.model_validate(result)
     if validated is None:
         raise ProtectedCapabilityError(
             "INVALID_CHECKER_RESULT",
