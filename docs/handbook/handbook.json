@@ -1,0 +1,534 @@
+{
+  "authority": {
+    "authoritative_inputs": [
+      "human-authored manifest",
+      "source",
+      "tests",
+      "governance policy",
+      "active behavioral rules"
+    ],
+    "derived_index": true,
+    "syntax_infers_behavior": false
+  },
+  "behaviors": [
+    {
+      "behavior_id": "artifact-containment",
+      "contracts": [
+        "Content-addressed artifacts remain beneath the configured trusted root.",
+        "Static symlink and Windows reparse-point escapes fail closed."
+      ],
+      "dependencies": [],
+      "failure_modes": [
+        "Unavailable, non-regular, escaped, or hash-mismatched artifacts raise a fixed storage error."
+      ],
+      "governing_rule_version_ids": [
+        "rule-version-path-containment-v1"
+      ],
+      "inputs": [
+        "Immutable artifact bytes, media type, and a trusted storage root."
+      ],
+      "outputs": [
+        "A content-addressed artifact reference whose digest and size bind the stored bytes."
+      ],
+      "permissions": [
+        "Read and write only the configured artifact namespace."
+      ],
+      "postconditions": [
+        "Authoritative references resolve only to regular files with matching SHA-256 and size."
+      ],
+      "preconditions": [
+        "The configured root is a trusted local filesystem path."
+      ],
+      "related_behaviors": [
+        "protected-evaluation-separation"
+      ],
+      "source_locations": [
+        {
+          "end_line": 124,
+          "kind": "CLASS",
+          "module": "src.super_scientist.providers.storage.artifacts",
+          "relationship": "IMPLEMENTS",
+          "relative_path": "src/super_scientist/providers/storage/artifacts.py",
+          "repository_commit": "c5de7d14f530e172216f35d8a5453057aa257f61",
+          "source_hash": "5502058494d8cf902bcb2b5964e2800c8ac952f57a5b39e3fba964732f35d2ca",
+          "start_line": 19,
+          "symbol": "FileArtifactStore",
+          "symbol_source_hash": "ea47ec2c15b6b3c23d605840f3121e9dc0143c1a6cc4bff8a0e47ef75089ad3b",
+          "verification_method": "PYTHON_AST_SYMBOL_AND_SHA256"
+        }
+      ],
+      "state_read": [
+        "Existing content-addressed artifact bytes and filesystem metadata."
+      ],
+      "state_written": [
+        "Immutable content-addressed files beneath the configured root."
+      ],
+      "summary": "Persist and retrieve immutable artifacts without allowing static path escapes.",
+      "test_paths": [
+        "tests/integration/storage/test_artifacts.py"
+      ],
+      "tools": [
+        "Python pathlib, lstat, hard links, and SHA-256."
+      ]
+    },
+    {
+      "behavior_id": "protected-evaluation-separation",
+      "contracts": [
+        "Only strict hashes, aggregates, and checker outcomes cross the evaluator boundary.",
+        "Protected expected outputs remain outside the ordinary repository set and main database."
+      ],
+      "dependencies": [
+        "artifact-containment"
+      ],
+      "failure_modes": [
+        "Malformed or desynchronized worker exchanges poison the capability channel.",
+        "Protected storage failures return fixed responses without answer or path leakage."
+      ],
+      "governing_rule_version_ids": [
+        "rule-version-protected-holdout-separation-v1"
+      ],
+      "inputs": [
+        "Protected answer bytes supplied only to separately scoped evaluation capabilities."
+      ],
+      "outputs": [
+        "Validated protected checker results containing non-reversible hashes and aggregates."
+      ],
+      "permissions": [
+        "Role-specific capabilities expose only answer reading, integrity auditing, result validation, or coordinator persistence."
+      ],
+      "postconditions": [
+        "Ordinary storage and serialized result DTOs contain no answer bytes or reversible references."
+      ],
+      "preconditions": [
+        "The protected store uses a physically distinct database and artifact root."
+      ],
+      "related_behaviors": [
+        "artifact-containment"
+      ],
+      "source_locations": [
+        {
+          "end_line": 325,
+          "kind": "CLASS",
+          "module": "src.super_scientist.providers.storage.protected_evaluation",
+          "relationship": "IMPLEMENTS",
+          "relative_path": "src/super_scientist/providers/storage/protected_evaluation.py",
+          "repository_commit": "c5de7d14f530e172216f35d8a5453057aa257f61",
+          "source_hash": "5991f6326016034769f1dc33216c1ab47f53b3d787e00aba7559e8ecb6ab1dfe",
+          "start_line": 218,
+          "symbol": "ProtectedEvaluationStore",
+          "symbol_source_hash": "a6d23256b3baeda6d547c41f12d182ee6d1ef55289690e59d7823774cde4f788",
+          "verification_method": "PYTHON_AST_SYMBOL_AND_SHA256"
+        }
+      ],
+      "state_read": [
+        "Protected expected-output metadata and content-addressed bytes through scoped readers."
+      ],
+      "state_written": [
+        "Protected metadata and artifacts, plus ordinary non-secret checker-result records."
+      ],
+      "summary": "Keep held-out expected outputs physically and capability-wise separate from candidates and ordinary storage.",
+      "test_paths": [
+        "tests/integration/storage/test_protected_evaluation_store.py"
+      ],
+      "tools": [
+        "Spawned-process strict JSON capabilities, SQLite, and content-addressed storage."
+      ]
+    },
+    {
+      "behavior_id": "transactional-admission-coordination",
+      "contracts": [
+        "Every durable proposal is normalized, governed, projected, decided, and audited in one transaction.",
+        "Exact replay resolves before new proposal execution and retains original authority."
+      ],
+      "dependencies": [
+        "workspace-integrity-verification"
+      ],
+      "failure_modes": [
+        "Integrity, programming, database, and filesystem failures propagate and roll back.",
+        "Safe malformed proposals become fixed durable rejections only when truthful identity is available."
+      ],
+      "governing_rule_version_ids": [
+        "rule-version-transaction-authority-v1"
+      ],
+      "inputs": [
+        "A strict typed proposal or bounded untrusted proposal attempt."
+      ],
+      "outputs": [
+        "One transaction decision and one policy-attributed audit event."
+      ],
+      "permissions": [
+        "Construct only the narrow read and write capabilities registered for the proposal kind."
+      ],
+      "postconditions": [
+        "Accepted projections, the decision, and the audit event commit atomically or not at all."
+      ],
+      "preconditions": [
+        "The workspace passes integrity verification and has an active registered governance policy."
+      ],
+      "related_behaviors": [
+        "workspace-integrity-verification"
+      ],
+      "source_locations": [
+        {
+          "end_line": 590,
+          "kind": "CLASS",
+          "module": "src.super_scientist.application.transactions.coordinator",
+          "relationship": "IMPLEMENTS",
+          "relative_path": "src/super_scientist/application/transactions/coordinator.py",
+          "repository_commit": "c5de7d14f530e172216f35d8a5453057aa257f61",
+          "source_hash": "75fa7325ad84cbff7db9effc5d001e4c33c140cee23e1b99ccdad0db444d9b7c",
+          "start_line": 175,
+          "symbol": "TransactionCoordinator",
+          "symbol_source_hash": "7adb09cac8b17a32a516a04dd838502361a407b6d2168053224d2ade681cac9a",
+          "verification_method": "PYTHON_AST_SYMBOL_AND_SHA256"
+        }
+      ],
+      "state_read": [
+        "The complete verified workspace, replay records, active policy, and focused domain context."
+      ],
+      "state_written": [
+        "Accepted domain projections, one append-only decision, and one append-only audit event."
+      ],
+      "summary": "Coordinate governed domain proposals while preserving exact replay, audit, and atomicity.",
+      "test_paths": [
+        "tests/integration/application/test_transaction_coordinator.py"
+      ],
+      "tools": [
+        "SQLAlchemy unit of work and a fixed source-controlled proposal router."
+      ]
+    },
+    {
+      "behavior_id": "workspace-integrity-verification",
+      "contracts": [
+        "Reconstruct authoritative state and compare every governed projection before mutation or replay.",
+        "Reject tampered, orphaned, causally impossible, or unsupported durable records."
+      ],
+      "dependencies": [],
+      "failure_modes": [
+        "Any mismatch raises storage integrity failure and prevents the requested mutation."
+      ],
+      "governing_rule_version_ids": [
+        "rule-version-workspace-integrity-v1"
+      ],
+      "inputs": [
+        "Append-only records, audit history, policy snapshots, and rebuildable heads."
+      ],
+      "outputs": [
+        "A successful integrity result or a fixed integrity failure."
+      ],
+      "permissions": [
+        "Read authoritative repositories and replay through narrow in-memory capabilities."
+      ],
+      "postconditions": [
+        "Every verified projection exactly matches replayed authoritative history."
+      ],
+      "preconditions": [
+        "The database is opened with foreign-key enforcement and the supported migration head."
+      ],
+      "related_behaviors": [
+        "transactional-admission-coordination"
+      ],
+      "source_locations": [
+        {
+          "end_line": 647,
+          "kind": "FUNCTION",
+          "module": "src.super_scientist.application.workspace_integrity",
+          "relationship": "IMPLEMENTS",
+          "relative_path": "src/super_scientist/application/workspace_integrity.py",
+          "repository_commit": "c5de7d14f530e172216f35d8a5453057aa257f61",
+          "source_hash": "b351259e05306dca2f7a1d76749707f1f90e39f018833be3d5607fd36c491f1d",
+          "start_line": 598,
+          "symbol": "verify_workspace",
+          "symbol_source_hash": "19eaca47de650a42e2a66fe54a14983d39003b425f705450f83b8811a4a96876",
+          "verification_method": "PYTHON_AST_SYMBOL_AND_SHA256"
+        }
+      ],
+      "state_read": [
+        "All authoritative records, projections, and the audit chain."
+      ],
+      "state_written": [],
+      "summary": "Reconcile the complete workspace against deterministic replay before durable operations.",
+      "test_paths": [
+        "tests/integration/application/test_workspace_integrity.py"
+      ],
+      "tools": [
+        "Strict record decoding, audit-chain verification, and deterministic domain replay."
+      ]
+    }
+  ],
+  "disclosure_levels": [
+    {
+      "behaviors": [
+        {
+          "behavior_id": "artifact-containment",
+          "summary": "Persist and retrieve immutable artifacts without allowing static path escapes."
+        },
+        {
+          "behavior_id": "protected-evaluation-separation",
+          "summary": "Keep held-out expected outputs physically and capability-wise separate from candidates and ordinary storage."
+        },
+        {
+          "behavior_id": "transactional-admission-coordination",
+          "summary": "Coordinate governed domain proposals while preserving exact replay, audit, and atomicity."
+        },
+        {
+          "behavior_id": "workspace-integrity-verification",
+          "summary": "Reconcile the complete workspace against deterministic replay before durable operations."
+        }
+      ],
+      "level": 1,
+      "name": "summary"
+    },
+    {
+      "behaviors": [
+        {
+          "behavior_id": "artifact-containment",
+          "contracts": [
+            "Content-addressed artifacts remain beneath the configured trusted root.",
+            "Static symlink and Windows reparse-point escapes fail closed."
+          ],
+          "dependencies": [],
+          "governing_rule_version_ids": [
+            "rule-version-path-containment-v1"
+          ]
+        },
+        {
+          "behavior_id": "protected-evaluation-separation",
+          "contracts": [
+            "Only strict hashes, aggregates, and checker outcomes cross the evaluator boundary.",
+            "Protected expected outputs remain outside the ordinary repository set and main database."
+          ],
+          "dependencies": [
+            "artifact-containment"
+          ],
+          "governing_rule_version_ids": [
+            "rule-version-protected-holdout-separation-v1"
+          ]
+        },
+        {
+          "behavior_id": "transactional-admission-coordination",
+          "contracts": [
+            "Every durable proposal is normalized, governed, projected, decided, and audited in one transaction.",
+            "Exact replay resolves before new proposal execution and retains original authority."
+          ],
+          "dependencies": [
+            "workspace-integrity-verification"
+          ],
+          "governing_rule_version_ids": [
+            "rule-version-transaction-authority-v1"
+          ]
+        },
+        {
+          "behavior_id": "workspace-integrity-verification",
+          "contracts": [
+            "Reconstruct authoritative state and compare every governed projection before mutation or replay.",
+            "Reject tampered, orphaned, causally impossible, or unsupported durable records."
+          ],
+          "dependencies": [],
+          "governing_rule_version_ids": [
+            "rule-version-workspace-integrity-v1"
+          ]
+        }
+      ],
+      "level": 2,
+      "name": "contracts_dependencies_rules"
+    },
+    {
+      "behaviors": [
+        {
+          "behavior_id": "artifact-containment",
+          "locations": [
+            {
+              "kind": "CLASS",
+              "module": "src.super_scientist.providers.storage.artifacts",
+              "symbol": "FileArtifactStore"
+            }
+          ]
+        },
+        {
+          "behavior_id": "protected-evaluation-separation",
+          "locations": [
+            {
+              "kind": "CLASS",
+              "module": "src.super_scientist.providers.storage.protected_evaluation",
+              "symbol": "ProtectedEvaluationStore"
+            }
+          ]
+        },
+        {
+          "behavior_id": "transactional-admission-coordination",
+          "locations": [
+            {
+              "kind": "CLASS",
+              "module": "src.super_scientist.application.transactions.coordinator",
+              "symbol": "TransactionCoordinator"
+            }
+          ]
+        },
+        {
+          "behavior_id": "workspace-integrity-verification",
+          "locations": [
+            {
+              "kind": "FUNCTION",
+              "module": "src.super_scientist.application.workspace_integrity",
+              "symbol": "verify_workspace"
+            }
+          ]
+        }
+      ],
+      "level": 3,
+      "name": "modules_symbols"
+    },
+    {
+      "behaviors": [
+        {
+          "behavior_id": "artifact-containment",
+          "source_locations": [
+            {
+              "end_line": 124,
+              "kind": "CLASS",
+              "module": "src.super_scientist.providers.storage.artifacts",
+              "relationship": "IMPLEMENTS",
+              "relative_path": "src/super_scientist/providers/storage/artifacts.py",
+              "repository_commit": "c5de7d14f530e172216f35d8a5453057aa257f61",
+              "source_hash": "5502058494d8cf902bcb2b5964e2800c8ac952f57a5b39e3fba964732f35d2ca",
+              "start_line": 19,
+              "symbol": "FileArtifactStore",
+              "symbol_source_hash": "ea47ec2c15b6b3c23d605840f3121e9dc0143c1a6cc4bff8a0e47ef75089ad3b",
+              "verification_method": "PYTHON_AST_SYMBOL_AND_SHA256"
+            }
+          ],
+          "test_paths": [
+            "tests/integration/storage/test_artifacts.py"
+          ]
+        },
+        {
+          "behavior_id": "protected-evaluation-separation",
+          "source_locations": [
+            {
+              "end_line": 325,
+              "kind": "CLASS",
+              "module": "src.super_scientist.providers.storage.protected_evaluation",
+              "relationship": "IMPLEMENTS",
+              "relative_path": "src/super_scientist/providers/storage/protected_evaluation.py",
+              "repository_commit": "c5de7d14f530e172216f35d8a5453057aa257f61",
+              "source_hash": "5991f6326016034769f1dc33216c1ab47f53b3d787e00aba7559e8ecb6ab1dfe",
+              "start_line": 218,
+              "symbol": "ProtectedEvaluationStore",
+              "symbol_source_hash": "a6d23256b3baeda6d547c41f12d182ee6d1ef55289690e59d7823774cde4f788",
+              "verification_method": "PYTHON_AST_SYMBOL_AND_SHA256"
+            }
+          ],
+          "test_paths": [
+            "tests/integration/storage/test_protected_evaluation_store.py"
+          ]
+        },
+        {
+          "behavior_id": "transactional-admission-coordination",
+          "source_locations": [
+            {
+              "end_line": 590,
+              "kind": "CLASS",
+              "module": "src.super_scientist.application.transactions.coordinator",
+              "relationship": "IMPLEMENTS",
+              "relative_path": "src/super_scientist/application/transactions/coordinator.py",
+              "repository_commit": "c5de7d14f530e172216f35d8a5453057aa257f61",
+              "source_hash": "75fa7325ad84cbff7db9effc5d001e4c33c140cee23e1b99ccdad0db444d9b7c",
+              "start_line": 175,
+              "symbol": "TransactionCoordinator",
+              "symbol_source_hash": "7adb09cac8b17a32a516a04dd838502361a407b6d2168053224d2ade681cac9a",
+              "verification_method": "PYTHON_AST_SYMBOL_AND_SHA256"
+            }
+          ],
+          "test_paths": [
+            "tests/integration/application/test_transaction_coordinator.py"
+          ]
+        },
+        {
+          "behavior_id": "workspace-integrity-verification",
+          "source_locations": [
+            {
+              "end_line": 647,
+              "kind": "FUNCTION",
+              "module": "src.super_scientist.application.workspace_integrity",
+              "relationship": "IMPLEMENTS",
+              "relative_path": "src/super_scientist/application/workspace_integrity.py",
+              "repository_commit": "c5de7d14f530e172216f35d8a5453057aa257f61",
+              "source_hash": "b351259e05306dca2f7a1d76749707f1f90e39f018833be3d5607fd36c491f1d",
+              "start_line": 598,
+              "symbol": "verify_workspace",
+              "symbol_source_hash": "19eaca47de650a42e2a66fe54a14983d39003b425f705450f83b8811a4a96876",
+              "verification_method": "PYTHON_AST_SYMBOL_AND_SHA256"
+            }
+          ],
+          "test_paths": [
+            "tests/integration/application/test_workspace_integrity.py"
+          ]
+        }
+      ],
+      "level": 4,
+      "name": "exact_source"
+    }
+  ],
+  "manifest_hash": "8b10bd7fade65c8b1e81644924f71834bd941af9d2c281361a8cee3adc9b265b",
+  "repository": "InfiniteMalice/Super-Scientist-Orchestration-Harness",
+  "repository_commit": "c5de7d14f530e172216f35d8a5453057aa257f61",
+  "rule_to_behaviors": [
+    {
+      "behavior_ids": [
+        "artifact-containment"
+      ],
+      "rule_version_id": "rule-version-path-containment-v1"
+    },
+    {
+      "behavior_ids": [
+        "protected-evaluation-separation"
+      ],
+      "rule_version_id": "rule-version-protected-holdout-separation-v1"
+    },
+    {
+      "behavior_ids": [
+        "transactional-admission-coordination"
+      ],
+      "rule_version_id": "rule-version-transaction-authority-v1"
+    },
+    {
+      "behavior_ids": [
+        "workspace-integrity-verification"
+      ],
+      "rule_version_id": "rule-version-workspace-integrity-v1"
+    }
+  ],
+  "schema_version": 1,
+  "source_to_behaviors": [
+    {
+      "behavior_ids": [
+        "transactional-admission-coordination"
+      ],
+      "relative_path": "src/super_scientist/application/transactions/coordinator.py",
+      "symbol": "TransactionCoordinator"
+    },
+    {
+      "behavior_ids": [
+        "workspace-integrity-verification"
+      ],
+      "relative_path": "src/super_scientist/application/workspace_integrity.py",
+      "symbol": "verify_workspace"
+    },
+    {
+      "behavior_ids": [
+        "artifact-containment"
+      ],
+      "relative_path": "src/super_scientist/providers/storage/artifacts.py",
+      "symbol": "FileArtifactStore"
+    },
+    {
+      "behavior_ids": [
+        "protected-evaluation-separation"
+      ],
+      "relative_path": "src/super_scientist/providers/storage/protected_evaluation.py",
+      "symbol": "ProtectedEvaluationStore"
+    }
+  ],
+  "source_tree_hash": "584c319923319f08ec2e1dfff0b0007d80901f30d46de7b1ff2be04348ec5614"
+}
