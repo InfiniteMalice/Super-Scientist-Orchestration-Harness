@@ -5,7 +5,9 @@
 Task 13 was introduced in `84ca6f7` (`feat: separate protected harness evaluation
 storage`) and first hardened in `287b796` (`fix: enforce protected storage capability
 boundaries`). A second, separate review-reconciliation commit uses the required subject
-`fix: reconcile protected worker transactions and lifecycle`.
+`fix: reconcile protected worker transactions and lifecycle` (`70bbc3b`). The closure
+fix is a third separate commit with the required subject
+`fix: seal protected response error paths`.
 
 The final design keeps protected answers in a physically separate store and sends only
 strict typed hashes, aggregates, and checker outcomes into ordinary campaign storage.
@@ -40,13 +42,35 @@ After implementation the identical selection passed **20 of 20** (18 other tests
 deselected) in 63.10 seconds. The full protected-evaluation integration file then passed
 38 of 38 in 94.95 seconds.
 
+The closure review found two final response-path defects. Validator and gateway
+prevalidation raised fixed errors *from* Pydantic validation errors, so a formatted
+cause chain retained answer-bearing subclass or malformed-DTO input values. Separately,
+reader, auditor, and validator role-payload decoding occurred after `_request` released
+its lock; an invalid payload raised `INVALID_WORKER_RESPONSE` without poisoning the
+channel, allowing a later call to consume the next response.
+
+Strict RED evidence was recorded independently:
+
+- result prevalidation: 2 selected, 2 failed in 10.47 seconds, with literal held-out
+  bytes and protected-path material present in the formatted Pydantic cause chains; and
+- role payload decoding: 3 selected, 3 failed in 3.08 seconds because every second call
+  succeeded instead of raising `CAPABILITY_CHANNEL_UNUSABLE`.
+
+The exact combined closure slice passes 5 of 5 in 6.46 seconds. Public validator and
+gateway boundaries now require the exact `ProtectedCheckerResult` type and reject other
+objects before invoking their methods. The complete exchange now includes role payload
+decoding under the same lock and poison transition; invalid responses retain no
+validation cause/context or sensitive formatted chain.
+
 ## Transaction and authority model
 
 Evaluator validation and coordinator persistence are separate authorities:
 
 - `ProtectedResultValidator` is a spawned evaluator-facing capability. It accepts
   strict JSON, reconstructs a `ProtectedCheckerResult`, and returns only that validated
-  DTO. It owns no SQLAlchemy object, database URL, protected path, or repository.
+  DTO. Its parent entry point requires that exact DTO type rather than accepting
+  subclasses or duck-typed serializers. It owns no SQLAlchemy object, database URL,
+  protected path, or repository.
 - `ProtectedResultGateway` remains the coordinator-facing persistence protocol. Its
   implementation is a local adapter over the caller's supplied active SQLAlchemy
   connection. It uses repositories bound to that exact connection and never creates
@@ -65,9 +89,10 @@ There is no second SQLite writer and no independently durable protected result.
 ## Worker concurrency and lifecycle
 
 Each process capability owns a re-entrant lock around the complete request-number,
-send, poll, and receive exchange. A 32-thread shared-reader regression proves response
-correlation, while a 32-thread coordinator-gateway regression proves serialized use of
-the single supplied connection.
+send, poll, receive, and role-payload decode exchange. A malformed envelope or decoded
+payload therefore poisons the channel before any competing or later request can send.
+A 32-thread shared-reader regression proves response correlation, while a 32-thread
+coordinator-gateway regression proves serialized use of the single supplied connection.
 
 Timeout, EOF, transport failure, malformed response, or request-ID mismatch permanently
 poisons a channel. Later calls return `CAPABILITY_CHANNEL_UNUSABLE`; they cannot consume
@@ -92,6 +117,9 @@ paths, protected bytes, or reversible answer references.
 Regressions cover a structurally corrupt SQLite schema plus missing and non-regular
 artifact paths. They assert no `Traceback`, SQLite diagnostic, protected-root path, or
 secret reaches captured child output, exception messages, or serialized reports.
+Answer-bearing checker-result subclasses, malformed DTOs, and malformed reader/auditor/
+validator success payloads additionally prove fixed error args, absent causes/contexts,
+non-leaking formatted chains, and no post-failure channel reuse.
 
 ## Existing Task 13 storage retained
 
@@ -130,6 +158,17 @@ Fresh non-overlapping repository inventory on the frozen implementation tree:
 
 Combined result: **1,469 passed, 3 skipped**.
 
+Closure-source verification adds:
+
+- combined closure regressions: 5 passed, 38 deselected in 6.46 seconds;
+- complete protected-evaluation file: 43 passed in 140.46 seconds;
+- expanded reviewer slice: 25 passed, 18 deselected in 99.77 seconds;
+- leakage/lifecycle warnings-as-errors slice: 12 passed, 31 deselected in 51.30 seconds;
+- protected coverage run: 43 passed in 142.94 seconds with 94.19% branch-aware
+  coverage over 518 statements and 102 branches;
+- complete storage integration: 154 passed, 3 skipped in 378.88 seconds; and
+- complete property tests: 213 passed in 605.20 seconds.
+
 ## Release gates
 
 - Repository Ruff lint: passed.
@@ -144,23 +183,19 @@ Combined result: **1,469 passed, 3 skipped**.
 - Wheel inspection: 94 entries and the wheel contains migration 0006,
   `protected_evaluation.py`, and `domain_records.py`.
 - Fresh short-path wheel install: import resolved from
-  `C:\c13smoke\Lib\site-packages`; a 32-thread spawned answer reader, spawned result
-  validator, real-unit-of-work commit and rollback, and installed
+  `C:\c13seal\Lib\site-packages`; answer-bearing subclass and malformed-DTO redaction,
+  all three malformed role-payload poison paths, a 32-thread spawned answer reader,
+  spawned result validator, real-unit-of-work gateway, and installed
   `scientist-harness --help` all passed.
 
-## Files in this reconciliation
+## Files in the closure fix
 
 Modified:
 
 - `src/super_scientist/providers/storage/protected_evaluation.py`
 - `tests/integration/storage/test_protected_evaluation_store.py`
-- `docs/superpowers/plans/2026-07-18-governed-adaptation-and-harness-evolution.md`
-- `docs/superpowers/specs/2026-07-18-governed-adaptation-and-harness-evolution-design.md`
-- `.superpowers/sdd/task-13-report.md`
-
-Added:
-
 - `docs/adr/0001-protected-evaluation-transaction-and-worker-lifecycle.md`
+- `.superpowers/sdd/task-13-report.md`
 
 No migration, dependency, CI, CLI, network, dynamic-import, or runtime plugin surface
 was added by this reconciliation.

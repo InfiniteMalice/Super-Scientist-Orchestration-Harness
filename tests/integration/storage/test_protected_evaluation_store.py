@@ -6,6 +6,7 @@ import json
 import pickle
 import sqlite3
 import sys
+import traceback
 import weakref
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -39,6 +40,7 @@ from super_scientist.providers.storage.protected_evaluation import (
     ProtectedCheckerResult,
     ProtectedEvaluationStore,
     ProtectedIntegrityAuditor,
+    ProtectedIntegrityReport,
     ProtectedResultGateway,
     create_protected_result_gateway,
 )
@@ -229,6 +231,55 @@ def test_result_gateway_schema_cannot_carry_answer_material() -> None:
         ProtectedCheckerResult.model_validate(payload)
 
 
+@pytest.mark.integration
+def test_result_validator_rejects_answer_bearing_subclass_without_exception_leak(
+    tmp_path: Path,
+) -> None:
+    secret = b"validator-held-out-answer"
+    protected_path = str(tmp_path / "protected" / "answers.bin")
+    result = _AnswerBearingProtectedCheckerResult(
+        **_checker_result().model_dump(mode="python"),
+        answer_bytes=secret,
+        answer_path=protected_path,
+    )
+    validator = protected_evaluation_module.create_protected_result_validator()
+    try:
+        with pytest.raises(ProtectedCapabilityError) as captured:
+            validator.validate_result(result)
+        _assert_fixed_non_leaking_result_error(
+            captured.value,
+            sensitive_values=(secret.decode(), protected_path),
+        )
+    finally:
+        validator.close()
+
+
+@pytest.mark.integration
+def test_result_gateway_rejects_malformed_dto_without_exception_leak(tmp_path: Path) -> None:
+    secret = b"gateway-held-out-answer"
+    protected_path = str(tmp_path / "protected" / "answers.bin")
+    malformed = _MalformedProtectedCheckerResult(secret, protected_path)
+    main_url = f"sqlite+pysqlite:///{(tmp_path / 'main.db').as_posix()}"
+    upgrade_database(main_url)
+    engine = create_database_engine(main_url)
+    try:
+        with DatabaseUnitOfWork(engine) as unit_of_work:
+            connection = unit_of_work.connection
+            assert connection is not None
+            gateway = create_protected_result_gateway(connection)
+            try:
+                with pytest.raises(ProtectedCapabilityError) as captured:
+                    gateway.append_result(malformed)  # type: ignore[arg-type]
+                _assert_fixed_non_leaking_result_error(
+                    captured.value,
+                    sensitive_values=(secret.decode(), protected_path),
+                )
+            finally:
+                gateway.close()
+    finally:
+        engine.dispose()
+
+
 def test_result_gateway_requires_an_open_active_sqlalchemy_transaction(
     tmp_path: Path,
 ) -> None:
@@ -391,6 +442,57 @@ def test_protocol_desynchronization_permanently_poisons_capability_channel() -> 
     assert poisoned.value.code == "CAPABILITY_CHANNEL_UNUSABLE"
     assert len(transport.sent_frames) == sent_after_mismatch
     capability.close()
+
+
+@pytest.mark.parametrize("role", ("reader", "auditor", "validator"))
+def test_role_payload_decode_failure_atomically_poisons_capability_channel(role: str) -> None:
+    sensitive_value = f"{role}-worker-payload-secret"
+    if role == "reader":
+        malformed_payload: object = {"base64": f"not-base64-{sensitive_value}"}
+        valid_payload: object = {"base64": "c2VjcmV0"}
+        capability_type = protected_evaluation_module._AnswerReaderCapability
+    elif role == "auditor":
+        malformed_payload = {
+            "valid": True,
+            "checked_outputs": 0,
+            "findings": [],
+            "answer_path": sensitive_value,
+        }
+        valid_payload = ProtectedIntegrityReport(
+            valid=True,
+            checked_outputs=0,
+            findings=(),
+        ).model_dump(mode="json")
+        capability_type = protected_evaluation_module._IntegrityAuditorCapability
+    else:
+        malformed_payload = _checker_result().model_dump(mode="json")
+        malformed_payload["answer_bytes"] = sensitive_value
+        valid_payload = _checker_result().model_dump(mode="json")
+        capability_type = protected_evaluation_module._ProtectedResultValidatorCapability
+
+    transport = _SequencedPayloadTransport((malformed_payload, valid_payload))
+    process = _StubbornProcess()
+    capability = capability_type(transport, process)
+    if role == "reader":
+        invoke = partial(capability.read_expected_output, "task-1")
+    elif role == "auditor":
+        invoke = capability.verify_integrity
+    else:
+        invoke = partial(capability.validate_result, _checker_result())
+
+    try:
+        with pytest.raises(ProtectedCapabilityError) as first:
+            invoke()
+        assert first.value.code == "INVALID_WORKER_RESPONSE"
+        sent_after_invalid_response = len(transport.sent_frames)
+
+        with pytest.raises(ProtectedCapabilityError) as poisoned:
+            invoke()
+        assert poisoned.value.code == "CAPABILITY_CHANNEL_UNUSABLE"
+        assert len(transport.sent_frames) == sent_after_invalid_response
+        _assert_fixed_non_leaking_worker_response_error(first.value, sensitive_value)
+    finally:
+        capability.close()
 
 
 @pytest.mark.integration
@@ -978,6 +1080,74 @@ def _execute_pickle_probe(marker: str) -> dict[str, object]:
     }
 
 
+class _AnswerBearingProtectedCheckerResult(ProtectedCheckerResult):
+    answer_bytes: bytes
+    answer_path: str
+
+
+class _MalformedProtectedCheckerResult:
+    def __init__(self, secret: bytes, protected_path: str) -> None:
+        self._secret = secret
+        self._protected_path = protected_path
+
+    def model_dump(self, *, mode: str) -> dict[str, object]:
+        payload = _checker_result().model_dump(mode=mode)
+        payload["answer_bytes"] = self._secret
+        payload["answer_path"] = self._protected_path
+        return payload
+
+
+def _assert_fixed_non_leaking_result_error(
+    error: ProtectedCapabilityError,
+    *,
+    sensitive_values: tuple[str, ...],
+) -> None:
+    formatted_chain = "".join(
+        traceback.format_exception(
+            type(error),
+            error,
+            error.__traceback__,
+            chain=True,
+        )
+    )
+    evidence = "\n".join(
+        (
+            str(error),
+            repr(error),
+            repr(error.args),
+            repr(error.__cause__),
+            formatted_chain,
+        )
+    )
+    for sensitive_value in sensitive_values:
+        assert sensitive_value not in evidence
+    assert error.code == "INVALID_CHECKER_RESULT"
+    assert error.args == ("protected checker result is invalid",)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+def _assert_fixed_non_leaking_worker_response_error(
+    error: ProtectedCapabilityError,
+    sensitive_value: str,
+) -> None:
+    formatted_chain = "".join(
+        traceback.format_exception(
+            type(error),
+            error,
+            error.__traceback__,
+            chain=True,
+        )
+    )
+    assert sensitive_value not in formatted_chain
+    assert sensitive_value not in repr(error)
+    assert sensitive_value not in repr(error.args)
+    assert error.code == "INVALID_WORKER_RESPONSE"
+    assert error.args == ("protected capability worker returned an invalid response",)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
 class _TimeoutTransport:
     def __init__(self) -> None:
         self._responses = [
@@ -1026,6 +1196,27 @@ class _MismatchedResponseTransport(_TimeoutTransport):
                     "error_message": None,
                 }
             ).encode("utf-8")
+        )
+
+
+class _SequencedPayloadTransport(_TimeoutTransport):
+    def __init__(self, payloads: tuple[object, ...]) -> None:
+        super().__init__()
+        self._responses.extend(
+            json.dumps(
+                {
+                    "request_id": f"request-{request_number}",
+                    "ok": True,
+                    "payload": payload,
+                    "error_code": None,
+                    "error_message": None,
+                },
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            for request_number, payload in enumerate(payloads, start=1)
         )
 
 

@@ -21,21 +21,27 @@ The protected evaluator boundary and coordinator persistence boundary have disti
 objects and authority:
 
 1. An evaluator-facing spawned result validator accepts strict JSON, validates a
-   `ProtectedCheckerResult`, and returns only that validated DTO. It owns no main
-   database object or protected-store path.
+   `ProtectedCheckerResult`, and returns only that validated DTO. Its parent boundary
+   accepts only the exact DTO type, never a subclass or duck-typed object whose
+   serialization could carry protected fields. It owns no main database object or
+   protected-store path.
 2. `ProtectedResultGateway` remains the coordinator-facing API. Its implementation is
    a local adapter over the supplied active SQLAlchemy connection and appends through
    that exact transaction. It necessarily owns coordinator repository/connection
    authority and must never be inserted into evaluator or candidate object graphs.
-3. Each process capability serializes a complete request-id/send/poll/receive exchange
-   and `close()` under one re-entrant lock. Timeout, EOF, transport failure, malformed
-   response, or request-id mismatch permanently poisons the channel.
+3. Each process capability serializes a complete request-id/send/poll/receive/payload-
+   decode exchange and `close()` under one re-entrant lock. Timeout, EOF, transport
+   failure, malformed envelope or role payload, or request-id mismatch permanently
+   poisons the channel before another request can be sent.
 4. Capability close is idempotent and race-safe, closes the transport, joins or
    terminates the child, then calls `BaseProcess.close()`. Stores weakly track issued
    role capabilities so closed or abandoned wrapper objects are not retained.
 5. Reader and auditor workers catch expected SQLAlchemy, database, and filesystem
    failures. They return fixed typed errors or integrity findings without exception
    text, filesystem paths, answer data, or inherited child tracebacks.
+6. Rejected checker-result objects and malformed worker payloads raise only fixed safe
+   errors with no retained validation cause or formatted exception chain containing
+   input values or paths.
 
 ## Consequences
 
@@ -60,6 +66,8 @@ Regression coverage must include:
 - committed-campaign append and rollback inside `DatabaseUnitOfWork`;
 - a 32-thread shared reader and concurrent coordinator gateway appends;
 - timeout/desynchronization poison behavior and concurrent idempotent close;
+- answer-bearing result subclasses/malformed DTOs and malformed reader, auditor, and
+  validator payloads with no cause-chain leakage or channel reuse;
 - portable weak-registry and closed-process checks plus Windows handle counts;
 - structurally corrupt protected SQLite and unavailable artifacts with no path,
   answer, exception, or traceback leakage; and

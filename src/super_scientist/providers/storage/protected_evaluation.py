@@ -365,7 +365,12 @@ class _ProcessCapability:
                     self._process.join(_WORKER_JOIN_TIMEOUT_SECONDS)
                 self._process.close()
 
-    def _request(self, operation: str, payload: object | None) -> object | None:
+    def _request[ResponseT](
+        self,
+        operation: str,
+        payload: object | None,
+        decoder: Callable[[object | None], ResponseT],
+    ) -> ResponseT:
         with self._lock:
             if self._closed:
                 raise ProtectedCapabilityError(
@@ -378,7 +383,8 @@ class _ProcessCapability:
                     "protected capability channel is unusable",
                 )
             try:
-                return self._exchange(operation, payload)
+                response_payload = self._exchange(operation, payload)
+                return decoder(response_payload)
             except ProtectedCapabilityError as error:
                 if error.code in {"CAPABILITY_WORKER_UNAVAILABLE", "INVALID_WORKER_RESPONSE"}:
                     self._channel_usable = False
@@ -421,13 +427,14 @@ class _ProcessCapability:
                 "CAPABILITY_WORKER_UNAVAILABLE",
                 "protected capability worker is unavailable",
             ) from error
-        try:
+        response: _WorkerResponse | None = None
+        with suppress(TypeError, ValueError):
             response = _WorkerResponse.model_validate_json(raw_response)
-        except (TypeError, ValueError) as error:
+        if response is None:
             raise ProtectedCapabilityError(
                 "INVALID_WORKER_RESPONSE",
                 "protected capability worker returned an invalid response",
-            ) from error
+            ) from None
         if response.request_id != request_id:
             raise ProtectedCapabilityError(
                 "INVALID_WORKER_RESPONSE",
@@ -446,54 +453,26 @@ class _ProcessCapability:
 class _AnswerReaderCapability(_ProcessCapability):
     def read_expected_output(self, task_id: str) -> bytes:
         validated_task_id = _STABLE_IDENTIFIER_ADAPTER.validate_python(task_id)
-        payload = self._request("READ_EXPECTED_OUTPUT", validated_task_id)
-        if (
-            not isinstance(payload, dict)
-            or set(payload) != {"base64"}
-            or not isinstance(payload.get("base64"), str)
-        ):
-            raise ProtectedCapabilityError(
-                "INVALID_WORKER_RESPONSE",
-                "protected capability worker returned an invalid response",
-            )
-        try:
-            return base64.b64decode(payload["base64"], validate=True)
-        except ValueError as error:
-            raise ProtectedCapabilityError(
-                "INVALID_WORKER_RESPONSE",
-                "protected capability worker returned an invalid response",
-            ) from error
+        return self._request(
+            "READ_EXPECTED_OUTPUT",
+            validated_task_id,
+            _decode_expected_output_payload,
+        )
 
 
 class _IntegrityAuditorCapability(_ProcessCapability):
     def verify_integrity(self) -> ProtectedIntegrityReport:
-        payload = self._request("VERIFY_INTEGRITY", None)
-        try:
-            return ProtectedIntegrityReport.model_validate_json(canonical_json_bytes(payload))
-        except (TypeError, ValueError) as error:
-            raise ProtectedCapabilityError(
-                "INVALID_WORKER_RESPONSE",
-                "protected capability worker returned an invalid response",
-            ) from error
+        return self._request("VERIFY_INTEGRITY", None, _decode_integrity_report_payload)
 
 
 class _ProtectedResultValidatorCapability(_ProcessCapability):
     def validate_result(self, result: ProtectedCheckerResult) -> ProtectedCheckerResult:
-        try:
-            validated = ProtectedCheckerResult.model_validate(result.model_dump(mode="python"))
-        except (AttributeError, TypeError, ValueError) as error:
-            raise ProtectedCapabilityError(
-                "INVALID_CHECKER_RESULT",
-                "protected checker result is invalid",
-            ) from error
-        payload = self._request("VALIDATE_RESULT", validated.model_dump(mode="json"))
-        try:
-            return ProtectedCheckerResult.model_validate_json(canonical_json_bytes(payload))
-        except (TypeError, ValueError) as error:
-            raise ProtectedCapabilityError(
-                "INVALID_WORKER_RESPONSE",
-                "protected capability worker returned an invalid response",
-            ) from error
+        validated = _require_exact_checker_result(result)
+        return self._request(
+            "VALIDATE_RESULT",
+            validated.model_dump(mode="json"),
+            _decode_checker_result_payload,
+        )
 
 
 class _CoordinatorProtectedResultGateway:
@@ -513,13 +492,7 @@ class _CoordinatorProtectedResultGateway:
                     "CAPABILITY_CLOSED",
                     "protected capability is closed",
                 )
-            try:
-                validated = ProtectedCheckerResult.model_validate(result.model_dump(mode="python"))
-            except (AttributeError, TypeError, ValueError) as error:
-                raise ProtectedCapabilityError(
-                    "INVALID_CHECKER_RESULT",
-                    "protected checker result is invalid",
-                ) from error
+            validated = _require_exact_checker_result(result)
             if self._connection.closed or not self._connection.in_transaction():
                 raise ProtectedCapabilityError(
                     "RESULT_APPEND_REJECTED",
@@ -544,6 +517,54 @@ class _CoordinatorProtectedResultGateway:
     def close(self) -> None:
         with self._lock:
             self._closed = True
+
+
+def _require_exact_checker_result(result: object) -> ProtectedCheckerResult:
+    if not isinstance(result, ProtectedCheckerResult) or type(result) is not ProtectedCheckerResult:
+        raise ProtectedCapabilityError(
+            "INVALID_CHECKER_RESULT",
+            "protected checker result is invalid",
+        ) from None
+    return result
+
+
+def _decode_expected_output_payload(payload: object | None) -> bytes:
+    decoded: bytes | None = None
+    if (
+        isinstance(payload, dict)
+        and set(payload) == {"base64"}
+        and isinstance(payload.get("base64"), str)
+    ):
+        with suppress(ValueError):
+            decoded = base64.b64decode(payload["base64"], validate=True)
+    if decoded is None:
+        raise _invalid_worker_response_error() from None
+    return decoded
+
+
+def _decode_integrity_report_payload(payload: object | None) -> ProtectedIntegrityReport:
+    decoded: ProtectedIntegrityReport | None = None
+    with suppress(TypeError, ValueError):
+        decoded = ProtectedIntegrityReport.model_validate_json(canonical_json_bytes(payload))
+    if decoded is None:
+        raise _invalid_worker_response_error() from None
+    return decoded
+
+
+def _decode_checker_result_payload(payload: object | None) -> ProtectedCheckerResult:
+    decoded: ProtectedCheckerResult | None = None
+    with suppress(TypeError, ValueError):
+        decoded = ProtectedCheckerResult.model_validate_json(canonical_json_bytes(payload))
+    if decoded is None:
+        raise _invalid_worker_response_error() from None
+    return decoded
+
+
+def _invalid_worker_response_error() -> ProtectedCapabilityError:
+    return ProtectedCapabilityError(
+        "INVALID_WORKER_RESPONSE",
+        "protected capability worker returned an invalid response",
+    )
 
 
 def create_protected_result_gateway(connection: SqlConnection) -> ProtectedResultGateway:
