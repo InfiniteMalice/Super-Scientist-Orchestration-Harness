@@ -252,7 +252,7 @@ def test_new_rejection_codes_are_appended_with_stable_values() -> None:
     )
 
 
-def test_proposal_union_has_thirty_two_fixed_additive_persistent_kinds() -> None:
+def test_proposal_union_has_thirty_seven_fixed_additive_persistent_kinds() -> None:
     proposal_types = (
         CreateResearchRun,
         AppendResearchRunEvent,
@@ -286,6 +286,11 @@ def test_proposal_union_has_thirty_two_fixed_additive_persistent_kinds() -> None
         transaction_models.RecordCounterexample,
         transaction_models.ReviseHypothesis,
         transaction_models.AdmitHypothesis,
+        transaction_models.CreateHarnessCampaign,
+        transaction_models.RecordHarnessIteration,
+        transaction_models.RecordHarnessProtectedResult,
+        transaction_models.RecordHarnessConfound,
+        transaction_models.DecideHarnessCampaign,
     )
     expected = (
         "create_research_run",
@@ -320,6 +325,11 @@ def test_proposal_union_has_thirty_two_fixed_additive_persistent_kinds() -> None
         "record_counterexample",
         "revise_hypothesis",
         "admit_hypothesis",
+        "create_harness_campaign",
+        "record_harness_iteration",
+        "record_harness_protected_result",
+        "record_harness_confound",
+        "decide_harness_campaign",
     )
     legacy = ("add_evidence", "propose_claim", "transition_claim")
 

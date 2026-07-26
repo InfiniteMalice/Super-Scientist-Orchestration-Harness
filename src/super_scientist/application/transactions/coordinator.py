@@ -8,6 +8,7 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 from sqlalchemy import Connection
 
 from super_scientist.application.evidence_verification import verify_artifact_binding
+from super_scientist.application.harness_eval.service import fixed_harness_eval_handlers
 from super_scientist.application.transactions.adaptation import (
     adaptation_capabilities,
     fixed_adaptation_handlers,
@@ -16,6 +17,7 @@ from super_scientist.application.transactions.contracts import (
     HandlerReadCapability,
     HandlerWriteCapability,
 )
+from super_scientist.application.transactions.harness_eval import harness_eval_capabilities
 from super_scientist.application.transactions.hypotheses import (
     fixed_hypothesis_handlers,
     hypothesis_capabilities,
@@ -57,7 +59,9 @@ from super_scientist.kernel.transactions.models import (
     AppendProgressEvent,
     BindReportSentence,
     ConsolidateBehavioralRule,
+    CreateHarnessCampaign,
     DecideCompletion,
+    DecideHarnessCampaign,
     ImportReviewerAssessment,
     InvalidProposal,
     Proposal,
@@ -72,6 +76,9 @@ from super_scientist.kernel.transactions.models import (
     ProposePrimitiveVersion,
     RecordCounterexample,
     RecordEvidenceTrailVersion,
+    RecordHarnessConfound,
+    RecordHarnessIteration,
+    RecordHarnessProtectedResult,
     RecordPrimitiveEvaluation,
     RecordProgressPlan,
     RecordRuleIncident,
@@ -210,6 +217,9 @@ class TransactionCoordinator:
         hypothesis_handlers = tuple(
             (handler.proposal_type, handler) for handler in fixed_hypothesis_handlers()
         )
+        harness_eval_handlers = tuple(
+            (handler.proposal_type, handler) for handler in fixed_harness_eval_handlers()
+        )
         self._router = ProposalRouter(
             (
                 *compatibility_handlers,
@@ -219,6 +229,7 @@ class TransactionCoordinator:
                 *rule_handlers,
                 *representation_handlers,
                 *hypothesis_handlers,
+                *harness_eval_handlers,
             )
         )
 
@@ -504,6 +515,23 @@ class TransactionCoordinator:
                 )
                 reads = hypothesis_io.reads
                 writes = hypothesis_io.writes
+            elif isinstance(
+                admitted_proposal,
+                (
+                    CreateHarnessCampaign,
+                    RecordHarnessIteration,
+                    RecordHarnessProtectedResult,
+                    RecordHarnessConfound,
+                    DecideHarnessCampaign,
+                ),
+            ):
+                harness_eval_io = harness_eval_capabilities(
+                    admitted_proposal,
+                    connection,
+                    stored_policy,
+                )
+                reads = harness_eval_io
+                writes = harness_eval_io
             else:
                 adaptation_io = adaptation_capabilities(
                     admitted_proposal,
@@ -610,6 +638,11 @@ def _normalize_proposal(value: object) -> Proposal | TransactionDecision:
                 RecordCounterexample,
                 ReviseHypothesis,
                 AdmitHypothesis,
+                CreateHarnessCampaign,
+                RecordHarnessIteration,
+                RecordHarnessProtectedResult,
+                RecordHarnessConfound,
+                DecideHarnessCampaign,
             ),
         ):
             return PROPOSAL_ADAPTER.validate_json(

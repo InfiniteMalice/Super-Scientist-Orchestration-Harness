@@ -5,7 +5,6 @@ import stat
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
-from decimal import Decimal
 from multiprocessing import get_context
 from multiprocessing.process import BaseProcess
 from pathlib import Path
@@ -18,7 +17,6 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
-    field_validator,
     model_validator,
 )
 from sqlalchemy import (
@@ -36,12 +34,11 @@ from sqlalchemy.engine import Connection as SqlConnection
 from sqlalchemy.exc import SQLAlchemyError
 
 from super_scientist.domain.evidence.models import ArtifactRef
-from super_scientist.domain.improvement.models import AssessmentOutcome
+from super_scientist.domain.harness_eval.models import MetricValue, ProtectedCheckerResult
 from super_scientist.domain.primitives import (
     NonBlankText,
     Sha256Hex,
     StableIdentifier,
-    UtcTimestamp,
     canonical_json_bytes,
     sha256_hex,
 )
@@ -117,42 +114,6 @@ class _WorkerResponse(_StrictFrozenModel):
         if not self.ok and (self.error_code is None or self.error_message is None):
             raise ValueError("worker response error fields must exactly match failure status")
         return self
-
-
-class MetricValue(_StrictFrozenModel):
-    metric_id: StableIdentifier
-    value: Decimal
-
-    @field_validator("value")
-    @classmethod
-    def require_finite_value(cls, value: Decimal) -> Decimal:
-        if not value.is_finite():
-            raise ValueError("metric value must be finite")
-        return value
-
-
-class ProtectedCheckerResult(_StrictFrozenModel):
-    result_id: StableIdentifier
-    campaign_id: StableIdentifier
-    task_id: StableIdentifier
-    expected_output_hash: Sha256Hex
-    candidate_output_hash: Sha256Hex
-    checker_id: StableIdentifier
-    checker_version: StableIdentifier
-    outcome: AssessmentOutcome
-    metric_values: tuple[MetricValue, ...]
-    evaluated_at: UtcTimestamp
-
-    @field_validator("metric_values")
-    @classmethod
-    def require_unique_metric_ids(
-        cls,
-        value: tuple[MetricValue, ...],
-    ) -> tuple[MetricValue, ...]:
-        metric_ids = tuple(item.metric_id for item in value)
-        if len(set(metric_ids)) != len(metric_ids):
-            raise ValueError("metric_values must have unique metric identifiers")
-        return value
 
 
 class ProtectedExpectedOutputReceipt(_StrictFrozenModel):

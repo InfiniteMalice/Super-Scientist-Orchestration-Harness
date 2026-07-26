@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from super_scientist.domain.identity import ActorIdentity, ActorKind, are_independent
 from super_scientist.domain.improvement.classification import (
@@ -186,20 +186,98 @@ class EvaluatorSuccessionDecision(_StrictFrozenModel):
 
 
 class CollapseMetrics(_StrictFrozenModel):
-    protected_performance: float = Field(strict=True, allow_inf_nan=False)
-    external_performance: float = Field(strict=True, allow_inf_nan=False)
-    calibration: float = Field(strict=True, allow_inf_nan=False)
-    response_diversity: float = Field(strict=True, allow_inf_nan=False)
-    hypothesis_diversity: float = Field(strict=True, allow_inf_nan=False)
-    source_diversity: float = Field(strict=True, allow_inf_nan=False)
-    experiment_diversity: float = Field(strict=True, allow_inf_nan=False)
-    adapter_output_entropy: float = Field(strict=True, allow_inf_nan=False)
-    repeated_error_rate: float = Field(strict=True, allow_inf_nan=False)
-    confidence_error_coupling: float = Field(strict=True, allow_inf_nan=False)
-    evaluator_disagreement: float = Field(strict=True, allow_inf_nan=False)
-    catastrophic_regression: float = Field(strict=True, allow_inf_nan=False)
-    task_distribution_narrowing: float = Field(strict=True, allow_inf_nan=False)
-    externally_grounded_data_proportion: float = Field(strict=True, allow_inf_nan=False)
+    protected_performance: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    external_performance: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    calibration: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    response_diversity: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    hypothesis_diversity: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    source_diversity: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    experiment_diversity: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    adapter_output_entropy: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    repeated_error_rate: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    confidence_error_coupling: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    evaluator_disagreement: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    catastrophic_regression: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    task_distribution_narrowing: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    externally_grounded_data_proportion: float = Field(
+        strict=True,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
+
+
+class CollapseFindingCode(StrEnum):
+    SHARED_PROPOSER_JUDGE_CONFIGURATION = "SHARED_PROPOSER_JUDGE_CONFIGURATION"
+    CONFIDENCE_AS_REWARD = "CONFIDENCE_AS_REWARD"
+    SELF_CONSISTENCY_AS_TRUTH = "SELF_CONSISTENCY_AS_TRUTH"
+    CORRELATED_REVIEWERS = "CORRELATED_REVIEWERS"
+    SELF_GENERATED_DATA_SELF_APPROVED = "SELF_GENERATED_DATA_SELF_APPROVED"
+    EVALUATOR_GAIN_WITHOUT_EXTERNAL_GAIN = "EVALUATOR_GAIN_WITHOUT_EXTERNAL_GAIN"
+    CONFIDENCE_WITHOUT_EVIDENCE = "CONFIDENCE_WITHOUT_EVIDENCE"
+    PARAPHRASE_ONLY_REFINEMENT = "PARAPHRASE_ONLY_REFINEMENT"
+    TEXTUAL_AGREEMENT_DISPLACES_EMPIRICAL_EVIDENCE = (
+        "TEXTUAL_AGREEMENT_DISPLACES_EMPIRICAL_EVIDENCE"
+    )
+
+
+class CollapseFinding(_StrictFrozenModel):
+    code: CollapseFindingCode
+    evidence_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    detail: NonBlankText
+
+    @field_validator("evidence_ids")
+    @classmethod
+    def require_unique_evidence_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("collapse finding evidence_ids must be unique")
+        return value
+
+
+class EvaluatorCollapseReport(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    evaluator_collapse_report_id: StableIdentifier
+    evaluator_version_id: StableIdentifier
+    metrics: CollapseMetrics
+    catastrophic_regression: bool
+    findings: tuple[CollapseFinding, ...]
+    evidence_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    measured_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @model_validator(mode="after")
+    def require_complete_nonaggregate_report(self) -> EvaluatorCollapseReport:
+        if self.catastrophic_regression != (self.metrics.catastrophic_regression > 0.0):
+            raise ValueError("catastrophic flag must match the retained catastrophic dimension")
+        finding_codes = tuple(item.code for item in self.findings)
+        if len(finding_codes) != len(set(finding_codes)):
+            raise ValueError("collapse findings must use unique prohibited-pattern codes")
+        if len(set(self.evidence_ids)) != len(self.evidence_ids):
+            raise ValueError("collapse report evidence_ids must be unique")
+        if any(not set(item.evidence_ids).issubset(self.evidence_ids) for item in self.findings):
+            raise ValueError("collapse finding evidence must be retained by the report")
+        return self
+
+
+class CollapsePromotionAssessment(_StrictFrozenModel):
+    accepted: Literal[False] = False
+    authoritative: Literal[False] = False
+    reasons: tuple[NonBlankText, ...] = Field(min_length=1)
+
+
+def assess_collapse_report_only(report: EvaluatorCollapseReport) -> CollapsePromotionAssessment:
+    validated = EvaluatorCollapseReport.model_validate(report)
+    if validated.catastrophic_regression:
+        return CollapsePromotionAssessment(
+            reasons=("catastrophic regression blocks promotion",),
+        )
+    if validated.findings:
+        return CollapsePromotionAssessment(
+            reasons=("explicit collapse findings block promotion",),
+        )
+    return CollapsePromotionAssessment(
+        reasons=("collapse reports are non-authoritative for promotion",),
+    )
 
 
 class EvaluatorCollapseRecord(_StrictFrozenModel):

@@ -32,6 +32,15 @@ from super_scientist.domain.evidence_trails.models import (
     TrailAssessment,
     TrailCheckResult,
 )
+from super_scientist.domain.harness_eval.models import (
+    CampaignIteration,
+    HarnessCampaign,
+    HarnessCampaignReport,
+    HarnessConfound,
+    HarnessDecision,
+    HarnessVariant,
+    ProtectedCheckerResult,
+)
 from super_scientist.domain.hypotheses.models import (
     CounterexampleReceiptRef,
     CounterexampleRecord,
@@ -121,6 +130,11 @@ type ProposalKind = Literal[
     "record_counterexample",
     "revise_hypothesis",
     "admit_hypothesis",
+    "create_harness_campaign",
+    "record_harness_iteration",
+    "record_harness_protected_result",
+    "record_harness_confound",
+    "decide_harness_campaign",
 ]
 
 
@@ -444,6 +458,38 @@ class AdmitHypothesis(ProposalBase):
     admission_decision: HypothesisAdmissionDecision
 
 
+class CreateHarnessCampaign(ProposalBase):
+    proposal_type: Literal["create_harness_campaign"] = "create_harness_campaign"
+    campaign: HarnessCampaign
+
+
+class RecordHarnessIteration(ProposalBase):
+    proposal_type: Literal["record_harness_iteration"] = "record_harness_iteration"
+    iteration: CampaignIteration
+    governing_policy_hash: Sha256Hex
+
+
+class RecordHarnessProtectedResult(ProposalBase):
+    proposal_type: Literal["record_harness_protected_result"] = "record_harness_protected_result"
+    observation_id: StableIdentifier
+    partition_manifest_id: StableIdentifier
+    variant: HarnessVariant
+    evaluator_version_id: StableIdentifier
+    result: ProtectedCheckerResult
+    governing_policy_hash: Sha256Hex
+
+
+class RecordHarnessConfound(ProposalBase):
+    proposal_type: Literal["record_harness_confound"] = "record_harness_confound"
+    confound: HarnessConfound
+
+
+class DecideHarnessCampaign(ProposalBase):
+    proposal_type: Literal["decide_harness_campaign"] = "decide_harness_campaign"
+    report: HarnessCampaignReport
+    decision: HarnessDecision
+
+
 class InvalidProposal(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
@@ -491,6 +537,11 @@ Proposal = Annotated[
     | RecordCounterexample
     | ReviseHypothesis
     | AdmitHypothesis
+    | CreateHarnessCampaign
+    | RecordHarnessIteration
+    | RecordHarnessProtectedResult
+    | RecordHarnessConfound
+    | DecideHarnessCampaign
     | InvalidProposal,
     Field(discriminator="proposal_type"),
 ]

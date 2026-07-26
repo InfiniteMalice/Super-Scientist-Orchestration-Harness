@@ -34,6 +34,11 @@ from super_scientist.domain.evidence_trails.models import (
     TrailAssessment,
     TrailCheckResult,
 )
+from super_scientist.domain.harness_eval.models import (
+    HarnessDecisionStatus,
+    HarnessPartition,
+    HarnessVariant,
+)
 from super_scientist.domain.identity import ActorIdentity
 from super_scientist.domain.improvement.models import (
     AssessmentOutcome,
@@ -228,37 +233,6 @@ class AdmissionDecisionOutcome(StrEnum):
     ABSTAIN = "ABSTAIN"
 
 
-class HarnessVariant(StrEnum):
-    UNCHANGED_HARNESS_SINGLE_ATTEMPT = "UNCHANGED_HARNESS_SINGLE_ATTEMPT"
-    UNCHANGED_HARNESS_BEST_OF_N = "UNCHANGED_HARNESS_BEST_OF_N"
-    UNCHANGED_HARNESS_RETRY_WITH_FEEDBACK = "UNCHANGED_HARNESS_RETRY_WITH_FEEDBACK"
-    UNCHANGED_HARNESS_TASK_LEVEL_SEARCH = "UNCHANGED_HARNESS_TASK_LEVEL_SEARCH"
-    RANDOM_HARNESS_SEARCH = "RANDOM_HARNESS_SEARCH"
-    SIMPLE_PARAMETER_SEARCH = "SIMPLE_PARAMETER_SEARCH"
-    EVOLVED_HARNESS = "EVOLVED_HARNESS"
-
-
-class HarnessPartition(StrEnum):
-    HARNESS_DISCOVERY_TASKS = "HARNESS_DISCOVERY_TASKS"
-    HARNESS_VALIDATION_TASKS = "HARNESS_VALIDATION_TASKS"
-    HARNESS_TRANSFER_TASKS = "HARNESS_TRANSFER_TASKS"
-    HARNESS_REGRESSION_TASKS = "HARNESS_REGRESSION_TASKS"
-    HARNESS_SAFETY_TASKS = "HARNESS_SAFETY_TASKS"
-
-
-class HarnessDecisionStatus(StrEnum):
-    PROPOSED = "PROPOSED"
-    DISCOVERY_GAIN = "DISCOVERY_GAIN"
-    VALIDATION_GAIN = "VALIDATION_GAIN"
-    TRANSFER_VALIDATED = "TRANSFER_VALIDATED"
-    REGRESSION_DETECTED = "REGRESSION_DETECTED"
-    BENCHMARK_SPECIFIC = "BENCHMARK_SPECIFIC"
-    INCONCLUSIVE = "INCONCLUSIVE"
-    REJECTED = "REJECTED"
-    ADMITTED = "ADMITTED"
-    ROLLED_BACK = "ROLLED_BACK"
-
-
 class _StrictFrozenStorageRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -314,6 +288,13 @@ class HarnessCampaignRecord(_StrictFrozenStorageRecord):
     model_id: StableIdentifier
     model_version: StableIdentifier
     adapter_id: StableIdentifier | None
+    baseline_variant: HarnessVariant | None = None
+    candidate_variant: HarnessVariant | None = None
+    baseline_harness_version_id: StableIdentifier | None = None
+    candidate_harness_version_id: StableIdentifier | None = None
+    rollback_harness_version_id: StableIdentifier | None = None
+    evaluator_version_id: StableIdentifier | None = None
+    candidate_producer_id: StableIdentifier | None = None
     created_by: StableIdentifier
     created_at: UtcTimestamp
     governing_policy_hash: Sha256Hex
@@ -333,6 +314,7 @@ class HarnessPartitionManifestRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     partition_manifest_id: StableIdentifier
     campaign_id: StableIdentifier
+    campaign_version: int | None = Field(default=None, ge=1)
     partition: HarnessPartition
     task_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
     manifest_hash: Sha256Hex
@@ -387,9 +369,14 @@ class HarnessObservationRecord(_StrictFrozenStorageRecord):
     partition_manifest_id: StableIdentifier
     task_id: StableIdentifier
     variant: HarnessVariant
+    iteration_index: int | None = Field(default=None, ge=0)
+    budget_id: StableIdentifier | None = None
     candidate_output_hash: Sha256Hex
     attempt: int = Field(ge=1)
     negative_result: bool
+    result_id: StableIdentifier | None = None
+    outcome: AssessmentOutcome | None = None
+    evaluator_version_id: StableIdentifier | None = None
     observed_at: UtcTimestamp
     governing_policy_hash: Sha256Hex
 
@@ -425,6 +412,8 @@ class HarnessConfoundRecord(_StrictFrozenStorageRecord):
     code: StableIdentifier
     description: NonBlankText
     affected_variant: HarnessVariant | None
+    resolved: bool = False
+    independent_analysis_id: StableIdentifier | None = None
     recorded_at: UtcTimestamp
     governing_policy_hash: Sha256Hex
 
@@ -437,6 +426,11 @@ class HarnessDecisionRecord(_StrictFrozenStorageRecord):
     admitted: bool
     rationale: tuple[NonBlankText, ...] = Field(min_length=1)
     authority_id: StableIdentifier
+    rollback_target_id: StableIdentifier | None = None
+    evaluator_audit_id: StableIdentifier | None = None
+    measurement_id: StableIdentifier | None = None
+    metric_result_ids: tuple[StableIdentifier, ...] = ()
+    confound_ids: tuple[StableIdentifier, ...] = ()
     decided_at: UtcTimestamp
     governing_policy_hash: Sha256Hex
 

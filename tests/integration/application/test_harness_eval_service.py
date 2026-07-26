@@ -1,0 +1,856 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine, text
+
+from super_scientist.application.harness_eval.service import (
+    HarnessEvaluationService,
+    campaign_export_bytes,
+    compare_budgets,
+    decide_campaign,
+)
+from super_scientist.application.transactions.coordinator import TransactionCoordinator
+from super_scientist.config.loader import policy_hash
+from super_scientist.config.models import (
+    AdaptationRequirement,
+    GovernancePolicyV2,
+    PolicySnapshot,
+)
+from super_scientist.domain.harness_eval.models import (
+    CampaignIteration,
+    CampaignPartitionManifest,
+    EvaluationBudget,
+    FeedbackMode,
+    HarnessCampaign,
+    HarnessCampaignReport,
+    HarnessConfound,
+    HarnessConfoundCode,
+    HarnessDecisionStatus,
+    HarnessPartition,
+    HarnessVariant,
+    PartitionMetric,
+    VariantEvaluationBudget,
+    partition_manifest_hash,
+)
+from super_scientist.domain.identity import ActorIdentity, ActorKind
+from super_scientist.domain.improvement.classification import (
+    ChangeTarget,
+    ExternalGrounding,
+    PersistenceScope,
+    VerificationLevel,
+)
+from super_scientist.domain.improvement.models import AssessmentOutcome
+from super_scientist.domain.primitives import sha256_hex
+from super_scientist.kernel.transactions.models import (
+    Approval,
+    CreateHarnessCampaign,
+    DecideHarnessCampaign,
+    RecordHarnessConfound,
+    RecordHarnessIteration,
+    RecordHarnessProtectedResult,
+    RejectionCode,
+)
+from super_scientist.providers.storage.artifacts import FileArtifactStore
+from super_scientist.providers.storage.database import (
+    DatabaseUnitOfWork,
+    create_database_engine,
+    upgrade_database,
+)
+from super_scientist.providers.storage.domain_records import (
+    HarnessBudgetRepository,
+    HarnessCampaignHeadRepository,
+    HarnessCampaignRepository,
+    HarnessConfoundRepository,
+    HarnessDecisionRepository,
+    HarnessMetricRepository,
+    HarnessObservationRepository,
+    HarnessPartitionManifestRepository,
+)
+from super_scientist.providers.storage.protected_evaluation import (
+    MetricValue,
+    ProtectedCheckerResult,
+)
+
+NOW = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+SECRET = b"integration-held-out-answer-task-15"
+
+
+class _Clock:
+    def now(self) -> datetime:
+        return NOW
+
+
+class _InProcessResultValidator:
+    """Exercise Task 15 orchestration without coverage tracing a spawned worker."""
+
+    def validate_result(self, result: ProtectedCheckerResult) -> ProtectedCheckerResult:
+        if type(result) is not ProtectedCheckerResult:
+            raise TypeError("result must be the strict protected checker DTO")
+        return result
+
+    def close(self) -> None:
+        return None
+
+
+@dataclass(frozen=True)
+class Runtime:
+    engine: Engine
+    uow_factory: Callable[[], DatabaseUnitOfWork]
+    coordinator: TransactionCoordinator
+    service: HarnessEvaluationService
+    policy: PolicySnapshot
+    proposer: ActorIdentity
+    authority: ActorIdentity
+
+
+@pytest.fixture
+def runtime(tmp_path: Path) -> Iterator[Runtime]:
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'harness.db').as_posix()}"
+    upgrade_database(database_url)
+    engine = create_database_engine(database_url)
+    policy = _policy()
+
+    def uow_factory() -> DatabaseUnitOfWork:
+        return DatabaseUnitOfWork(engine)
+
+    with uow_factory() as uow:
+        uow.repositories().policies.add_and_activate(policy, NOW)
+    coordinator = TransactionCoordinator(
+        uow_factory,
+        policy,
+        _Clock(),
+        FileArtifactStore(tmp_path / "artifacts"),
+    )
+    validator = _InProcessResultValidator()
+    try:
+        yield Runtime(
+            engine=engine,
+            uow_factory=uow_factory,
+            coordinator=coordinator,
+            service=HarnessEvaluationService(coordinator, validator),
+            policy=policy,
+            proposer=_model_actor("candidate-producer"),
+            authority=_human_actor("campaign-authority"),
+        )
+    finally:
+        validator.close()
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_campaign_creation_persists_campaign_partitions_and_budgets_in_one_transaction(
+    runtime: Runtime,
+) -> None:
+    campaign = _campaign(runtime)
+    decision = runtime.service.create_campaign(_create_proposal(runtime, campaign))
+
+    assert decision.accepted is True
+    with runtime.uow_factory() as uow:
+        assert uow.connection is not None
+        assert HarnessCampaignRepository(uow.connection).get(campaign.campaign_id) is not None
+        assert len(HarnessPartitionManifestRepository(uow.connection).list_all()) == 5
+        assert len(HarnessBudgetRepository(uow.connection).list_all()) == 2
+        assert len(uow.repositories().transactions.list_all()) == 1
+        assert len(uow.repositories().audit.list_all()) == 1
+
+
+@pytest.mark.integration
+def test_campaign_creation_replays_without_duplicate_children(runtime: Runtime) -> None:
+    proposal = _create_proposal(runtime, _campaign(runtime))
+
+    first = runtime.service.create_campaign(proposal)
+    second = runtime.service.create_campaign(proposal)
+
+    assert first.accepted is True
+    assert second == first.model_copy(update={"replayed": True})
+    with runtime.uow_factory() as uow:
+        assert uow.connection is not None
+        assert len(HarnessPartitionManifestRepository(uow.connection).list_all()) == 5
+        assert len(HarnessBudgetRepository(uow.connection).list_all()) == 2
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "case",
+    ("candidate-producer", "coordinator", "protected-partition", "policy"),
+)
+def test_campaign_creation_rejects_confounded_authority_and_lineage(
+    runtime: Runtime,
+    case: str,
+) -> None:
+    campaign = _campaign(runtime)
+    proposer = runtime.proposer
+    approval = _approval(runtime)
+    if case == "candidate-producer":
+        proposer = _model_actor("other-producer")
+    elif case == "coordinator":
+        approval = Approval(approver=_human_actor("other-coordinator"), approved_at=NOW)
+    elif case == "protected-partition":
+        changed = campaign.partitions[1].model_copy(update={"protected_content_hash": None})
+        campaign = campaign.model_copy(
+            update={"partitions": (campaign.partitions[0], changed, *campaign.partitions[2:])}
+        )
+    else:
+        wrong_hash = "f" * 64
+        campaign = campaign.model_copy(
+            update={
+                "partitions": tuple(
+                    item.model_copy(update={"governing_policy_hash": wrong_hash})
+                    for item in campaign.partitions
+                ),
+                "governing_policy_hash": wrong_hash,
+            }
+        )
+
+    decision = runtime.service.create_campaign(
+        CreateHarnessCampaign(
+            proposal_id=f"rejected-create-{case}",
+            idempotency_key=f"rejected-create-{case}-key",
+            proposer=proposer,
+            approval=approval,
+            campaign=campaign,
+        )
+    )
+
+    assert decision.accepted is False
+
+
+@pytest.mark.integration
+def test_iteration_handler_rejects_missing_duplicate_unauthorized_and_mismatched_records(
+    runtime: Runtime,
+) -> None:
+    campaign = _campaign(runtime)
+    assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
+    base = _iteration()
+    cases = (
+        (
+            base.model_copy(update={"partition_manifest_id": "missing-manifest"}),
+            runtime.authority,
+            _approval(runtime),
+            runtime.policy.policy_hash,
+            RejectionCode.MISSING_ENTITY,
+        ),
+        (
+            base,
+            _human_actor("other-human"),
+            Approval(approver=_human_actor("other-human"), approved_at=NOW),
+            runtime.policy.policy_hash,
+            RejectionCode.PERMISSION_DENIED,
+        ),
+        (
+            base.model_copy(update={"task_id": "other-task"}),
+            runtime.authority,
+            _approval(runtime),
+            runtime.policy.policy_hash,
+            RejectionCode.INVALID_LINEAGE,
+        ),
+        (
+            base,
+            runtime.authority,
+            _approval(runtime),
+            "f" * 64,
+            RejectionCode.POLICY_HASH_MISMATCH,
+        ),
+    )
+    for index, (iteration, proposer, approval, policy, expected) in enumerate(cases):
+        decision = runtime.service.record_iteration(
+            RecordHarnessIteration(
+                proposal_id=f"rejected-iteration-{index}",
+                idempotency_key=f"rejected-iteration-{index}-key",
+                proposer=proposer,
+                approval=approval,
+                iteration=iteration,
+                governing_policy_hash=policy,
+            )
+        )
+        assert decision.accepted is False
+        assert decision.reasons[0].code is expected
+
+    assert runtime.service.record_iteration(
+        RecordHarnessIteration(
+            proposal_id="accepted-iteration",
+            idempotency_key="accepted-iteration-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            iteration=base,
+            governing_policy_hash=runtime.policy.policy_hash,
+        )
+    ).accepted
+    duplicate = runtime.service.record_iteration(
+        RecordHarnessIteration(
+            proposal_id="duplicate-iteration",
+            idempotency_key="duplicate-iteration-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            iteration=base,
+            governing_policy_hash=runtime.policy.policy_hash,
+        )
+    )
+    assert duplicate.reasons[0].code is RejectionCode.ENTITY_ALREADY_EXISTS
+
+
+@pytest.mark.integration
+def test_iteration_and_validated_protected_result_share_public_hash_bindings(
+    runtime: Runtime,
+) -> None:
+    campaign = _campaign(runtime)
+    assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
+    iteration = _iteration()
+    iteration_proposal = RecordHarnessIteration(
+        proposal_id="record-iteration",
+        idempotency_key="record-iteration-key",
+        proposer=runtime.authority,
+        approval=_approval(runtime),
+        iteration=iteration,
+        governing_policy_hash=runtime.policy.policy_hash,
+    )
+    assert runtime.service.record_iteration(iteration_proposal).accepted
+
+    result = _protected_result()
+    result_proposal = RecordHarnessProtectedResult(
+        proposal_id="record-result",
+        idempotency_key="record-result-key",
+        proposer=runtime.authority,
+        approval=_approval(runtime),
+        observation_id=iteration.observation_id,
+        partition_manifest_id=iteration.partition_manifest_id,
+        variant=iteration.variant,
+        evaluator_version_id=iteration.evaluator_version_id,
+        result=result,
+        governing_policy_hash=runtime.policy.policy_hash,
+    )
+    assert runtime.service.record_protected_result(result_proposal).accepted
+
+    with runtime.uow_factory() as uow:
+        assert uow.connection is not None
+        assert (
+            HarnessObservationRepository(uow.connection).get(iteration.observation_id) is not None
+        )
+        assert HarnessMetricRepository(uow.connection).get(result.result_id) is not None
+
+
+@pytest.mark.integration
+def test_evaluator_change_is_retained_as_a_confound_and_public_lineage(
+    runtime: Runtime,
+) -> None:
+    campaign = _campaign(runtime)
+    assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
+    confound = HarnessConfound(
+        confound_id="confound-evaluator-change",
+        campaign_id=campaign.campaign_id,
+        code=HarnessConfoundCode.EVALUATOR_CHANGED,
+        description="the evaluator changed during the campaign",
+        affected_variant=HarnessVariant.EVOLVED_HARNESS,
+        resolved=False,
+        independent_analysis_id=None,
+        recorded_at=NOW,
+        governing_policy_hash=runtime.policy.policy_hash,
+    )
+    assert runtime.service.record_confound(
+        RecordHarnessConfound(
+            proposal_id="evaluator-confound",
+            idempotency_key="evaluator-confound-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            confound=confound,
+        )
+    ).accepted
+    iteration = _iteration().model_copy(update={"evaluator_version_id": "evaluator-v2"})
+
+    iteration_decision = runtime.service.record_iteration(
+        RecordHarnessIteration(
+            proposal_id="changed-evaluator-iteration",
+            idempotency_key="changed-evaluator-iteration-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            iteration=iteration,
+            governing_policy_hash=runtime.policy.policy_hash,
+        )
+    )
+
+    assert iteration_decision.accepted is True
+    result_decision = runtime.service.record_protected_result(
+        RecordHarnessProtectedResult(
+            proposal_id="changed-evaluator-result",
+            idempotency_key="changed-evaluator-result-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            observation_id=iteration.observation_id,
+            partition_manifest_id=iteration.partition_manifest_id,
+            variant=iteration.variant,
+            evaluator_version_id=iteration.evaluator_version_id,
+            result=_protected_result(),
+            governing_policy_hash=runtime.policy.policy_hash,
+        )
+    )
+
+    assert result_decision.accepted is True
+    with runtime.uow_factory() as uow:
+        assert uow.connection is not None
+        stored = HarnessObservationRepository(uow.connection).get(iteration.observation_id)
+        assert stored is not None
+        assert stored.evaluator_version_id == "evaluator-v2"
+        assert HarnessConfoundRepository(uow.connection).get(confound.confound_id) is not None
+
+
+@pytest.mark.integration
+def test_result_binding_mismatch_is_rejected_without_persisting_metric(runtime: Runtime) -> None:
+    campaign = _campaign(runtime)
+    assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
+    iteration = _iteration()
+    assert runtime.service.record_iteration(
+        RecordHarnessIteration(
+            proposal_id="iteration",
+            idempotency_key="iteration-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            iteration=iteration,
+            governing_policy_hash=runtime.policy.policy_hash,
+        )
+    ).accepted
+    result = _protected_result().model_copy(update={"candidate_output_hash": "f" * 64})
+    decision = runtime.service.record_protected_result(
+        RecordHarnessProtectedResult(
+            proposal_id="mismatched-result",
+            idempotency_key="mismatched-result-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            observation_id=iteration.observation_id,
+            partition_manifest_id=iteration.partition_manifest_id,
+            variant=iteration.variant,
+            evaluator_version_id=iteration.evaluator_version_id,
+            result=result,
+            governing_policy_hash=runtime.policy.policy_hash,
+        )
+    )
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
+    with runtime.uow_factory() as uow:
+        assert uow.connection is not None
+        assert HarnessMetricRepository(uow.connection).get(result.result_id) is None
+
+
+@pytest.mark.integration
+def test_protected_result_handler_rejects_missing_unauthorized_stale_and_duplicate_records(
+    runtime: Runtime,
+) -> None:
+    campaign = _campaign(runtime)
+    assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
+    iteration = _iteration()
+    assert runtime.service.record_iteration(
+        RecordHarnessIteration(
+            proposal_id="result-precondition-iteration",
+            idempotency_key="result-precondition-iteration-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            iteration=iteration,
+            governing_policy_hash=runtime.policy.policy_hash,
+        )
+    ).accepted
+    other = _human_actor("other-result-authority")
+    cases = (
+        (
+            {"observation_id": "missing-observation"},
+            runtime.authority,
+            _approval(runtime),
+            _protected_result(),
+            runtime.policy.policy_hash,
+            RejectionCode.MISSING_ENTITY,
+        ),
+        (
+            {},
+            other,
+            Approval(approver=other, approved_at=NOW),
+            _protected_result(),
+            runtime.policy.policy_hash,
+            RejectionCode.PERMISSION_DENIED,
+        ),
+        (
+            {},
+            runtime.authority,
+            _approval(runtime),
+            _protected_result().model_copy(update={"evaluated_at": NOW - timedelta(seconds=1)}),
+            runtime.policy.policy_hash,
+            RejectionCode.INVALID_LINEAGE,
+        ),
+        (
+            {},
+            runtime.authority,
+            _approval(runtime),
+            _protected_result(),
+            "f" * 64,
+            RejectionCode.POLICY_HASH_MISMATCH,
+        ),
+    )
+    for index, (updates, proposer, approval, result, policy, expected) in enumerate(cases):
+        proposal = RecordHarnessProtectedResult(
+            proposal_id=f"rejected-result-{index}",
+            idempotency_key=f"rejected-result-{index}-key",
+            proposer=proposer,
+            approval=approval,
+            observation_id=iteration.observation_id,
+            partition_manifest_id=iteration.partition_manifest_id,
+            variant=iteration.variant,
+            evaluator_version_id=iteration.evaluator_version_id,
+            result=result,
+            governing_policy_hash=policy,
+        ).model_copy(update=updates)
+        decision = runtime.service.record_protected_result(proposal)
+        assert decision.accepted is False
+        assert decision.reasons[0].code is expected
+
+    accepted_proposal = RecordHarnessProtectedResult(
+        proposal_id="accepted-result",
+        idempotency_key="accepted-result-key",
+        proposer=runtime.authority,
+        approval=_approval(runtime),
+        observation_id=iteration.observation_id,
+        partition_manifest_id=iteration.partition_manifest_id,
+        variant=iteration.variant,
+        evaluator_version_id=iteration.evaluator_version_id,
+        result=_protected_result(),
+        governing_policy_hash=runtime.policy.policy_hash,
+    )
+    assert runtime.service.record_protected_result(accepted_proposal).accepted
+    duplicate = runtime.service.record_protected_result(
+        accepted_proposal.model_copy(
+            update={
+                "proposal_id": "duplicate-result",
+                "idempotency_key": "duplicate-result-key",
+            }
+        )
+    )
+    assert duplicate.reasons[0].code is RejectionCode.ENTITY_ALREADY_EXISTS
+
+
+@pytest.mark.integration
+def test_negative_iterations_confounds_and_nonadmission_decision_are_all_append_only(
+    runtime: Runtime,
+) -> None:
+    campaign = _campaign(runtime, extra_attempt=True)
+    assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
+    confound = HarnessConfound(
+        confound_id="confound-budget",
+        campaign_id=campaign.campaign_id,
+        code=HarnessConfoundCode.ATTEMPTS_MISMATCH,
+        description="candidate received an additional attempt",
+        affected_variant=HarnessVariant.EVOLVED_HARNESS,
+        resolved=False,
+        independent_analysis_id=None,
+        recorded_at=NOW,
+        governing_policy_hash=runtime.policy.policy_hash,
+    )
+    assert runtime.service.record_confound(
+        RecordHarnessConfound(
+            proposal_id="confound-proposal",
+            idempotency_key="confound-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            confound=confound,
+        )
+    ).accepted
+    report = _report(runtime, campaign, confounds=(confound,))
+    recommendation = decide_campaign(report)
+    assert recommendation.status is HarnessDecisionStatus.INCONCLUSIVE
+    assert runtime.service.decide_campaign(
+        DecideHarnessCampaign(
+            proposal_id="decision-proposal",
+            idempotency_key="decision-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            report=report,
+            decision=recommendation,
+        )
+    ).accepted
+
+    with runtime.uow_factory() as uow:
+        assert uow.connection is not None
+        assert HarnessConfoundRepository(uow.connection).get(confound.confound_id) is not None
+        stored = HarnessDecisionRepository(uow.connection).get(recommendation.decision_id)
+        assert stored is not None
+        assert stored.admitted is False
+        assert HarnessCampaignHeadRepository(uow.connection).get(campaign.campaign_id) == (
+            recommendation.decision_id,
+            recommendation.status,
+        )
+
+
+@pytest.mark.integration
+def test_admission_without_durable_audit_and_measurement_is_rejected(runtime: Runtime) -> None:
+    campaign = _campaign(runtime)
+    assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
+    report = _report(runtime, campaign, transfer=Decimal("0.9"), admission_requested=True)
+    recommendation = decide_campaign(report)
+    assert recommendation.admitted is True
+
+    durable = runtime.service.decide_campaign(
+        DecideHarnessCampaign(
+            proposal_id="unsupported-admission",
+            idempotency_key="unsupported-admission-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            report=report,
+            decision=recommendation,
+        )
+    )
+
+    assert durable.accepted is False
+    assert durable.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+
+
+@pytest.mark.integration
+def test_protected_literal_is_absent_from_main_database_audit_and_campaign_export(
+    runtime: Runtime,
+) -> None:
+    campaign = _campaign(runtime)
+    assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
+    iteration = _iteration(candidate_hash=sha256_hex(SECRET))
+    assert runtime.service.record_iteration(
+        RecordHarnessIteration(
+            proposal_id="secret-observation",
+            idempotency_key="secret-observation-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            iteration=iteration,
+            governing_policy_hash=runtime.policy.policy_hash,
+        )
+    ).accepted
+    report = _report(runtime, campaign)
+
+    with runtime.engine.connect() as connection:
+        dump = b"\n".join(
+            str(row).encode("utf-8")
+            for table_name in (
+                "harness_campaigns",
+                "harness_partition_manifests",
+                "harness_budgets",
+                "harness_observations",
+                "harness_metrics",
+                "harness_confounds",
+                "harness_decisions",
+                "transactions",
+                "audit_events",
+            )
+            for row in connection.execute(text(f"SELECT * FROM {table_name}"))
+        )
+    assert SECRET not in dump
+    assert SECRET not in campaign_export_bytes(report)
+    assert b"protected://" not in campaign_export_bytes(report)
+
+
+def _policy() -> PolicySnapshot:
+    policy = GovernancePolicyV2(
+        required_claim_checks=("source_exists",),
+        human_approval_for=frozenset({"harness_admission"}),
+        adaptation_requirements=(
+            AdaptationRequirement(
+                change_target=ChangeTarget.ORCHESTRATION,
+                persistence=PersistenceScope.HARNESS_CODE,
+                minimum_verification=VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK,
+                permitted_grounding=frozenset({ExternalGrounding.INDEPENDENT_TEST_SUITE}),
+                required_approver_kind=ActorKind.HUMAN,
+                protected_evaluation_required=True,
+                rollback_required=True,
+            ),
+        ),
+    )
+    return PolicySnapshot(policy_hash=policy_hash(policy), policy=policy)
+
+
+def _create_proposal(runtime: Runtime, campaign: HarnessCampaign) -> CreateHarnessCampaign:
+    return CreateHarnessCampaign(
+        proposal_id="create-campaign",
+        idempotency_key="create-campaign-key",
+        proposer=runtime.proposer,
+        approval=_approval(runtime),
+        campaign=campaign,
+    )
+
+
+def _approval(runtime: Runtime) -> Approval:
+    return Approval(approver=runtime.authority, approved_at=NOW)
+
+
+def _budget(*, attempts: int = 1) -> EvaluationBudget:
+    return EvaluationBudget(
+        model_id="model-1",
+        model_version="model-v1",
+        adapter_id=None,
+        feedback_mode=FeedbackMode.NONE,
+        tool_ids=(),
+        attempts=attempts,
+        token_limit=100,
+        reasoning_limit=50,
+        evaluator_call_limit=1,
+        wall_clock_seconds=Decimal("10"),
+        cost_limit=Decimal("1"),
+        human_intervention_limit=0,
+    )
+
+
+def _campaign(runtime: Runtime, *, extra_attempt: bool = False) -> HarnessCampaign:
+    variants = (
+        HarnessVariant.UNCHANGED_HARNESS_SINGLE_ATTEMPT,
+        HarnessVariant.EVOLVED_HARNESS,
+    )
+    partitions: list[CampaignPartitionManifest] = []
+    for partition in HarnessPartition:
+        task_ids = (f"{partition.value.lower()}-task",)
+        partitions.append(
+            CampaignPartitionManifest(
+                partition_manifest_id=f"manifest-{partition.value.lower()}",
+                campaign_id="campaign-v1",
+                campaign_version=1,
+                partition=partition,
+                task_ids=task_ids,
+                manifest_hash=partition_manifest_hash(
+                    campaign_id="campaign-v1",
+                    campaign_version=1,
+                    partition=partition,
+                    task_ids=task_ids,
+                ),
+                protected_content_hash=(
+                    None if partition is HarnessPartition.HARNESS_DISCOVERY_TASKS else "a" * 64
+                ),
+                created_at=NOW,
+                governing_policy_hash=runtime.policy.policy_hash,
+            )
+        )
+    return HarnessCampaign(
+        campaign_id="campaign-v1",
+        version=1,
+        variants=variants,
+        baseline_variant=variants[0],
+        candidate_variant=variants[1],
+        baseline_harness_version_id="harness-v1",
+        candidate_harness_version_id="harness-v2",
+        rollback_harness_version_id="harness-v1",
+        model_id="model-1",
+        model_version="model-v1",
+        adapter_id=None,
+        evaluator=_model_actor("evaluator"),
+        evaluator_version_id="evaluator-v1",
+        candidate_producer=runtime.proposer,
+        coordinator=runtime.authority,
+        partitions=tuple(partitions),
+        budgets=(
+            VariantEvaluationBudget(
+                budget_id="budget-baseline",
+                variant=variants[0],
+                budget=_budget(),
+            ),
+            VariantEvaluationBudget(
+                budget_id="budget-candidate",
+                variant=variants[1],
+                budget=_budget(attempts=2 if extra_attempt else 1),
+            ),
+        ),
+        created_at=NOW,
+        governing_policy_hash=runtime.policy.policy_hash,
+    )
+
+
+def _iteration(*, candidate_hash: str = "b" * 64) -> CampaignIteration:
+    return CampaignIteration(
+        iteration_index=0,
+        observation_id="observation-discovery",
+        partition_manifest_id="manifest-harness_discovery_tasks",
+        task_id="harness_discovery_tasks-task",
+        partition=HarnessPartition.HARNESS_DISCOVERY_TASKS,
+        variant=HarnessVariant.EVOLVED_HARNESS,
+        budget_id="budget-candidate",
+        attempt=1,
+        candidate_output_hash=candidate_hash,
+        result_id="result-1",
+        outcome=AssessmentOutcome.PASSED,
+        negative_result=False,
+        evaluator_version_id="evaluator-v1",
+        observed_at=NOW,
+    )
+
+
+def _protected_result() -> ProtectedCheckerResult:
+    return ProtectedCheckerResult(
+        result_id="result-1",
+        campaign_id="campaign-v1",
+        task_id="harness_discovery_tasks-task",
+        expected_output_hash="a" * 64,
+        candidate_output_hash="b" * 64,
+        checker_id="checker-1",
+        checker_version="checker-v1",
+        outcome=AssessmentOutcome.PASSED,
+        metric_values=(MetricValue(metric_id="correctness", value=Decimal("1")),),
+        evaluated_at=NOW,
+    )
+
+
+def _report(
+    runtime: Runtime,
+    campaign: HarnessCampaign,
+    *,
+    transfer: Decimal = Decimal("0.4"),
+    admission_requested: bool = False,
+    confounds: tuple[HarnessConfound, ...] = (),
+) -> HarnessCampaignReport:
+    partitions = tuple(HarnessPartition)
+    metrics = tuple(
+        PartitionMetric(
+            partition=partition,
+            metric_id="correctness",
+            baseline_value=Decimal("0.5"),
+            candidate_value=(
+                transfer
+                if partition is HarnessPartition.HARNESS_TRANSFER_TASKS
+                else (
+                    Decimal("0.5")
+                    if partition
+                    in (
+                        HarnessPartition.HARNESS_REGRESSION_TASKS,
+                        HarnessPartition.HARNESS_SAFETY_TASKS,
+                    )
+                    else Decimal("0.8")
+                )
+            ),
+            higher_is_better=True,
+            catastrophic_regression=False,
+            result_ids=(f"metric-{partition.value.lower()}",),
+            evaluator_version_id="evaluator-v1",
+        )
+        for partition in partitions
+    )
+    baseline = campaign.budgets[0].budget
+    return HarnessCampaignReport(
+        campaign=campaign,
+        expected_iteration_count=0,
+        iterations=(),
+        negative_observation_ids=(),
+        budget_comparisons=tuple(
+            compare_budgets(baseline, item.budget) for item in campaign.budgets[1:]
+        ),
+        metrics=metrics,
+        confounds=confounds,
+        evaluator_audit_id="audit-1",
+        evaluator_audit_passed=True,
+        measurement_id="measurement-1",
+        measurement_accepted=True,
+        rollback=None,
+        admission_requested=admission_requested,
+        decision_authority=runtime.authority,
+        reported_at=NOW,
+        governing_policy_hash=runtime.policy.policy_hash,
+    )
+
+
+def _human_actor(identifier: str) -> ActorIdentity:
+    return ActorIdentity(actor_id=identifier, kind=ActorKind.HUMAN, created_at=NOW)
+
+
+def _model_actor(identifier: str) -> ActorIdentity:
+    return ActorIdentity.model(identifier, "provider", identifier, None, NOW)
