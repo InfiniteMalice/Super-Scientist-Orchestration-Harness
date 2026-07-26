@@ -34,7 +34,7 @@
       "source_bindings": [
         {
           "relative_path": "src/super_scientist/providers/storage/artifacts.py",
-          "repository_commit": "c5de7d14f530e172216f35d8a5453057aa257f61",
+          "repository_commit": "0a75ee7edc3c5a6679a2e510d69ef5482358c709",
           "source_hash": "5502058494d8cf902bcb2b5964e2800c8ac952f57a5b39e3fba964732f35d2ca",
           "symbol": "FileArtifactStore"
         }
@@ -90,8 +90,8 @@
       "source_bindings": [
         {
           "relative_path": "src/super_scientist/providers/storage/protected_evaluation.py",
-          "repository_commit": "c5de7d14f530e172216f35d8a5453057aa257f61",
-          "source_hash": "5991f6326016034769f1dc33216c1ab47f53b3d787e00aba7559e8ecb6ab1dfe",
+          "repository_commit": "0a75ee7edc3c5a6679a2e510d69ef5482358c709",
+          "source_hash": "7d0176de4a80142bfb49eb5204a965923ff79c744abf82378427ddfdbd2e87e7",
           "symbol": "ProtectedEvaluationStore"
         }
       ],
@@ -146,8 +146,8 @@
       "source_bindings": [
         {
           "relative_path": "src/super_scientist/application/transactions/coordinator.py",
-          "repository_commit": "c5de7d14f530e172216f35d8a5453057aa257f61",
-          "source_hash": "75fa7325ad84cbff7db9effc5d001e4c33c140cee23e1b99ccdad0db444d9b7c",
+          "repository_commit": "0a75ee7edc3c5a6679a2e510d69ef5482358c709",
+          "source_hash": "54a8be0625eaa17d8230a06270647e0de58bee9b99acd78ad7f1b25ca67e0875",
           "symbol": "TransactionCoordinator"
         }
       ],
@@ -199,7 +199,7 @@
       "source_bindings": [
         {
           "relative_path": "src/super_scientist/application/workspace_integrity.py",
-          "repository_commit": "c5de7d14f530e172216f35d8a5453057aa257f61",
+          "repository_commit": "0a75ee7edc3c5a6679a2e510d69ef5482358c709",
           "source_hash": "b351259e05306dca2f7a1d76749707f1f90e39f018833be3d5607fd36c491f1d",
           "symbol": "verify_workspace"
         }
@@ -218,6 +218,6 @@
     }
   ],
   "repository": "InfiniteMalice/Super-Scientist-Orchestration-Harness",
-  "repository_commit": "c5de7d14f530e172216f35d8a5453057aa257f61",
+  "repository_commit": "0a75ee7edc3c5a6679a2e510d69ef5482358c709",
   "schema_version": 1
 }

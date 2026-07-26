@@ -4,9 +4,9 @@
 > Python syntax verifies locations only and does not infer behavioral truth.
 
 - Repository: `InfiniteMalice/Super-Scientist-Orchestration-Harness`
-- Repository commit: `c5de7d14f530e172216f35d8a5453057aa257f61`
-- Manifest SHA-256: `8b10bd7fade65c8b1e81644924f71834bd941af9d2c281361a8cee3adc9b265b`
-- Source-tree SHA-256: `584c319923319f08ec2e1dfff0b0007d80901f30d46de7b1ff2be04348ec5614`
+- Repository commit: `0a75ee7edc3c5a6679a2e510d69ef5482358c709`
+- Manifest SHA-256: `8e9f062d10a82a6d6070b6a1d84f540881581121bb391e81f90587506652346d`
+- Source-tree SHA-256: `66322516c4e278bb21898a9ebcb85cb67a73238ad8aa083917bcf75f2b8e5ce3`
 
 ## Level 1: Summary
 
@@ -110,7 +110,7 @@ Governing rule versions:
 
 ### `artifact-containment`
 
-- Commit: `c5de7d14f530e172216f35d8a5453057aa257f61`
+- Commit: `0a75ee7edc3c5a6679a2e510d69ef5482358c709`
   - Source: `src/super_scientist/providers/storage/artifacts.py:19` through line 124
   - Symbol: `FileArtifactStore`
   - File SHA-256: `5502058494d8cf902bcb2b5964e2800c8ac952f57a5b39e3fba964732f35d2ca`
@@ -122,10 +122,10 @@ Tests:
 
 ### `protected-evaluation-separation`
 
-- Commit: `c5de7d14f530e172216f35d8a5453057aa257f61`
-  - Source: `src/super_scientist/providers/storage/protected_evaluation.py:218` through line 325
+- Commit: `0a75ee7edc3c5a6679a2e510d69ef5482358c709`
+  - Source: `src/super_scientist/providers/storage/protected_evaluation.py:179` through line 286
   - Symbol: `ProtectedEvaluationStore`
-  - File SHA-256: `5991f6326016034769f1dc33216c1ab47f53b3d787e00aba7559e8ecb6ab1dfe`
+  - File SHA-256: `7d0176de4a80142bfb49eb5204a965923ff79c744abf82378427ddfdbd2e87e7`
   - Symbol SHA-256: `a6d23256b3baeda6d547c41f12d182ee6d1ef55289690e59d7823774cde4f788`
 
 Tests:
@@ -134,11 +134,11 @@ Tests:
 
 ### `transactional-admission-coordination`
 
-- Commit: `c5de7d14f530e172216f35d8a5453057aa257f61`
-  - Source: `src/super_scientist/application/transactions/coordinator.py:175` through line 590
+- Commit: `0a75ee7edc3c5a6679a2e510d69ef5482358c709`
+  - Source: `src/super_scientist/application/transactions/coordinator.py:182` through line 618
   - Symbol: `TransactionCoordinator`
-  - File SHA-256: `75fa7325ad84cbff7db9effc5d001e4c33c140cee23e1b99ccdad0db444d9b7c`
-  - Symbol SHA-256: `7adb09cac8b17a32a516a04dd838502361a407b6d2168053224d2ade681cac9a`
+  - File SHA-256: `54a8be0625eaa17d8230a06270647e0de58bee9b99acd78ad7f1b25ca67e0875`
+  - Symbol SHA-256: `ebef267a8c6ee889f7e66b7d4cce4d483e6cb2f7ab459f22a2cba4604cf4c279`
 
 Tests:
 
@@ -146,7 +146,7 @@ Tests:
 
 ### `workspace-integrity-verification`
 
-- Commit: `c5de7d14f530e172216f35d8a5453057aa257f61`
+- Commit: `0a75ee7edc3c5a6679a2e510d69ef5482358c709`
   - Source: `src/super_scientist/application/workspace_integrity.py:598` through line 647
   - Symbol: `verify_workspace`
   - File SHA-256: `b351259e05306dca2f7a1d76749707f1f90e39f018833be3d5607fd36c491f1d`
