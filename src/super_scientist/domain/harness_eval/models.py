@@ -314,6 +314,7 @@ def fixed_checker_configuration_hash(
     metric_ids: tuple[str, ...],
     evaluator_id: str,
     evaluator_version_id: str,
+    metric_higher_is_better: tuple[bool, ...] = (True,),
 ) -> str:
     return sha256_hex(
         canonical_json_bytes(
@@ -322,6 +323,7 @@ def fixed_checker_configuration_hash(
                 "checker_version": checker_version,
                 "checker_kind": checker_kind.value,
                 "metric_ids": list(metric_ids),
+                "metric_higher_is_better": list(metric_higher_is_better),
                 "evaluator_id": evaluator_id,
                 "evaluator_version_id": evaluator_version_id,
             }
@@ -335,6 +337,7 @@ class FixedCheckerConfiguration(_StrictFrozenModel):
     checker_kind: FixedCheckerKind
     configuration_hash: Sha256Hex
     metric_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    metric_higher_is_better: tuple[bool, ...] = (True,)
     evaluator_id: StableIdentifier
     evaluator_version_id: StableIdentifier
 
@@ -347,6 +350,8 @@ class FixedCheckerConfiguration(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_content_addressed_configuration(self) -> Self:
+        if len(self.metric_higher_is_better) != len(self.metric_ids):
+            raise ValueError("metric direction must exactly align with metric_ids")
         expected = fixed_checker_configuration_hash(
             checker_id=self.checker_id,
             checker_version=self.checker_version,
@@ -354,6 +359,7 @@ class FixedCheckerConfiguration(_StrictFrozenModel):
             metric_ids=self.metric_ids,
             evaluator_id=self.evaluator_id,
             evaluator_version_id=self.evaluator_version_id,
+            metric_higher_is_better=self.metric_higher_is_better,
         )
         if self.configuration_hash != expected:
             raise ValueError("configuration_hash must content-address all checker semantics")

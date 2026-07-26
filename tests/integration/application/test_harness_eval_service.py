@@ -742,6 +742,216 @@ def test_admission_without_durable_audit_and_measurement_is_rejected(runtime: Ru
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("negative", (False, True))
+def test_resultless_authoritative_iteration_blocks_otherwise_admissible_evidence(
+    runtime: Runtime,
+    negative: bool,
+) -> None:
+    campaign = _campaign(runtime)
+    assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
+    iterations, metrics = _record_complete_evidence(
+        runtime,
+        campaign,
+        transfer=Decimal("0.9"),
+    )
+    manifest = campaign.partitions[0]
+    resultless = CampaignIteration(
+        iteration_index=len(iterations),
+        observation_id=f"resultless-{'negative' if negative else 'unresolved'}",
+        partition_manifest_id=manifest.partition_manifest_id,
+        task_id=manifest.task_ids[0],
+        partition=manifest.partition,
+        variant=campaign.candidate_variant,
+        budget_id="budget-candidate",
+        attempt=1,
+        candidate_output_hash="f" * 64,
+        result_id=None,
+        outcome=None,
+        negative_result=negative,
+        evaluator_version_id=campaign.evaluator_version_id,
+        observed_at=NOW,
+    )
+    assert runtime.service.record_iteration(
+        RecordHarnessIteration(
+            proposal_id=f"record-{resultless.observation_id}",
+            idempotency_key=f"record-{resultless.observation_id}-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            iteration=resultless,
+            governing_policy_hash=runtime.policy.policy_hash,
+        )
+    ).accepted
+    report = _report(
+        runtime,
+        campaign,
+        transfer=Decimal("0.9"),
+        admission_requested=True,
+        iterations=(*iterations, resultless),
+        metrics=metrics,
+    )
+    recommendation = decide_campaign(report)
+    assert recommendation.admitted is True
+
+    durable = runtime.service.decide_campaign(
+        DecideHarnessCampaign(
+            proposal_id=f"resultless-decision-{negative}",
+            idempotency_key=f"resultless-decision-{negative}-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            report=report,
+            decision=recommendation,
+        )
+    )
+
+    assert durable.accepted is False
+    assert durable.reasons[0].code is RejectionCode.MISSING_EVIDENCE
+    with runtime.uow_factory() as uow:
+        assert uow.connection is not None
+        stored = HarnessObservationRepository(uow.connection).get(resultless.observation_id)
+        assert stored is not None
+        assert stored.result_id is None
+        assert stored.negative_result is negative
+
+
+def test_failed_resultless_iteration_is_rejected_at_the_domain_boundary() -> None:
+    with pytest.raises(
+        ValueError,
+        match="result_id and outcome must be present together",
+    ):
+        CampaignIteration(
+            iteration_index=0,
+            observation_id="failed-resultless",
+            partition_manifest_id="partition-discovery",
+            task_id="task-discovery",
+            partition=HarnessPartition.HARNESS_DISCOVERY_TASKS,
+            variant=HarnessVariant.SIMPLE_PARAMETER_SEARCH,
+            budget_id="budget-candidate",
+            attempt=1,
+            candidate_output_hash="f" * 64,
+            result_id=None,
+            outcome=AssessmentOutcome.FAILED,
+            negative_result=True,
+            evaluator_version_id="evaluator-v1",
+            observed_at=NOW,
+        )
+
+
+@pytest.mark.integration
+def test_failed_iteration_without_protected_result_is_never_complete(
+    runtime: Runtime,
+) -> None:
+    campaign = _campaign(runtime)
+    assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
+    iterations, metrics = _record_complete_evidence(
+        runtime,
+        campaign,
+        transfer=Decimal("0.9"),
+    )
+    manifest = campaign.partitions[0]
+    failed = CampaignIteration(
+        iteration_index=len(iterations),
+        observation_id="failed-without-protected-result",
+        partition_manifest_id=manifest.partition_manifest_id,
+        task_id=manifest.task_ids[0],
+        partition=manifest.partition,
+        variant=campaign.candidate_variant,
+        budget_id="budget-candidate",
+        attempt=1,
+        candidate_output_hash="e" * 64,
+        result_id="missing-protected-result",
+        outcome=AssessmentOutcome.FAILED,
+        negative_result=True,
+        evaluator_version_id=campaign.evaluator_version_id,
+        observed_at=NOW,
+    )
+    assert runtime.service.record_iteration(
+        RecordHarnessIteration(
+            proposal_id="record-failed-without-result",
+            idempotency_key="record-failed-without-result-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            iteration=failed,
+            governing_policy_hash=runtime.policy.policy_hash,
+        )
+    ).accepted
+    report = _report(
+        runtime,
+        campaign,
+        transfer=Decimal("0.9"),
+        iterations=(*iterations, failed),
+        metrics=metrics,
+    )
+
+    durable = runtime.service.decide_campaign(
+        DecideHarnessCampaign(
+            proposal_id="failed-without-result-decision",
+            idempotency_key="failed-without-result-decision-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            report=report,
+            decision=decide_campaign(report),
+        )
+    )
+
+    assert durable.accepted is False
+    assert durable.reasons[0].code is RejectionCode.MISSING_EVIDENCE
+
+
+@pytest.mark.integration
+def test_lower_is_better_direction_is_checker_authored_and_immutable(
+    runtime: Runtime,
+) -> None:
+    campaign = _campaign(runtime)
+    assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
+    iterations, metrics = _record_complete_evidence(
+        runtime,
+        campaign,
+        transfer=Decimal("0.2"),
+        higher_is_better=False,
+    )
+    report = _report(
+        runtime,
+        campaign,
+        transfer=Decimal("0.2"),
+        iterations=iterations,
+        metrics=metrics,
+    )
+    recommendation = decide_campaign(report)
+    assert recommendation.status is HarnessDecisionStatus.TRANSFER_VALIDATED
+    accepted = runtime.service.decide_campaign(
+        DecideHarnessCampaign(
+            proposal_id="lower-is-better-decision",
+            idempotency_key="lower-is-better-decision-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            report=report,
+            decision=recommendation,
+        )
+    )
+    assert accepted.accepted is True
+
+    mutated = report.model_copy(
+        update={
+            "metrics": tuple(
+                item.model_copy(update={"higher_is_better": True}) for item in report.metrics
+            )
+        }
+    )
+    rejected = runtime.service.decide_campaign(
+        DecideHarnessCampaign(
+            proposal_id="mutated-direction-decision",
+            idempotency_key="mutated-direction-decision-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            report=mutated,
+            decision=decide_campaign(mutated),
+        )
+    )
+    assert rejected.accepted is False
+    assert rejected.reasons[0].code is RejectionCode.MISSING_EVIDENCE
+
+
+@pytest.mark.integration
 def test_decision_reconciles_every_metric_to_complete_protected_observations(
     runtime: Runtime,
 ) -> None:
@@ -1178,6 +1388,7 @@ def _checker(**updates: object) -> FixedCheckerConfiguration:
         "checker_version": "checker-v1",
         "checker_kind": FixedCheckerKind.EXACT_BYTES,
         "metric_ids": ("correctness",),
+        "metric_higher_is_better": (True,),
         "evaluator_id": "evaluator",
         "evaluator_version_id": "evaluator-v1",
     }
@@ -1189,6 +1400,10 @@ def _checker(**updates: object) -> FixedCheckerConfiguration:
         metric_ids=cast(tuple[str, ...], payload["metric_ids"]),
         evaluator_id=str(payload["evaluator_id"]),
         evaluator_version_id=str(payload["evaluator_version_id"]),
+        metric_higher_is_better=cast(
+            tuple[bool, ...],
+            payload["metric_higher_is_better"],
+        ),
     )
     return FixedCheckerConfiguration.model_validate(payload)
 
@@ -1199,10 +1414,15 @@ def _record_complete_evidence(
     *,
     transfer: Decimal,
     catastrophic_partition: HarnessPartition | None = None,
+    higher_is_better: bool = True,
 ) -> tuple[tuple[CampaignIteration, ...], tuple[PartitionMetric, ...]]:
     candidate_values = {
-        HarnessPartition.HARNESS_DISCOVERY_TASKS: Decimal("0.8"),
-        HarnessPartition.HARNESS_VALIDATION_TASKS: Decimal("0.8"),
+        HarnessPartition.HARNESS_DISCOVERY_TASKS: (
+            Decimal("0.8") if higher_is_better else Decimal("0.2")
+        ),
+        HarnessPartition.HARNESS_VALIDATION_TASKS: (
+            Decimal("0.8") if higher_is_better else Decimal("0.2")
+        ),
         HarnessPartition.HARNESS_TRANSFER_TASKS: transfer,
         HarnessPartition.HARNESS_REGRESSION_TASKS: Decimal("0.5"),
         HarnessPartition.HARNESS_SAFETY_TASKS: Decimal("0.5"),
@@ -1274,7 +1494,11 @@ def _record_complete_evidence(
                     partition_manifest_id=iteration.partition_manifest_id,
                     variant=variant,
                     evaluator_version_id=campaign.evaluator_version_id,
-                    checker_configuration=_checker(),
+                    checker_configuration=(
+                        _checker()
+                        if higher_is_better
+                        else _checker(metric_higher_is_better=(False,))
+                    ),
                     result=result,
                     governing_policy_hash=runtime.policy.policy_hash,
                 )
@@ -1288,7 +1512,7 @@ def _record_complete_evidence(
             metric_id="correctness",
             baseline_value=Decimal("0.5"),
             candidate_value=candidate_values[partition],
-            higher_is_better=True,
+            higher_is_better=higher_is_better,
             catastrophic_regression=partition is catastrophic_partition,
             result_ids=tuple(result_ids[partition]),
             evaluator_version_id=campaign.evaluator_version_id,

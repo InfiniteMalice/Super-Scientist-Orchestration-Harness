@@ -257,3 +257,104 @@ the protected literal from the main database.
 The handbook manifest does not bind any changed source in this review round
 (`protected_evaluation.py` and `artifacts.py` remain unchanged), so no handbook refresh or
 separate documentation commit is required.
+
+## Review hardening round 2
+
+The second canonical review identified three remaining blocking completeness, metric
+direction, and package-facade gaps. This round is limited to those findings:
+
+1. Treat every resultless authoritative iteration as incomplete evidence, including
+   unresolved, negative, and failed outcomes, so it cannot disappear from reconciliation
+   or support a promotable/durable decision.
+2. Make each metric direction immutable checker-authored configuration, include it in the
+   checker content address and protected-result identity, and require report direction to
+   match that authority exactly.
+3. Export the sole sealed candidate-context factory from the package facade.
+
+### Round 2 RED and design rationale
+
+The combined reviewer reproductions initially failed as expected:
+
+```text
+5 failed in 9.87s
+```
+
+The package facade omitted `create_candidate_execution_context`; resultless unresolved
+and negative observations incorrectly reached `INDEPENDENT_REVIEW_REQUIRED` instead of
+failing closed as missing evidence; and report models did not yet admit a direction field
+for authoritative reconciliation. Isolating completeness produced `2 failed, 1 passed in
+11.39s`; the already-safe failed observation with a claimed result identifier but no
+protected record remained rejected. A separate lower-is-better evaluator reproduction
+then failed `1 failed in 2.75s` because an exact match still emitted the higher-is-better
+value.
+
+The domain model already rejects a failed outcome without a result identifier because
+`result_id` and `outcome` must be present together. The final matrix makes that invariant
+explicit, then separately proves that a failed observation with a claimed result identifier
+but no protected record cannot become complete evidence.
+
+The minimal implementation closes those gaps at their authority boundaries:
+
+- Authoritative reconciliation now requires a protected result identifier for every
+  iteration. A resultless authoritative observation makes the decision evidence
+  incomplete regardless of its reported outcome.
+- `FixedCheckerConfiguration.metric_higher_is_better` is an exact, length-aligned tuple
+  that participates in both the canonical checker hash and protected result identity.
+  Evaluators emit direction-aware metric values, and decision reconciliation derives one
+  immutable direction per group from stored checker lineage and rejects report mutation.
+- The application package facade exports `create_candidate_execution_context`; direct
+  construction with the public in-memory reader remains rejected by the exact sealed
+  context boundary.
+
+### Round 2 GREEN and final gates
+
+Focused functional progression:
+
+```text
+lower-is-better evaluator targeted GREEN: 1 passed in 2.25s
+reviewer subset GREEN: 6 passed in 13.97s
+full Task 15 focused suite: 239 passed in 49.55s
+final focused coverage suite: 80 passed in 64.97s
+branch-aware Task 15 coverage: 91.0629654705484%
+coverage report --fail-under=90: exit 0
+```
+
+The final focused coverage measurement covered 1,061 of 1,135 statements and 284 of 342
+branches across the four Task 15 domain/application ownership modules.
+
+Protected-storage compatibility:
+
+```text
+Task 13 + migration 0006 + append-only + evaluator succession:
+79 passed in 119.66s
+```
+
+Static, security, and dependency gates:
+
+```text
+Ruff check src tests: PASS
+Ruff format, 6 owned files: PASS
+mypy: Success, no issues in 91 source files
+Bandit recursive medium/high scan: PASS
+pip-audit: No known vulnerabilities found
+```
+
+`pip-audit` skipped only the unpublished local distribution.
+
+Packaging and installed-wheel package-root smoke:
+
+```text
+isolated Hatchling sdist and wheel build: PASS
+Twine check, sdist and wheel: PASS
+force-install current wheel into fresh environment: PASS
+fresh installed-wheel package-root smoke: PASS
+```
+
+The smoke ran outside the repository, imported the facade from `site-packages`, constructed
+a sealed context only through the facade factory, verified that direct facade construction
+with the public reader is rejected, and proved that checker hashes differ when only metric
+direction changes.
+
+The handbook manifest still binds only unchanged `protected_evaluation.py` and
+`artifacts.py` source for the relevant protected behavior. This round changes only
+application/domain code and tests, so no handbook refresh is required.

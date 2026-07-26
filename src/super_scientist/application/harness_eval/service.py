@@ -1038,7 +1038,7 @@ def _authoritative_metrics_match(
     iterations_by_result: dict[str, CampaignIteration] = {}
     for iteration in context.iterations:
         if iteration.result_id is None:
-            continue
+            return False
         if iteration.result_id in iterations_by_result:
             return False
         iterations_by_result[iteration.result_id] = iteration
@@ -1063,7 +1063,7 @@ def _authoritative_metrics_match(
     manifest_by_id = {item.partition_manifest_id: item for item in context.partitions}
     groups: dict[
         tuple[HarnessPartition, str],
-        list[tuple[CampaignIteration, RecordHarnessProtectedResult, Decimal]],
+        list[tuple[CampaignIteration, RecordHarnessProtectedResult, Decimal, bool]],
     ] = defaultdict(list)
     for result_id, iteration in iterations_by_result.items():
         proposal = proposals_by_result[result_id]
@@ -1092,9 +1092,14 @@ def _authoritative_metrics_match(
             or not _metric_record_matches_result(stored, result)
         ):
             return False
-        for value in result.metric_values:
+        for index, value in enumerate(result.metric_values):
             groups[(iteration.partition, value.metric_id)].append(
-                (iteration, proposal, value.value)
+                (
+                    iteration,
+                    proposal,
+                    value.value,
+                    checker.metric_higher_is_better[index],
+                )
             )
 
     report_by_key = {(item.partition, item.metric_id): item for item in report.metrics}
@@ -1105,29 +1110,31 @@ def _authoritative_metrics_match(
         ordered = sorted(evidence, key=lambda item: item[0].iteration_index)
         baseline_values = [
             value
-            for iteration, _, value in ordered
+            for iteration, _, value, _ in ordered
             if iteration.variant is report.campaign.baseline_variant
         ]
         candidate_values = [
             value
-            for iteration, _, value in ordered
+            for iteration, _, value, _ in ordered
             if iteration.variant is report.campaign.candidate_variant
         ]
         evaluator_versions = {item[0].evaluator_version_id for item in ordered}
         configuration_hashes = {
             item[1].checker_configuration.configuration_hash for item in ordered
         }
+        metric_directions = {item[3] for item in ordered}
         if (
             not baseline_values
             or not candidate_values
             or len(evaluator_versions) != 1
             or len(configuration_hashes) != 1
+            or len(metric_directions) != 1
         ):
             return False
         catastrophic = any(
             iteration.variant is report.campaign.candidate_variant
             and (iteration.negative_result or iteration.outcome is not AssessmentOutcome.PASSED)
-            for iteration, _, _ in ordered
+            for iteration, _, _, _ in ordered
         )
         if (
             metric.result_ids != tuple(item[1].result.result_id for item in ordered)
@@ -1135,7 +1142,7 @@ def _authoritative_metrics_match(
             != sum(baseline_values, start=Decimal(0)) / len(baseline_values)
             or metric.candidate_value
             != sum(candidate_values, start=Decimal(0)) / len(candidate_values)
-            or not metric.higher_is_better
+            or metric.higher_is_better is not next(iter(metric_directions))
             or metric.catastrophic_regression != catastrophic
             or metric.evaluator_version_id != next(iter(evaluator_versions))
         ):

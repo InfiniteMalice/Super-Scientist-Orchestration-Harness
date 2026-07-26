@@ -9,6 +9,7 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
+from super_scientist.application import harness_eval as harness_eval_facade
 from super_scientist.application.harness_eval.capabilities import (
     CandidateExecutionContext,
     InMemoryPublicTaskInputReader,
@@ -292,6 +293,20 @@ def test_candidate_context_factory_seals_public_input_authority() -> None:
     assert context.input_reader.__class__.__name__ != InMemoryPublicTaskInputReader.__name__
 
 
+def test_package_facade_constructs_only_the_sealed_candidate_context() -> None:
+    context = harness_eval_facade.create_candidate_execution_context(
+        (_public_input(),),
+        _budget(),
+    )
+
+    assert context.input_reader.get_task_input("campaign-v1", "task-1") == _public_input()
+    with pytest.raises((TypeError, ValidationError)):
+        CandidateExecutionContext(
+            input_reader=InMemoryPublicTaskInputReader((_public_input(),)),  # type: ignore[arg-type]
+            budget=_budget(),
+        )
+
+
 def test_candidate_context_rejects_dual_role_and_recursively_nested_authority(
     tmp_path: Path,
 ) -> None:
@@ -361,6 +376,7 @@ def test_fixed_checker_configuration_is_content_addressed_over_all_semantic_fiel
         {"checker_id": "other-checker"},
         {"checker_version": "other-version"},
         {"metric_ids": ("correctness", "safety")},
+        {"metric_higher_is_better": (False,)},
         {"evaluator_id": "other-evaluator"},
         {"evaluator_version_id": "evaluator-v2"},
     ):
@@ -372,6 +388,7 @@ def test_fixed_checker_configuration_is_content_addressed_over_all_semantic_fiel
             metric_ids=payload["metric_ids"],
             evaluator_id=str(payload["evaluator_id"]),
             evaluator_version_id=str(payload["evaluator_version_id"]),
+            metric_higher_is_better=payload["metric_higher_is_better"],
         )
         assert expected != checker.configuration_hash
 
@@ -383,6 +400,23 @@ def test_result_identity_cannot_collide_across_checker_or_evaluator_lineage() ->
     second = _evaluator().evaluate("campaign-v1", "task-1", SECRET, changed)
 
     assert first.result_id != second.result_id
+
+
+def test_lower_is_better_checker_emits_directional_values_and_distinct_identity() -> None:
+    higher = _evaluator().evaluate("campaign-v1", "task-1", SECRET, _checker())
+    lower_checker = _checker(metric_higher_is_better=(False,))
+
+    lower_match = _evaluator().evaluate("campaign-v1", "task-1", SECRET, lower_checker)
+    lower_miss = _evaluator().evaluate(
+        "campaign-v1",
+        "task-1",
+        b"wrong-answer",
+        lower_checker,
+    )
+
+    assert lower_match.metric_values[0].value == Decimal("0")
+    assert lower_miss.metric_values[0].value == Decimal("1")
+    assert lower_match.result_id != higher.result_id
 
 
 def _candidate_context() -> CandidateExecutionContext:
@@ -423,6 +457,7 @@ def _checker(**updates: object) -> FixedCheckerConfiguration:
         "checker_version": "exact-match-v1",
         "checker_kind": FixedCheckerKind.EXACT_BYTES,
         "metric_ids": ("correctness",),
+        "metric_higher_is_better": (True,),
         "evaluator_id": "evaluator",
         "evaluator_version_id": "evaluator-v1",
     }
@@ -434,6 +469,10 @@ def _checker(**updates: object) -> FixedCheckerConfiguration:
         metric_ids=cast(tuple[str, ...], payload["metric_ids"]),
         evaluator_id=str(payload["evaluator_id"]),
         evaluator_version_id=str(payload["evaluator_version_id"]),
+        metric_higher_is_better=cast(
+            tuple[bool, ...],
+            payload["metric_higher_is_better"],
+        ),
     )
     return FixedCheckerConfiguration(
         **payload,  # type: ignore[arg-type]

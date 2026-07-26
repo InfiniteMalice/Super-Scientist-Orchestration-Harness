@@ -8,6 +8,7 @@ from super_scientist.application.harness_eval.capabilities import (
     InMemoryPublicTaskInputReader,
     OutputOnlyEvaluatorExecutor,
     PublicTaskInputReader,
+    create_candidate_execution_context,
 )
 from super_scientist.application.harness_eval.service import (
     HarnessEvaluationService,
@@ -27,5 +28,6 @@ __all__ = [
     "PublicTaskInputReader",
     "campaign_export_bytes",
     "compare_budgets",
+    "create_candidate_execution_context",
     "decide_campaign",
 ]

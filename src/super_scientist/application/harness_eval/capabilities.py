@@ -221,6 +221,7 @@ class OutputOnlyEvaluatorExecutor:
                     "checker_kind": fixed_checker.checker_kind.value,
                     "configuration_hash": fixed_checker.configuration_hash,
                     "metric_ids": list(fixed_checker.metric_ids),
+                    "metric_higher_is_better": list(fixed_checker.metric_higher_is_better),
                     "evaluator_id": fixed_checker.evaluator_id,
                     "evaluator_version_id": fixed_checker.evaluator_version_id,
                     "evaluated_at": evaluated_at.isoformat(),
@@ -237,8 +238,15 @@ class OutputOnlyEvaluatorExecutor:
             checker_version=fixed_checker.checker_version,
             outcome=AssessmentOutcome.PASSED if matched else AssessmentOutcome.FAILED,
             metric_values=tuple(
-                MetricValue(metric_id=metric_id, value=Decimal(1 if matched else 0))
-                for metric_id in fixed_checker.metric_ids
+                MetricValue(
+                    metric_id=metric_id,
+                    value=Decimal(int(matched) if higher_is_better else int(not matched)),
+                )
+                for metric_id, higher_is_better in zip(
+                    fixed_checker.metric_ids,
+                    fixed_checker.metric_higher_is_better,
+                    strict=True,
+                )
             ),
             evaluated_at=evaluated_at,
         )
