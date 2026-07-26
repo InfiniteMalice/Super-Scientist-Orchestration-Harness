@@ -284,6 +284,13 @@ class HarnessCampaign(_StrictFrozenModel):
         return self
 
 
+def harness_campaign_hash(campaign: HarnessCampaign) -> str:
+    """Content-address every immutable campaign field, including nested lineage."""
+
+    validated = HarnessCampaign.model_validate(campaign)
+    return sha256_hex(canonical_json_bytes(validated.model_dump(mode="json")))
+
+
 class PublicTaskInput(_StrictFrozenModel):
     campaign_id: StableIdentifier
     campaign_version: int = Field(strict=True, ge=1)
@@ -299,12 +306,36 @@ class PublicTaskInput(_StrictFrozenModel):
         return self
 
 
+def fixed_checker_configuration_hash(
+    *,
+    checker_id: str,
+    checker_version: str,
+    checker_kind: FixedCheckerKind,
+    metric_ids: tuple[str, ...],
+    evaluator_id: str,
+    evaluator_version_id: str,
+) -> str:
+    return sha256_hex(
+        canonical_json_bytes(
+            {
+                "checker_id": checker_id,
+                "checker_version": checker_version,
+                "checker_kind": checker_kind.value,
+                "metric_ids": list(metric_ids),
+                "evaluator_id": evaluator_id,
+                "evaluator_version_id": evaluator_version_id,
+            }
+        )
+    )
+
+
 class FixedCheckerConfiguration(_StrictFrozenModel):
     checker_id: StableIdentifier
     checker_version: StableIdentifier
     checker_kind: FixedCheckerKind
     configuration_hash: Sha256Hex
     metric_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    evaluator_id: StableIdentifier
     evaluator_version_id: StableIdentifier
 
     @field_validator("metric_ids")
@@ -313,6 +344,20 @@ class FixedCheckerConfiguration(_StrictFrozenModel):
         if len(set(value)) != len(value):
             raise ValueError("metric_ids must contain unique identifiers")
         return value
+
+    @model_validator(mode="after")
+    def require_content_addressed_configuration(self) -> Self:
+        expected = fixed_checker_configuration_hash(
+            checker_id=self.checker_id,
+            checker_version=self.checker_version,
+            checker_kind=self.checker_kind,
+            metric_ids=self.metric_ids,
+            evaluator_id=self.evaluator_id,
+            evaluator_version_id=self.evaluator_version_id,
+        )
+        if self.configuration_hash != expected:
+            raise ValueError("configuration_hash must content-address all checker semantics")
+        return self
 
 
 class MetricValue(_StrictFrozenModel):
@@ -496,6 +541,12 @@ class HarnessCampaignReport(_StrictFrozenModel):
         metric_keys = tuple((item.partition, item.metric_id) for item in self.metrics)
         if len(metric_keys) != len(set(metric_keys)):
             raise ValueError("partition metrics must be unique")
+        result_partitions: dict[str, HarnessPartition] = {}
+        for metric in self.metrics:
+            for result_id in metric.result_ids:
+                prior = result_partitions.setdefault(result_id, metric.partition)
+                if prior is not metric.partition:
+                    raise ValueError("a protected result cannot support multiple partitions")
         if set(item.partition for item in self.metrics) != set(HarnessPartition):
             raise ValueError("report must preserve all five partition metric families")
         evaluator_versions = {
@@ -585,5 +636,7 @@ __all__ = [
     "PublicTaskInput",
     "VariantEvaluationBudget",
     "compare_evaluation_budgets",
+    "fixed_checker_configuration_hash",
+    "harness_campaign_hash",
     "partition_manifest_hash",
 ]

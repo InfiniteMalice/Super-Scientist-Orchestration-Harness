@@ -34,6 +34,7 @@ from super_scientist.domain.evidence_trails.models import (
 )
 from super_scientist.domain.harness_eval.models import (
     CampaignIteration,
+    FixedCheckerConfiguration,
     HarnessCampaign,
     HarnessCampaignReport,
     HarnessConfound,
@@ -475,6 +476,7 @@ class RecordHarnessProtectedResult(ProposalBase):
     partition_manifest_id: StableIdentifier
     variant: HarnessVariant
     evaluator_version_id: StableIdentifier
+    checker_configuration: FixedCheckerConfiguration
     result: ProtectedCheckerResult
     governing_policy_hash: Sha256Hex
 

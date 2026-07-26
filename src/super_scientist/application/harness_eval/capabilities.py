@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import types
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from decimal import Decimal
@@ -28,6 +29,8 @@ from super_scientist.providers.storage.protected_evaluation import (
     MetricValue,
     ProtectedAnswerReader,
     ProtectedCheckerResult,
+    ProtectedEvaluationStore,
+    ProtectedResultGateway,
     ProtectedResultValidator,
 )
 
@@ -108,16 +111,39 @@ class InMemoryPublicTaskInputReader:
             raise KeyError("public task input is unavailable") from None
 
 
+class _CandidatePublicInputCapability:
+    """Opaque candidate-facing projection with exactly one public operation."""
+
+    __slots__ = ("_inputs",)
+
+    def __init__(self, inputs: tuple[PublicTaskInput, ...]) -> None:
+        normalized = tuple(PublicTaskInput.model_validate(item) for item in inputs)
+        keys = tuple((item.campaign_id, item.task_id) for item in normalized)
+        if len(keys) != len(set(keys)):
+            raise ValueError("candidate public inputs must have unique campaign/task identities")
+        self._inputs: Mapping[tuple[str, str], PublicTaskInput] = MappingProxyType(
+            dict(zip(keys, normalized, strict=True))
+        )
+
+    def get_task_input(self, campaign_id: str, task_id: str) -> PublicTaskInput:
+        campaign = _IDENTIFIER_ADAPTER.validate_python(campaign_id)
+        task = _IDENTIFIER_ADAPTER.validate_python(task_id)
+        try:
+            return self._inputs[(campaign, task)]
+        except KeyError:
+            raise KeyError("public task input is unavailable") from None
+
+
 @dataclass(frozen=True, slots=True)
 class CandidateExecutionContext:
     """The complete authority offered to candidate code."""
 
-    input_reader: PublicTaskInputReader
+    input_reader: _CandidatePublicInputCapability
     budget: EvaluationBudget
 
     def __post_init__(self) -> None:
-        if not isinstance(self.input_reader, PublicTaskInputReader):
-            raise TypeError("candidate context requires a public task input reader")
+        if type(self.input_reader) is not _CandidatePublicInputCapability:
+            raise TypeError("candidate context requires sealed public-input authority")
         if type(self.budget) is not EvaluationBudget:
             raise TypeError("candidate context requires an exact immutable evaluation budget")
         try:
@@ -125,6 +151,17 @@ class CandidateExecutionContext:
         except (TypeError, ValidationError):
             raise ValueError("candidate evaluation budget is invalid") from None
         object.__setattr__(self, "budget", canonical)
+        _reject_forbidden_candidate_authority(self)
+
+
+def create_candidate_execution_context(
+    inputs: tuple[PublicTaskInput, ...],
+    budget: EvaluationBudget,
+) -> CandidateExecutionContext:
+    if type(inputs) is not tuple or any(type(item) is not PublicTaskInput for item in inputs):
+        raise TypeError("candidate context factory requires exact public task inputs")
+    capability = _CandidatePublicInputCapability(inputs)
+    return CandidateExecutionContext(input_reader=capability, budget=budget)
 
 
 class OutputOnlyEvaluatorExecutor:
@@ -181,6 +218,11 @@ class OutputOnlyEvaluatorExecutor:
                     "expected_output_hash": expected_hash,
                     "checker_id": fixed_checker.checker_id,
                     "checker_version": fixed_checker.checker_version,
+                    "checker_kind": fixed_checker.checker_kind.value,
+                    "configuration_hash": fixed_checker.configuration_hash,
+                    "metric_ids": list(fixed_checker.metric_ids),
+                    "evaluator_id": fixed_checker.evaluator_id,
+                    "evaluator_version_id": fixed_checker.evaluator_version_id,
                     "evaluated_at": evaluated_at.isoformat(),
                 }
             )
@@ -206,8 +248,12 @@ class OutputOnlyEvaluatorExecutor:
 def walk_object_graph_types(root: object) -> frozenset[type[object]]:
     """Inspect concrete owned values without invoking arbitrary properties."""
 
+    return frozenset(type(item) for item in _walk_object_graph_values(root))
+
+
+def _walk_object_graph_values(root: object) -> tuple[object, ...]:
     seen: set[int] = set()
-    graph_types: set[type[object]] = set()
+    values: list[object] = []
     pending = [root]
     while pending:
         current = pending.pop()
@@ -215,7 +261,7 @@ def walk_object_graph_types(root: object) -> frozenset[type[object]]:
         if identity in seen:
             continue
         seen.add(identity)
-        graph_types.add(type(current))
+        values.append(current)
         if isinstance(current, Mapping):
             pending.extend(current.keys())
             pending.extend(current.values())
@@ -223,7 +269,21 @@ def walk_object_graph_types(root: object) -> frozenset[type[object]]:
             pending.extend(current)
         elif is_dataclass(current) and not isinstance(current, type):
             pending.extend(getattr(current, field.name) for field in fields(current))
+        elif isinstance(current, types.MethodType):
+            pending.extend((current.__self__, current.__func__))
+        elif isinstance(current, types.FunctionType):
+            pending.extend(current.__defaults__ or ())
+            pending.extend((current.__kwdefaults__ or {}).values())
+            pending.extend(
+                cell.cell_contents
+                for cell in (current.__closure__ or ())
+                if _cell_has_contents(cell)
+            )
         else:
+            state = getattr(current, "__dict__", None)
+            if isinstance(state, dict):
+                pending.extend(state.keys())
+                pending.extend(state.values())
             slots = getattr(type(current), "__slots__", ())
             if isinstance(slots, str):
                 slots = (slots,)
@@ -233,7 +293,44 @@ def walk_object_graph_types(root: object) -> frozenset[type[object]]:
                         pending.append(object.__getattribute__(current, slot))
                     except AttributeError:
                         continue
-    return frozenset(graph_types)
+    return tuple(values)
+
+
+def _cell_has_contents(cell: types.CellType) -> bool:
+    try:
+        _ = cell.cell_contents
+    except ValueError:
+        return False
+    return True
+
+
+def _reject_forbidden_candidate_authority(root: object) -> None:
+    forbidden_reference_fragments = ("protected://", "artifact://")
+    forbidden_field_names = {"answer_reference", "answer_bytes", "expected_output"}
+    for value in _walk_object_graph_values(root):
+        if isinstance(value, str):
+            lowered = value.lower()
+            if lowered in forbidden_field_names or any(
+                fragment in lowered for fragment in forbidden_reference_fragments
+            ):
+                raise ValueError("candidate context contains a reversible protected reference")
+        if isinstance(value, bytes):
+            lowered_bytes = value.lower()
+            if any(
+                fragment.encode() in lowered_bytes for fragment in forbidden_reference_fragments
+            ):
+                raise ValueError("candidate context contains a reversible protected reference")
+        if isinstance(
+            value,
+            (
+                ProtectedAnswerReader,
+                ProtectedResultValidator,
+                ProtectedEvaluationStore,
+                ProtectedResultGateway,
+                OutputOnlyEvaluatorExecutor,
+            ),
+        ):
+            raise TypeError("candidate context contains forbidden protected authority")
 
 
 __all__ = [
@@ -244,5 +341,6 @@ __all__ = [
     "InMemoryPublicTaskInputReader",
     "OutputOnlyEvaluatorExecutor",
     "PublicTaskInputReader",
+    "create_candidate_execution_context",
     "walk_object_graph_types",
 ]

@@ -23,6 +23,8 @@ from super_scientist.domain.harness_eval.models import (
     PublicTaskInput,
     VariantEvaluationBudget,
     compare_evaluation_budgets,
+    fixed_checker_configuration_hash,
+    harness_campaign_hash,
     partition_manifest_hash,
 )
 
@@ -49,5 +51,7 @@ __all__ = [
     "PublicTaskInput",
     "VariantEvaluationBudget",
     "compare_evaluation_budgets",
+    "fixed_checker_configuration_hash",
+    "harness_campaign_hash",
     "partition_manifest_hash",
 ]

@@ -304,6 +304,7 @@ def test_strict_public_and_result_dtos_reject_ambiguous_hashes_and_metrics() -> 
             checker_kind=FixedCheckerKind.EXACT_BYTES,
             configuration_hash=HASH,
             metric_ids=("correctness", "correctness"),
+            evaluator_id="evaluator",
             evaluator_version_id="evaluator-v1",
         )
 

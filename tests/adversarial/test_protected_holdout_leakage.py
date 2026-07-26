@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -11,6 +13,7 @@ from super_scientist.application.harness_eval.capabilities import (
     CandidateExecutionContext,
     InMemoryPublicTaskInputReader,
     OutputOnlyEvaluatorExecutor,
+    create_candidate_execution_context,
     walk_object_graph_types,
 )
 from super_scientist.domain.harness_eval.models import (
@@ -20,6 +23,7 @@ from super_scientist.domain.harness_eval.models import (
     FixedCheckerKind,
     HarnessPartition,
     PublicTaskInput,
+    fixed_checker_configuration_hash,
 )
 from super_scientist.domain.improvement.models import AssessmentOutcome
 from super_scientist.domain.primitives import sha256_hex
@@ -187,6 +191,24 @@ def test_public_reader_rejects_duplicate_authority_bindings() -> None:
         InMemoryPublicTaskInputReader((public, public))
 
 
+def test_public_and_sealed_readers_fail_closed_on_missing_or_ambiguous_inputs() -> None:
+    public = _public_input()
+    reader = InMemoryPublicTaskInputReader((public,))
+
+    assert reader.get_task_input(public.campaign_id, public.task_id) == public
+    with pytest.raises(KeyError, match="unavailable"):
+        reader.get_task_input(public.campaign_id, "missing-task")
+    with pytest.raises(ValueError, match="unique campaign/task"):
+        create_candidate_execution_context((public, public), _budget())
+    with pytest.raises(TypeError, match="exact public task inputs"):
+        create_candidate_execution_context([public], _budget())  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="exact immutable evaluation budget"):
+        CandidateExecutionContext(
+            input_reader=_candidate_context().input_reader,
+            budget=object(),  # type: ignore[arg-type]
+        )
+
+
 def test_candidate_context_revalidates_nonvalidating_budget_copies() -> None:
     invalid_budget = _budget().model_copy(update={"attempts": 0})
 
@@ -234,18 +256,147 @@ def test_object_graph_walker_handles_cycles_containers_and_unset_slots() -> None
     assert int in graph_types
 
 
+def test_object_graph_walker_inspects_bound_methods_defaults_and_closures() -> None:
+    reader = _Reader()
+    captured = reader
+
+    def closure(value: object = reader, *, keyword: object = reader) -> object:
+        del value, keyword
+        return captured
+
+    graph_types = walk_object_graph_types((reader.read_expected_output, closure))
+
+    assert _Reader in graph_types
+    assert type(closure) in graph_types
+
+
+def test_sealed_context_rejects_reversible_reference_bytes() -> None:
+    public = _public_input().model_copy(
+        update={
+            "payload": b"artifact://protected-answer",
+            "payload_hash": sha256_hex(b"artifact://protected-answer"),
+        }
+    )
+
+    with pytest.raises(ValueError, match="reversible protected reference"):
+        create_candidate_execution_context((public,), _budget())
+
+
+def test_candidate_context_factory_seals_public_input_authority() -> None:
+    public = _public_input()
+
+    context = create_candidate_execution_context((public,), _budget())
+
+    assert context.input_reader.get_task_input("campaign-v1", "task-1") == public
+    assert not hasattr(context.input_reader, "read_expected_output")
+    assert context.input_reader.__class__.__name__ != InMemoryPublicTaskInputReader.__name__
+
+
+def test_candidate_context_rejects_dual_role_and_recursively_nested_authority(
+    tmp_path: Path,
+) -> None:
+    class DualRole(_Reader):
+        def get_task_input(self, campaign_id: str, task_id: str) -> PublicTaskInput:
+            del campaign_id, task_id
+            return _public_input()
+
+    class DictionaryWrapper:
+        def __init__(self, authority: object) -> None:
+            self.nested = {"authority": authority}
+
+        def get_task_input(self, campaign_id: str, task_id: str) -> PublicTaskInput:
+            del campaign_id, task_id
+            return _public_input()
+
+    class SlotWrapper:
+        __slots__ = ("authority",)
+
+        def __init__(self, authority: object) -> None:
+            self.authority = authority
+
+        def get_task_input(self, campaign_id: str, task_id: str) -> PublicTaskInput:
+            del campaign_id, task_id
+            return _public_input()
+
+    class Gateway:
+        def append_result(self, result: ProtectedCheckerResult) -> None:
+            del result
+
+        def close(self) -> None:
+            return None
+
+    reader = _Reader()
+    store = ProtectedEvaluationStore(tmp_path / "protected")
+    try:
+        closure = lambda: reader.read_expected_output("task-1")  # noqa: E731
+        protected_authorities = (reader, store, _evaluator(), _Validator(), Gateway())
+        forbidden = (
+            DualRole(),
+            *(DictionaryWrapper(item) for item in protected_authorities),
+            *(SlotWrapper(item) for item in protected_authorities),
+            closure,
+            reader.read_expected_output,
+            *protected_authorities,
+            {"nested": {"answer_reference": "protected://task-1"}},
+            {"nested": "artifact://reversible-answer"},
+        )
+        for authority in forbidden:
+            with pytest.raises((TypeError, ValueError), match=r"candidate|authority|public"):
+                CandidateExecutionContext(
+                    input_reader=authority,  # type: ignore[arg-type]
+                    budget=_budget(),
+                )
+    finally:
+        store.close()
+
+
+def test_fixed_checker_configuration_is_content_addressed_over_all_semantic_fields() -> None:
+    checker = _checker()
+    with pytest.raises(ValidationError, match="configuration_hash"):
+        FixedCheckerConfiguration.model_validate(
+            checker.model_dump(mode="python") | {"configuration_hash": "f" * 64}
+        )
+
+    for update in (
+        {"checker_id": "other-checker"},
+        {"checker_version": "other-version"},
+        {"metric_ids": ("correctness", "safety")},
+        {"evaluator_id": "other-evaluator"},
+        {"evaluator_version_id": "evaluator-v2"},
+    ):
+        payload = checker.model_dump(mode="python") | update
+        expected = fixed_checker_configuration_hash(
+            checker_id=str(payload["checker_id"]),
+            checker_version=str(payload["checker_version"]),
+            checker_kind=payload["checker_kind"],
+            metric_ids=payload["metric_ids"],
+            evaluator_id=str(payload["evaluator_id"]),
+            evaluator_version_id=str(payload["evaluator_version_id"]),
+        )
+        assert expected != checker.configuration_hash
+
+
+def test_result_identity_cannot_collide_across_checker_or_evaluator_lineage() -> None:
+    first = _evaluator().evaluate("campaign-v1", "task-1", SECRET, _checker())
+    changed = _checker(evaluator_version_id="evaluator-v2")
+
+    second = _evaluator().evaluate("campaign-v1", "task-1", SECRET, changed)
+
+    assert first.result_id != second.result_id
+
+
 def _candidate_context() -> CandidateExecutionContext:
-    public = PublicTaskInput(
+    return create_candidate_execution_context((_public_input(),), _budget())
+
+
+def _public_input() -> PublicTaskInput:
+    return PublicTaskInput(
         campaign_id="campaign-v1",
         campaign_version=1,
         task_id="task-1",
         partition=HarnessPartition.HARNESS_DISCOVERY_TASKS,
         payload=b"public-question",
         payload_hash=sha256_hex(b"public-question"),
-    )
-    return CandidateExecutionContext(
-        input_reader=InMemoryPublicTaskInputReader((public,)),
-        budget=_budget(),
     )
 
 
@@ -266,14 +417,26 @@ def _budget() -> EvaluationBudget:
     )
 
 
-def _checker() -> FixedCheckerConfiguration:
+def _checker(**updates: object) -> FixedCheckerConfiguration:
+    payload: dict[str, object] = {
+        "checker_id": "exact-match",
+        "checker_version": "exact-match-v1",
+        "checker_kind": FixedCheckerKind.EXACT_BYTES,
+        "metric_ids": ("correctness",),
+        "evaluator_id": "evaluator",
+        "evaluator_version_id": "evaluator-v1",
+    }
+    payload.update(updates)
+    payload["configuration_hash"] = fixed_checker_configuration_hash(
+        checker_id=str(payload["checker_id"]),
+        checker_version=str(payload["checker_version"]),
+        checker_kind=cast(FixedCheckerKind, payload["checker_kind"]),
+        metric_ids=cast(tuple[str, ...], payload["metric_ids"]),
+        evaluator_id=str(payload["evaluator_id"]),
+        evaluator_version_id=str(payload["evaluator_version_id"]),
+    )
     return FixedCheckerConfiguration(
-        checker_id="exact-match",
-        checker_version="exact-match-v1",
-        checker_kind=FixedCheckerKind.EXACT_BYTES,
-        configuration_hash="a" * 64,
-        metric_ids=("correctness",),
-        evaluator_version_id="evaluator-v1",
+        **payload,  # type: ignore[arg-type]
     )
 
 

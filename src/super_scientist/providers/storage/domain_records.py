@@ -293,8 +293,10 @@ class HarnessCampaignRecord(_StrictFrozenStorageRecord):
     baseline_harness_version_id: StableIdentifier | None = None
     candidate_harness_version_id: StableIdentifier | None = None
     rollback_harness_version_id: StableIdentifier | None = None
+    evaluator_id: StableIdentifier | None = None
     evaluator_version_id: StableIdentifier | None = None
     candidate_producer_id: StableIdentifier | None = None
+    canonical_campaign_hash: Sha256Hex | None = None
     created_by: StableIdentifier
     created_at: UtcTimestamp
     governing_policy_hash: Sha256Hex

@@ -151,3 +151,109 @@ forced rollback.
   coverage tracing interfering with spawned worker startup.
 - Existing campaign records remain decodable because the new 0006 JSON fields are optional
   with strict defaults; no database schema migration is added.
+
+## Review hardening round 1
+
+The first canonical review identified four blocking authority and evidence-lineage gaps.
+This round is limited to those findings:
+
+1. Replace structural candidate input authority with an exact sealed adapter created by a
+   fixed factory, and reject recursively nested protected/evaluator authority.
+2. Bind decisions to a canonical accepted campaign hash plus the exact stored partition
+   and budget children.
+3. Reconcile every report metric and result identifier to complete authoritative
+   observation, protected-result, checker, variant, partition, evaluator, and metric-value
+   lineage before a durable decision can be accepted.
+4. Content-address fixed checker configurations over every semantic field and bind the
+   unchanged Task 13 result DTO through the Task 15 transaction proposal.
+
+Production changes will follow strict RED-to-GREEN tests. The ledger-deferred minor review
+items remain out of scope.
+
+### Review reproduction and design rationale
+
+The candidate-authority reproduction first failed at collection because the sealed factory
+did not exist (`1 error in 2.56s`). The checker-addressing reproduction likewise failed at
+collection because the canonical hash function did not exist (`1 error in 2.67s`). The
+encoded attack matrices then covered 20 immutable campaign mutations, 11 metric/result
+mutations, five protected checker/evaluator binding mutations, and direct plus recursively
+wrapped candidate authority (ordinary state, slots, closures, bound methods, protected
+store, evaluator, validator, gateway, and reversible references).
+
+The implementation uses four fail-closed bindings:
+
+- Candidate code can receive only the exact private public-input adapter returned by
+  `create_candidate_execution_context`; the context revalidates its budget and recursively
+  walks concrete owned state without invoking arbitrary properties.
+- Accepted campaigns retain a canonical hash of the complete strict campaign DTO. Decision
+  reads also reconstruct and compare every stored partition and every stored budget field,
+  so report-only evaluator, version, manifest, membership, or budget changes cannot pass.
+- Every decision metric is reconstructed from the exact accepted iteration proposal,
+  protected-result proposal, immutable metric record, partition membership, variant,
+  evaluator/checker configuration, metric values, and complete result set. Negative or
+  failed candidate observations deterministically force the catastrophic flag.
+- Fixed checker hashes cover checker identity/version/kind, ordered metric identifiers,
+  evaluator identity, and evaluator version. Protected-result transaction proposals bind
+  that configuration to the unchanged Task 13 `ProtectedCheckerResult`.
+
+Audit and measurement support for admission now names the complete canonical protected
+result set, exact baseline/candidate versions, evaluator lineage, producer, rollback, and
+policy. Report aggregates are never admission authority.
+
+### Review GREEN and final gates
+
+Focused functional progression:
+
+```text
+candidate authority adversarial GREEN: 14 passed
+campaign + metric mutation matrices: 2 passed (31 embedded mutations)
+focused unit/adversarial/service/improvement: 229 passed in 37.58s
+final focused coverage suite: 74 passed in 45.18s
+branch-aware Task 15 coverage: 90.89055064581918%
+coverage report --fail-under=90: exit 0
+```
+
+The final candidate matrix additionally exercises every direct and wrapped protected role,
+duplicate/invalid public inputs, reversible reference bytes, and method/default/closure
+graph traversal.
+
+Compatibility and adjacency:
+
+```text
+short-temp protected storage: 50 passed in 103.63s
+Task 13 + migration 0006 + append-only + evaluator succession: 79 passed in 119.69s
+transaction/adaptation/migrations 0004-0006 adjacency: 93 passed in 88.26s
+```
+
+Static and security:
+
+```text
+Ruff check src tests: PASS
+Ruff format, 10 owned files: PASS
+mypy: Success, no issues in 91 source files
+Bandit recursive medium/high scan: PASS
+pip-audit: No known vulnerabilities found
+```
+
+`pip-audit` skipped only the unpublished local distribution. An all-repository Ruff format
+probe identified 18 pre-existing non-owned formatting differences; the owned-file format
+gate is clean.
+
+Packaging and installed-wheel smoke:
+
+```text
+isolated Hatchling sdist and wheel build: PASS
+Twine check, sdist and wheel: PASS
+fresh installed-wheel functional smoke: PASS
+```
+
+The no-network functional smoke force-reinstalled the current same-version wheel into the
+dependency-complete fresh environment and imported from `site-packages`. It verified
+sealed candidate authority, checker/config/evaluator/metric identity changes, canonical
+campaign and cross-partition result-reuse rejection, a valid public decision construction,
+same-unit-of-work protected-result visibility followed by forced rollback, and absence of
+the protected literal from the main database.
+
+The handbook manifest does not bind any changed source in this review round
+(`protected_evaluation.py` and `artifacts.py` remain unchanged), so no handbook refresh or
+separate documentation commit is required.

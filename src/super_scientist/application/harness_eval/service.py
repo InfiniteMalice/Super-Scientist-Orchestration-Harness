@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import defaultdict
+from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -14,6 +16,7 @@ from super_scientist.domain.harness_eval.models import (
     HarnessDecisionStatus,
     HarnessPartition,
     compare_evaluation_budgets,
+    harness_campaign_hash,
 )
 from super_scientist.domain.identity import ActorIdentity, ActorKind, are_independent
 from super_scientist.domain.improvement.classification import (
@@ -260,6 +263,18 @@ class HarnessDecisionReadCapability(HarnessCampaignReadCapability, Protocol):
 
     def list_iterations(self, campaign_id: str) -> tuple[CampaignIteration, ...]: ...
 
+    def list_partition_manifests(
+        self,
+        campaign_id: str,
+    ) -> tuple[HarnessPartitionManifestRecord, ...]: ...
+
+    def list_budgets(self, campaign_id: str) -> tuple[HarnessBudgetRecord, ...]: ...
+
+    def list_protected_results(
+        self,
+        campaign_id: str,
+    ) -> tuple[RecordHarnessProtectedResult, ...]: ...
+
     def list_confounds(self, campaign_id: str) -> tuple[HarnessConfoundRecord, ...]: ...
 
     def list_metrics(self, campaign_id: str) -> tuple[HarnessMetricRecord, ...]: ...
@@ -309,6 +324,9 @@ class _DecisionContext(BaseModel):
     evaluator_audit: EvaluatorAuditRecord | None
     measurement: SelfImprovementMeasurementRecord | None
     iterations: tuple[CampaignIteration, ...]
+    partitions: tuple[HarnessPartitionManifestRecord, ...]
+    budgets: tuple[HarnessBudgetRecord, ...]
+    protected_results: tuple[RecordHarnessProtectedResult, ...]
     confounds: tuple[HarnessConfoundRecord, ...]
     metrics: tuple[HarnessMetricRecord, ...]
 
@@ -522,6 +540,12 @@ class RecordHarnessProtectedResultHandler:
             or context.observation.result_id != result.result_id
             or context.observation.outcome is not result.outcome
             or context.observation.evaluator_version_id != proposal.evaluator_version_id
+            or proposal.checker_configuration.checker_id != result.checker_id
+            or proposal.checker_configuration.checker_version != result.checker_version
+            or proposal.checker_configuration.evaluator_id != context.campaign.evaluator_id
+            or proposal.checker_configuration.evaluator_version_id != proposal.evaluator_version_id
+            or proposal.checker_configuration.metric_ids
+            != tuple(item.metric_id for item in result.metric_values)
         ):
             return _rejected(
                 proposal.proposal_id,
@@ -639,6 +663,19 @@ class DecideHarnessCampaignHandler:
                     key=lambda item: item.iteration_index,
                 )
             ),
+            partitions=tuple(
+                sorted(
+                    capability.list_partition_manifests(campaign_id),
+                    key=lambda item: item.partition.value,
+                )
+            ),
+            budgets=tuple(
+                sorted(
+                    capability.list_budgets(campaign_id),
+                    key=lambda item: item.variant.value,
+                )
+            ),
+            protected_results=capability.list_protected_results(campaign_id),
             confounds=capability.list_confounds(campaign_id),
             metrics=capability.list_metrics(campaign_id),
         )
@@ -686,7 +723,12 @@ class DecideHarnessCampaignHandler:
                 RejectionCode.ENTITY_ID_MISMATCH,
                 "decision authority must submit and approve the campaign decision",
             )
-        if not _campaign_matches_record(report.campaign, context.campaign):
+        if not _campaign_matches_record(
+            report.campaign,
+            context.campaign,
+            context.partitions,
+            context.budgets,
+        ):
             return _rejected(
                 proposal.proposal_id,
                 RejectionCode.INVALID_LINEAGE,
@@ -697,6 +739,12 @@ class DecideHarnessCampaignHandler:
                 proposal.proposal_id,
                 RejectionCode.MISSING_EVIDENCE,
                 "campaign report omits or reinterprets retained iterations",
+            )
+        if not _authoritative_metrics_match(report, context):
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.MISSING_EVIDENCE,
+                "campaign metrics do not reconcile to complete protected result lineage",
             )
         if not _report_confounds_match(report, context.confounds):
             return _rejected(
@@ -867,7 +915,96 @@ def _support_record_rejection(
     return None
 
 
-def _campaign_matches_record(campaign: HarnessCampaign, record: HarnessCampaignRecord) -> bool:
+def _campaign_matches_record(
+    campaign: HarnessCampaign,
+    record: HarnessCampaignRecord,
+    partitions: tuple[HarnessPartitionManifestRecord, ...],
+    budgets: tuple[HarnessBudgetRecord, ...],
+) -> bool:
+    expected_partitions = tuple(
+        sorted(
+            (
+                (
+                    item.partition_manifest_id,
+                    item.campaign_id,
+                    item.campaign_version,
+                    item.partition,
+                    item.task_ids,
+                    item.manifest_hash,
+                    item.protected_content_hash,
+                    item.created_at,
+                    item.governing_policy_hash,
+                )
+                for item in campaign.partitions
+            ),
+            key=lambda item: item[3].value,
+        )
+    )
+    actual_partitions = tuple(
+        (
+            item.partition_manifest_id,
+            item.campaign_id,
+            item.campaign_version,
+            item.partition,
+            item.task_ids,
+            item.manifest_hash,
+            item.protected_content_hash,
+            item.created_at,
+            item.governing_policy_hash,
+        )
+        for item in partitions
+    )
+    expected_budgets = tuple(
+        sorted(
+            (
+                (
+                    item.budget_id,
+                    campaign.campaign_id,
+                    item.variant,
+                    sha256_hex(canonical_json_bytes(item.budget.model_dump(mode="json"))),
+                    item.budget.model_id,
+                    item.budget.model_version,
+                    item.budget.adapter_id,
+                    item.budget.feedback_mode.value,
+                    item.budget.tool_ids,
+                    item.budget.attempts,
+                    item.budget.token_limit,
+                    item.budget.reasoning_limit,
+                    item.budget.evaluator_call_limit,
+                    item.budget.wall_clock_seconds,
+                    item.budget.cost_limit,
+                    item.budget.human_intervention_limit,
+                    campaign.created_at,
+                    campaign.governing_policy_hash,
+                )
+                for item in campaign.budgets
+            ),
+            key=lambda item: item[2].value,
+        )
+    )
+    actual_budgets = tuple(
+        (
+            item.budget_id,
+            item.campaign_id,
+            item.variant,
+            item.budget_hash,
+            item.model_id,
+            item.model_version,
+            item.adapter_id,
+            item.feedback_mode,
+            item.tool_ids,
+            item.attempts,
+            item.token_limit,
+            item.reasoning_limit,
+            item.evaluator_call_limit,
+            item.wall_clock_seconds,
+            item.cost_limit,
+            item.human_intervention_limit,
+            item.created_at,
+            item.governing_policy_hash,
+        )
+        for item in budgets
+    )
     return (
         campaign.campaign_id == record.campaign_id
         and campaign.version == record.version
@@ -880,11 +1017,152 @@ def _campaign_matches_record(campaign: HarnessCampaign, record: HarnessCampaignR
         and campaign.model_id == record.model_id
         and campaign.model_version == record.model_version
         and campaign.adapter_id == record.adapter_id
+        and campaign.evaluator.actor_id == record.evaluator_id
         and campaign.evaluator_version_id == record.evaluator_version_id
         and campaign.candidate_producer.actor_id == record.candidate_producer_id
         and campaign.coordinator.actor_id == record.created_by
         and campaign.created_at == record.created_at
         and campaign.governing_policy_hash == record.governing_policy_hash
+        and record.canonical_campaign_hash == harness_campaign_hash(campaign)
+        and actual_partitions == expected_partitions
+        and actual_budgets == expected_budgets
+    )
+
+
+def _authoritative_metrics_match(
+    report: HarnessCampaignReport,
+    context: _DecisionContext,
+) -> bool:
+    """Reconstruct every aggregate from accepted observations and protected results."""
+
+    iterations_by_result: dict[str, CampaignIteration] = {}
+    for iteration in context.iterations:
+        if iteration.result_id is None:
+            continue
+        if iteration.result_id in iterations_by_result:
+            return False
+        iterations_by_result[iteration.result_id] = iteration
+
+    proposals_by_result: dict[str, RecordHarnessProtectedResult] = {}
+    for proposal in context.protected_results:
+        result_id = proposal.result.result_id
+        if result_id in proposals_by_result:
+            return False
+        proposals_by_result[result_id] = proposal
+
+    records_by_result: dict[str, HarnessMetricRecord] = {}
+    for record in context.metrics:
+        if record.result_id in records_by_result:
+            return False
+        records_by_result[record.result_id] = record
+
+    result_ids = set(iterations_by_result)
+    if result_ids != set(proposals_by_result) or result_ids != set(records_by_result):
+        return False
+
+    manifest_by_id = {item.partition_manifest_id: item for item in context.partitions}
+    groups: dict[
+        tuple[HarnessPartition, str],
+        list[tuple[CampaignIteration, RecordHarnessProtectedResult, Decimal]],
+    ] = defaultdict(list)
+    for result_id, iteration in iterations_by_result.items():
+        proposal = proposals_by_result[result_id]
+        result = proposal.result
+        checker = proposal.checker_configuration
+        stored = records_by_result[result_id]
+        manifest = manifest_by_id.get(iteration.partition_manifest_id)
+        if (
+            manifest is None
+            or iteration.task_id not in manifest.task_ids
+            or iteration.partition is not manifest.partition
+            or proposal.observation_id != iteration.observation_id
+            or proposal.partition_manifest_id != iteration.partition_manifest_id
+            or proposal.variant is not iteration.variant
+            or proposal.evaluator_version_id != iteration.evaluator_version_id
+            or result.campaign_id != report.campaign.campaign_id
+            or result.task_id != iteration.task_id
+            or result.result_id != iteration.result_id
+            or result.candidate_output_hash != iteration.candidate_output_hash
+            or result.outcome is not iteration.outcome
+            or checker.checker_id != result.checker_id
+            or checker.checker_version != result.checker_version
+            or checker.evaluator_id != report.campaign.evaluator.actor_id
+            or checker.evaluator_version_id != iteration.evaluator_version_id
+            or checker.metric_ids != tuple(item.metric_id for item in result.metric_values)
+            or not _metric_record_matches_result(stored, result)
+        ):
+            return False
+        for value in result.metric_values:
+            groups[(iteration.partition, value.metric_id)].append(
+                (iteration, proposal, value.value)
+            )
+
+    report_by_key = {(item.partition, item.metric_id): item for item in report.metrics}
+    if set(report_by_key) != set(groups):
+        return False
+    for key, evidence in groups.items():
+        metric = report_by_key[key]
+        ordered = sorted(evidence, key=lambda item: item[0].iteration_index)
+        baseline_values = [
+            value
+            for iteration, _, value in ordered
+            if iteration.variant is report.campaign.baseline_variant
+        ]
+        candidate_values = [
+            value
+            for iteration, _, value in ordered
+            if iteration.variant is report.campaign.candidate_variant
+        ]
+        evaluator_versions = {item[0].evaluator_version_id for item in ordered}
+        configuration_hashes = {
+            item[1].checker_configuration.configuration_hash for item in ordered
+        }
+        if (
+            not baseline_values
+            or not candidate_values
+            or len(evaluator_versions) != 1
+            or len(configuration_hashes) != 1
+        ):
+            return False
+        catastrophic = any(
+            iteration.variant is report.campaign.candidate_variant
+            and (iteration.negative_result or iteration.outcome is not AssessmentOutcome.PASSED)
+            for iteration, _, _ in ordered
+        )
+        if (
+            metric.result_ids != tuple(item[1].result.result_id for item in ordered)
+            or metric.baseline_value
+            != sum(baseline_values, start=Decimal(0)) / len(baseline_values)
+            or metric.candidate_value
+            != sum(candidate_values, start=Decimal(0)) / len(candidate_values)
+            or not metric.higher_is_better
+            or metric.catastrophic_regression != catastrophic
+            or metric.evaluator_version_id != next(iter(evaluator_versions))
+        ):
+            return False
+    return True
+
+
+def _metric_record_matches_result(
+    record: HarnessMetricRecord,
+    result: object,
+) -> bool:
+    from super_scientist.domain.harness_eval.models import ProtectedCheckerResult
+
+    if type(result) is not ProtectedCheckerResult:
+        return False
+    return (
+        record.result_id == result.result_id
+        and record.campaign_id == result.campaign_id
+        and record.task_id == result.task_id
+        and record.expected_output_hash == result.expected_output_hash
+        and record.candidate_output_hash == result.candidate_output_hash
+        and record.checker_id == result.checker_id
+        and record.checker_version == result.checker_version
+        and record.outcome is result.outcome
+        and tuple((item.metric_id, item.value) for item in record.metric_values)
+        == tuple((item.metric_id, item.value) for item in result.metric_values)
+        and record.evaluated_at == result.evaluated_at
     )
 
 
@@ -929,6 +1207,9 @@ def _admission_support_matches(
     measurement = context.measurement
     metric_ids = {item.result_id for item in context.metrics}
     report_metric_ids = {result_id for metric in report.metrics for result_id in metric.result_ids}
+    measurement_metric_ids = (
+        set() if measurement is None else {item.source_id for item in measurement.protected_metrics}
+    )
     return (
         report.evaluator_audit_passed
         and report.measurement_accepted
@@ -937,16 +1218,20 @@ def _admission_support_matches(
         and audit.evaluator == report.campaign.evaluator
         and audit.evaluator_version == report.campaign.evaluator_version_id
         and audit.candidate_producer == report.campaign.candidate_producer
+        and set(audit.evidence_ids) == metric_ids
         and audit.governing_policy_hash == report.governing_policy_hash
         and measurement is not None
         and measurement.decision is MeasurementDecision.ACCEPTED
         and measurement.evaluator == report.campaign.evaluator
         and measurement.evaluator_version == report.campaign.evaluator_version_id
         and measurement.evaluator_audit_id == report.evaluator_audit_id
+        and measurement.proposer == report.campaign.candidate_producer
+        and measurement.baseline_version_id == report.campaign.baseline_harness_version_id
         and measurement.candidate_version_id == report.campaign.candidate_harness_version_id
         and measurement.rollback_target_id == report.campaign.rollback_harness_version_id
         and measurement.governing_policy_hash == report.governing_policy_hash
-        and report_metric_ids <= metric_ids
+        and report_metric_ids == metric_ids
+        and measurement_metric_ids == metric_ids
     )
 
 

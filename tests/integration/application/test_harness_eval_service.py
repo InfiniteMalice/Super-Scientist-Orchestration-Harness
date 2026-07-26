@@ -5,12 +5,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 import pytest
 from sqlalchemy import Engine, text
 
 from super_scientist.application.harness_eval.service import (
     HarnessEvaluationService,
+    _campaign_matches_record,
     campaign_export_bytes,
     compare_budgets,
     decide_campaign,
@@ -27,6 +29,8 @@ from super_scientist.domain.harness_eval.models import (
     CampaignPartitionManifest,
     EvaluationBudget,
     FeedbackMode,
+    FixedCheckerConfiguration,
+    FixedCheckerKind,
     HarnessCampaign,
     HarnessCampaignReport,
     HarnessConfound,
@@ -36,6 +40,7 @@ from super_scientist.domain.harness_eval.models import (
     HarnessVariant,
     PartitionMetric,
     VariantEvaluationBudget,
+    fixed_checker_configuration_hash,
     partition_manifest_hash,
 )
 from super_scientist.domain.identity import ActorIdentity, ActorKind
@@ -176,6 +181,55 @@ def test_campaign_creation_replays_without_duplicate_children(runtime: Runtime) 
 
 
 @pytest.mark.integration
+def test_decision_campaign_binding_covers_all_nested_partition_and_budget_semantics(
+    runtime: Runtime,
+) -> None:
+    campaign = _campaign(runtime)
+    assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
+    with runtime.uow_factory() as uow:
+        assert uow.connection is not None
+        stored = HarnessCampaignRepository(uow.connection).get(campaign.campaign_id)
+        assert stored is not None
+        partitions = tuple(
+            sorted(
+                HarnessPartitionManifestRepository(uow.connection).list_all(),
+                key=lambda item: item.partition.value,
+            )
+        )
+        budgets = tuple(
+            sorted(
+                HarnessBudgetRepository(uow.connection).list_all(),
+                key=lambda item: item.variant.value,
+            )
+        )
+
+    for case in (
+        "evaluator_identity",
+        "evaluator_version",
+        "campaign_version",
+        "partition_membership",
+        "partition_protected_hash",
+        "partition_timestamp",
+        "model_id",
+        "model_version",
+        "adapter_id",
+        "feedback_mode",
+        "tool_ids",
+        "attempts",
+        "token_limit",
+        "reasoning_limit",
+        "evaluator_call_limit",
+        "wall_clock_seconds",
+        "cost_limit",
+        "human_intervention_limit",
+        "budget_id",
+        "budget_order",
+    ):
+        changed = _mutate_campaign_semantic(campaign, case)
+        assert not _campaign_matches_record(changed, stored, partitions, budgets), case
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "case",
     ("candidate-producer", "coordinator", "protected-partition", "policy"),
@@ -228,7 +282,16 @@ def test_iteration_handler_rejects_missing_duplicate_unauthorized_and_mismatched
     campaign = _campaign(runtime)
     assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
     base = _iteration()
-    cases = (
+    cases: tuple[
+        tuple[
+            CampaignIteration,
+            ActorIdentity,
+            Approval,
+            str,
+            RejectionCode,
+        ],
+        ...,
+    ] = (
         (
             base.model_copy(update={"partition_manifest_id": "missing-manifest"}),
             runtime.authority,
@@ -322,6 +385,7 @@ def test_iteration_and_validated_protected_result_share_public_hash_bindings(
         partition_manifest_id=iteration.partition_manifest_id,
         variant=iteration.variant,
         evaluator_version_id=iteration.evaluator_version_id,
+        checker_configuration=_checker(),
         result=result,
         governing_policy_hash=runtime.policy.policy_hash,
     )
@@ -385,6 +449,7 @@ def test_evaluator_change_is_retained_as_a_confound_and_public_lineage(
             partition_manifest_id=iteration.partition_manifest_id,
             variant=iteration.variant,
             evaluator_version_id=iteration.evaluator_version_id,
+            checker_configuration=_checker(evaluator_version_id="evaluator-v2"),
             result=_protected_result(),
             governing_policy_hash=runtime.policy.policy_hash,
         )
@@ -425,6 +490,7 @@ def test_result_binding_mismatch_is_rejected_without_persisting_metric(runtime: 
             partition_manifest_id=iteration.partition_manifest_id,
             variant=iteration.variant,
             evaluator_version_id=iteration.evaluator_version_id,
+            checker_configuration=_checker(),
             result=result,
             governing_policy_hash=runtime.policy.policy_hash,
         )
@@ -435,6 +501,49 @@ def test_result_binding_mismatch_is_rejected_without_persisting_metric(runtime: 
     with runtime.uow_factory() as uow:
         assert uow.connection is not None
         assert HarnessMetricRepository(uow.connection).get(result.result_id) is None
+
+
+@pytest.mark.integration
+def test_protected_result_rejects_checker_and_evaluator_configuration_mismatches(
+    runtime: Runtime,
+) -> None:
+    campaign = _campaign(runtime)
+    assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
+    iteration = _iteration()
+    assert runtime.service.record_iteration(
+        RecordHarnessIteration(
+            proposal_id="checker-binding-iteration",
+            idempotency_key="checker-binding-iteration-key",
+            proposer=runtime.authority,
+            approval=_approval(runtime),
+            iteration=iteration,
+            governing_policy_hash=runtime.policy.policy_hash,
+        )
+    ).accepted
+    for case, checker in (
+        ("checker_id", _checker(checker_id="other-checker")),
+        ("checker_version", _checker(checker_version="other-version")),
+        ("metric_ids", _checker(metric_ids=("other-metric",))),
+        ("evaluator_id", _checker(evaluator_id="other-evaluator")),
+        ("evaluator_version", _checker(evaluator_version_id="evaluator-v2")),
+    ):
+        decision = runtime.service.record_protected_result(
+            RecordHarnessProtectedResult(
+                proposal_id=f"checker-binding-{case}",
+                idempotency_key=f"checker-binding-{case}-key",
+                proposer=runtime.authority,
+                approval=_approval(runtime),
+                observation_id=iteration.observation_id,
+                partition_manifest_id=iteration.partition_manifest_id,
+                variant=iteration.variant,
+                evaluator_version_id=iteration.evaluator_version_id,
+                checker_configuration=checker,
+                result=_protected_result(),
+                governing_policy_hash=runtime.policy.policy_hash,
+            )
+        )
+        assert decision.accepted is False, case
+        assert decision.reasons[0].code is RejectionCode.INVALID_LINEAGE
 
 
 @pytest.mark.integration
@@ -455,7 +564,17 @@ def test_protected_result_handler_rejects_missing_unauthorized_stale_and_duplica
         )
     ).accepted
     other = _human_actor("other-result-authority")
-    cases = (
+    cases: tuple[
+        tuple[
+            dict[str, str],
+            ActorIdentity,
+            Approval,
+            ProtectedCheckerResult,
+            str,
+            RejectionCode,
+        ],
+        ...,
+    ] = (
         (
             {"observation_id": "missing-observation"},
             runtime.authority,
@@ -499,6 +618,7 @@ def test_protected_result_handler_rejects_missing_unauthorized_stale_and_duplica
             partition_manifest_id=iteration.partition_manifest_id,
             variant=iteration.variant,
             evaluator_version_id=iteration.evaluator_version_id,
+            checker_configuration=_checker(),
             result=result,
             governing_policy_hash=policy,
         ).model_copy(update=updates)
@@ -515,6 +635,7 @@ def test_protected_result_handler_rejects_missing_unauthorized_stale_and_duplica
         partition_manifest_id=iteration.partition_manifest_id,
         variant=iteration.variant,
         evaluator_version_id=iteration.evaluator_version_id,
+        checker_configuration=_checker(),
         result=_protected_result(),
         governing_policy_hash=runtime.policy.policy_hash,
     )
@@ -556,7 +677,14 @@ def test_negative_iterations_confounds_and_nonadmission_decision_are_all_append_
             confound=confound,
         )
     ).accepted
-    report = _report(runtime, campaign, confounds=(confound,))
+    iterations, metrics = _record_complete_evidence(runtime, campaign, transfer=Decimal("0.4"))
+    report = _report(
+        runtime,
+        campaign,
+        confounds=(confound,),
+        iterations=iterations,
+        metrics=metrics,
+    )
     recommendation = decide_campaign(report)
     assert recommendation.status is HarnessDecisionStatus.INCONCLUSIVE
     assert runtime.service.decide_campaign(
@@ -586,7 +714,15 @@ def test_negative_iterations_confounds_and_nonadmission_decision_are_all_append_
 def test_admission_without_durable_audit_and_measurement_is_rejected(runtime: Runtime) -> None:
     campaign = _campaign(runtime)
     assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
-    report = _report(runtime, campaign, transfer=Decimal("0.9"), admission_requested=True)
+    iterations, metrics = _record_complete_evidence(runtime, campaign, transfer=Decimal("0.9"))
+    report = _report(
+        runtime,
+        campaign,
+        transfer=Decimal("0.9"),
+        admission_requested=True,
+        iterations=iterations,
+        metrics=metrics,
+    )
     recommendation = decide_campaign(report)
     assert recommendation.admitted is True
 
@@ -603,6 +739,166 @@ def test_admission_without_durable_audit_and_measurement_is_rejected(runtime: Ru
 
     assert durable.accepted is False
     assert durable.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+
+
+@pytest.mark.integration
+def test_decision_reconciles_every_metric_to_complete_protected_observations(
+    runtime: Runtime,
+) -> None:
+    campaign = _campaign(runtime)
+    assert runtime.service.create_campaign(_create_proposal(runtime, campaign)).accepted
+    iterations, metrics = _record_complete_evidence(
+        runtime,
+        campaign,
+        transfer=Decimal("0.9"),
+        catastrophic_partition=HarnessPartition.HARNESS_SAFETY_TASKS,
+    )
+    report = _report(
+        runtime,
+        campaign,
+        transfer=Decimal("0.9"),
+        iterations=iterations,
+        metrics=metrics,
+    )
+    base = DecideHarnessCampaign(
+        proposal_id="lineage-base",
+        idempotency_key="lineage-base-key",
+        proposer=runtime.authority,
+        approval=_approval(runtime),
+        report=report,
+        decision=decide_campaign(report),
+    )
+
+    negative_index = next(index for index, item in enumerate(iterations) if item.negative_result)
+    safety_index = next(
+        index
+        for index, item in enumerate(metrics)
+        if item.partition is HarnessPartition.HARNESS_SAFETY_TASKS
+    )
+    mutations: dict[str, HarnessCampaignReport] = {
+        "wrong_task": report.model_copy(
+            update={
+                "iterations": (
+                    iterations[0].model_copy(update={"task_id": "wrong-task"}),
+                    *iterations[1:],
+                )
+            }
+        ),
+        "wrong_partition": report.model_copy(
+            update={
+                "iterations": (
+                    iterations[0].model_copy(
+                        update={"partition": HarnessPartition.HARNESS_VALIDATION_TASKS}
+                    ),
+                    *iterations[1:],
+                )
+            }
+        ),
+        "wrong_variant": report.model_copy(
+            update={
+                "iterations": (
+                    iterations[0].model_copy(
+                        update={
+                            "variant": campaign.candidate_variant,
+                            "budget_id": "budget-candidate",
+                        }
+                    ),
+                    *iterations[1:],
+                )
+            }
+        ),
+        "wrong_evaluator": report.model_copy(
+            update={
+                "iterations": (
+                    iterations[0].model_copy(update={"evaluator_version_id": "evaluator-v2"}),
+                    *iterations[1:],
+                )
+            }
+        ),
+        "wrong_metric": report.model_copy(
+            update={
+                "metrics": (
+                    metrics[0].model_copy(update={"metric_id": "other-metric"}),
+                    *metrics[1:],
+                )
+            }
+        ),
+        "wrong_value": report.model_copy(
+            update={
+                "metrics": (
+                    metrics[0].model_copy(update={"candidate_value": Decimal("0.99")}),
+                    *metrics[1:],
+                )
+            }
+        ),
+        "partial_results": report.model_copy(
+            update={
+                "metrics": (
+                    metrics[0].model_copy(update={"result_ids": metrics[0].result_ids[:1]}),
+                    *metrics[1:],
+                )
+            }
+        ),
+        "extra_result": report.model_copy(
+            update={
+                "metrics": (
+                    metrics[0].model_copy(
+                        update={"result_ids": (*metrics[0].result_ids, "invented-result")}
+                    ),
+                    *metrics[1:],
+                )
+            }
+        ),
+        "reused_cross_partition_result": report.model_copy(
+            update={
+                "metrics": (
+                    *metrics[:safety_index],
+                    metrics[safety_index].model_copy(update={"result_ids": metrics[0].result_ids}),
+                    *metrics[safety_index + 1 :],
+                )
+            }
+        ),
+        "omitted_negative": report.model_copy(
+            update={
+                "iterations": (
+                    *iterations[:negative_index],
+                    iterations[negative_index].model_copy(
+                        update={
+                            "negative_result": False,
+                            "outcome": AssessmentOutcome.PASSED,
+                        }
+                    ),
+                    *iterations[negative_index + 1 :],
+                ),
+                "negative_observation_ids": (),
+            }
+        ),
+        "favorable_aggregate_hides_catastrophe": report.model_copy(
+            update={
+                "metrics": (
+                    *metrics[:safety_index],
+                    metrics[safety_index].model_copy(
+                        update={
+                            "candidate_value": Decimal("0.9"),
+                            "catastrophic_regression": False,
+                        }
+                    ),
+                    *metrics[safety_index + 1 :],
+                )
+            }
+        ),
+    }
+    for case, mutated_report in mutations.items():
+        proposal = base.model_copy(
+            update={
+                "proposal_id": f"lineage-{case}",
+                "idempotency_key": f"lineage-{case}-key",
+                "report": mutated_report,
+                "decision": decide_campaign(mutated_report),
+            }
+        )
+        decision = runtime.service.decide_campaign(proposal)
+        assert decision.accepted is False, case
 
 
 @pytest.mark.integration
@@ -757,6 +1053,91 @@ def _campaign(runtime: Runtime, *, extra_attempt: bool = False) -> HarnessCampai
     )
 
 
+def _mutate_campaign_semantic(campaign: HarnessCampaign, case: str) -> HarnessCampaign:
+    if case == "evaluator_identity":
+        return campaign.model_copy(update={"evaluator": _model_actor("other-evaluator")})
+    if case == "evaluator_version":
+        return campaign.model_copy(update={"evaluator_version_id": "evaluator-v2"})
+    if case == "campaign_version":
+        partitions = tuple(
+            item.model_copy(
+                update={
+                    "campaign_version": 2,
+                    "manifest_hash": partition_manifest_hash(
+                        campaign_id=item.campaign_id,
+                        campaign_version=2,
+                        partition=item.partition,
+                        task_ids=item.task_ids,
+                    ),
+                }
+            )
+            for item in campaign.partitions
+        )
+        return HarnessCampaign.model_validate(
+            campaign.model_dump(mode="python") | {"version": 2, "partitions": partitions}
+        )
+    if case.startswith("partition_"):
+        first = campaign.partitions[0]
+        if case == "partition_membership":
+            task_ids = ("replacement-discovery-task",)
+            changed = first.model_copy(
+                update={
+                    "task_ids": task_ids,
+                    "manifest_hash": partition_manifest_hash(
+                        campaign_id=first.campaign_id,
+                        campaign_version=first.campaign_version,
+                        partition=first.partition,
+                        task_ids=task_ids,
+                    ),
+                }
+            )
+        elif case == "partition_protected_hash":
+            changed = first.model_copy(update={"protected_content_hash": "b" * 64})
+        else:
+            changed = first.model_copy(update={"created_at": NOW + timedelta(seconds=1)})
+        return HarnessCampaign.model_validate(
+            campaign.model_dump(mode="python") | {"partitions": (changed, *campaign.partitions[1:])}
+        )
+    if case == "budget_order":
+        return HarnessCampaign.model_validate(
+            campaign.model_dump(mode="python") | {"budgets": tuple(reversed(campaign.budgets))}
+        )
+    if case == "budget_id":
+        changed_item = campaign.budgets[1].model_copy(update={"budget_id": "other-budget"})
+        return HarnessCampaign.model_validate(
+            campaign.model_dump(mode="python") | {"budgets": (campaign.budgets[0], changed_item)}
+        )
+    replacements: dict[str, object] = {
+        "model_id": "model-2",
+        "model_version": "model-v2",
+        "adapter_id": "adapter-2",
+        "feedback_mode": FeedbackMode.PER_ATTEMPT,
+        "tool_ids": ("tool-1",),
+        "attempts": 2,
+        "token_limit": 101,
+        "reasoning_limit": 51,
+        "evaluator_call_limit": 2,
+        "wall_clock_seconds": Decimal("11"),
+        "cost_limit": Decimal("2"),
+        "human_intervention_limit": 1,
+    }
+    replacement = replacements[case]
+    if case in {"model_id", "model_version", "adapter_id"}:
+        changed_budgets = tuple(
+            item.model_copy(update={"budget": item.budget.model_copy(update={case: replacement})})
+            for item in campaign.budgets
+        )
+        return HarnessCampaign.model_validate(
+            campaign.model_dump(mode="python") | {case: replacement, "budgets": changed_budgets}
+        )
+    changed_item = campaign.budgets[1].model_copy(
+        update={"budget": campaign.budgets[1].budget.model_copy(update={case: replacement})}
+    )
+    return HarnessCampaign.model_validate(
+        campaign.model_dump(mode="python") | {"budgets": (campaign.budgets[0], changed_item)}
+    )
+
+
 def _iteration(*, candidate_hash: str = "b" * 64) -> CampaignIteration:
     return CampaignIteration(
         iteration_index=0,
@@ -791,6 +1172,132 @@ def _protected_result() -> ProtectedCheckerResult:
     )
 
 
+def _checker(**updates: object) -> FixedCheckerConfiguration:
+    payload: dict[str, object] = {
+        "checker_id": "checker-1",
+        "checker_version": "checker-v1",
+        "checker_kind": FixedCheckerKind.EXACT_BYTES,
+        "metric_ids": ("correctness",),
+        "evaluator_id": "evaluator",
+        "evaluator_version_id": "evaluator-v1",
+    }
+    payload.update(updates)
+    payload["configuration_hash"] = fixed_checker_configuration_hash(
+        checker_id=str(payload["checker_id"]),
+        checker_version=str(payload["checker_version"]),
+        checker_kind=cast(FixedCheckerKind, payload["checker_kind"]),
+        metric_ids=cast(tuple[str, ...], payload["metric_ids"]),
+        evaluator_id=str(payload["evaluator_id"]),
+        evaluator_version_id=str(payload["evaluator_version_id"]),
+    )
+    return FixedCheckerConfiguration.model_validate(payload)
+
+
+def _record_complete_evidence(
+    runtime: Runtime,
+    campaign: HarnessCampaign,
+    *,
+    transfer: Decimal,
+    catastrophic_partition: HarnessPartition | None = None,
+) -> tuple[tuple[CampaignIteration, ...], tuple[PartitionMetric, ...]]:
+    candidate_values = {
+        HarnessPartition.HARNESS_DISCOVERY_TASKS: Decimal("0.8"),
+        HarnessPartition.HARNESS_VALIDATION_TASKS: Decimal("0.8"),
+        HarnessPartition.HARNESS_TRANSFER_TASKS: transfer,
+        HarnessPartition.HARNESS_REGRESSION_TASKS: Decimal("0.5"),
+        HarnessPartition.HARNESS_SAFETY_TASKS: Decimal("0.5"),
+    }
+    iterations: list[CampaignIteration] = []
+    result_ids: dict[HarnessPartition, list[str]] = {
+        partition: [] for partition in HarnessPartition
+    }
+    index = 0
+    for partition in HarnessPartition:
+        manifest = next(item for item in campaign.partitions if item.partition is partition)
+        for variant in (campaign.baseline_variant, campaign.candidate_variant):
+            budget = next(item for item in campaign.budgets if item.variant is variant)
+            result_id = f"evidence-{partition.value.lower()}-{variant.value.lower()}"
+            output_hash = sha256_hex(result_id.encode())
+            value = (
+                Decimal("0.5")
+                if variant is campaign.baseline_variant
+                else candidate_values[partition]
+            )
+            catastrophic = (
+                variant is campaign.candidate_variant and partition is catastrophic_partition
+            )
+            iteration = CampaignIteration(
+                iteration_index=index,
+                observation_id=f"observation-{result_id}",
+                partition_manifest_id=manifest.partition_manifest_id,
+                task_id=manifest.task_ids[0],
+                partition=partition,
+                variant=variant,
+                budget_id=budget.budget_id,
+                attempt=1,
+                candidate_output_hash=output_hash,
+                result_id=result_id,
+                outcome=(AssessmentOutcome.FAILED if catastrophic else AssessmentOutcome.PASSED),
+                negative_result=catastrophic,
+                evaluator_version_id=campaign.evaluator_version_id,
+                observed_at=NOW,
+            )
+            assert runtime.service.record_iteration(
+                RecordHarnessIteration(
+                    proposal_id=f"record-{result_id}",
+                    idempotency_key=f"record-{result_id}-key",
+                    proposer=runtime.authority,
+                    approval=_approval(runtime),
+                    iteration=iteration,
+                    governing_policy_hash=runtime.policy.policy_hash,
+                )
+            ).accepted
+            result = ProtectedCheckerResult(
+                result_id=result_id,
+                campaign_id=campaign.campaign_id,
+                task_id=manifest.task_ids[0],
+                expected_output_hash="a" * 64,
+                candidate_output_hash=output_hash,
+                checker_id="checker-1",
+                checker_version="checker-v1",
+                outcome=cast(AssessmentOutcome, iteration.outcome),
+                metric_values=(MetricValue(metric_id="correctness", value=value),),
+                evaluated_at=NOW,
+            )
+            assert runtime.service.record_protected_result(
+                RecordHarnessProtectedResult(
+                    proposal_id=f"protect-{result_id}",
+                    idempotency_key=f"protect-{result_id}-key",
+                    proposer=runtime.authority,
+                    approval=_approval(runtime),
+                    observation_id=iteration.observation_id,
+                    partition_manifest_id=iteration.partition_manifest_id,
+                    variant=variant,
+                    evaluator_version_id=campaign.evaluator_version_id,
+                    checker_configuration=_checker(),
+                    result=result,
+                    governing_policy_hash=runtime.policy.policy_hash,
+                )
+            ).accepted
+            iterations.append(iteration)
+            result_ids[partition].append(result_id)
+            index += 1
+    metrics = tuple(
+        PartitionMetric(
+            partition=partition,
+            metric_id="correctness",
+            baseline_value=Decimal("0.5"),
+            candidate_value=candidate_values[partition],
+            higher_is_better=True,
+            catastrophic_regression=partition is catastrophic_partition,
+            result_ids=tuple(result_ids[partition]),
+            evaluator_version_id=campaign.evaluator_version_id,
+        )
+        for partition in HarnessPartition
+    )
+    return tuple(iterations), metrics
+
+
 def _report(
     runtime: Runtime,
     campaign: HarnessCampaign,
@@ -798,9 +1305,11 @@ def _report(
     transfer: Decimal = Decimal("0.4"),
     admission_requested: bool = False,
     confounds: tuple[HarnessConfound, ...] = (),
+    iterations: tuple[CampaignIteration, ...] = (),
+    metrics: tuple[PartitionMetric, ...] | None = None,
 ) -> HarnessCampaignReport:
     partitions = tuple(HarnessPartition)
-    metrics = tuple(
+    selected_metrics = metrics or tuple(
         PartitionMetric(
             partition=partition,
             metric_id="correctness",
@@ -828,13 +1337,15 @@ def _report(
     baseline = campaign.budgets[0].budget
     return HarnessCampaignReport(
         campaign=campaign,
-        expected_iteration_count=0,
-        iterations=(),
-        negative_observation_ids=(),
+        expected_iteration_count=len(iterations),
+        iterations=iterations,
+        negative_observation_ids=tuple(
+            item.observation_id for item in iterations if item.negative_result
+        ),
         budget_comparisons=tuple(
             compare_budgets(baseline, item.budget) for item in campaign.budgets[1:]
         ),
-        metrics=metrics,
+        metrics=selected_metrics,
         confounds=confounds,
         evaluator_audit_id="audit-1",
         evaluator_audit_passed=True,

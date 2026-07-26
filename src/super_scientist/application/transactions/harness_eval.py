@@ -13,6 +13,7 @@ from super_scientist.domain.harness_eval.models import (
     HarnessConfound,
     HarnessDecision,
     ProtectedCheckerResult,
+    harness_campaign_hash,
 )
 from super_scientist.domain.improvement.models import (
     EvaluatorAuditRecord,
@@ -268,6 +269,27 @@ class HarnessDecisionCapabilities:
             and stored.proposal.iteration.partition_manifest_id in manifest_ids
         )
 
+    def list_partition_manifests(
+        self,
+        campaign_id: str,
+    ) -> tuple[HarnessPartitionManifestRecord, ...]:
+        return tuple(item for item in self.partitions.list_all() if item.campaign_id == campaign_id)
+
+    def list_budgets(self, campaign_id: str) -> tuple[HarnessBudgetRecord, ...]:
+        return tuple(item for item in self.budgets.list_all() if item.campaign_id == campaign_id)
+
+    def list_protected_results(
+        self,
+        campaign_id: str,
+    ) -> tuple[RecordHarnessProtectedResult, ...]:
+        return tuple(
+            stored.proposal
+            for stored in self.transactions.list_all()
+            if stored.decision.accepted
+            and isinstance(stored.proposal, RecordHarnessProtectedResult)
+            and stored.proposal.result.campaign_id == campaign_id
+        )
+
     def list_confounds(self, campaign_id: str) -> tuple[HarnessConfoundRecord, ...]:
         return tuple(item for item in self.confounds.list_all() if item.campaign_id == campaign_id)
 
@@ -401,8 +423,10 @@ def _campaign_record(campaign: HarnessCampaign) -> HarnessCampaignRecord:
         baseline_harness_version_id=campaign.baseline_harness_version_id,
         candidate_harness_version_id=campaign.candidate_harness_version_id,
         rollback_harness_version_id=campaign.rollback_harness_version_id,
+        evaluator_id=campaign.evaluator.actor_id,
         evaluator_version_id=campaign.evaluator_version_id,
         candidate_producer_id=campaign.candidate_producer.actor_id,
+        canonical_campaign_hash=harness_campaign_hash(campaign),
         created_by=campaign.coordinator.actor_id,
         created_at=campaign.created_at,
         governing_policy_hash=campaign.governing_policy_hash,
