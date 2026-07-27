@@ -317,29 +317,40 @@ combined development-governance workflow are project-specific decisions.
 
 ### S21-S29 - Governed adaptation and harness evolution
 
-- **S21** supplies vocabulary for bounded adaptation, loop closure, grounding,
-  verification hierarchy, collapse, and governance measurement. SSOH adapts the
-  classification but treats the survey's observations as contingent, not formal laws.
-- **S22** separates foundation-model configuration, scaffold configuration, and
-  execution state. SSOH persists metadata only and adds its own strict version,
-  rollback, and admission contracts; the surveyed systems are not reproduced.
-- **S23** motivates dense long-horizon diagnostics. SSOH retains complete trajectories
-  and failed attempts while refusing to equate partial progress with final success.
-- **S24** motivates source-first natural evidence trails and separated validation
+- **S21**, arXiv `2607.07663v1` (CC BY 4.0), supplies vocabulary for
+  bounded adaptation, loop closure, grounding, verification hierarchy, collapse, and
+  governance measurement. SSOH adapts the classification but treats the survey's
+  observations as contingent, not formal laws.
+- **S22**, arXiv `2607.13104v1` and the MIT-licensed companion repository at
+  `06a48f9beddeb0ff711a3f63be857e3e95709923`, separates foundation-model
+  configuration, scaffold configuration, and execution state. SSOH persists metadata
+  only and adds its own strict version, rollback, and admission contracts; the
+  surveyed systems are not reproduced.
+- **S23**, arXiv `2607.08964v2` (CC BY 4.0), motivates dense long-horizon
+  diagnostics. SSOH retains complete trajectories and failed attempts while refusing
+  to equate partial progress with final success.
+- **S24**, arXiv `2607.09328v1` under the arXiv non-exclusive distribution
+  license, motivates source-first natural evidence trails and separated validation
   stages. In SSOH a trail remains evidence, not proof.
-- **S25** identifies vocabulary and verifier gaps. Representational primitives remain
+- **S25**, arXiv `2607.09560v1` under the arXiv non-exclusive distribution
+  license, identifies vocabulary and verifier gaps. Representational primitives remain
   deferred and quarantined until independently checked under source-controlled rules.
-- **S26** motivates matched search/inference budgets, protected transfer, and causal
-  attribution. The unlicensed repository code is not reused.
-- **S27** inspires retained feedback and pre-submission rule review. SSOH's conflict,
+- **S26**, arXiv `2607.12227v1` (CC BY 4.0), motivates matched
+  search/inference budgets, protected transfer, and causal attribution. Its companion
+  repository is pinned at `ffd1ba1c2c3e31099264f630b9ed44aec63a86a7`, has no
+  license file, and is subject to a no-code-reuse boundary.
+- **S27**, arXiv `2607.13091v1` under the arXiv non-exclusive distribution
+  license, inspires retained feedback and pre-submission rule review. SSOH's conflict,
   redundancy, independent-review, and consolidation design is original synthesis.
-- **S28** motivates behavior-centric navigation and progressive disclosure. SSOH uses
-  a deterministic, rebuildable, non-authoritative source index and does not reproduce
-  the paper's LLM-assisted generation system.
-- **S29** is architectural inspiration only for a generic
-  hypothesis-model-checker-revision-admission loop. Its public results are
-  self-reported; no source code, benchmark-specific logic, or hidden task assumptions
-  enter SSOH.
+- **S28**, arXiv `2607.13285v1` (CC BY 4.0), motivates behavior-centric
+  navigation and progressive disclosure. SSOH uses a deterministic, rebuildable,
+  non-authoritative source index and does not reproduce the paper's LLM-assisted
+  generation system.
+- **S29** is the unlicensed public GitHub Pages repository pinned at
+  `d907a3c18ac97fe6bf7b0bbe43ba938acb023b72`. It is architectural inspiration
+  only for a generic hypothesis-model-checker-revision-admission loop, is not peer
+  reviewed, and reports results that were not independently verified. No source code,
+  benchmark-specific logic, or hidden task assumptions enter SSOH.
 
 All nine sources have `reproduction_status: not_reproduced` in the source register.
 Their exact consulted versions, repository commits, licenses, evidence boundaries, and

@@ -72,6 +72,27 @@ to policy snapshots, evidence records, claim versions, transactions, and audit e
 but an attacker with database-file or process-level access is outside the kernel's
 authorization boundary.
 
+## Workspace Exchange Boundary
+
+An imported bundle and its source artifact store are untrusted. The strict
+`WorkspaceExport` schema rejects extras and coercions; canonical proposal, bundle,
+policy, decision, and projection hashes are checked before the target is declared
+equivalent. Records are submitted through stable coordinator intents under their
+recorded governing policy. Same-identity content changes produce audited conflicts
+rather than replacement.
+
+The JSON bundle contains digest-only artifact references. Artifact bytes move between
+explicit stores and are checked for media type, size, digest, and content-derived
+location. Exported object graphs are scanned fail closed for protected-answer fields,
+protected-store or database references, live paths, and executable configuration. This
+is a structural boundary, not a data-loss-prevention system: operators must still keep
+secrets and sensitive research content out of ordinary evidence and proposal fields.
+
+Import is intended for an empty workspace or an exact idempotent replay. It is not a
+general merge, backup encryption, sandbox, signature, origin authentication, or
+authorization protocol. Bundle hashing detects modification under the local hash
+assumptions but does not establish who produced the bundle.
+
 ## Integrity And Secrets
 
 Audit events use trusted sequence-derived identifiers, hash canonical payloads, and link
@@ -133,3 +154,5 @@ checks, direct database-file tampering, denial of service through large local in
 dependency and build-tool compromise, and disclosure through user-managed backups or
 logs. The audit chain is tamper-evident under its hash and storage assumptions; it is not
 an external timestamp, signature, remote attestation, or guarantee of scientific truth.
+See `THREAT_MODEL.md` for assets, trust boundaries, attacker capabilities, controls,
+and explicit non-goals.

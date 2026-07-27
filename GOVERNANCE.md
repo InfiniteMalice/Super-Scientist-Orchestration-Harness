@@ -45,9 +45,44 @@ alias, not an independent approver. A distinct typed human or non-model actor re
 independent when its actor identity differs. Model agreement is not human approval.
 
 The default policy names `governance_change` and `adapter_promotion` as requiring human
-approval. Those proposal types and their approval workflow are not implemented in this
-slice. The current CLI rejects active-policy changes instead of bypassing that future
-human boundary. Operators must not mutate the SQLite policy tables directly.
+approval. Governed policy transitions are implemented through the application
+coordinator; direct policy-table mutation remains outside authority. Adapter training
+is a deterministic metadata fake and promotion is represented by governed records, not
+a live training runtime. The CLI does not provide a direct policy-replacement shortcut.
+Operators must not mutate the SQLite policy tables directly.
+
+## Self-Improvement Authority
+
+A candidate policy cannot authorize any part of its own activation. V1-to-V2, later
+V2-to-V2 transitions, and rollback proposals are evaluated under the stored prior
+policy plus the source-controlled constitutional floor. Admission requires an exact
+change classification, dedicated research run, complete protected measurement, passed
+independent evaluator audit, independent human approval, compatible candidate hash,
+and registered rollback policy. A transition commits all projections, its decision,
+and its prior-policy-attributed audit event atomically.
+
+Progress scores, evidence-trail coherence, rule-review agreement, model confidence,
+handbook mappings, discovery-set gains, and self-authored evaluator claims have no
+promotion authority. Evaluator succession has no automatic promotion and requires
+protected and external evaluation, independence, a canary, human review, and a rollback
+target. A benchmark-specific improvement remains `BENCHMARK_SPECIFIC`; only held-out
+transfer plus independent authority can produce `ADMITTED`, relative to the declared
+campaign and policy.
+
+## Workspace Import Authority
+
+Workspace exchange is implemented reconstruction, not cross-workspace trust
+delegation. Export verifies the source and carries canonical proposals, decisions,
+policy snapshots, projection expectations, and content-addressed artifact metadata.
+Import validates all hashes and schemas, transfers verified bytes out of band, and
+submits each record through the ordinary coordinator under its recorded governing
+policy. It cannot install a bootstrap policy over nonempty durable state.
+
+Identical content under the same stable intent replays. Different content under an
+existing identity is an audited `IDEMPOTENCY_CONFLICT`, not an overwrite or merge.
+Projection expectations are verification inputs only and cannot authorize canonical
+state. Protected answers, protected-store references, live paths, and executable
+configuration are prohibited from the bundle.
 
 ## Hypothesis Mutation Boundary
 

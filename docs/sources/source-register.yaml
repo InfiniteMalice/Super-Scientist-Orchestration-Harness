@@ -566,7 +566,7 @@ sources:
       - "Bo Qu"
     year: 2026
     source_type: paper
-    canonical_locator: "https://arxiv.org/abs/2607.07663"
+    canonical_locator: "https://arxiv.org/abs/2607.07663v1"
     version_consulted: v1
     accessed_at: "2026-07-18"
     repository: null
@@ -600,7 +600,7 @@ sources:
       - "Jürgen Schmidhuber"
     year: 2026
     source_type: paper_and_companion_repository
-    canonical_locator: "https://arxiv.org/abs/2607.13104"
+    canonical_locator: "https://arxiv.org/abs/2607.13104v1"
     version_consulted: "v1; companion repository commit 06a48f9beddeb0ff711a3f63be857e3e95709923"
     accessed_at: "2026-07-18"
     repository: "selfimproving-agent/Awesome-Self-Improving-Agents@06a48f9beddeb0ff711a3f63be857e3e95709923"
@@ -633,7 +633,7 @@ sources:
       - "Leowei Liang"
     year: 2026
     source_type: paper
-    canonical_locator: "https://arxiv.org/abs/2607.08964"
+    canonical_locator: "https://arxiv.org/abs/2607.08964v2"
     version_consulted: v2
     accessed_at: "2026-07-18"
     repository: null
@@ -663,7 +663,7 @@ sources:
       - "Huamin Qu"
     year: 2026
     source_type: paper
-    canonical_locator: "https://arxiv.org/abs/2607.09328"
+    canonical_locator: "https://arxiv.org/abs/2607.09328v1"
     version_consulted: v1
     accessed_at: "2026-07-18"
     repository: null
@@ -685,7 +685,7 @@ sources:
       - "Haiqian Yang"
     year: 2026
     source_type: position_paper
-    canonical_locator: "https://arxiv.org/abs/2607.09560"
+    canonical_locator: "https://arxiv.org/abs/2607.09560v1"
     version_consulted: v1
     accessed_at: "2026-07-18"
     repository: null
@@ -715,7 +715,7 @@ sources:
       - "Teng Xiao"
     year: 2026
     source_type: paper_and_code_repository
-    canonical_locator: "https://arxiv.org/abs/2607.12227"
+    canonical_locator: "https://arxiv.org/abs/2607.12227v1"
     version_consulted: "v1; code repository commit ffd1ba1c2c3e31099264f630b9ed44aec63a86a7"
     accessed_at: "2026-07-18"
     repository: "rethinking-harness-evolution/code@ffd1ba1c2c3e31099264f630b9ed44aec63a86a7"
@@ -728,7 +728,7 @@ sources:
     reproduction_status: not_reproduced
     limitations:
       - causal attribution remains conditional on matched protocols and recorded confounds
-      - unlicensed repository code is unavailable for reuse and was not imported
+      - no code reuse: the unlicensed repository code was not imported
 
   - id: S27
     title: "Self-Improving AI Coding Agents Through Accumulated Behavioral Rules: A Closed-Loop Framework"
@@ -737,7 +737,7 @@ sources:
       - "Nahid Farhady Ghalaty"
     year: 2026
     source_type: paper
-    canonical_locator: "https://arxiv.org/abs/2607.13091"
+    canonical_locator: "https://arxiv.org/abs/2607.13091v1"
     version_consulted: v1
     accessed_at: "2026-07-18"
     repository: null
@@ -767,7 +767,7 @@ sources:
       - "Leowei Liang"
     year: 2026
     source_type: paper
-    canonical_locator: "https://arxiv.org/abs/2607.13285"
+    canonical_locator: "https://arxiv.org/abs/2607.13285v1"
     version_consulted: v1
     accessed_at: "2026-07-18"
     repository: null
@@ -794,11 +794,11 @@ sources:
     repository: "official GitHub Pages repository@d907a3c18ac97fe6bf7b0bbe43ba938acb023b72"
     license: "no license file"
     source_proposal: "Public benchmark descriptions suggest a hypothesis-model-checker-revision-admission research loop."
-    source_evidence: "Public-set results are self-reported and were not independently verified; there is no peer-reviewed paper."
+    source_evidence: "Public-set results are self-reported and were not independently verified; the site is not peer reviewed."
     project_adaptation: "Architectural inspiration only for a domain-neutral typed loop."
     project_original_synthesis: "All task assumptions, checkers, authority boundaries, and safe execution constraints are independently specified."
     adoption_status: inspired
     reproduction_status: not_reproduced
     limitations:
-      - no peer-reviewed paper and no independent verification of public results
-      - no source code, benchmark-specific implementation, or hidden task assumptions are imported
+      - not peer reviewed; public results have no independent verification
+      - no code reuse: source code, benchmark-specific implementation, and hidden task assumptions are not imported

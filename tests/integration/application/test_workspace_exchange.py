@@ -1,0 +1,551 @@
+from __future__ import annotations
+
+import copy
+import importlib
+import json
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine
+
+from super_scientist.application.transactions.coordinator import TransactionCoordinator
+from super_scientist.config.models import GovernancePolicy, PolicySnapshot
+from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord
+from super_scientist.domain.identity import ActorIdentity, ActorKind
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
+from super_scientist.kernel.transactions.models import AddEvidence, RejectionCode
+from super_scientist.providers.storage.artifacts import FileArtifactStore
+from super_scientist.providers.storage.database import (
+    DatabaseUnitOfWork,
+    create_database_engine,
+    upgrade_database,
+)
+
+NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+
+
+class FixedClock:
+    def now(self) -> datetime:
+        return NOW
+
+
+class ChangingArtifactStore:
+    def __init__(self, delegate: FileArtifactStore) -> None:
+        self._delegate = delegate
+
+    def put(self, data: bytes, media_type: str) -> ArtifactRef:
+        return self._delegate.put(data, media_type).model_copy(
+            update={"media_type": "application/x-changed"}
+        )
+
+    def read(self, ref: ArtifactRef) -> bytes:
+        return self._delegate.read(ref)
+
+
+@dataclass(frozen=True)
+class ExchangeRuntime:
+    engine: Engine
+    uow_factory: Callable[[], DatabaseUnitOfWork]
+    coordinator: TransactionCoordinator
+    artifact_store: FileArtifactStore
+    actor: ActorIdentity
+
+    def add_evidence(self, content: bytes) -> None:
+        artifact = self.artifact_store.put(content, "text/plain")
+        decision = self.coordinator.submit(
+            AddEvidence(
+                proposal_id="workspace-record-1",
+                idempotency_key="workspace-record-key-1",
+                proposer=self.actor,
+                evidence=EvidenceRecord(
+                    evidence_id="workspace-evidence-1",
+                    evidence_type="synthetic_observation",
+                    source_locator=f"fixture://{content.decode('ascii')}",
+                    retrieved_at=NOW,
+                    artifact=artifact,
+                    provenance={"collector": "workspace-exchange-test"},
+                    ingestion_actor_id=self.actor.actor_id,
+                ),
+            )
+        )
+        assert decision.accepted is True
+
+
+def _policy() -> PolicySnapshot:
+    policy = GovernancePolicy(required_claim_checks=("source_exists",))
+    payload = policy.model_dump(mode="json")
+    payload["human_approval_for"] = sorted(policy.human_approval_for)
+    return PolicySnapshot(
+        policy_hash=sha256_hex(canonical_json_bytes(payload)),
+        policy=policy,
+    )
+
+
+def _runtime(
+    root: Path,
+    name: str,
+    *,
+    policy_snapshot: PolicySnapshot | None = None,
+) -> ExchangeRuntime:
+    database_url = f"sqlite:///{(root / f'{name}.db').as_posix()}"
+    upgrade_database(database_url)
+    engine = create_database_engine(database_url)
+    policy = policy_snapshot or _policy()
+    artifact_store = FileArtifactStore(root / f"{name}-artifacts")
+    actor = ActorIdentity(
+        actor_id="workspace-scientist",
+        kind=ActorKind.HUMAN,
+        created_at=NOW,
+    )
+
+    def uow_factory() -> DatabaseUnitOfWork:
+        return DatabaseUnitOfWork(engine)
+
+    with uow_factory() as unit_of_work:
+        unit_of_work.repositories().policies.add_and_activate(policy, NOW)
+    return ExchangeRuntime(
+        engine=engine,
+        uow_factory=uow_factory,
+        coordinator=TransactionCoordinator(
+            uow_factory,
+            policy,
+            FixedClock(),
+            artifact_store,
+        ),
+        artifact_store=artifact_store,
+        actor=actor,
+    )
+
+
+@pytest.fixture
+def runtimes(tmp_path: Path) -> Iterator[tuple[ExchangeRuntime, ExchangeRuntime]]:
+    source = _runtime(tmp_path, "source")
+    target = _runtime(tmp_path, "target")
+    yield source, target
+    source.engine.dispose()
+    target.engine.dispose()
+
+
+def _exchange() -> object:
+    module_path = Path("src/super_scientist/application/workspace_exchange.py")
+    assert module_path.is_file()
+    return importlib.import_module("super_scientist.application.workspace_exchange")
+
+
+def _rehash_bundle_payload(payload: dict[str, object]) -> dict[str, object]:
+    canonical = copy.deepcopy(payload)
+    canonical.pop("bundle_hash")
+    payload["bundle_hash"] = sha256_hex(canonical_json_bytes(canonical))
+    return payload
+
+
+def test_workspace_exchange_exposes_strict_canonical_import_contract() -> None:
+    exchange = _exchange()
+
+    assert exchange.WorkspaceExport.model_config["frozen"] is True
+    assert exchange.WorkspaceExport.model_config["extra"] == "forbid"
+    assert callable(exchange.export_workspace)
+    assert callable(exchange.import_workspace)
+
+
+def test_workspace_export_import_is_protected_safe_canonical_and_replayable(
+    runtimes: tuple[ExchangeRuntime, ExchangeRuntime],
+) -> None:
+    exchange = _exchange()
+    source, target = runtimes
+    source.add_evidence(b"thermal-observation")
+
+    exported = exchange.export_workspace(
+        uow_factory=source.uow_factory,
+        artifact_store=source.artifact_store,
+    )
+    serialized = exported.model_dump_json()
+
+    assert tuple(record.stable_identity for record in exported.records) == tuple(
+        sorted(record.stable_identity for record in exported.records)
+    )
+    assert str(
+        source.artifact_store.resolve(source.artifact_store.put(b"x", "text/plain"))
+    ) not in (serialized)
+    assert "protected_expected_output" not in serialized
+    assert "protected_store" not in serialized
+    assert "executable_configuration" not in serialized
+
+    imported = exchange.import_workspace(
+        exported,
+        uow_factory=target.uow_factory,
+        artifact_store=target.artifact_store,
+        source_artifact_store=source.artifact_store,
+        clock=FixedClock(),
+    )
+    replayed = exchange.import_workspace(
+        exported,
+        uow_factory=target.uow_factory,
+        artifact_store=target.artifact_store,
+        source_artifact_store=source.artifact_store,
+        clock=FixedClock(),
+    )
+    target_export = exchange.export_workspace(
+        uow_factory=target.uow_factory,
+        artifact_store=target.artifact_store,
+    )
+
+    assert imported.conflicts == ()
+    assert imported.imported == 1
+    assert imported.replayed == 0
+    assert imported.projections_verified is True
+    assert replayed.conflicts == ()
+    assert replayed.imported == 0
+    assert replayed.replayed == 1
+    assert replayed.projections_verified is True
+    assert target_export == exported
+
+
+def test_workspace_export_rejects_changed_content_without_matching_hash(
+    runtimes: tuple[ExchangeRuntime, ExchangeRuntime],
+) -> None:
+    exchange = _exchange()
+    source, _ = runtimes
+    source.add_evidence(b"thermal-observation")
+    exported = exchange.export_workspace(
+        uow_factory=source.uow_factory,
+        artifact_store=source.artifact_store,
+    )
+    payload = exported.model_dump(mode="json")
+    payload["records"][0]["proposal"]["evidence"]["source_locator"] = "fixture://tampered"
+
+    with pytest.raises(ValueError, match="hash"):
+        exchange.WorkspaceExport.model_validate_json(json.dumps(payload))
+
+
+def test_workspace_export_validates_every_record_identity_and_decision_binding(
+    runtimes: tuple[ExchangeRuntime, ExchangeRuntime],
+) -> None:
+    exchange = _exchange()
+    source, _ = runtimes
+    source.add_evidence(b"thermal-observation")
+    exported = exchange.export_workspace(
+        uow_factory=source.uow_factory,
+        artifact_store=source.artifact_store,
+    )
+    base = exported.model_dump(mode="json")
+
+    identity_mismatch = copy.deepcopy(base)
+    identity_mismatch["records"][0]["stable_identity"] = "different-record"
+    decision_mismatch = copy.deepcopy(base)
+    decision_mismatch["records"][0]["expected_decision"]["proposal_id"] = "different-record"
+    replay_marker = copy.deepcopy(base)
+    replay_marker["records"][0]["expected_decision"]["replayed"] = True
+    policy_mismatch = copy.deepcopy(base)
+    policy_mismatch["policies"][0]["policy_hash"] = "0" * 64
+
+    for payload, message in (
+        (identity_mismatch, "stable identity"),
+        (decision_mismatch, "decision identity"),
+        (replay_marker, "replay marker"),
+        (policy_mismatch, "policy hash"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            exchange.WorkspaceExport.model_validate_json(json.dumps(payload))
+
+
+def test_workspace_export_rejects_noncanonical_and_prohibited_bundle_shapes(
+    runtimes: tuple[ExchangeRuntime, ExchangeRuntime],
+) -> None:
+    exchange = _exchange()
+    source, _ = runtimes
+    source.add_evidence(b"thermal-observation")
+    exported = exchange.export_workspace(
+        uow_factory=source.uow_factory,
+        artifact_store=source.artifact_store,
+    )
+    base = exported.model_dump(mode="json")
+
+    duplicate_policy = copy.deepcopy(base)
+    duplicate_policy["policies"].append(copy.deepcopy(duplicate_policy["policies"][0]))
+    missing_bootstrap = copy.deepcopy(base)
+    missing_bootstrap["bootstrap_policy_hash"] = "0" * 64
+    missing_active = copy.deepcopy(base)
+    missing_active["active_policy_hash"] = "1" * 64
+    duplicate_record = copy.deepcopy(base)
+    second_record = copy.deepcopy(duplicate_record["records"][0])
+    second_record["replay_order"] = 1
+    duplicate_record["records"].append(second_record)
+    noncontiguous_replay = copy.deepcopy(base)
+    noncontiguous_replay["records"][0]["replay_order"] = 2
+    duplicate_projection = copy.deepcopy(base)
+    duplicate_projection["projection_expectations"].append(
+        copy.deepcopy(duplicate_projection["projection_expectations"][0])
+    )
+    duplicate_artifact = copy.deepcopy(base)
+    duplicate_artifact["artifacts"].append(copy.deepcopy(duplicate_artifact["artifacts"][0]))
+    wrong_bundle_hash = copy.deepcopy(base)
+    wrong_bundle_hash["bundle_hash"] = "0" * 64
+    protected_field = copy.deepcopy(base)
+    protected_field["artifacts"][0]["media_type"] = "protected_store"
+    _rehash_bundle_payload(protected_field)
+    live_path = copy.deepcopy(base)
+    live_path["records"][0]["proposal"]["evidence"]["provenance"]["input_file"] = (
+        "C:\\private\\thermal.txt"
+    )
+    live_path["records"][0]["proposal_hash"] = sha256_hex(
+        canonical_json_bytes(live_path["records"][0]["proposal"])
+    )
+    _rehash_bundle_payload(live_path)
+
+    for payload, message in (
+        (duplicate_policy, "policies"),
+        (missing_bootstrap, "bootstrap policy"),
+        (missing_active, "active policy"),
+        (duplicate_record, "records"),
+        (noncontiguous_replay, "replay order"),
+        (duplicate_projection, "projections"),
+        (duplicate_artifact, "artifacts"),
+        (wrong_bundle_hash, "bundle hash"),
+        (protected_field, "prohibited protected"),
+        (live_path, "live path"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            exchange.WorkspaceExport.model_validate_json(json.dumps(payload))
+
+
+def test_empty_workspace_export_uses_active_policy_as_bootstrap(tmp_path: Path) -> None:
+    exchange = _exchange()
+    runtime = _runtime(tmp_path, "empty")
+    try:
+        exported = exchange.export_workspace(
+            uow_factory=runtime.uow_factory,
+            artifact_store=runtime.artifact_store,
+        )
+
+        assert exported.bootstrap_policy_hash == exported.active_policy_hash
+        assert exported.records == ()
+        assert exported.artifacts == ()
+    finally:
+        runtime.engine.dispose()
+
+
+def test_workspace_export_requires_an_active_policy(tmp_path: Path) -> None:
+    exchange = _exchange()
+    database_url = f"sqlite:///{(tmp_path / 'uninitialized.db').as_posix()}"
+    upgrade_database(database_url)
+    engine = create_database_engine(database_url)
+
+    def uow_factory() -> DatabaseUnitOfWork:
+        return DatabaseUnitOfWork(engine)
+
+    try:
+        with pytest.raises(ValueError, match="active policy"):
+            exchange.export_workspace(
+                uow_factory=uow_factory,
+                artifact_store=FileArtifactStore(tmp_path / "uninitialized-artifacts"),
+            )
+    finally:
+        engine.dispose()
+
+
+def test_workspace_import_rejects_a_target_with_an_unrelated_bootstrap_policy(
+    tmp_path: Path,
+) -> None:
+    exchange = _exchange()
+    source = _runtime(tmp_path, "source")
+    different_policy = GovernancePolicy(required_claim_checks=("evidence_span_exists",))
+    different_payload = different_policy.model_dump(mode="json")
+    different_payload["human_approval_for"] = sorted(different_policy.human_approval_for)
+    target = _runtime(
+        tmp_path,
+        "target",
+        policy_snapshot=PolicySnapshot(
+            policy_hash=sha256_hex(canonical_json_bytes(different_payload)),
+            policy=different_policy,
+        ),
+    )
+    try:
+        source.add_evidence(b"thermal-observation")
+        exported = exchange.export_workspace(
+            uow_factory=source.uow_factory,
+            artifact_store=source.artifact_store,
+        )
+
+        with pytest.raises(exchange.WorkspaceImportError, match="bootstrap policy"):
+            exchange.import_workspace(
+                exported,
+                uow_factory=target.uow_factory,
+                artifact_store=target.artifact_store,
+                source_artifact_store=source.artifact_store,
+                clock=FixedClock(),
+            )
+    finally:
+        source.engine.dispose()
+        target.engine.dispose()
+
+
+def test_workspace_import_rejects_artifact_reference_changes(
+    runtimes: tuple[ExchangeRuntime, ExchangeRuntime],
+) -> None:
+    exchange = _exchange()
+    source, target = runtimes
+    source.add_evidence(b"thermal-observation")
+    exported = exchange.export_workspace(
+        uow_factory=source.uow_factory,
+        artifact_store=source.artifact_store,
+    )
+
+    with pytest.raises(exchange.WorkspaceImportError, match="artifact transfer"):
+        exchange.import_workspace(
+            exported,
+            uow_factory=target.uow_factory,
+            artifact_store=ChangingArtifactStore(target.artifact_store),
+            source_artifact_store=source.artifact_store,
+            clock=FixedClock(),
+        )
+
+
+def test_workspace_import_checks_expected_decisions_on_import_and_replay(
+    tmp_path: Path,
+) -> None:
+    exchange = _exchange()
+    source = _runtime(tmp_path, "source")
+    first_target = _runtime(tmp_path, "first-target")
+    replay_target = _runtime(tmp_path, "replay-target")
+    try:
+        source.add_evidence(b"thermal-observation")
+        exported = exchange.export_workspace(
+            uow_factory=source.uow_factory,
+            artifact_store=source.artifact_store,
+        )
+        payload = exported.model_dump(mode="json")
+        payload["records"][0]["expected_decision"].update(
+            {
+                "accepted": False,
+                "reasons": [
+                    {
+                        "code": RejectionCode.INVALID_PROPOSAL.value,
+                        "message": "tampered expected decision",
+                    }
+                ],
+            }
+        )
+        changed_expectation = exchange.WorkspaceExport.model_validate_json(
+            json.dumps(_rehash_bundle_payload(payload))
+        )
+
+        with pytest.raises(exchange.WorkspaceImportError, match="imported decision"):
+            exchange.import_workspace(
+                changed_expectation,
+                uow_factory=first_target.uow_factory,
+                artifact_store=first_target.artifact_store,
+                source_artifact_store=source.artifact_store,
+                clock=FixedClock(),
+            )
+        exchange.import_workspace(
+            exported,
+            uow_factory=replay_target.uow_factory,
+            artifact_store=replay_target.artifact_store,
+            source_artifact_store=source.artifact_store,
+            clock=FixedClock(),
+        )
+        with pytest.raises(exchange.WorkspaceImportError, match="replayed decision"):
+            exchange.import_workspace(
+                changed_expectation,
+                uow_factory=replay_target.uow_factory,
+                artifact_store=replay_target.artifact_store,
+                source_artifact_store=source.artifact_store,
+                clock=FixedClock(),
+            )
+    finally:
+        source.engine.dispose()
+        first_target.engine.dispose()
+        replay_target.engine.dispose()
+
+
+def test_workspace_import_rejects_unprojected_artifact_metadata(tmp_path: Path) -> None:
+    exchange = _exchange()
+    source = _runtime(tmp_path, "source")
+    target = _runtime(tmp_path, "target")
+    try:
+        source.add_evidence(b"thermal-observation")
+        orphan = source.artifact_store.put(b"orphan-artifact", "text/plain")
+        exported = exchange.export_workspace(
+            uow_factory=source.uow_factory,
+            artifact_store=source.artifact_store,
+        )
+        payload = exported.model_dump(mode="json")
+        payload["artifacts"].append(
+            {
+                "schema_version": 1,
+                "sha256": orphan.sha256,
+                "size_bytes": orphan.size_bytes,
+                "media_type": orphan.media_type,
+            }
+        )
+        payload["artifacts"].sort(
+            key=lambda item: (item["sha256"], item["size_bytes"], item["media_type"])
+        )
+        changed_artifacts = exchange.WorkspaceExport.model_validate_json(
+            json.dumps(_rehash_bundle_payload(payload))
+        )
+
+        with pytest.raises(exchange.WorkspaceImportError, match="does not match"):
+            exchange.import_workspace(
+                changed_artifacts,
+                uow_factory=target.uow_factory,
+                artifact_store=target.artifact_store,
+                source_artifact_store=source.artifact_store,
+                clock=FixedClock(),
+            )
+    finally:
+        source.engine.dispose()
+        target.engine.dispose()
+
+
+def test_changed_import_under_existing_identity_is_an_audited_conflict(
+    tmp_path: Path,
+) -> None:
+    exchange = _exchange()
+    source = _runtime(tmp_path, "source")
+    changed = _runtime(tmp_path, "changed")
+    target = _runtime(tmp_path, "target")
+    try:
+        source.add_evidence(b"thermal-observation")
+        changed.add_evidence(b"changed-observation")
+        exported = exchange.export_workspace(
+            uow_factory=source.uow_factory,
+            artifact_store=source.artifact_store,
+        )
+        changed_export = exchange.export_workspace(
+            uow_factory=changed.uow_factory,
+            artifact_store=changed.artifact_store,
+        )
+        first = exchange.import_workspace(
+            exported,
+            uow_factory=target.uow_factory,
+            artifact_store=target.artifact_store,
+            source_artifact_store=source.artifact_store,
+            clock=FixedClock(),
+        )
+        conflict = exchange.import_workspace(
+            changed_export,
+            uow_factory=target.uow_factory,
+            artifact_store=target.artifact_store,
+            source_artifact_store=changed.artifact_store,
+            clock=FixedClock(),
+        )
+
+        assert first.conflicts == ()
+        assert len(conflict.conflicts) == 1
+        assert conflict.conflicts[0].stable_identity == "workspace-record-1"
+        assert conflict.conflicts[0].code is RejectionCode.IDEMPOTENCY_CONFLICT
+        with target.uow_factory() as unit_of_work:
+            audit = unit_of_work.repositories().audit.list_all()[-1]
+            assert audit.payload["decision"]["accepted"] is False
+            assert audit.payload["decision"]["reasons"][0]["code"] == (
+                RejectionCode.IDEMPOTENCY_CONFLICT.value
+            )
+    finally:
+        source.engine.dispose()
+        changed.engine.dispose()
+        target.engine.dispose()

@@ -80,3 +80,20 @@ successor references are not implemented. Transitions to `REPRODUCED`, `CORROBOR
 `INDEPENDENT_REVIEW_REQUIRED`; ordinary evidence links alone cannot confer those
 statuses. These statuses do not certify scientific truth. Source metadata for [S02] is
 maintained in `docs/sources/source-register.yaml`.
+
+## Governed-Adaptation Boundary
+
+Research-run progress, evidence-trail structure, hypothesis simulation, reviewer
+agreement, behavioral-rule admission, handbook mapping, harness-campaign performance,
+and self-improvement measurements are separate typed domains. None automatically
+creates a claim, changes a claim head, or satisfies a review-required claim transition.
+In particular, a coherent trail is evidence rather than proof, provisional progress is
+not completion, deterministic simulator agreement is conditional on the implemented
+model, and discovery-set improvement is not general scientific corroboration.
+
+Workspace export carries accepted and rejected claim proposals and rebuildable claim
+projection expectations. Import replays those proposals through the original governing
+policy and verifies the resulting heads and history; it does not trust the exported
+projection expectation as authority. Exact content may replay idempotently. Changed
+content under an existing identity is an audited conflict and cannot revise claim
+history.

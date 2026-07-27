@@ -178,3 +178,41 @@ exception classes. Typer's documented custom `cls` extension still requires its
 
 Source metadata for [S07] and [S12] is maintained in
 `docs/sources/source-register.yaml`.
+
+## Workspace Exchange
+
+`export_workspace()` first runs whole-workspace integrity verification, then builds a
+strict schema-version-1 `WorkspaceExport`. Policies, transaction records, rebuildable
+projection expectations, and content-addressed artifact references are unique and
+sorted by stable identity. Each proposal and the whole bundle have canonical SHA-256
+hashes. Replay order is retained separately from sort order so reconstruction preserves
+the original governing policy and event sequence.
+
+The bundle is a portable integrity description, not a database dump. It contains no
+SQLite path, artifact-root path, protected expected answer, protected-store reference,
+or executable configuration. Artifact references contain only digest, byte count, and
+media type; bytes are transferred between caller-supplied artifact stores and verified
+against those references.
+
+`import_workspace()` reparses the canonical JSON through the strict model, validates
+every policy, proposal, decision, artifact, projection expectation, and bundle hash,
+and bootstraps only a genuinely empty target. It then replays records in retained order
+through `TransactionCoordinator.submit_intent()`. Exact stable intents are idempotent.
+Changed canonical content under an existing proposal or idempotency identity becomes a
+durable audited `IDEMPOTENCY_CONFLICT`; it is never treated as an update. A conflict
+returns before claiming projection equivalence. A conflict-free import must re-export
+to exactly the source bundle.
+
+## Capability Status
+
+Implemented components include transactional proposal admission, V1-to-V2 and governed
+V2 policy transitions, deterministic workspace verification and exchange, progress and
+evidence-trail contracts, append-only behavioral-rule records, fixed simulator
+execution, hypothesis admission contracts, deterministic handbook generation, and
+matched-budget harness decisions.
+
+The vertical-slice simulator, measurement report, and metadata-only adapter records are
+deterministic fakes used to test contracts. Learned evaluation, primitive evolution,
+live model providers, experiment control, and training are interface-only,
+experimental, or deferred. S21-S29 are source inspirations marked not reproduced; no
+general improvement or compatibility with S29 follows from this architecture.
