@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import Engine
 
 from super_scientist.application.kernel_service import KernelService
+from super_scientist.application.transactions import coordinator as coordinator_module
 from super_scientist.application.transactions.coordinator import TransactionCoordinator
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
 from super_scientist.domain.evidence.models import EvidenceRecord
@@ -112,13 +113,90 @@ def test_coordinator_preserves_one_decision_and_audit_event_per_new_attempt(
 
 
 @pytest.mark.integration
+def test_coordinator_submits_an_ordered_batch_after_one_integrity_check(
+    runtime: Runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    integrity_checks = 0
+    real_integrity_check = coordinator_module.require_workspace_integrity
+
+    def count_integrity_checks(*args: object, **kwargs: object) -> None:
+        nonlocal integrity_checks
+        integrity_checks += 1
+        real_integrity_check(*args, **kwargs)
+
+    monkeypatch.setattr(
+        coordinator_module,
+        "require_workspace_integrity",
+        count_integrity_checks,
+    )
+    proposals = (
+        runtime.add_evidence_proposal("proposal-1", "key-1"),
+        runtime.add_evidence_proposal("proposal-2", "key-2"),
+    )
+
+    decisions = runtime.coordinator.submit_batch(proposals)
+
+    assert tuple(decision.accepted for decision in decisions) == (True, True)
+    assert integrity_checks == 1
+    assert runtime.transaction_and_audit_counts() == (2, 2)
+    with runtime.uow_factory() as unit_of_work:
+        transaction_ids = tuple(
+            transaction.proposal.proposal_id
+            for transaction in unit_of_work.repositories().transactions.list_all()
+        )
+    assert transaction_ids == ("proposal-1", "proposal-2")
+
+
+@pytest.mark.integration
+def test_coordinator_batch_handles_empty_and_unstorable_inputs(runtime: Runtime) -> None:
+    assert runtime.coordinator.submit_batch(()) == ()
+
+    (decision,) = runtime.coordinator.submit_batch(({},))
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code.value == "INVALID_PROPOSAL"
+    assert runtime.transaction_and_audit_counts() == (0, 0)
+
+
+@pytest.mark.integration
+def test_coordinator_batch_rolls_back_prior_writes_when_a_later_submit_raises(
+    runtime: Runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposals = (
+        runtime.add_evidence_proposal("proposal-1", "key-1"),
+        runtime.add_evidence_proposal("proposal-2", "key-2"),
+    )
+    real_submit_locked = runtime.coordinator._submit_locked
+    call_count = 0
+
+    def fail_second_submit(*args: object, **kwargs: object) -> object:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("second submit failed")
+        return real_submit_locked(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runtime.coordinator, "_submit_locked", fail_second_submit)
+
+    with pytest.raises(RuntimeError, match="second submit failed"):
+        runtime.coordinator.submit_batch(proposals)
+
+    assert runtime.transaction_and_audit_counts() == (0, 0)
+
+
+@pytest.mark.integration
 def test_compatibility_router_declares_the_resolved_proposal_type(runtime: Runtime) -> None:
     proposal_types = ("add_evidence", "propose_claim", "transition_claim")
 
-    assert tuple(
-        runtime.coordinator.router.resolve(proposal_type).proposal_type
-        for proposal_type in proposal_types
-    ) == proposal_types
+    assert (
+        tuple(
+            runtime.coordinator.router.resolve(proposal_type).proposal_type
+            for proposal_type in proposal_types
+        )
+        == proposal_types
+    )
 
 
 @pytest.mark.integration

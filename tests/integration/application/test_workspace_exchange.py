@@ -13,10 +13,21 @@ from sqlalchemy import Engine
 
 from super_scientist.application.transactions.coordinator import TransactionCoordinator
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
-from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord
+from super_scientist.domain.claims.models import (
+    AtomicClaim,
+    ClaimStatus,
+    EvidenceLink,
+)
+from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord, EvidenceSpan
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
-from super_scientist.kernel.transactions.models import AddEvidence, RejectionCode
+from super_scientist.kernel.transactions.models import (
+    AddEvidence,
+    ProposalAttempt,
+    ProposeClaim,
+    RejectionCode,
+    TransitionClaim,
+)
 from super_scientist.providers.storage.artifacts import FileArtifactStore
 from super_scientist.providers.storage.database import (
     DatabaseUnitOfWork,
@@ -43,6 +54,25 @@ class ChangingArtifactStore:
 
     def read(self, ref: ArtifactRef) -> bytes:
         return self._delegate.read(ref)
+
+
+class ChangingFileArtifactStore(FileArtifactStore):
+    def put(self, data: bytes, media_type: str) -> ArtifactRef:
+        return (
+            super().put(data, media_type).model_copy(update={"media_type": "application/x-changed"})
+        )
+
+
+class UnreadableArtifactStore:
+    def __init__(self, delegate: FileArtifactStore) -> None:
+        self._delegate = delegate
+
+    def put(self, data: bytes, media_type: str) -> ArtifactRef:
+        return self._delegate.put(data, media_type)
+
+    def read(self, ref: ArtifactRef) -> bytes:
+        del ref
+        raise OSError("source artifact became unreadable")
 
 
 @dataclass(frozen=True)
@@ -140,6 +170,38 @@ def _rehash_bundle_payload(payload: dict[str, object]) -> dict[str, object]:
     canonical.pop("bundle_hash")
     payload["bundle_hash"] = sha256_hex(canonical_json_bytes(canonical))
     return payload
+
+
+def _durable_snapshot(runtime: ExchangeRuntime, artifact_root: Path) -> tuple[object, ...]:
+    with runtime.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        database_state = (
+            tuple(item.policy_hash for item in repositories.policies.list_all()),
+            tuple(
+                (
+                    item.proposal.proposal_id,
+                    item.proposal_hash,
+                    item.decision.accepted,
+                    tuple(reason.code for reason in item.decision.reasons),
+                )
+                for item in repositories.transactions.list_all()
+            ),
+            tuple(
+                (
+                    item.evidence_id,
+                    item.artifact.sha256,
+                    item.verification_state,
+                )
+                for item in repositories.evidence.list_all()
+            ),
+            tuple(item.event_hash for item in repositories.audit.list_all()),
+        )
+    artifact_state = tuple(
+        (path.relative_to(artifact_root).as_posix(), path.read_bytes())
+        for path in sorted(artifact_root.rglob("*"))
+        if path.is_file()
+    )
+    return (*database_state, artifact_state)
 
 
 def test_workspace_exchange_exposes_strict_canonical_import_contract() -> None:
@@ -404,6 +466,67 @@ def test_workspace_import_rejects_artifact_reference_changes(
         )
 
 
+def test_workspace_import_removes_artifact_written_before_reference_change(
+    tmp_path: Path,
+) -> None:
+    exchange = _exchange()
+    source = _runtime(tmp_path, "source-changing-file")
+    target = _runtime(tmp_path, "target-changing-file")
+    target_artifact_root = tmp_path / "changing-file-artifacts"
+    changing_store = ChangingFileArtifactStore(target_artifact_root)
+    try:
+        source.add_evidence(b"thermal-observation")
+        exported = exchange.export_workspace(
+            uow_factory=source.uow_factory,
+            artifact_store=source.artifact_store,
+        )
+        before = _durable_snapshot(target, target_artifact_root)
+
+        with pytest.raises(exchange.WorkspaceImportError, match="canonical reference"):
+            exchange.import_workspace(
+                exported,
+                uow_factory=target.uow_factory,
+                artifact_store=changing_store,
+                source_artifact_store=source.artifact_store,
+                clock=FixedClock(),
+            )
+
+        assert _durable_snapshot(target, target_artifact_root) == before
+    finally:
+        source.engine.dispose()
+        target.engine.dispose()
+
+
+def test_workspace_import_wraps_artifact_read_failure_without_mutating_target(
+    tmp_path: Path,
+) -> None:
+    exchange = _exchange()
+    source = _runtime(tmp_path, "source-unreadable")
+    target = _runtime(tmp_path, "target-unreadable")
+    target_artifact_root = tmp_path / "target-unreadable-artifacts"
+    try:
+        source.add_evidence(b"thermal-observation")
+        exported = exchange.export_workspace(
+            uow_factory=source.uow_factory,
+            artifact_store=source.artifact_store,
+        )
+        before = _durable_snapshot(target, target_artifact_root)
+
+        with pytest.raises(exchange.WorkspaceImportError, match="artifact transfer failed"):
+            exchange.import_workspace(
+                exported,
+                uow_factory=target.uow_factory,
+                artifact_store=target.artifact_store,
+                source_artifact_store=UnreadableArtifactStore(source.artifact_store),
+                clock=FixedClock(),
+            )
+
+        assert _durable_snapshot(target, target_artifact_root) == before
+    finally:
+        source.engine.dispose()
+        target.engine.dispose()
+
+
 def test_workspace_import_checks_expected_decisions_on_import_and_replay(
     tmp_path: Path,
 ) -> None:
@@ -545,6 +668,408 @@ def test_changed_import_under_existing_identity_is_an_audited_conflict(
             assert audit.payload["decision"]["reasons"][0]["code"] == (
                 RejectionCode.IDEMPOTENCY_CONFLICT.value
             )
+    finally:
+        source.engine.dispose()
+        changed.engine.dispose()
+        target.engine.dispose()
+
+
+def test_workspace_import_rejects_unreconstructed_preflight_target(
+    runtimes: tuple[ExchangeRuntime, ExchangeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exchange = _exchange()
+    source, target = runtimes
+    source.add_evidence(b"preflight-clone-observation")
+    exported = exchange.export_workspace(
+        uow_factory=source.uow_factory,
+        artifact_store=source.artifact_store,
+    )
+    unreconstructed = exchange.WorkspaceImportResult(
+        imported=0,
+        replayed=0,
+        conflicts=(),
+        projections_verified=False,
+    )
+    monkeypatch.setattr(
+        exchange,
+        "_commit_workspace",
+        lambda *args, **kwargs: unreconstructed,
+    )
+
+    with pytest.raises(exchange.WorkspaceImportError, match="preflight clone"):
+        exchange.import_workspace(
+            exported,
+            uow_factory=target.uow_factory,
+            artifact_store=target.artifact_store,
+            source_artifact_store=source.artifact_store,
+            clock=FixedClock(),
+        )
+
+
+def test_workspace_import_rejects_preflight_to_commit_result_drift(
+    runtimes: tuple[ExchangeRuntime, ExchangeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exchange = _exchange()
+    source, target = runtimes
+    source.add_evidence(b"commit-drift-observation")
+    exported = exchange.export_workspace(
+        uow_factory=source.uow_factory,
+        artifact_store=source.artifact_store,
+    )
+    preflight = exchange.WorkspaceImportResult(
+        imported=1,
+        replayed=0,
+        conflicts=(),
+        projections_verified=True,
+    )
+    committed = preflight.model_copy(update={"imported": 0, "replayed": 1})
+    monkeypatch.setattr(
+        exchange,
+        "_preflight_import",
+        lambda *args, **kwargs: preflight,
+    )
+    monkeypatch.setattr(
+        exchange,
+        "_commit_workspace",
+        lambda *args, **kwargs: committed,
+    )
+
+    with pytest.raises(exchange.WorkspaceImportError, match="changed after successful preflight"):
+        exchange.import_workspace(
+            exported,
+            uow_factory=target.uow_factory,
+            artifact_store=target.artifact_store,
+            source_artifact_store=source.artifact_store,
+            clock=FixedClock(),
+        )
+
+
+def test_workspace_conflict_commit_rejects_identity_and_decision_drift(
+    runtimes: tuple[ExchangeRuntime, ExchangeRuntime],
+) -> None:
+    exchange = _exchange()
+    source, target = runtimes
+    source.add_evidence(b"conflict-drift-observation")
+    exported = exchange.export_workspace(
+        uow_factory=source.uow_factory,
+        artifact_store=source.artifact_store,
+    )
+
+    missing_identity = (
+        exchange.WorkspaceImportConflict(
+            stable_identity="absent-workspace-record",
+            code=RejectionCode.IDEMPOTENCY_CONFLICT,
+        ),
+    )
+    with pytest.raises(exchange.WorkspaceImportError, match="committed conflicts changed"):
+        exchange._commit_conflicts(
+            exported,
+            expected=missing_identity,
+            uow_factory=target.uow_factory,
+            artifact_store=target.artifact_store,
+            clock=FixedClock(),
+        )
+
+    changed_decision = (
+        exchange.WorkspaceImportConflict(
+            stable_identity=exported.records[0].stable_identity,
+            code=RejectionCode.IDEMPOTENCY_CONFLICT,
+        ),
+    )
+    with pytest.raises(exchange.WorkspaceImportError, match="conflict decision changed"):
+        exchange._commit_conflicts(
+            exported,
+            expected=changed_decision,
+            uow_factory=target.uow_factory,
+            artifact_store=target.artifact_store,
+            clock=FixedClock(),
+        )
+
+
+def test_workspace_replay_order_follows_audit_sequence_for_same_timestamp_dependencies(
+    tmp_path: Path,
+) -> None:
+    exchange = _exchange()
+    source = _runtime(tmp_path, "source")
+    target = _runtime(tmp_path, "target")
+    try:
+        artifact = source.artifact_store.put(b"ordered evidence", "text/plain")
+        evidence = EvidenceRecord(
+            evidence_id="ordered-evidence",
+            evidence_type="synthetic_observation",
+            source_locator="fixture://ordered-evidence",
+            retrieved_at=NOW,
+            artifact=artifact,
+            provenance={"collector": "workspace-order-test"},
+            extracted_span=EvidenceSpan(
+                start=0,
+                end=len("ordered evidence"),
+                text="ordered evidence",
+            ),
+            ingestion_actor_id=source.actor.actor_id,
+        )
+        assert source.coordinator.submit(
+            AddEvidence(
+                proposal_id="z-evidence",
+                idempotency_key="z-evidence-key",
+                proposer=source.actor,
+                evidence=evidence,
+            )
+        ).accepted
+        claim = AtomicClaim(
+            claim_id="ordered-claim",
+            version=1,
+            proposition="The ordered evidence supports this claim.",
+            scope="fixture",
+            population_or_system="fixture system",
+            epistemic_modality="observed",
+            status=ClaimStatus.PROPOSED,
+            created_at=NOW,
+            created_by=source.actor.actor_id,
+        )
+        assert source.coordinator.submit(
+            ProposeClaim(
+                proposal_id="m-claim",
+                idempotency_key="m-claim-key",
+                proposer=source.actor,
+                claim=claim,
+            )
+        ).accepted
+        assert source.coordinator.submit(
+            TransitionClaim(
+                proposal_id="a-transition",
+                idempotency_key="a-transition-key",
+                proposer=source.actor,
+                next_claim=claim.model_copy(
+                    update={
+                        "version": 2,
+                        "status": ClaimStatus.EVIDENCE_LINKED,
+                        "evidence_links": (
+                            EvidenceLink(
+                                evidence_id=evidence.evidence_id,
+                                supporting_span="ordered evidence",
+                            ),
+                        ),
+                        "parent_version_id": "ordered-claim:1",
+                    }
+                ),
+            )
+        ).accepted
+
+        exported = exchange.export_workspace(
+            uow_factory=source.uow_factory,
+            artifact_store=source.artifact_store,
+        )
+        replay_order = {record.stable_identity: record.replay_order for record in exported.records}
+        imported = exchange.import_workspace(
+            exported,
+            uow_factory=target.uow_factory,
+            artifact_store=target.artifact_store,
+            source_artifact_store=source.artifact_store,
+            clock=FixedClock(),
+        )
+
+        assert tuple(record.stable_identity for record in exported.records) == (
+            "a-transition",
+            "m-claim",
+            "z-evidence",
+        )
+        assert replay_order == {"z-evidence": 0, "m-claim": 1, "a-transition": 2}
+        assert imported.imported == 3
+        assert imported.projections_verified is True
+    finally:
+        source.engine.dispose()
+        target.engine.dispose()
+
+
+def test_workspace_audit_order_rejects_missing_or_ambiguous_transaction_identity(
+    runtimes: tuple[ExchangeRuntime, ExchangeRuntime],
+) -> None:
+    exchange = _exchange()
+    source, _ = runtimes
+    source.add_evidence(b"audit-order-observation")
+    with source.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        event = repositories.audit.list_all()[0]
+        transaction = repositories.transactions.list_all()[0]
+
+    ignored_payload = dict(event.payload)
+    ignored_payload["transaction_persisted"] = False
+    ignored = event.model_copy(update={"payload": ignored_payload})
+    malformed_payload = dict(event.payload)
+    malformed_payload["proposal"] = {}
+    malformed = event.model_copy(update={"payload": malformed_payload})
+
+    assert exchange._transaction_replay_orders((ignored,)) == {}
+    with pytest.raises(ValueError, match="stable proposal identity"):
+        exchange._transaction_replay_orders((malformed,))
+    with pytest.raises(ValueError, match="more than one persisted audit event"):
+        exchange._transaction_replay_orders((event, event))
+    with pytest.raises(ValueError, match="governing audit event"):
+        exchange._governing_hash(transaction, {})
+    with pytest.raises(ValueError, match="audit replay order"):
+        exchange._replay_order(transaction, {})
+
+
+@pytest.mark.parametrize("failure_stage", ("expected_decision", "final_equivalence"))
+def test_workspace_import_validation_failure_preserves_target_state(
+    tmp_path: Path,
+    failure_stage: str,
+) -> None:
+    exchange = _exchange()
+    source = _runtime(tmp_path, f"source-{failure_stage}")
+    target = _runtime(tmp_path, f"target-{failure_stage}")
+    artifact_root = tmp_path / f"target-{failure_stage}-artifacts"
+    try:
+        source.add_evidence(b"fail-atomic-observation")
+        exported = exchange.export_workspace(
+            uow_factory=source.uow_factory,
+            artifact_store=source.artifact_store,
+        )
+        payload = exported.model_dump(mode="json")
+        if failure_stage == "expected_decision":
+            payload["records"][0]["expected_decision"].update(
+                {
+                    "accepted": False,
+                    "reasons": [
+                        {
+                            "code": RejectionCode.INVALID_PROPOSAL.value,
+                            "message": "preflight must reject this decision",
+                        }
+                    ],
+                }
+            )
+            message = "imported decision"
+        else:
+            payload["projection_expectations"][0]["content_hash"] = "0" * 64
+            message = "does not match"
+        invalid_bundle = exchange.WorkspaceExport.model_validate_json(
+            json.dumps(_rehash_bundle_payload(payload))
+        )
+        before = _durable_snapshot(target, artifact_root)
+
+        with pytest.raises(exchange.WorkspaceImportError, match=message):
+            exchange.import_workspace(
+                invalid_bundle,
+                uow_factory=target.uow_factory,
+                artifact_store=target.artifact_store,
+                source_artifact_store=source.artifact_store,
+                clock=FixedClock(),
+            )
+
+        assert _durable_snapshot(target, artifact_root) == before
+    finally:
+        source.engine.dispose()
+        target.engine.dispose()
+
+
+def test_workspace_import_replays_audited_invalid_proposal(tmp_path: Path) -> None:
+    exchange = _exchange()
+    source = _runtime(tmp_path, "source-invalid")
+    target = _runtime(tmp_path, "target-invalid")
+    try:
+        attempt = ProposalAttempt(
+            proposal_id="invalid-evidence",
+            idempotency_key="invalid-evidence-key",
+            proposer=source.actor,
+            proposal_kind="add_evidence",
+            intent_digest="0" * 64,
+        )
+
+        def invalid_factory() -> object:
+            return AddEvidence.model_validate({})
+
+        decision = source.coordinator.submit_intent(attempt, invalid_factory)
+        assert decision.accepted is False
+        assert decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+        exported = exchange.export_workspace(
+            uow_factory=source.uow_factory,
+            artifact_store=source.artifact_store,
+        )
+
+        imported = exchange.import_workspace(
+            exported,
+            uow_factory=target.uow_factory,
+            artifact_store=target.artifact_store,
+            source_artifact_store=source.artifact_store,
+            clock=FixedClock(),
+        )
+
+        assert imported.imported == 1
+        assert imported.conflicts == ()
+        assert (
+            exchange.export_workspace(
+                uow_factory=target.uow_factory,
+                artifact_store=target.artifact_store,
+            )
+            == exported
+        )
+    finally:
+        source.engine.dispose()
+        target.engine.dispose()
+
+
+def test_changed_content_with_same_proposal_id_is_entity_conflict(tmp_path: Path) -> None:
+    exchange = _exchange()
+    source = _runtime(tmp_path, "source-original")
+    changed = _runtime(tmp_path, "source-changed")
+    target = _runtime(tmp_path, "target-entity-conflict")
+    try:
+        source.add_evidence(b"original-observation")
+        changed_artifact = changed.artifact_store.put(
+            b"changed-observation",
+            "text/plain",
+        )
+        assert changed.coordinator.submit(
+            AddEvidence(
+                proposal_id="workspace-record-1",
+                idempotency_key="different-idempotency-key",
+                proposer=changed.actor,
+                evidence=EvidenceRecord(
+                    evidence_id="workspace-evidence-1",
+                    evidence_type="synthetic_observation",
+                    source_locator="fixture://changed-observation",
+                    retrieved_at=NOW,
+                    artifact=changed_artifact,
+                    provenance={"collector": "workspace-exchange-test"},
+                    ingestion_actor_id=changed.actor.actor_id,
+                ),
+            )
+        ).accepted
+        original = exchange.export_workspace(
+            uow_factory=source.uow_factory,
+            artifact_store=source.artifact_store,
+        )
+        changed_export = exchange.export_workspace(
+            uow_factory=changed.uow_factory,
+            artifact_store=changed.artifact_store,
+        )
+        exchange.import_workspace(
+            original,
+            uow_factory=target.uow_factory,
+            artifact_store=target.artifact_store,
+            source_artifact_store=source.artifact_store,
+            clock=FixedClock(),
+        )
+
+        conflict = exchange.import_workspace(
+            changed_export,
+            uow_factory=target.uow_factory,
+            artifact_store=target.artifact_store,
+            source_artifact_store=changed.artifact_store,
+            clock=FixedClock(),
+        )
+
+        assert conflict.imported == 0
+        assert conflict.conflicts[0].stable_identity == "workspace-record-1"
+        assert conflict.conflicts[0].code is RejectionCode.ENTITY_ALREADY_EXISTS
+        with target.uow_factory() as unit_of_work:
+            audit = unit_of_work.repositories().audit.list_all()[-1]
+        assert audit.payload["decision"]["reasons"][0]["code"] == (
+            RejectionCode.ENTITY_ALREADY_EXISTS.value
+        )
     finally:
         source.engine.dispose()
         changed.engine.dispose()

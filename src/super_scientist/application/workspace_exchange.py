@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from enum import Enum
-from pathlib import PurePosixPath, PureWindowsPath
-from typing import Literal, Protocol
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from tempfile import TemporaryDirectory
+from types import TracebackType
+from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import Connection
@@ -28,8 +30,12 @@ from super_scientist.kernel.transactions.models import (
     RejectionCode,
     TransactionDecision,
 )
-from super_scientist.providers.storage.artifacts import ArtifactStore
-from super_scientist.providers.storage.database import DatabaseUnitOfWork
+from super_scientist.providers.storage.artifacts import ArtifactStore, FileArtifactStore
+from super_scientist.providers.storage.database import (
+    DatabaseUnitOfWork,
+    create_database_engine,
+    upgrade_database,
+)
 from super_scientist.providers.storage.domain_records import HarnessCampaignHeadRepository
 from super_scientist.providers.storage.repositories import RepositorySet, StoredTransaction
 
@@ -38,6 +44,29 @@ type UnitOfWorkFactory = Callable[[], DatabaseUnitOfWork]
 
 class Clock(Protocol):
     def now(self) -> UtcTimestamp: ...
+
+
+class _BorrowedUnitOfWork:
+    """Expose one outer transaction to coordinator calls without committing it."""
+
+    def __init__(self, owner: DatabaseUnitOfWork) -> None:
+        self._owner = owner
+        self.connection = owner.connection
+
+    def __enter__(self) -> _BorrowedUnitOfWork:
+        _active_connection(self.connection)
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc, traceback
+
+    def repositories(self) -> RepositorySet:
+        return self._owner.repositories()
 
 
 class _StrictFrozenModel(BaseModel):
@@ -185,45 +214,55 @@ def export_workspace(
 ) -> WorkspaceExport:
     with uow_factory() as unit_of_work:
         repositories = unit_of_work.repositories()
-        require_workspace_integrity(repositories, artifact_store)
-        active_policy = repositories.policies.get_active()
-        if active_policy is None:
-            raise ValueError("workspace export requires an active policy")
-        transactions = repositories.transactions.list_all()
-        governing_hashes = _governing_policy_hashes(repositories.audit.list_all())
-        records = tuple(
-            sorted(
-                (
-                    WorkspaceRecord(
-                        stable_identity=transaction.proposal.proposal_id,
-                        replay_order=index,
-                        governing_policy_hash=_governing_hash(transaction, governing_hashes),
-                        proposal_hash=_proposal_hash(transaction.proposal),
-                        proposal=transaction.proposal,
-                        expected_decision=transaction.decision.model_copy(
-                            update={"replayed": False}
-                        ),
-                    )
-                    for index, transaction in enumerate(transactions)
-                ),
-                key=lambda item: item.stable_identity,
-            )
-        )
-        snapshots = repositories.policies.list_all()
-        policies = tuple(
-            WorkspacePolicy(policy_hash=snapshot.policy_hash, snapshot=snapshot)
-            for snapshot in sorted(snapshots, key=lambda item: item.policy_hash)
-        )
-        bootstrap_hash = (
-            governing_hashes[transactions[0].proposal.proposal_id]
-            if transactions
-            else active_policy.policy_hash
-        )
-        projections = _projection_expectations(
+        return _export_workspace_snapshot(
             repositories,
             _active_connection(unit_of_work.connection),
+            artifact_store,
         )
-        artifacts = _artifact_references(records)
+
+
+def _export_workspace_snapshot(
+    repositories: RepositorySet,
+    connection: Connection,
+    artifact_store: ArtifactStore,
+) -> WorkspaceExport:
+    require_workspace_integrity(repositories, artifact_store)
+    active_policy = repositories.policies.get_active()
+    if active_policy is None:
+        raise ValueError("workspace export requires an active policy")
+    transactions = repositories.transactions.list_all()
+    events = repositories.audit.list_all()
+    governing_hashes = _governing_policy_hashes(events)
+    replay_orders = _transaction_replay_orders(events)
+    records = tuple(
+        sorted(
+            (
+                WorkspaceRecord(
+                    stable_identity=transaction.proposal.proposal_id,
+                    replay_order=_replay_order(transaction, replay_orders),
+                    governing_policy_hash=_governing_hash(transaction, governing_hashes),
+                    proposal_hash=_proposal_hash(transaction.proposal),
+                    proposal=transaction.proposal,
+                    expected_decision=transaction.decision.model_copy(update={"replayed": False}),
+                )
+                for transaction in transactions
+            ),
+            key=lambda item: item.stable_identity,
+        )
+    )
+    snapshots = repositories.policies.list_all()
+    policies = tuple(
+        WorkspacePolicy(policy_hash=snapshot.policy_hash, snapshot=snapshot)
+        for snapshot in sorted(snapshots, key=lambda item: item.policy_hash)
+    )
+    first_identity = min(replay_orders, key=replay_orders.__getitem__) if replay_orders else None
+    bootstrap_hash = (
+        governing_hashes[first_identity]
+        if first_identity is not None
+        else active_policy.policy_hash
+    )
+    projections = _projection_expectations(repositories, connection)
+    artifacts = _artifact_references(records)
     payload: dict[str, object] = {
         "schema_version": 1,
         "bootstrap_policy_hash": bootstrap_hash,
@@ -254,25 +293,169 @@ def import_workspace(
     clock: Clock,
 ) -> WorkspaceImportResult:
     canonical = WorkspaceExport.model_validate_json(workspace.model_dump_json())
-    policy_by_hash = {item.policy_hash: item.snapshot for item in canonical.policies}
-    _prepare_target_policy(
+    target_before = _target_snapshot(
         canonical,
-        policy_by_hash,
         uow_factory=uow_factory,
+        artifact_store=artifact_store,
+    )
+    preflight = _preflight_import(
+        canonical,
+        target_before=target_before,
+        target_artifact_store=artifact_store,
+        source_artifact_store=source_artifact_store,
         clock=clock,
     )
-    _transfer_artifacts(
-        canonical.artifacts,
+    if preflight.conflicts:
+        return _commit_conflicts(
+            canonical,
+            expected=preflight.conflicts,
+            uow_factory=uow_factory,
+            artifact_store=artifact_store,
+            clock=clock,
+        )
+    committed = _commit_workspace(
+        canonical,
+        uow_factory=uow_factory,
+        artifact_store=artifact_store,
+        source_artifact_store=source_artifact_store,
+        clock=clock,
+    )
+    if committed != preflight:
+        raise WorkspaceImportError("committed import changed after successful preflight")
+    return committed
+
+
+def _target_snapshot(
+    workspace: WorkspaceExport,
+    *,
+    uow_factory: UnitOfWorkFactory,
+    artifact_store: ArtifactStore,
+) -> WorkspaceExport | None:
+    with uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        active = repositories.policies.get_active()
+        if active is None:
+            if repositories.has_durable_state():
+                raise WorkspaceImportError("target durable state has no active policy")
+            return None
+        if repositories.policies.get(workspace.bootstrap_policy_hash) is None:
+            raise WorkspaceImportError("target does not contain the export bootstrap policy")
+        return _export_workspace_snapshot(
+            repositories,
+            _active_connection(unit_of_work.connection),
+            artifact_store,
+        )
+
+
+def _preflight_import(
+    workspace: WorkspaceExport,
+    *,
+    target_before: WorkspaceExport | None,
+    target_artifact_store: ArtifactStore,
+    source_artifact_store: ArtifactStore,
+    clock: Clock,
+) -> WorkspaceImportResult:
+    with TemporaryDirectory(prefix="ssöh-workspace-preflight-") as temporary:
+        root = Path(temporary)
+        database_url = f"sqlite:///{(root / 'preflight.db').as_posix()}"
+        upgrade_database(database_url)
+        engine = create_database_engine(database_url)
+        staged_artifacts = FileArtifactStore(root / "artifacts")
+
+        def staged_uow_factory() -> DatabaseUnitOfWork:
+            return DatabaseUnitOfWork(engine)
+
+        try:
+            if target_before is not None:
+                cloned = _commit_workspace(
+                    target_before,
+                    uow_factory=staged_uow_factory,
+                    artifact_store=staged_artifacts,
+                    source_artifact_store=target_artifact_store,
+                    clock=clock,
+                )
+                if not cloned.projections_verified:
+                    raise WorkspaceImportError("target preflight clone was not reconstructed")
+            return _commit_workspace(
+                workspace,
+                uow_factory=staged_uow_factory,
+                artifact_store=staged_artifacts,
+                source_artifact_store=source_artifact_store,
+                clock=clock,
+            )
+        finally:
+            engine.dispose()
+
+
+def _commit_workspace(
+    workspace: WorkspaceExport,
+    *,
+    uow_factory: UnitOfWorkFactory,
+    artifact_store: ArtifactStore,
+    source_artifact_store: ArtifactStore,
+    clock: Clock,
+) -> WorkspaceImportResult:
+    policy_by_hash = {item.policy_hash: item.snapshot for item in workspace.policies}
+    created_artifacts = _transfer_artifacts_for_commit(
+        workspace.artifacts,
         source=source_artifact_store,
         target=artifact_store,
     )
+    result: WorkspaceImportResult
+    try:
+        with uow_factory() as unit_of_work:
+            repositories = unit_of_work.repositories()
+            _prepare_target_policy_in_repositories(
+                workspace,
+                policy_by_hash,
+                repositories=repositories,
+                clock=clock,
+            )
+            result = _replay_records(
+                workspace,
+                policy_by_hash,
+                unit_of_work=unit_of_work,
+                artifact_store=artifact_store,
+                clock=clock,
+            )
+            if not result.conflicts:
+                rebuilt = _export_workspace_snapshot(
+                    repositories,
+                    _active_connection(unit_of_work.connection),
+                    artifact_store,
+                )
+                if rebuilt != workspace:
+                    raise WorkspaceImportError(
+                        "rebuilt workspace export does not match canonical bundle"
+                    )
+    except BaseException:
+        _remove_created_artifacts(created_artifacts)
+        raise
+    if result.conflicts:
+        return result
+    return result.model_copy(update={"projections_verified": True})
+
+
+def _replay_records(
+    workspace: WorkspaceExport,
+    policies: Mapping[str, PolicySnapshot],
+    *,
+    unit_of_work: DatabaseUnitOfWork,
+    artifact_store: ArtifactStore,
+    clock: Clock,
+) -> WorkspaceImportResult:
+    borrowed = _BorrowedUnitOfWork(unit_of_work)
+
+    def borrowed_uow_factory() -> DatabaseUnitOfWork:
+        return cast(DatabaseUnitOfWork, borrowed)
+
     imported = 0
     replayed = 0
     conflicts: list[WorkspaceImportConflict] = []
-    for record in sorted(canonical.records, key=lambda item: item.replay_order):
+    for record in sorted(workspace.records, key=lambda item: item.replay_order):
         coordinator = TransactionCoordinator(
-            uow_factory,
-            policy_by_hash[record.governing_policy_hash],
+            borrowed_uow_factory,
+            policies[record.governing_policy_hash],
             clock,
             artifact_store,
         )
@@ -287,32 +470,73 @@ def import_workspace(
                 raise WorkspaceImportError(
                     f"replayed decision changed for {record.stable_identity}"
                 )
-        elif _is_identity_conflict(decision):
+        elif (conflict_code := _identity_conflict_code(decision)) is not None:
             conflicts.append(
                 WorkspaceImportConflict(
                     stable_identity=record.stable_identity,
-                    code=RejectionCode.IDEMPOTENCY_CONFLICT,
+                    code=conflict_code,
                 )
             )
         elif decision != record.expected_decision:
             raise WorkspaceImportError(f"imported decision changed for {record.stable_identity}")
         else:
             imported += 1
-    if conflicts:
-        return WorkspaceImportResult(
-            imported=imported,
-            replayed=replayed,
-            conflicts=tuple(conflicts),
-            projections_verified=False,
-        )
-    target = export_workspace(uow_factory=uow_factory, artifact_store=artifact_store)
-    if target != canonical:
-        raise WorkspaceImportError("rebuilt workspace export does not match canonical bundle")
     return WorkspaceImportResult(
         imported=imported,
         replayed=replayed,
-        conflicts=(),
-        projections_verified=True,
+        conflicts=tuple(conflicts),
+        projections_verified=False,
+    )
+
+
+def _commit_conflicts(
+    workspace: WorkspaceExport,
+    *,
+    expected: tuple[WorkspaceImportConflict, ...],
+    uow_factory: UnitOfWorkFactory,
+    artifact_store: ArtifactStore,
+    clock: Clock,
+) -> WorkspaceImportResult:
+    expected_by_identity = {item.stable_identity: item.code for item in expected}
+    actual: list[WorkspaceImportConflict] = []
+    policies = {item.policy_hash: item.snapshot for item in workspace.policies}
+    with uow_factory() as unit_of_work:
+        borrowed = _BorrowedUnitOfWork(unit_of_work)
+
+        def borrowed_uow_factory() -> DatabaseUnitOfWork:
+            return cast(DatabaseUnitOfWork, borrowed)
+
+        for record in sorted(workspace.records, key=lambda item: item.replay_order):
+            expected_code = expected_by_identity.get(record.stable_identity)
+            if expected_code is None:
+                continue
+            decision = TransactionCoordinator(
+                borrowed_uow_factory,
+                policies[record.governing_policy_hash],
+                clock,
+                artifact_store,
+            ).submit_intent(
+                _proposal_attempt(record),
+                _constant_proposal_factory(record.proposal),
+            )
+            actual_code = _identity_conflict_code(decision)
+            if actual_code is not expected_code:
+                raise WorkspaceImportError(
+                    f"conflict decision changed for {record.stable_identity}"
+                )
+            actual.append(
+                WorkspaceImportConflict(
+                    stable_identity=record.stable_identity,
+                    code=actual_code,
+                )
+            )
+    if tuple(actual) != expected:
+        raise WorkspaceImportError("committed conflicts changed after successful preflight")
+    return WorkspaceImportResult(
+        imported=0,
+        replayed=0,
+        conflicts=tuple(actual),
+        projections_verified=False,
     )
 
 
@@ -350,6 +574,22 @@ def _governing_policy_hashes(events: tuple[AuditEvent, ...]) -> dict[str, str]:
     return governing
 
 
+def _transaction_replay_orders(events: tuple[AuditEvent, ...]) -> dict[str, int]:
+    replay_orders: dict[str, int] = {}
+    for event in events:
+        payload = json_compatible_payload(event.payload)
+        proposal = payload.get("proposal")
+        if not isinstance(proposal, Mapping) or not payload.get("transaction_persisted"):
+            continue
+        proposal_id = proposal.get("proposal_id")
+        if not isinstance(proposal_id, str):
+            raise ValueError("audit event lacks a stable proposal identity")
+        if proposal_id in replay_orders:
+            raise ValueError("transaction has more than one persisted audit event")
+        replay_orders[proposal_id] = len(replay_orders)
+    return replay_orders
+
+
 def _governing_hash(
     transaction: StoredTransaction,
     governing_hashes: Mapping[str, str],
@@ -358,6 +598,16 @@ def _governing_hash(
         return governing_hashes[transaction.proposal.proposal_id]
     except KeyError as error:
         raise ValueError("transaction lacks a persisted governing audit event") from error
+
+
+def _replay_order(
+    transaction: StoredTransaction,
+    replay_orders: Mapping[str, int],
+) -> int:
+    try:
+        return replay_orders[transaction.proposal.proposal_id]
+    except KeyError as error:
+        raise ValueError("transaction lacks a persisted audit replay order") from error
 
 
 def _artifact_references(
@@ -442,38 +692,61 @@ def _projection_expectations(
     )
 
 
-def _prepare_target_policy(
+def _prepare_target_policy_in_repositories(
     workspace: WorkspaceExport,
     policies: Mapping[str, PolicySnapshot],
     *,
-    uow_factory: UnitOfWorkFactory,
+    repositories: RepositorySet,
     clock: Clock,
 ) -> None:
-    with uow_factory() as unit_of_work:
-        repositories = unit_of_work.repositories()
-        active = repositories.policies.get_active()
-        if active is None:
-            if repositories.has_durable_state():
-                raise WorkspaceImportError("target durable state has no active policy")
-            repositories.policies.add_and_activate(
-                policies[workspace.bootstrap_policy_hash],
-                clock.now(),
-            )
-        elif repositories.policies.get(workspace.bootstrap_policy_hash) is None:
-            raise WorkspaceImportError("target does not contain the export bootstrap policy")
+    active = repositories.policies.get_active()
+    if active is None:
+        if repositories.has_durable_state():
+            raise WorkspaceImportError("target durable state has no active policy")
+        repositories.policies.add_and_activate(
+            policies[workspace.bootstrap_policy_hash],
+            clock.now(),
+        )
+    elif repositories.policies.get(workspace.bootstrap_policy_hash) is None:
+        raise WorkspaceImportError("target does not contain the export bootstrap policy")
 
 
-def _transfer_artifacts(
+def _transfer_artifacts_for_commit(
     references: tuple[WorkspaceArtifactReference, ...],
     *,
     source: ArtifactStore,
     target: ArtifactStore,
-) -> None:
-    for reference in references:
-        artifact = reference.to_artifact()
-        stored = target.put(source.read(artifact), reference.media_type)
-        if stored != artifact:
-            raise WorkspaceImportError("artifact transfer changed its canonical reference")
+) -> tuple[Path, ...]:
+    if not references:
+        return ()
+    if not isinstance(target, FileArtifactStore):
+        raise WorkspaceImportError(
+            "artifact transfer requires a rollback-capable file artifact store"
+        )
+    created: list[Path] = []
+    try:
+        for reference in references:
+            artifact = reference.to_artifact()
+            path = target.resolve(artifact)
+            existed = path.is_file()
+            try:
+                stored = target.put(source.read(artifact), reference.media_type)
+            finally:
+                if not existed and path.is_file():
+                    created.append(path)
+            if stored != artifact:
+                raise WorkspaceImportError("artifact transfer changed its canonical reference")
+    except (OSError, ValueError) as error:
+        _remove_created_artifacts(tuple(created))
+        if isinstance(error, WorkspaceImportError):
+            raise
+        raise WorkspaceImportError(f"artifact transfer failed: {error}") from error
+    return tuple(created)
+
+
+def _remove_created_artifacts(paths: tuple[Path, ...]) -> None:
+    for path in reversed(paths):
+        path.unlink(missing_ok=True)
 
 
 def _proposal_attempt(record: WorkspaceRecord) -> ProposalAttempt:
@@ -495,12 +768,16 @@ def _proposal_attempt(record: WorkspaceRecord) -> ProposalAttempt:
     )
 
 
-def _is_identity_conflict(decision: TransactionDecision) -> bool:
-    return (
-        not decision.accepted
-        and bool(decision.reasons)
-        and decision.reasons[0].code is RejectionCode.IDEMPOTENCY_CONFLICT
-    )
+def _identity_conflict_code(decision: TransactionDecision) -> RejectionCode | None:
+    if decision.accepted or not decision.reasons:
+        return None
+    code = decision.reasons[0].code
+    if code in {
+        RejectionCode.IDEMPOTENCY_CONFLICT,
+        RejectionCode.ENTITY_ALREADY_EXISTS,
+    }:
+        return code
+    return None
 
 
 def _require_protected_safe(value: object) -> None:

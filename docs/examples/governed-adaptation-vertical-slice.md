@@ -47,7 +47,7 @@ the report.
 | 1 | `initialize_v1_kernel` | Registers and activates the schema-version-1 bootstrap policy in an empty SQLite workspace. |
 | 2 | `approve_v1_to_v2_transition` | Submits an explicit V1-to-V2 transition with a dedicated run, complete measurement, passed independent audit, human approval, and V1 rollback target. V1 remains the governing authority for that transaction. |
 | 3 | `add_synthetic_source_evidence` | Stores the SSOH-authored incident note content-addressably and admits a hash-verified immutable evidence record under V2. |
-| 4 | `create_research_run_and_progress_plan` | Creates strict local research-run and two-subtask progress-plan records with explicit budgets and a final validator. These records are demonstrated contracts, not separately persisted proposals in this example. |
+| 4 | `create_research_run_and_progress_plan` | Admits a strict research run, its two-subtask progress plan, and the initial run event with explicit budgets and a final validator. |
 | 5 | `propose_competing_thermal_hypotheses` | Retains bounded-heating and runaway-heating alternatives with assumptions, predictions, and falsification conditions. |
 | 6 | `register_builtin_thermal_simulator` | Selects only the fixed `thermal-chamber-v1` deterministic simulator with a strict numeric input and bounded resource metadata. No record supplies executable code. |
 | 7 | `record_predictions_and_falsification_criteria` | Executes the fixed model and checks the retained peak-temperature boundaries against both hypotheses. |
@@ -68,10 +68,10 @@ the report.
 
 ## Authority Boundaries
 
-Only steps 1-3 and 21 mutate or verify the durable transactional workspace. The other
-steps exercise strict domain objects and deterministic decision functions so the
-end-to-end narrative remains bounded and inspectable. They do not silently claim
-durable persistence where the example does not submit a proposal.
+Steps 1-20 admit their governed records through repositories and the transaction
+coordinator into the durable SQLite and content-addressed-artifact workspace. Step 21
+opens a fresh repository boundary, verifies the whole workspace, and derives every
+reported outcome from durable transactions, projections, artifacts, and audit history.
 
 The first harness result cannot authorize the second. The failed hypothesis, provisional
 progress, incidents, dissent-capable assessments, negative observation boundaries, and

@@ -7,6 +7,16 @@ from pathlib import Path
 
 import pytest
 
+from super_scientist.application.transactions.coordinator import (
+    TransactionCoordinator as _TransactionCoordinator,  # noqa: F401
+)
+from super_scientist.application.workspace_integrity import verify_workspace
+from super_scientist.providers.storage.artifacts import FileArtifactStore
+from super_scientist.providers.storage.database import (
+    DatabaseUnitOfWork,
+    create_database_engine,
+)
+
 STEP_CODES = (
     "initialize_v1_kernel",
     "approve_v1_to_v2_transition",
@@ -52,7 +62,8 @@ def test_governed_adaptation_vertical_slice(tmp_path: Path) -> None:
     example = Path("examples/governed_adaptation_vertical_slice.py")
     assert example.is_file()
 
-    result = _run_example(example, tmp_path / "workspace")
+    workspace = tmp_path / "workspace"
+    result = _run_example(example, workspace)
     assert result["policy_versions"] == [1, 2]
     assert result["false_finish_rejected"] is True
     assert result["failed_hypothesis_preserved"] is True
@@ -64,6 +75,53 @@ def test_governed_adaptation_vertical_slice(tmp_path: Path) -> None:
     assert [step["number"] for step in steps] == list(range(1, 22))
     assert [step["code"] for step in steps] == list(STEP_CODES)
     assert all(step["completed"] is True for step in steps)
+
+    engine = create_database_engine(
+        f"sqlite:///{(workspace / 'governed-adaptation.db').as_posix()}"
+    )
+    artifacts = FileArtifactStore(workspace / "artifacts")
+    try:
+        with DatabaseUnitOfWork(engine) as unit_of_work:
+            repositories = unit_of_work.repositories()
+            proposal_types = {
+                item.proposal.proposal_type for item in repositories.transactions.list_all()
+            }
+            verification = verify_workspace(repositories, artifacts)
+            policy_versions = tuple(
+                item.policy.schema_version for item in repositories.policies.list_all()
+            )
+            adaptation = repositories.adaptation_integrity_snapshot()
+            progress = repositories.progress_integrity_snapshot()
+            trail = repositories.trail_integrity_snapshot()
+            rules = repositories.rule_integrity_snapshot()
+            hypotheses = repositories.hypothesis_integrity_snapshot()
+    finally:
+        engine.dispose()
+
+    assert {
+        "create_research_run",
+        "record_progress_plan",
+        "propose_hypothesis_version",
+        "register_executable_model",
+        "record_simulation_result",
+        "record_evidence_trail_version",
+        "append_progress_event",
+        "decide_completion",
+        "revise_hypothesis",
+        "record_rule_incident",
+        "propose_behavioral_rule",
+        "import_reviewer_assessment",
+        "consolidate_behavioral_rule",
+        "create_harness_campaign",
+        "decide_harness_campaign",
+    } <= proposal_types
+    assert adaptation.research_run_heads
+    assert progress.heads
+    assert trail.heads
+    assert rules.heads
+    assert hypotheses.heads
+    assert policy_versions == (1, 2)
+    assert verification.valid is True
 
 
 @pytest.mark.e2e

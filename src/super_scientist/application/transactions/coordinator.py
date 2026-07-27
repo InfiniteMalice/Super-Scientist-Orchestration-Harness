@@ -247,6 +247,26 @@ class TransactionCoordinator:
             connection = _active_connection(uow.connection)
             return self._submit_locked(normalized, repositories, connection)
 
+    def submit_batch(
+        self,
+        proposals: tuple[object, ...],
+    ) -> tuple[TransactionDecision, ...]:
+        """Atomically submit proposals in order after one starting integrity check."""
+        if not proposals:
+            return ()
+        normalized = tuple(_normalize_proposal(proposal) for proposal in proposals)
+        decisions: list[TransactionDecision] = []
+        with self._uow_factory() as uow:
+            repositories = uow.repositories()
+            require_workspace_integrity(repositories, self._artifact_store)
+            connection = _active_connection(uow.connection)
+            for proposal in normalized:
+                if isinstance(proposal, TransactionDecision):
+                    decisions.append(proposal)
+                else:
+                    decisions.append(self._submit_locked(proposal, repositories, connection))
+        return tuple(decisions)
+
     def submit_intent(
         self,
         attempt: ProposalAttempt,
@@ -696,12 +716,16 @@ def _invalid_proposal_decision(proposal_id: str) -> TransactionDecision:
 
 
 def _matches_attempt(proposal: Proposal, attempt: ProposalAttempt) -> bool:
+    proposal_kind = (
+        proposal.attempted_proposal_kind
+        if isinstance(proposal, InvalidProposal)
+        else proposal.proposal_type
+    )
     return (
-        not isinstance(proposal, InvalidProposal)
-        and proposal.proposal_id == attempt.proposal_id
+        proposal.proposal_id == attempt.proposal_id
         and proposal.idempotency_key == attempt.idempotency_key
         and proposal.proposer == attempt.proposer
-        and proposal.proposal_type == attempt.proposal_kind
+        and proposal_kind == attempt.proposal_kind
     )
 
 
