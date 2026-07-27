@@ -25,11 +25,18 @@ def json_envelope(
     )
 
 
-def emit(command: str, success: bool, json_output: bool, **payload: Any) -> None:
+def emit(
+    command: str,
+    success: bool,
+    json_output: bool,
+    *,
+    human_command: str | None = None,
+    **payload: Any,
+) -> None:
     envelope = json_envelope(command, success, **payload)
     if json_output:
         typer.echo(envelope)
         return
     parsed = json.loads(envelope)
-    typer.echo(f"{command}: {'ok' if success else 'rejected'}")
+    typer.echo(f"{human_command or command}: {'ok' if success else 'rejected'}")
     typer.echo(json.dumps(parsed, indent=2, ensure_ascii=False, sort_keys=True))

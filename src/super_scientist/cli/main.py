@@ -8,6 +8,20 @@ from click import ClickException
 # Typer's documented custom-cls hook has no top-level TyperGroup export in 0.19.2.
 from typer.core import TyperGroup
 
+from super_scientist.cli.adaptation import (
+    governance_app,
+    hypothesis_app,
+    improvement_app,
+    model_app,
+    primitive_app,
+    progress_app,
+    research_run_app,
+    rule_app,
+    trail_app,
+    verifier_app,
+)
+from super_scientist.cli.handbook import handbook_app
+from super_scientist.cli.harness_eval import harness_eval_app
 from super_scientist.cli.kernel import (
     audit_app,
     claim_app,
@@ -19,6 +33,33 @@ from super_scientist.cli.output import emit
 from super_scientist.quality.runner import QualityCheckResult, run_quality_gate
 
 _COMMAND_PATHS = (
+    ("rule", "review", "import"),
+    ("research-run", "create"),
+    ("governance", "propose"),
+    ("governance", "show"),
+    ("improvement", "classify"),
+    ("improvement", "report"),
+    ("progress", "add"),
+    ("progress", "validate"),
+    ("progress", "status"),
+    ("trail", "create"),
+    ("trail", "add-node"),
+    ("trail", "add-relation"),
+    ("trail", "validate"),
+    ("rule", "propose"),
+    ("rule", "consolidate"),
+    ("rule", "history"),
+    ("primitive", "propose"),
+    ("primitive", "evaluate"),
+    ("hypothesis", "propose"),
+    ("hypothesis", "revise"),
+    ("model", "register"),
+    ("verifier", "record"),
+    ("handbook", "build"),
+    ("handbook", "verify"),
+    ("harness-eval", "create"),
+    ("harness-eval", "record"),
+    ("harness-eval", "report"),
     ("evidence", "add"),
     ("evidence", "show"),
     ("claim", "propose"),
@@ -85,6 +126,18 @@ app.add_typer(evidence_app, name="evidence")
 app.add_typer(claim_app, name="claim")
 app.add_typer(transaction_app, name="transaction")
 app.add_typer(audit_app, name="audit")
+app.add_typer(research_run_app, name="research-run")
+app.add_typer(governance_app, name="governance")
+app.add_typer(improvement_app, name="improvement")
+app.add_typer(progress_app, name="progress")
+app.add_typer(trail_app, name="trail")
+app.add_typer(rule_app, name="rule")
+app.add_typer(primitive_app, name="primitive")
+app.add_typer(hypothesis_app, name="hypothesis")
+app.add_typer(model_app, name="model")
+app.add_typer(verifier_app, name="verifier")
+app.add_typer(handbook_app, name="handbook")
+app.add_typer(harness_eval_app, name="harness-eval")
 
 
 def _quality_result_payload(result: QualityCheckResult) -> dict[str, object]:
