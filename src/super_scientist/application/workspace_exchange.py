@@ -313,16 +313,14 @@ def import_workspace(
             artifact_store=artifact_store,
             clock=clock,
         )
-    committed = _commit_workspace(
+    return _commit_workspace(
         canonical,
         uow_factory=uow_factory,
         artifact_store=artifact_store,
         source_artifact_store=source_artifact_store,
         clock=clock,
+        expected=preflight,
     )
-    if committed != preflight:
-        raise WorkspaceImportError("committed import changed after successful preflight")
-    return committed
 
 
 def _target_snapshot(
@@ -394,6 +392,7 @@ def _commit_workspace(
     artifact_store: ArtifactStore,
     source_artifact_store: ArtifactStore,
     clock: Clock,
+    expected: WorkspaceImportResult | None = None,
 ) -> WorkspaceImportResult:
     policy_by_hash = {item.policy_hash: item.snapshot for item in workspace.policies}
     created_artifacts = _transfer_artifacts_for_commit(
@@ -401,7 +400,7 @@ def _commit_workspace(
         source=source_artifact_store,
         target=artifact_store,
     )
-    result: WorkspaceImportResult
+    committed: WorkspaceImportResult
     try:
         with uow_factory() as unit_of_work:
             repositories = unit_of_work.repositories()
@@ -418,7 +417,9 @@ def _commit_workspace(
                 artifact_store=artifact_store,
                 clock=clock,
             )
-            if not result.conflicts:
+            if result.conflicts:
+                committed = result
+            else:
                 rebuilt = _export_workspace_snapshot(
                     repositories,
                     _active_connection(unit_of_work.connection),
@@ -428,12 +429,13 @@ def _commit_workspace(
                     raise WorkspaceImportError(
                         "rebuilt workspace export does not match canonical bundle"
                     )
+                committed = result.model_copy(update={"projections_verified": True})
+            if expected is not None and committed != expected:
+                raise WorkspaceImportError("committed import changed after successful preflight")
     except BaseException:
         _remove_created_artifacts(created_artifacts)
         raise
-    if result.conflicts:
-        return result
-    return result.model_copy(update={"projections_verified": True})
+    return committed
 
 
 def _replay_records(
@@ -470,6 +472,8 @@ def _replay_records(
                 raise WorkspaceImportError(
                     f"replayed decision changed for {record.stable_identity}"
                 )
+        elif decision == record.expected_decision:
+            imported += 1
         elif (conflict_code := _identity_conflict_code(decision)) is not None:
             conflicts.append(
                 WorkspaceImportConflict(
@@ -477,10 +481,8 @@ def _replay_records(
                     code=conflict_code,
                 )
             )
-        elif decision != record.expected_decision:
-            raise WorkspaceImportError(f"imported decision changed for {record.stable_identity}")
         else:
-            imported += 1
+            raise WorkspaceImportError(f"imported decision changed for {record.stable_identity}")
     return WorkspaceImportResult(
         imported=imported,
         replayed=replayed,
@@ -530,8 +532,8 @@ def _commit_conflicts(
                     code=actual_code,
                 )
             )
-    if tuple(actual) != expected:
-        raise WorkspaceImportError("committed conflicts changed after successful preflight")
+        if tuple(actual) != expected:
+            raise WorkspaceImportError("committed conflicts changed after successful preflight")
     return WorkspaceImportResult(
         imported=0,
         replayed=0,

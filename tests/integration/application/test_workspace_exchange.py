@@ -75,6 +75,30 @@ class UnreadableArtifactStore:
         raise OSError("source artifact became unreadable")
 
 
+class CollisionInjectingUnitOfWork(DatabaseUnitOfWork):
+    def __init__(
+        self,
+        engine: Engine,
+        coordinator: TransactionCoordinator,
+        collision: AddEvidence,
+    ) -> None:
+        super().__init__(engine)
+        self._coordinator = coordinator
+        self._collision = collision
+
+    def __enter__(self) -> CollisionInjectingUnitOfWork:
+        super().__enter__()
+        connection = self.connection
+        assert connection is not None
+        decision = self._coordinator._submit_locked(
+            self._collision,
+            self.repositories(),
+            connection,
+        )
+        assert decision.accepted is True
+        return self
+
+
 @dataclass(frozen=True)
 class ExchangeRuntime:
     engine: Engine
@@ -264,6 +288,57 @@ def test_workspace_export_import_is_protected_safe_canonical_and_replayable(
     assert replayed.replayed == 1
     assert replayed.projections_verified is True
     assert target_export == exported
+
+
+def test_authoritative_duplicate_evidence_rejection_round_trips_without_conflict(
+    runtimes: tuple[ExchangeRuntime, ExchangeRuntime],
+) -> None:
+    exchange = _exchange()
+    source, target = runtimes
+    source.add_evidence(b"accepted-observation")
+    duplicate_artifact = source.artifact_store.put(b"duplicate-observation", "text/plain")
+    duplicate = source.coordinator.submit(
+        AddEvidence(
+            proposal_id="workspace-record-2",
+            idempotency_key="workspace-record-key-2",
+            proposer=source.actor,
+            evidence=EvidenceRecord(
+                evidence_id="workspace-evidence-1",
+                evidence_type="synthetic_observation",
+                source_locator="fixture://duplicate-observation",
+                retrieved_at=NOW,
+                artifact=duplicate_artifact,
+                provenance={"collector": "workspace-exchange-test"},
+                ingestion_actor_id=source.actor.actor_id,
+            ),
+        )
+    )
+    assert duplicate.accepted is False
+    assert duplicate.reasons[0].code is RejectionCode.ENTITY_ALREADY_EXISTS
+    exported = exchange.export_workspace(
+        uow_factory=source.uow_factory,
+        artifact_store=source.artifact_store,
+    )
+
+    imported = exchange.import_workspace(
+        exported,
+        uow_factory=target.uow_factory,
+        artifact_store=target.artifact_store,
+        source_artifact_store=source.artifact_store,
+        clock=FixedClock(),
+    )
+
+    assert imported.imported == 2
+    assert imported.replayed == 0
+    assert imported.conflicts == ()
+    assert imported.projections_verified is True
+    assert (
+        exchange.export_workspace(
+            uow_factory=target.uow_factory,
+            artifact_store=target.artifact_store,
+        )
+        == exported
+    )
 
 
 def test_workspace_export_rejects_changed_content_without_matching_hash(
@@ -708,42 +783,65 @@ def test_workspace_import_rejects_unreconstructed_preflight_target(
 
 
 def test_workspace_import_rejects_preflight_to_commit_result_drift(
-    runtimes: tuple[ExchangeRuntime, ExchangeRuntime],
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     exchange = _exchange()
-    source, target = runtimes
+    source = _runtime(tmp_path, "source-drift")
+    target = _runtime(tmp_path, "target-drift")
+    artifact_root = tmp_path / "target-drift-artifacts"
     source.add_evidence(b"commit-drift-observation")
-    exported = exchange.export_workspace(
-        uow_factory=source.uow_factory,
-        artifact_store=source.artifact_store,
+    collision_artifact = target.artifact_store.put(b"target-collision", "text/plain")
+    collision = AddEvidence(
+        proposal_id="workspace-record-1",
+        idempotency_key="workspace-record-key-1",
+        proposer=target.actor,
+        evidence=EvidenceRecord(
+            evidence_id="target-collision-evidence",
+            evidence_type="synthetic_observation",
+            source_locator="fixture://target-collision",
+            retrieved_at=NOW,
+            artifact=collision_artifact,
+            provenance={"collector": "workspace-drift-test"},
+            ingestion_actor_id=target.actor.actor_id,
+        ),
     )
-    preflight = exchange.WorkspaceImportResult(
-        imported=1,
-        replayed=0,
-        conflicts=(),
-        projections_verified=True,
-    )
-    committed = preflight.model_copy(update={"imported": 0, "replayed": 1})
-    monkeypatch.setattr(
-        exchange,
-        "_preflight_import",
-        lambda *args, **kwargs: preflight,
-    )
-    monkeypatch.setattr(
-        exchange,
-        "_commit_workspace",
-        lambda *args, **kwargs: committed,
-    )
+    target_uow_calls = 0
 
-    with pytest.raises(exchange.WorkspaceImportError, match="changed after successful preflight"):
-        exchange.import_workspace(
-            exported,
-            uow_factory=target.uow_factory,
-            artifact_store=target.artifact_store,
-            source_artifact_store=source.artifact_store,
-            clock=FixedClock(),
+    def drifting_uow_factory() -> DatabaseUnitOfWork:
+        nonlocal target_uow_calls
+        target_uow_calls += 1
+        if target_uow_calls == 2:
+            return CollisionInjectingUnitOfWork(
+                target.engine,
+                target.coordinator,
+                collision,
+            )
+        return DatabaseUnitOfWork(target.engine)
+
+    try:
+        exported = exchange.export_workspace(
+            uow_factory=source.uow_factory,
+            artifact_store=source.artifact_store,
         )
+        before = _durable_snapshot(target, artifact_root)
+
+        with pytest.raises(
+            exchange.WorkspaceImportError,
+            match="changed after successful preflight",
+        ):
+            exchange.import_workspace(
+                exported,
+                uow_factory=drifting_uow_factory,
+                artifact_store=target.artifact_store,
+                source_artifact_store=source.artifact_store,
+                clock=FixedClock(),
+            )
+
+        assert target_uow_calls == 2
+        assert _durable_snapshot(target, artifact_root) == before
+    finally:
+        source.engine.dispose()
+        target.engine.dispose()
 
 
 def test_workspace_conflict_commit_rejects_identity_and_decision_drift(
