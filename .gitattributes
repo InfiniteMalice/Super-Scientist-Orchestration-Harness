@@ -3,3 +3,7 @@ docs/handbook/*.md text eol=lf
 docs/behavior-handbook.md text eol=lf
 docs/reviews/quality-policy-records/*.json text eol=lf
 quality/*.json text eol=lf
+src/super_scientist/application/transactions/coordinator.py text eol=lf
+src/super_scientist/application/workspace_integrity.py text eol=lf
+src/super_scientist/providers/storage/artifacts.py text eol=lf
+src/super_scientist/providers/storage/protected_evaluation.py text eol=lf
