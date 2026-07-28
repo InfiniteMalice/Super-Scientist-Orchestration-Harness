@@ -235,9 +235,32 @@ from super_scientist.providers.storage.repositories import (
     StorageIntegrityError,
     StoredTransaction,
 )
+from super_scientist.quality.imported_pattern_firewall import (
+    QualityPolicyBinding,
+    approved_quality_policy_binding,
+    current_quality_policy_binding,
+)
+from super_scientist.quality.imported_pattern_firewall import (
+    quality_policy_hash as _quality_policy_hash,
+)
 
 PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
 SHA256_ADAPTER: TypeAdapter[Sha256Hex] = TypeAdapter(Sha256Hex)
+
+
+def workspace_quality_policy_hash(
+    *,
+    registry_hash: Sha256Hex,
+    firewall_policy_sha256: Sha256Hex,
+    allowed_attribution_paths: tuple[str, ...],
+) -> str:
+    """Bind the executable registry and imported-pattern firewall policy."""
+
+    return _quality_policy_hash(
+        registry_hash=registry_hash,
+        firewall_policy_sha256=firewall_policy_sha256,
+        allowed_attribution_paths=allowed_attribution_paths,
+    )
 
 
 @dataclass(frozen=True)
@@ -598,9 +621,21 @@ class _HypothesisReplayCapability:
 def verify_workspace(
     repositories: RepositorySet,
     artifact_store: ArtifactStore,
+    *,
+    quality_policy_binding: QualityPolicyBinding | None = None,
 ) -> AuditVerification:
     events: tuple[AuditEvent, ...] = ()
     try:
+        approved_quality_policy = approved_quality_policy_binding()
+        executable_quality_policy = current_quality_policy_binding()
+        _require(
+            executable_quality_policy == approved_quality_policy,
+            "current executable policy does not match the approved quality policy anchor",
+        )
+        _require_quality_policy_binding(
+            executable_quality_policy if quality_policy_binding is None else quality_policy_binding,
+            approved_quality_policy,
+        )
         active_policy = repositories.policies.get_active()
         policies = repositories.policies.list_all()
         evidence = repositories.evidence.list_all()
@@ -650,10 +685,35 @@ def verify_workspace(
 def require_workspace_integrity(
     repositories: RepositorySet,
     artifact_store: ArtifactStore,
+    *,
+    quality_policy_binding: QualityPolicyBinding | None = None,
 ) -> None:
-    result = verify_workspace(repositories, artifact_store)
+    result = verify_workspace(
+        repositories,
+        artifact_store,
+        quality_policy_binding=quality_policy_binding,
+    )
     if not result.valid:
         raise StorageIntegrityError(result.reason or "workspace integrity verification failed")
+
+
+def _require_quality_policy_binding(
+    binding: QualityPolicyBinding,
+    approved_binding: QualityPolicyBinding,
+) -> None:
+    expected_hash = workspace_quality_policy_hash(
+        registry_hash=binding.registry_hash,
+        firewall_policy_sha256=binding.firewall_policy_sha256,
+        allowed_attribution_paths=binding.allowed_attribution_paths,
+    )
+    _require(
+        binding.quality_policy_hash == expected_hash,
+        "quality policy binding does not match its declared hash",
+    )
+    _require(
+        binding == approved_binding,
+        "quality policy binding does not match the approved quality policy anchor",
+    )
 
 
 def _validated_audit_records(

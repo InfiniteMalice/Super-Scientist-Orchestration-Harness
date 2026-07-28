@@ -126,18 +126,14 @@ def accepted_proposal_receipts(
         ):
             continue
         matches = tuple(
-            event
-            for event in events
-            if _audit_event_matches(event, proposal, transaction.decision)
+            event for event in events if _audit_event_matches(event, proposal, transaction.decision)
         )
         if len(matches) != 1:
             continue
         event = matches[0]
         payload = json_compatible_payload(event.payload)
         try:
-            governing_policy_hash = SHA256_ADAPTER.validate_python(
-                payload["policy_hash"]
-            )
+            governing_policy_hash = SHA256_ADAPTER.validate_python(payload["policy_hash"])
         except (KeyError, ValidationError):
             continue
         receipts[proposal.proposal_id] = AcceptedProposalReceipt(
@@ -164,9 +160,7 @@ def _audit_event_matches(
     if payload.get("transaction_persisted") is not True:
         return False
     try:
-        audited_proposal = PROPOSAL_ADAPTER.validate_json(
-            canonical_json_bytes(payload["proposal"])
-        )
+        audited_proposal = PROPOSAL_ADAPTER.validate_json(canonical_json_bytes(payload["proposal"]))
         audited_decision = TransactionDecision.model_validate_json(
             canonical_json_bytes(payload["decision"])
         )

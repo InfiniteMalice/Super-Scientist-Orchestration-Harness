@@ -108,9 +108,7 @@ class GovernancePolicyV2(BaseModel):
             for requirement in self.adaptation_requirements
         )
         if len(keys) != len(set(keys)):
-            raise ValueError(
-                "duplicate adaptation requirement change_target/persistence key"
-            )
+            raise ValueError("duplicate adaptation requirement change_target/persistence key")
         return self
 
 

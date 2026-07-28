@@ -130,9 +130,7 @@ def with_fresh_source_first(
     )
     return snapshot.model_copy(
         update={
-            "version": snapshot.version.model_copy(
-                update={"source_first_provenance": provenance}
-            )
+            "version": snapshot.version.model_copy(update={"source_first_provenance": provenance})
         }
     )
 
@@ -217,8 +215,7 @@ def make_trail_fixture() -> TrailFixture:
     node_ids = (required.node_id, supporting.node_id)
     relation_ids = tuple(relation.relation_id for relation in relations)
     check_ids = tuple(
-        trusted_check_id("trail-version-1", category)
-        for category in TrailCheckCategory
+        trusted_check_id("trail-version-1", category) for category in TrailCheckCategory
     )
     checks = tuple(
         TrailCheckResult(
@@ -290,18 +287,14 @@ def make_trail_fixture() -> TrailFixture:
         artifact_bytes=source_bytes,
     )
     source_first_provenance = build_source_first_provenance(
-        source_receipts=(
-            AddEvidenceReceiptRef(**_receipt_fields("proposal-source")),
-        ),
+        source_receipts=(AddEvidenceReceiptRef(**_receipt_fields("proposal-source")),),
         node_stage_receipt=EvidenceTrailNodeStageReceiptRef(
             **_receipt_fields("proposal-node-stage-1")
         ),
         relation_stage_receipt=EvidenceTrailRelationStageReceiptRef(
             **_receipt_fields("proposal-relation-stage-1")
         ),
-        claim_stage_receipt=ProposeClaimReceiptRef(
-            **_receipt_fields("proposal-claim")
-        ),
+        claim_stage_receipt=ProposeClaimReceiptRef(**_receipt_fields("proposal-claim")),
     )
     version = EvidenceTrailVersion(
         trail_version_id="trail-version-1",
@@ -339,9 +332,7 @@ def make_trail_fixture() -> TrailFixture:
     )
     inputs = TrailValidationInputs(
         claim=claim,
-        sources=(
-            retained_source,
-        ),
+        sources=(retained_source,),
     )
     return TrailFixture(snapshot=snapshot, inputs=inputs)
 

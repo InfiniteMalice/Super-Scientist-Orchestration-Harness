@@ -10,18 +10,18 @@ import traceback
 import weakref
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, suppress
 from datetime import UTC, datetime
 from decimal import Decimal
 from functools import partial
 from multiprocessing.process import BaseProcess
 from pathlib import Path, PurePath
-from threading import Barrier
+from threading import Barrier, BrokenBarrierError
 from types import ModuleType
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import Connection, Engine
+from sqlalchemy import Connection, Engine, event
 from sqlalchemy.exc import IntegrityError
 
 from super_scientist.domain.improvement.models import AssessmentOutcome
@@ -464,6 +464,163 @@ def test_protected_expected_output_identity_is_append_only_and_replay_safe(tmp_p
     store.close()
     with pytest.raises(RuntimeError, match="closed"):
         store.answer_reader()
+
+
+@pytest.mark.integration
+def test_concurrent_same_key_replays_are_serialized(tmp_path: Path) -> None:
+    protected_root = tmp_path / "protected"
+    store = ProtectedEvaluationStore(protected_root)
+    engine, _ = store._resources()
+    concurrent_selects = Barrier(2)
+
+    def synchronize_initial_reads(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if not statement.lstrip().upper().startswith("SELECT"):
+            return
+        with suppress(BrokenBarrierError):
+            concurrent_selects.wait(timeout=0.25)
+
+    event.listen(engine, "after_cursor_execute", synchronize_initial_reads)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = tuple(
+                executor.submit(
+                    store.add_expected_output,
+                    "task-1",
+                    b"concurrent-held-out-answer",
+                )
+                for _ in range(2)
+            )
+            receipts = tuple(future.result() for future in futures)
+
+        assert receipts[0] == receipts[1]
+        with closing(sqlite3.connect(protected_root / "protected.sqlite3")) as connection:
+            row_count = connection.execute(
+                "SELECT count(*) FROM protected_expected_outputs WHERE task_id = 'task-1'"
+            ).fetchone()
+        assert row_count == (1,)
+    finally:
+        event.remove(engine, "after_cursor_execute", synchronize_initial_reads)
+        store.close()
+
+
+@pytest.mark.integration
+def test_post_put_insert_failure_removes_the_unreferenced_artifact(tmp_path: Path) -> None:
+    protected_root = tmp_path / "protected"
+    secret = b"insert-failure-held-out-answer"
+    store = ProtectedEvaluationStore(protected_root)
+    engine, _ = store._resources()
+
+    def fail_metadata_insert(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if statement.lstrip().upper().startswith("INSERT INTO PROTECTED_EXPECTED_OUTPUTS"):
+            raise RuntimeError("forced metadata insert failure")
+
+    event.listen(engine, "before_cursor_execute", fail_metadata_insert)
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            store.add_expected_output("task-1", secret)
+
+        assert secret not in str(caught.value).encode()
+        assert not any(path.is_file() for path in (protected_root / "artifacts").rglob("*"))
+        with closing(sqlite3.connect(protected_root / "protected.sqlite3")) as connection:
+            row_count = connection.execute(
+                "SELECT count(*) FROM protected_expected_outputs"
+            ).fetchone()
+        assert row_count == (0,)
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_metadata_insert)
+        store.close()
+
+
+@pytest.mark.integration
+def test_commit_failure_removes_the_unreferenced_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protected_root = tmp_path / "protected"
+    secret = b"commit-failure-held-out-answer"
+    store = ProtectedEvaluationStore(protected_root)
+    engine, _ = store._resources()
+
+    def fail_commit(_dbapi_connection: object) -> None:
+        raise RuntimeError("forced transaction commit failure")
+
+    monkeypatch.setattr(engine.dialect, "do_commit", fail_commit)
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            store.add_expected_output("task-1", secret)
+
+        assert secret not in str(caught.value).encode()
+        assert not any(path.is_file() for path in (protected_root / "artifacts").rglob("*"))
+        with closing(sqlite3.connect(protected_root / "protected.sqlite3")) as connection:
+            row_count = connection.execute(
+                "SELECT count(*) FROM protected_expected_outputs"
+            ).fetchone()
+        assert row_count == (0,)
+    finally:
+        store.close()
+
+
+@pytest.mark.integration
+def test_failed_second_task_never_removes_an_artifact_referenced_by_the_first(
+    tmp_path: Path,
+) -> None:
+    protected_root = tmp_path / "protected"
+    shared_secret = b"shared-held-out-answer"
+    store = ProtectedEvaluationStore(protected_root)
+    first = store.add_expected_output("task-1", shared_secret)
+    engine, _ = store._resources()
+
+    def fail_second_metadata_insert(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        parameters: tuple[object, ...],
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if (
+            statement.lstrip().upper().startswith("INSERT INTO PROTECTED_EXPECTED_OUTPUTS")
+            and parameters[0] == "task-2"
+        ):
+            raise RuntimeError("forced second metadata insert failure")
+
+    event.listen(engine, "before_cursor_execute", fail_second_metadata_insert)
+    try:
+        with pytest.raises(RuntimeError):
+            store.add_expected_output("task-2", shared_secret)
+
+        reader = store.answer_reader()
+        assert reader.read_expected_output("task-1") == shared_secret
+        artifact_path = (
+            protected_root
+            / "artifacts"
+            / "sha256"
+            / first.expected_output_hash[:2]
+            / first.expected_output_hash
+        )
+        assert artifact_path.is_file()
+        with closing(sqlite3.connect(protected_root / "protected.sqlite3")) as connection:
+            task_ids = connection.execute(
+                "SELECT task_id FROM protected_expected_outputs ORDER BY task_id"
+            ).fetchall()
+        assert task_ids == [("task-1",)]
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_second_metadata_insert)
+        store.close()
 
 
 def test_protected_contracts_reject_duplicate_and_nonfinite_metrics() -> None:

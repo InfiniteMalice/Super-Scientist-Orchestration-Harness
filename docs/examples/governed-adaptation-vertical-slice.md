@@ -20,10 +20,14 @@ Install the project and run from the repository root with a new workspace:
 
 ```powershell
 python examples/governed_adaptation_vertical_slice.py `
-  --workspace .example-governed-adaptation
+  --root .example-governed-adaptation
+python -m super_scientist.cli.main audit verify `
+  --root .example-governed-adaptation `
+  --json
 ```
 
-The command prints exactly one canonical JSON object. A successful result has:
+The example and the subsequent ordinary CLI audit use the same root. Each command
+prints exactly one JSON object. A successful example result has:
 
 ```json
 {
@@ -38,7 +42,9 @@ The command prints exactly one canonical JSON object. A successful result has:
 
 The actual object also contains all 21 completed `steps`. Run against a second empty
 directory to verify byte-identical output. The SQLite and artifact paths do not enter
-the report.
+the report. The CLI audit exits zero with `success=true` and `data.valid=true`, proving
+that the example's `scientist-harness.db` and `artifacts` layout is the public workspace
+format rather than a parallel example-only format.
 
 ## Ordered Proof
 

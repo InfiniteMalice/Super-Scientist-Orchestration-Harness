@@ -136,10 +136,7 @@ class TrailCapabilities:
                 relation_receipt.proposal,
                 ProposeEvidenceTrailRelations,
             )
-            else tuple(
-                relation.relation_id
-                for relation in relation_receipt.proposal.relations
-            )
+            else tuple(relation.relation_id for relation in relation_receipt.proposal.relations)
         )
         return EvidenceTrailSnapshot(
             version=version,
@@ -260,8 +257,7 @@ def _ordered_records[RecordT](
 ) -> tuple[RecordT, ...]:
     declared = tuple(records[record_id] for record_id in declared_ids if record_id in records)
     extras = tuple(
-        records[record_id]
-        for record_id in sorted(set(records).difference(declared_ids))
+        records[record_id] for record_id in sorted(set(records).difference(declared_ids))
     )
     return (*declared, *extras)
 

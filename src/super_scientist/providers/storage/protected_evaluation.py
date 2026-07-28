@@ -218,36 +218,58 @@ class ProtectedEvaluationStore:
         if not isinstance(expected_output, bytes):
             raise TypeError("protected expected output must be bytes")
         digest = sha256_hex(expected_output)
-        engine, artifacts = self._resources()
-        with engine.begin() as connection:
-            existing = (
-                connection.execute(
-                    select(_protected_expected_outputs).where(
-                        _protected_expected_outputs.c.task_id == validated_task_id
+        with self._lock:
+            engine, artifacts = self._resources()
+            artifact: ArtifactRef | None = None
+            artifact_created = False
+            new_write_started = False
+            try:
+                with engine.begin() as connection:
+                    existing = (
+                        connection.execute(
+                            select(_protected_expected_outputs).where(
+                                _protected_expected_outputs.c.task_id == validated_task_id
+                            )
+                        )
+                        .mappings()
+                        .one_or_none()
                     )
-                )
-                .mappings()
-                .one_or_none()
-            )
-            if existing is not None:
-                stored_hash, stored_size = _validated_expected_output_row(dict(existing))
-                if stored_hash != digest or stored_size != len(expected_output):
-                    raise ValueError("protected expected output identity is already bound")
-                artifacts.read(_artifact_ref(stored_hash, stored_size))
-                return ProtectedExpectedOutputReceipt(
-                    task_id=validated_task_id,
-                    expected_output_hash=stored_hash,
-                    size_bytes=stored_size,
-                )
-            artifact = artifacts.put(expected_output, _PROTECTED_MEDIA_TYPE)
-            connection.execute(
-                insert(_protected_expected_outputs).values(
-                    task_id=validated_task_id,
-                    expected_output_hash=artifact.sha256,
-                    size_bytes=artifact.size_bytes,
-                    created_at=datetime.now(UTC).isoformat(),
-                )
-            )
+                    if existing is not None:
+                        stored_hash, stored_size = _validated_expected_output_row(dict(existing))
+                        if stored_hash != digest or stored_size != len(expected_output):
+                            raise ValueError("protected expected output identity is already bound")
+                        artifacts.read(_artifact_ref(stored_hash, stored_size))
+                        return ProtectedExpectedOutputReceipt(
+                            task_id=validated_task_id,
+                            expected_output_hash=stored_hash,
+                            size_bytes=stored_size,
+                        )
+                    new_write_started = True
+                    artifact, artifact_created = artifacts.put_with_creation_status(
+                        expected_output,
+                        _PROTECTED_MEDIA_TYPE,
+                    )
+                    connection.execute(
+                        insert(_protected_expected_outputs).values(
+                            task_id=validated_task_id,
+                            expected_output_hash=artifact.sha256,
+                            size_bytes=artifact.size_bytes,
+                            created_at=datetime.now(UTC).isoformat(),
+                        )
+                    )
+            except BaseException as error:
+                if not new_write_started:
+                    raise
+                if artifact is not None and artifact_created:
+                    try:
+                        _remove_unreferenced_protected_artifact(engine, artifacts, artifact)
+                    except BaseException as cleanup_error:
+                        if not isinstance(cleanup_error, Exception):
+                            raise
+                        raise RuntimeError("protected expected output persistence failed") from None
+                if not isinstance(error, Exception):
+                    raise
+                raise RuntimeError("protected expected output persistence failed") from None
         return ProtectedExpectedOutputReceipt(
             task_id=validated_task_id,
             expected_output_hash=digest,
@@ -919,6 +941,25 @@ def _artifact_ref(content_hash: str, size_bytes: int) -> ArtifactRef:
         media_type=_PROTECTED_MEDIA_TYPE,
         relative_path=f"sha256/{content_hash[:2]}/{content_hash}",
     )
+
+
+def _remove_unreferenced_protected_artifact(
+    engine: Engine,
+    artifacts: FileArtifactStore,
+    artifact: ArtifactRef,
+) -> None:
+    with engine.connect() as connection:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            referenced = connection.execute(
+                select(_protected_expected_outputs.c.task_id)
+                .where(_protected_expected_outputs.c.expected_output_hash == artifact.sha256)
+                .limit(1)
+            ).first()
+            if referenced is None:
+                artifacts.remove_if_matches(artifact)
+        finally:
+            connection.rollback()
 
 
 def _prepare_private_root(root: Path) -> Path:

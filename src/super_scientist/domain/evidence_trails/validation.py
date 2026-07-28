@@ -125,10 +125,7 @@ def validate_report_binding(
         or binding.contradiction_node_ids != expected_contradictions
     ):
         findings.add("REPORT_CONTRADICTIONS_MISMATCH")
-    if (
-        version.status is TrailOutcome.CONFLICTED
-        and binding.modality is ClaimModality.ASSERTED
-    ):
+    if version.status is TrailOutcome.CONFLICTED and binding.modality is ClaimModality.ASSERTED:
         findings.add("REPORT_CONFLICT_MODALITY_INVALID")
 
     try:
@@ -246,10 +243,7 @@ def validate_trail(
                 TrailCheckCategory.STRUCTURAL_BOUNDS,
                 "STRUCTURAL_LOCATION_MISMATCH",
             )
-        if not (
-            0 <= location.start <= span.start
-            and span.end <= location.end <= len(source_text)
-        ):
+        if not (0 <= location.start <= span.start and span.end <= location.end <= len(source_text)):
             add(TrailCheckCategory.STRUCTURAL_BOUNDS, "STRUCTURAL_BOUNDS_INVALID")
         evidence_span = source.evidence.extracted_span
         if evidence_span is not None and not (
@@ -363,10 +357,7 @@ def validate_trail(
                 )
         if schema.causal:
             causal_relations.append(relation)
-            if (
-                relation.causal_support
-                != required_causal_support(relation, trail.nodes)
-            ):
+            if relation.causal_support != required_causal_support(relation, trail.nodes):
                 add(TrailCheckCategory.RELATION_SCHEMA, "CAUSAL_SUPPORT_MISMATCH")
                 add(TrailCheckCategory.RELATION_SCHEMA, "CAUSAL_OVERCLAIM")
             if (
@@ -383,8 +374,7 @@ def validate_trail(
     if expected_causal_positions is None:
         add(TrailCheckCategory.RELATION_SCHEMA, "CAUSAL_GRAPH_CYCLE")
     elif any(
-        node.causal_position != expected_causal_positions[node.node_id]
-        for node in trail.nodes
+        node.causal_position != expected_causal_positions[node.node_id] for node in trail.nodes
     ):
         add(TrailCheckCategory.RELATION_SCHEMA, "CAUSAL_POSITION_MISMATCH")
     if version.geometry is not derive_geometry(trail):
@@ -418,15 +408,10 @@ def validate_trail(
             add(TrailCheckCategory.MODALITY, "MODALITY_OVERCLAIM")
 
     expected_assessment_ids = tuple(
-        trusted_assessment_id(version.trail_version_id, category)
-        for category in AssessmentCategory
+        trusted_assessment_id(version.trail_version_id, category) for category in AssessmentCategory
     )
-    actual_assessment_ids = tuple(
-        assessment.assessment_id for assessment in trail.assessments
-    )
-    actual_assessment_categories = tuple(
-        assessment.category for assessment in trail.assessments
-    )
+    actual_assessment_ids = tuple(assessment.assessment_id for assessment in trail.assessments)
+    actual_assessment_categories = tuple(assessment.category for assessment in trail.assessments)
     if _has_duplicates(actual_assessment_ids) or _has_duplicates(version.assessment_ids):
         add(TrailCheckCategory.ASSESSMENT_AUTHORITY, "DUPLICATE_ASSESSMENT_ID")
     if actual_assessment_ids != expected_assessment_ids:
@@ -446,13 +431,9 @@ def validate_trail(
         add(TrailCheckCategory.ASSESSMENT_AUTHORITY, "ASSESSMENT_CATEGORY_DUPLICATE")
 
     assessment_actors: list[ActorIdentity] = []
-    source_actor_ids = {
-        source.evidence.ingestion_actor_id for source in sources_by_id.values()
-    }
+    source_actor_ids = {source.evidence.ingestion_actor_id for source in sources_by_id.values()}
     non_assessment_actors = (version.constructed_by,)
-    assessments_by_category = {
-        assessment.category: assessment for assessment in trail.assessments
-    }
+    assessments_by_category = {assessment.category: assessment for assessment in trail.assessments}
     if version.opposing_node_ids:
         if set(version.opposing_node_ids) != contradiction_opposing_node_ids:
             add(
@@ -529,14 +510,11 @@ def validate_trail(
         add(TrailCheckCategory.RELATION_SCHEMA, "CAUSAL_OVERCLAIM")
     if causal_relations and causal_assessment is not None:
         latest_check_at = max(check.checked_at for check in trail.checks)
-        if not (
-            latest_check_at < causal_assessment.provenance.assessed_at < version.created_at
-        ):
+        if not (latest_check_at < causal_assessment.provenance.assessed_at < version.created_at):
             add(TrailCheckCategory.RELATION_SCHEMA, "STALE_CAUSAL_ASSESSMENT")
 
     expected_check_ids = tuple(
-        trusted_check_id(version.trail_version_id, category)
-        for category in TrailCheckCategory
+        trusted_check_id(version.trail_version_id, category) for category in TrailCheckCategory
     )
     actual_check_ids = tuple(check.check_id for check in trail.checks)
     actual_check_categories = tuple(check.category for check in trail.checks)

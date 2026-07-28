@@ -280,15 +280,11 @@ class EvidenceTrailVersionBuilder:
         causal_positions = derive_causal_positions_from_graph(nodes, relations)
         if causal_positions is not None:
             nodes = tuple(
-                node.model_copy(
-                    update={"causal_position": causal_positions[node.node_id]}
-                )
+                node.model_copy(update={"causal_position": causal_positions[node.node_id]})
                 for node in nodes
             )
         relations = tuple(
-            relation.model_copy(
-                update={"causal_support": required_causal_support(relation, nodes)}
-            )
+            relation.model_copy(update={"causal_support": required_causal_support(relation, nodes)})
             if relation.relation_type in CAUSAL_RELATION_TYPES
             else relation
             for relation in relations
@@ -364,8 +360,7 @@ class EvidenceTrailVersionBuilder:
         ):
             raise ValueError("successor graph requires a transition-claim receipt")
         expected_check_ids = tuple(
-            trusted_check_id(draft.trail_version_id, category)
-            for category in TrailCheckCategory
+            trusted_check_id(draft.trail_version_id, category) for category in TrailCheckCategory
         )
         expected_assessment_ids = tuple(
             trusted_assessment_id(draft.trail_version_id, category)
@@ -395,12 +390,8 @@ class EvidenceTrailVersionBuilder:
             raise ValueError("fresh source-first provenance is required")
         latest_check = max(check.checked_at for check in checks)
         earliest_check = min(check.checked_at for check in checks)
-        earliest_assessment = min(
-            assessment.provenance.assessed_at for assessment in assessments
-        )
-        latest_assessment = max(
-            assessment.provenance.assessed_at for assessment in assessments
-        )
+        earliest_assessment = min(assessment.provenance.assessed_at for assessment in assessments)
+        latest_assessment = max(assessment.provenance.assessed_at for assessment in assessments)
         if not (
             draft.parent_created_at < earliest_check
             and latest_check < earliest_assessment
@@ -560,8 +551,7 @@ class ProposeEvidenceTrailNodesHandler:
         return _NodeStageContext(
             active_policy=capability.policy_snapshot(),
             source_receipts=tuple(
-                capability.resolve_receipt(reference)
-                for reference in proposal.source_receipts
+                capability.resolve_receipt(reference) for reference in proposal.source_receipts
             ),
         )
 
@@ -588,11 +578,7 @@ class ProposeEvidenceTrailNodesHandler:
                 RejectionCode.MISSING_EVIDENCE,
                 "node stage requires exact accepted and audited evidence receipts",
             )
-        receipts = tuple(
-            receipt
-            for receipt in context.source_receipts
-            if receipt is not None
-        )
+        receipts = tuple(receipt for receipt in context.source_receipts if receipt is not None)
         if any(
             not isinstance(receipt.proposal, AddEvidence)
             or receipt.governing_policy_hash != context.active_policy.policy_hash
@@ -604,9 +590,7 @@ class ProposeEvidenceTrailNodesHandler:
                 "node-stage evidence receipts must be accepted under the active policy",
             )
         evidence_proposals = tuple(
-            receipt.proposal
-            for receipt in receipts
-            if isinstance(receipt.proposal, AddEvidence)
+            receipt.proposal for receipt in receipts if isinstance(receipt.proposal, AddEvidence)
         )
         source_pairs = tuple(
             dict.fromkeys((node.source_id, node.evidence_id) for node in proposal.nodes)
@@ -617,10 +601,7 @@ class ProposeEvidenceTrailNodesHandler:
             or len({node.node_id for node in proposal.nodes}) != len(proposal.nodes)
             or tuple(pair[1] for pair in source_pairs)
             != tuple(item.evidence.evidence_id for item in evidence_proposals)
-            or any(
-                node.trail_version_id != proposal.trail_version_id
-                for node in proposal.nodes
-            )
+            or any(node.trail_version_id != proposal.trail_version_id for node in proposal.nodes)
         ):
             return _rejected(
                 proposal.proposal_id,
@@ -745,13 +726,9 @@ class ProposeEvidenceTrailRelationsHandler:
             for receipt in context.source_receipts
             if receipt is not None and isinstance(receipt.proposal, AddEvidence)
         )
-        if (
-            len(source_proposals) != len(context.source_receipts)
-            or any(
-                _external_grounding(item.evidence)
-                is not ExternalGrounding.PRIMARY_SOURCE
-                for item in source_proposals
-            )
+        if len(source_proposals) != len(context.source_receipts) or any(
+            _external_grounding(item.evidence) is not ExternalGrounding.PRIMARY_SOURCE
+            for item in source_proposals
         ):
             return _rejected(
                 proposal.proposal_id,
@@ -807,18 +784,11 @@ class RecordEvidenceTrailVersionHandler:
             validation_inputs=capability.validation_inputs(snapshot),
             collision_ids=capability.collision_ids(snapshot),
             source_receipts=tuple(
-                capability.resolve_receipt(reference)
-                for reference in provenance.source_receipts
+                capability.resolve_receipt(reference) for reference in provenance.source_receipts
             ),
-            node_stage_receipt=capability.resolve_receipt(
-                provenance.node_stage_receipt
-            ),
-            relation_stage_receipt=capability.resolve_receipt(
-                provenance.relation_stage_receipt
-            ),
-            claim_stage_receipt=capability.resolve_receipt(
-                provenance.claim_stage_receipt
-            ),
+            node_stage_receipt=capability.resolve_receipt(provenance.node_stage_receipt),
+            relation_stage_receipt=capability.resolve_receipt(provenance.relation_stage_receipt),
+            claim_stage_receipt=capability.resolve_receipt(provenance.claim_stage_receipt),
         )
 
     def decide(
@@ -943,10 +913,7 @@ class BindReportSentenceHandler:
                 provenance.claim_stage_receipt,
             )
         )
-        receipts = tuple(
-            capability.resolve_receipt(reference)
-            for reference in receipt_references
-        )
+        receipts = tuple(capability.resolve_receipt(reference) for reference in receipt_references)
         return _ReportBindingContext(
             active_policy=capability.policy_snapshot(),
             snapshot=snapshot,
@@ -955,9 +922,7 @@ class BindReportSentenceHandler:
             ),
             existing_binding=capability.get_binding(proposal.binding.binding_id),
             authority_actors=tuple(
-                receipt.proposal.proposer
-                for receipt in receipts
-                if receipt is not None
+                receipt.proposal.proposer for receipt in receipts if receipt is not None
             ),
         )
 
@@ -1021,10 +986,13 @@ def trail_authority_rejection(
     authority_actors: tuple[ActorIdentity, ...] = (),
     authority_actor_ids: frozenset[str] = frozenset(),
 ) -> TransactionDecision | None:
-    if isinstance(
-        proposal,
-        (ProposeEvidenceTrailNodes, ProposeEvidenceTrailRelations),
-    ) and proposal.classification != FIXED_TRAIL_CLASSIFICATION:
+    if (
+        isinstance(
+            proposal,
+            (ProposeEvidenceTrailNodes, ProposeEvidenceTrailRelations),
+        )
+        and proposal.classification != FIXED_TRAIL_CLASSIFICATION
+    ):
         return _rejected(
             proposal.proposal_id,
             RejectionCode.PERMISSION_DENIED,
@@ -1053,8 +1021,7 @@ def trail_authority_rejection(
             "active policy does not govern run-local research-process records",
         )
     if (
-        requirement.minimum_verification
-        is not VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK
+        requirement.minimum_verification is not VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK
         or ExternalGrounding.PRIMARY_SOURCE not in requirement.permitted_grounding
     ):
         return _rejected(
@@ -1093,8 +1060,8 @@ def trail_authority_rejection(
     if retained is not None:
         exact_authority_actor_ids.update(
             {
-            retained.claim.created_by,
-            *(source.evidence.ingestion_actor_id for source in retained.sources),
+                retained.claim.created_by,
+                *(source.evidence.ingestion_actor_id for source in retained.sources),
             }
         )
     if (
@@ -1146,13 +1113,9 @@ def _lineage_rejection(
         or version.parent_trail_version_id != context.head[0]
         or version.trail_id != prior.version.trail_id
         or context.validation_inputs is None
-        or context.validation_inputs.claim.parent_version_id
-        != prior.version.claim_version_id
+        or context.validation_inputs.claim.parent_version_id != prior.version.claim_version_id
         or version.claim_version_id
-        != (
-            f"{context.validation_inputs.claim.claim_id}:"
-            f"{context.validation_inputs.claim.version}"
-        )
+        != (f"{context.validation_inputs.claim.claim_id}:{context.validation_inputs.claim.version}")
     ):
         return _rejected(
             proposal_id,
@@ -1194,19 +1157,14 @@ def trail_receipt_rejection(
             RejectionCode.MISSING_EVIDENCE,
             "trail requires exact accepted and audited source-first receipts",
         )
-    resolved_sources = tuple(
-        receipt for receipt in source_receipts if receipt is not None
-    )
+    resolved_sources = tuple(receipt for receipt in source_receipts if receipt is not None)
     if (
         not isinstance(node_receipt.proposal, ProposeEvidenceTrailNodes)
         or not isinstance(
             relation_receipt.proposal,
             ProposeEvidenceTrailRelations,
         )
-        or any(
-            not isinstance(receipt.proposal, AddEvidence)
-            for receipt in resolved_sources
-        )
+        or any(not isinstance(receipt.proposal, AddEvidence) for receipt in resolved_sources)
     ):
         return _rejected(
             proposal.proposal_id,
@@ -1238,9 +1196,7 @@ def trail_receipt_rejection(
         dict.fromkeys((node.source_id, node.evidence_id) for node in snapshot.nodes)
     )
     projected_evidence = tuple(
-        item.evidence.model_copy(
-            update={"verification_state": VerificationState.HASH_VERIFIED}
-        )
+        item.evidence.model_copy(update={"verification_state": VerificationState.HASH_VERIFIED})
         for item in source_proposals
     )
     if (
@@ -1258,8 +1214,7 @@ def trail_receipt_rejection(
         or relation_stage.trail_id != version.trail_id
         or relation_stage.trail_version_id != version.trail_version_id
         or relation_stage.classification != FIXED_TRAIL_CLASSIFICATION
-        or relation_stage.node_stage_receipt
-        != version.source_first_provenance.node_stage_receipt
+        or relation_stage.node_stage_receipt != version.source_first_provenance.node_stage_receipt
         or relation_stage.node_ids != tuple(node.node_id for node in snapshot.nodes)
         or relation_stage.nodes_hash != canonical_node_set_hash(snapshot.nodes)
         or relation_stage.relations != snapshot.relations
@@ -1284,8 +1239,7 @@ def trail_receipt_rejection(
             isinstance(claim_proposal, TransitionClaim)
             and claim_proposal.next_claim == claim
             and prior_snapshot is not None
-            and claim.parent_version_id
-            == prior_snapshot.version.claim_version_id
+            and claim.parent_version_id == prior_snapshot.version.claim_version_id
         )
     if (
         not claim_matches
@@ -1300,16 +1254,13 @@ def trail_receipt_rejection(
 
     if (
         any(
-            _receipt_transaction_key(source_receipt)
-            >= _receipt_transaction_key(node_receipt)
+            _receipt_transaction_key(source_receipt) >= _receipt_transaction_key(node_receipt)
             or source_receipt.audit_sequence >= node_receipt.audit_sequence
             for source_receipt in resolved_sources
         )
-        or _receipt_transaction_key(node_receipt)
-        >= _receipt_transaction_key(relation_receipt)
+        or _receipt_transaction_key(node_receipt) >= _receipt_transaction_key(relation_receipt)
         or node_receipt.audit_sequence >= relation_receipt.audit_sequence
-        or _receipt_transaction_key(relation_receipt)
-        >= _receipt_transaction_key(claim_receipt)
+        or _receipt_transaction_key(relation_receipt) >= _receipt_transaction_key(claim_receipt)
         or relation_receipt.audit_sequence >= claim_receipt.audit_sequence
         or (
             final_transaction_key is not None
@@ -1334,8 +1285,7 @@ def trail_receipt_rejection(
         claim_proposal.proposer,
     )
     if approval is None or any(
-        not trail_actors_are_independent(approval.approver, actor)
-        for actor in authority_actors
+        not trail_actors_are_independent(approval.approver, actor) for actor in authority_actors
     ):
         return _rejected(
             proposal.proposal_id,

@@ -180,9 +180,10 @@ def test_genuine_0001_database_upgrades_to_0003_without_changing_legacy_rows(
     engine = create_database_engine(database_url)
     try:
         with engine.connect() as connection:
-            assert connection.execute(
-                text("SELECT evidence_id FROM evidence_records")
-            ).scalar_one() == "legacy-evidence"
+            assert (
+                connection.execute(text("SELECT evidence_id FROM evidence_records")).scalar_one()
+                == "legacy-evidence"
+            )
     finally:
         engine.dispose()
     assert _table_names(database_url) >= AUTHORITATIVE_0003_TABLES | PROJECTION_0003_TABLES
@@ -206,9 +207,10 @@ def test_0002_database_upgrades_to_0003_without_changing_foundation_rows(
     engine = create_database_engine(database_url)
     try:
         with engine.connect() as connection:
-            assert connection.execute(
-                text("SELECT run_id FROM research_runs")
-            ).scalar_one() == "existing-run"
+            assert (
+                connection.execute(text("SELECT run_id FROM research_runs")).scalar_one()
+                == "existing-run"
+            )
     finally:
         engine.dispose()
     assert _revision(database_url) == REVISION

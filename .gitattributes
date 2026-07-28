@@ -1,3 +1,5 @@
 docs/handbook/*.json text eol=lf
 docs/handbook/*.md text eol=lf
 docs/behavior-handbook.md text eol=lf
+docs/reviews/quality-policy-records/*.json text eol=lf
+quality/*.json text eol=lf

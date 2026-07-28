@@ -61,9 +61,7 @@ class RelationSchema(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     relation_type: RelationType
-    allowed_role_pairs: tuple[tuple[TrailNodeRole, TrailNodeRole], ...] = Field(
-        min_length=1
-    )
+    allowed_role_pairs: tuple[tuple[TrailNodeRole, TrailNodeRole], ...] = Field(min_length=1)
     allowed_modalities: tuple[ClaimModality, ...] = Field(min_length=1)
     temporal_rule: RelationTemporalRule
     causal: bool
@@ -86,9 +84,7 @@ _SUPPORT_PAIRS = tuple(
     for source_role in (TrailNodeRole.REQUIRED, TrailNodeRole.SUPPORTING)
     for target_role in (TrailNodeRole.REQUIRED, TrailNodeRole.SUPPORTING)
 )
-_OPPOSING_PAIRS = tuple(
-    pair for pair in _NON_REDUNDANT_PAIRS if TrailNodeRole.OPPOSING in pair
-)
+_OPPOSING_PAIRS = tuple(pair for pair in _NON_REDUNDANT_PAIRS if TrailNodeRole.OPPOSING in pair)
 _ALL_MODALITIES = tuple(ClaimModality)
 _CAUSAL_MODALITIES = (
     ClaimModality.QUALIFIED,
@@ -277,10 +273,7 @@ def canonical_relation_evidence_ids(
     nodes: tuple[EvidenceTrailNode, ...],
 ) -> tuple[str, ...]:
     nodes_by_id = {node.node_id: node for node in nodes}
-    if (
-        relation.source_node_id not in nodes_by_id
-        or relation.target_node_id not in nodes_by_id
-    ):
+    if relation.source_node_id not in nodes_by_id or relation.target_node_id not in nodes_by_id:
         return ()
     return tuple(
         dict.fromkeys(
@@ -474,9 +467,7 @@ def trail_actors_are_independent(
 
 
 def canonical_node_set_hash(nodes: tuple[EvidenceTrailNode, ...]) -> str:
-    return sha256_hex(
-        canonical_json_bytes(tuple(node.model_dump(mode="json") for node in nodes))
-    )
+    return sha256_hex(canonical_json_bytes(tuple(node.model_dump(mode="json") for node in nodes)))
 
 
 def build_source_first_provenance(
@@ -518,15 +509,12 @@ def required_assessment_scope(
             evidence_ids=all_evidence_ids,
         )
     if category is AssessmentCategory.ANSWERABILITY:
-        relevant_nodes = tuple(
-            node for node in nodes if node.role is not TrailNodeRole.REDUNDANT
-        )
+        relevant_nodes = tuple(node for node in nodes if node.role is not TrailNodeRole.REDUNDANT)
         relevant_ids = {node.node_id for node in relevant_nodes}
         relevant_relations = tuple(
             relation
             for relation in relations
-            if relation.source_node_id in relevant_ids
-            and relation.target_node_id in relevant_ids
+            if relation.source_node_id in relevant_ids and relation.target_node_id in relevant_ids
         )
         return TrailScope(
             node_ids=tuple(node.node_id for node in relevant_nodes),
@@ -606,8 +594,7 @@ def semantic_assessment_outcome(
     """Apply every required assessment result before considering success."""
 
     mapped = tuple(
-        ASSESSMENT_OUTCOME_MATRIX[category][outcomes[category]]
-        for category in AssessmentCategory
+        ASSESSMENT_OUTCOME_MATRIX[category][outcomes[category]] for category in AssessmentCategory
     )
     if TrailOutcome.UNANSWERABLE in mapped:
         return TrailOutcome.UNANSWERABLE
@@ -627,12 +614,7 @@ def derive_trail_outcome(
 ) -> TrailOutcome:
     """Derive a trail status from the complete exact assessment matrix."""
 
-    outcomes = {
-        assessment.category: assessment.provenance.result
-        for assessment in assessments
-    }
-    if set(outcomes) != set(AssessmentCategory) or len(assessments) != len(
-        AssessmentCategory
-    ):
+    outcomes = {assessment.category: assessment.provenance.result for assessment in assessments}
+    if set(outcomes) != set(AssessmentCategory) or len(assessments) != len(AssessmentCategory):
         return TrailOutcome.INVALID_TRAIL
     return semantic_assessment_outcome(outcomes, conflicted=conflicted)

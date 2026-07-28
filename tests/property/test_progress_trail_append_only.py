@@ -73,10 +73,7 @@ def test_every_authoritative_0003_table_has_both_append_only_triggers(
     try:
         with engine.connect() as connection:
             trigger = connection.execute(
-                text(
-                    "SELECT name FROM sqlite_master "
-                    "WHERE type = 'trigger' AND name = :name"
-                ),
+                text("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = :name"),
                 {"name": f"{table_name}_{suffix}"},
             ).scalar_one_or_none()
     finally:
@@ -751,9 +748,7 @@ def _seed_authoritative_rows(connection: Connection) -> None:
         version=1,
     )
     connection.execute(
-        insert(schema.evidence_records).values(
-            **_record_values(evidence_id="evidence-1")
-        )
+        insert(schema.evidence_records).values(**_record_values(evidence_id="evidence-1"))
     )
     connection.execute(
         insert(schema.evidence_trail_versions).values(

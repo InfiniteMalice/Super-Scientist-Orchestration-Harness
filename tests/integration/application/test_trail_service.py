@@ -166,9 +166,7 @@ def _record_with_assessor_actor(
     proposal = runtime.record_proposal()
     first, *remaining = proposal.assessments
     aliased = first.model_copy(
-        update={
-            "provenance": first.provenance.model_copy(update={"actor": actor})
-        }
+        update={"provenance": first.provenance.model_copy(update={"actor": actor})}
     )
     return proposal.model_copy(update={"assessments": (aliased, *remaining)})
 
@@ -192,9 +190,7 @@ def _distinct_assessor_alias(
 def _append_accepted_without_handler(
     runtime: TrailRuntime,
     proposal: (
-        ProposeEvidenceTrailNodes
-        | ProposeEvidenceTrailRelations
-        | RecordEvidenceTrailVersion
+        ProposeEvidenceTrailNodes | ProposeEvidenceTrailRelations | RecordEvidenceTrailVersion
     ),
     *,
     governing_policy: PolicySnapshot | None = None,
@@ -302,9 +298,7 @@ def _relation_stage_proposal(
     node_stage = node_receipt.proposal
     assert isinstance(node_stage, ProposeEvidenceTrailNodes)
     nodes = node_stage.nodes
-    exact_relations = (
-        runtime.fixture.snapshot.relations if relations is None else relations
-    )
+    exact_relations = runtime.fixture.snapshot.relations if relations is None else relations
     return ProposeEvidenceTrailRelations(
         proposal_id=proposal_id,
         idempotency_key=f"intent-{proposal_id}",
@@ -509,6 +503,7 @@ def _accept_successor(
         assert runtime.coordinator.submit(proposal).accepted
     return proposal, claim
 
+
 @pytest.fixture
 def v2_runtime(tmp_path: Path) -> Iterator[TrailRuntime]:
     yield from _runtime(tmp_path, _v2_policy(), bootstrap_stages=True)
@@ -565,9 +560,7 @@ def test_shared_trail_authority_owns_exact_fixed_stage_classification(
     proposal = _node_stage_proposal(v2_stage_runtime).model_copy(
         update={
             "classification": FIXED_TRAIL_CLASSIFICATION.model_copy(
-                update={
-                    "signal": ImprovementSignal.INTRINSIC_EVALUATIVE_FEEDBACK
-                }
+                update={"signal": ImprovementSignal.INTRINSIC_EVALUATIVE_FEEDBACK}
             )
         }
     )
@@ -657,9 +650,7 @@ def test_node_stage_rejects_duplicate_exact_nodes(v2_stage_runtime: TrailRuntime
 def test_relation_stage_rejects_duplicate_exact_relations(
     v2_stage_runtime: TrailRuntime,
 ) -> None:
-    assert v2_stage_runtime.coordinator.submit(
-        _node_stage_proposal(v2_stage_runtime)
-    ).accepted
+    assert v2_stage_runtime.coordinator.submit(_node_stage_proposal(v2_stage_runtime)).accepted
     proposal = _relation_stage_proposal(v2_stage_runtime)
     duplicate = proposal.model_copy(
         update={"relations": (*proposal.relations, proposal.relations[0])}
@@ -675,9 +666,7 @@ def test_relation_stage_rejects_duplicate_exact_relations(
 def test_relation_stage_approver_must_be_independent_of_source_ingestor(
     v2_stage_runtime: TrailRuntime,
 ) -> None:
-    assert v2_stage_runtime.coordinator.submit(
-        _node_stage_proposal(v2_stage_runtime)
-    ).accepted
+    assert v2_stage_runtime.coordinator.submit(_node_stage_proposal(v2_stage_runtime)).accepted
     proposal = _relation_stage_proposal(
         v2_stage_runtime,
         approver=_actor("ingestor-1", ActorKind.HUMAN),
@@ -694,9 +683,7 @@ def test_wrong_source_receipt_hash_cannot_authorize_node_stage(
     v2_stage_runtime: TrailRuntime,
 ) -> None:
     proposal = _node_stage_proposal(v2_stage_runtime)
-    forged_reference = proposal.source_receipts[0].model_copy(
-        update={"proposal_hash": "f" * 64}
-    )
+    forged_reference = proposal.source_receipts[0].model_copy(update={"proposal_hash": "f" * 64})
     forged = proposal.model_copy(update={"source_receipts": (forged_reference,)})
 
     decision = v2_stage_runtime.coordinator.submit(forged)
@@ -751,8 +738,7 @@ def test_v1_both_stage_proposals_fail_closed_durably_and_audited(
 
     assert all(not decision.accepted for decision in decisions)
     assert all(
-        decision.reasons[0].code is RejectionCode.PERMISSION_DENIED
-        for decision in decisions
+        decision.reasons[0].code is RejectionCode.PERMISSION_DENIED for decision in decisions
     )
     with v1_runtime.engine.connect() as connection:
         repositories = RepositorySet(connection)
@@ -772,8 +758,7 @@ def test_v1_both_trail_proposals_fail_closed_durably_and_audited(
 
     assert all(not decision.accepted for decision in decisions)
     assert all(
-        decision.reasons[0].code is RejectionCode.PERMISSION_DENIED
-        for decision in decisions
+        decision.reasons[0].code is RejectionCode.PERMISSION_DENIED for decision in decisions
     )
     with v1_runtime.engine.connect() as connection:
         repositories = RepositorySet(connection)
@@ -1133,9 +1118,11 @@ def test_add_node_and_relation_helpers_build_complete_successor_versions_without
         checked_at=NOW + timedelta(minutes=4),
         assessed_at=NOW + timedelta(minutes=5),
     )
-    assert tuple(
-        item.trail_version.claim_version_id for item in (initial, second, third)
-    ) == ("claim-1:1", "claim-1:2", "claim-1:3")
+    assert tuple(item.trail_version.claim_version_id for item in (initial, second, third)) == (
+        "claim-1:1",
+        "claim-1:2",
+        "claim-1:3",
+    )
     assert third_claim.version == 3
 
     with v2_runtime.engine.connect() as connection:
@@ -1363,10 +1350,7 @@ def test_workspace_integrity_replay_detects_missing_trail_children(
     with v2_runtime.engine.begin() as connection:
         connection.execute(text("DROP TRIGGER evidence_trail_assessments_no_delete"))
         connection.execute(
-            text(
-                "DELETE FROM evidence_trail_assessments "
-                "WHERE assessment_id = :assessment_id"
-            ),
+            text("DELETE FROM evidence_trail_assessments WHERE assessment_id = :assessment_id"),
             {"assessment_id": proposal.assessments[0].assessment_id},
         )
 
@@ -1390,9 +1374,7 @@ def test_workspace_integrity_replay_rejects_forged_source_first_provenance(
             )
         }
     )
-    version = proposal.trail_version.model_copy(
-        update={"source_first_provenance": forged}
-    )
+    version = proposal.trail_version.model_copy(update={"source_first_provenance": forged})
     record_json = canonical_json_bytes(version.model_dump(mode="json")).decode("utf-8")
     with v2_runtime.engine.begin() as connection:
         connection.execute(text("DROP TRIGGER evidence_trail_versions_no_update"))
@@ -1496,9 +1478,7 @@ def test_workspace_replay_rejects_wrong_durable_stage_classification(
     proposal = _node_stage_proposal(v2_stage_runtime).model_copy(
         update={
             "classification": FIXED_TRAIL_CLASSIFICATION.model_copy(
-                update={
-                    "signal": ImprovementSignal.INTRINSIC_EVALUATIVE_FEEDBACK
-                }
+                update={"signal": ImprovementSignal.INTRINSIC_EVALUATIVE_FEEDBACK}
             )
         }
     )
@@ -1800,9 +1780,7 @@ def _runtime(
     )
     evidence_actor = _actor("ingestor-1", ActorKind.MODEL)
     claim_actor = (
-        _actor("claim-author", ActorKind.HUMAN)
-        if claim_proposer is None
-        else claim_proposer
+        _actor("claim-author", ActorKind.HUMAN) if claim_proposer is None else claim_proposer
     )
     assert coordinator.submit(
         AddEvidence(
@@ -1848,9 +1826,7 @@ def _runtime(
             update={"source_first_provenance": provenance}
         )
         fixture = fixture.__class__(
-            snapshot=fixture.snapshot.model_copy(
-                update={"version": rebound_version}
-            ),
+            snapshot=fixture.snapshot.model_copy(update={"version": rebound_version}),
             inputs=fixture.inputs,
         )
         runtime = TrailRuntime(
@@ -1879,7 +1855,7 @@ def _rebind_fixture(fixture: TrailFixture, governing_policy_hash: str) -> TrailF
                 "governing_policy_hash": governing_policy_hash,
                 "provenance": assessment.provenance.model_copy(
                     update={"governing_policy_hash": governing_policy_hash}
-                )
+                ),
             }
         )
         for assessment in fixture.snapshot.assessments

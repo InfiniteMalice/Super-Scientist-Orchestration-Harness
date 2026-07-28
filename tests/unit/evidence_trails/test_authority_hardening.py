@@ -53,9 +53,7 @@ def test_source_first_provenance_exposes_only_durable_receipt_references() -> No
 def test_source_first_provenance_builder_accepts_no_caller_chronology() -> None:
     source = AddEvidenceReceiptRef(**_receipt_fields("proposal-source"))
     node = EvidenceTrailNodeStageReceiptRef(**_receipt_fields("proposal-nodes"))
-    relation = EvidenceTrailRelationStageReceiptRef(
-        **_receipt_fields("proposal-relations")
-    )
+    relation = EvidenceTrailRelationStageReceiptRef(**_receipt_fields("proposal-relations"))
     claim = ProposeClaimReceiptRef(**_receipt_fields("proposal-claim"))
 
     provenance = trail_authority.build_source_first_provenance(
@@ -212,9 +210,7 @@ def _replace_check(
     snapshot: EvidenceTrailSnapshot,
     check: TrailCheckResult,
 ) -> EvidenceTrailSnapshot:
-    return snapshot.model_copy(
-        update={"checks": (check, *snapshot.checks[1:])}
-    )
+    return snapshot.model_copy(update={"checks": (check, *snapshot.checks[1:])})
 
 
 @pytest.mark.parametrize(
@@ -412,9 +408,7 @@ def test_stale_causal_assessment_cannot_authorize_new_relation(
         assessment.model_copy(
             update={
                 "provenance": assessment.provenance.model_copy(
-                    update={
-                        "assessed_at": snapshot.version.created_at - timedelta(days=1)
-                    }
+                    update={"assessed_at": snapshot.version.created_at - timedelta(days=1)}
                 )
             }
         )
@@ -544,8 +538,7 @@ def _two_source_fixture(fixture: TrailFixture) -> TrailFixture:
     )
     evidence_ids = ("evidence-1", "evidence-2")
     checks = tuple(
-        check.model_copy(update={"evidence_ids": evidence_ids})
-        for check in fixture.snapshot.checks
+        check.model_copy(update={"evidence_ids": evidence_ids}) for check in fixture.snapshot.checks
     )
     assessments = tuple(
         assessment.model_copy(
@@ -580,9 +573,7 @@ def _two_source_fixture(fixture: TrailFixture) -> TrailFixture:
     )
     inputs = fixture.inputs.model_copy(update={"sources": (first_source, second_source)})
     prior = fixture.snapshot.version.source_first_provenance
-    second_receipt = AddEvidenceReceiptRef(
-        **_receipt_fields("proposal-source-2")
-    )
+    second_receipt = AddEvidenceReceiptRef(**_receipt_fields("proposal-source-2"))
     provenance = trail_authority.build_source_first_provenance(
         source_receipts=(*prior.source_receipts, second_receipt),
         node_stage_receipt=prior.node_stage_receipt,
@@ -631,20 +622,14 @@ def _identity_relation_fixture(
             provenance["event_id"] = event_id
         sources.append(
             source.model_copy(
-                update={
-                    "evidence": source.evidence.model_copy(
-                        update={"provenance": provenance}
-                    )
-                }
+                update={"evidence": source.evidence.model_copy(update={"provenance": provenance})}
             )
         )
     nodes = fixture.snapshot.nodes
     if relation_type is RelationType.SAME_EVENT:
         nodes = (
             nodes[0],
-            nodes[1].model_copy(
-                update={"temporal_position": nodes[0].temporal_position}
-            ),
+            nodes[1].model_copy(update={"temporal_position": nodes[0].temporal_position}),
         )
     identity_relation = fixture.snapshot.relations[0].model_copy(
         update={"relation_type": relation_type}
@@ -688,8 +673,7 @@ def test_same_event_requires_event_identity_in_addition_to_equal_time(
         second_event_id="event-different",
     )
     assert (
-        fixture.snapshot.nodes[0].temporal_position
-        == fixture.snapshot.nodes[1].temporal_position
+        fixture.snapshot.nodes[0].temporal_position == fixture.snapshot.nodes[1].temporal_position
     )
 
     result = validate_trail(fixture.snapshot, fixture.inputs)
@@ -774,9 +758,7 @@ def test_assessor_cannot_share_builder_model_or_configuration(
             update={
                 "provenance": assessment.provenance.model_copy(
                     update={
-                        "actor": stage_actor.model_copy(
-                            update={"actor_id": "stage-model-alias"}
-                        )
+                        "actor": stage_actor.model_copy(update={"actor_id": "stage-model-alias"})
                     }
                 )
             }
@@ -907,9 +889,7 @@ def test_relation_evidence_tuple_is_exact_endpoint_order_not_a_subset(
     trail_fixture: TrailFixture,
 ) -> None:
     fixture = _two_source_fixture(trail_fixture)
-    relation = fixture.snapshot.relations[0].model_copy(
-        update={"evidence_ids": ("evidence-1",)}
-    )
+    relation = fixture.snapshot.relations[0].model_copy(update={"evidence_ids": ("evidence-1",)})
     snapshot = fixture.snapshot.model_copy(
         update={"relations": (relation, fixture.snapshot.relations[1])}
     )
@@ -929,12 +909,8 @@ def test_asserted_modality_cannot_authorize_candidate_causality(
         RelationType.CAUSES_CANDIDATE,
         _exact_causal_support(trail_fixture),
     )
-    asserted = snapshot.relations[1].model_copy(
-        update={"modality": ClaimModality.ASSERTED}
-    )
-    snapshot = snapshot.model_copy(
-        update={"relations": (snapshot.relations[0], asserted)}
-    )
+    asserted = snapshot.relations[1].model_copy(update={"modality": ClaimModality.ASSERTED})
+    snapshot = snapshot.model_copy(update={"relations": (snapshot.relations[0], asserted)})
     snapshot = with_fresh_source_first(trail_fixture, snapshot)
     assert snapshot.relations[1].modality is ClaimModality.ASSERTED
 
@@ -948,9 +924,7 @@ def test_opposing_role_without_actual_contradiction_is_invalid(
     trail_fixture: TrailFixture,
 ) -> None:
     required, supporting = trail_fixture.snapshot.nodes
-    opposing = supporting.model_copy(
-        update={"role": TrailNodeRole.OPPOSING, "necessity": True}
-    )
+    opposing = supporting.model_copy(update={"role": TrailNodeRole.OPPOSING, "necessity": True})
     version = trail_fixture.snapshot.version.model_copy(
         update={
             "supporting_node_ids": (),
@@ -1008,10 +982,13 @@ def _report_binding(
 def test_required_report_nodes_are_exact_canonical_nonredundant_nodes(
     trail_fixture: TrailFixture,
 ) -> None:
-    assert trail_authority.required_report_nodes(
-        trail_fixture.snapshot,
-        TrailOutcome.SUFFICIENT,
-    ) == trail_fixture.snapshot.nodes
+    assert (
+        trail_authority.required_report_nodes(
+            trail_fixture.snapshot,
+            TrailOutcome.SUFFICIENT,
+        )
+        == trail_fixture.snapshot.nodes
+    )
 
 
 @pytest.mark.parametrize("mutation", ("partial", "reordered", "duplicate", "span_reordered"))
@@ -1030,9 +1007,7 @@ def test_report_binding_rejects_partial_duplicate_or_reordered_relevance(
             update={"source_node_ids": (nodes[0].node_id, nodes[1].node_id, nodes[0].node_id)}
         )
     else:
-        binding = binding.model_copy(
-            update={"source_spans": tuple(reversed(binding.source_spans))}
-        )
+        binding = binding.model_copy(update={"source_spans": tuple(reversed(binding.source_spans))})
 
     findings = trail_models.validate_report_binding(
         binding,
@@ -1045,9 +1020,7 @@ def test_report_binding_rejects_partial_duplicate_or_reordered_relevance(
 
 def _conflicted_fixture(fixture: TrailFixture) -> TrailFixture:
     required, supporting = fixture.snapshot.nodes
-    opposing = supporting.model_copy(
-        update={"role": TrailNodeRole.OPPOSING, "necessity": True}
-    )
+    opposing = supporting.model_copy(update={"role": TrailNodeRole.OPPOSING, "necessity": True})
     contradiction = fixture.snapshot.relations[0].model_copy(
         update={
             "relation_type": RelationType.CONTRADICTS,

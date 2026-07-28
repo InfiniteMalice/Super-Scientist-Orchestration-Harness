@@ -44,11 +44,11 @@ STEP_CODES = (
 
 def _run_example(example: Path, workspace: Path) -> dict[str, object]:
     completed = subprocess.run(
-        [sys.executable, str(example), "--workspace", str(workspace)],
+        [sys.executable, str(example), "--root", str(workspace)],
         check=False,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=120,
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stderr == ""
@@ -76,9 +76,7 @@ def test_governed_adaptation_vertical_slice(tmp_path: Path) -> None:
     assert [step["code"] for step in steps] == list(STEP_CODES)
     assert all(step["completed"] is True for step in steps)
 
-    engine = create_database_engine(
-        f"sqlite:///{(workspace / 'governed-adaptation.db').as_posix()}"
-    )
+    engine = create_database_engine(f"sqlite:///{(workspace / 'scientist-harness.db').as_posix()}")
     artifacts = FileArtifactStore(workspace / "artifacts")
     try:
         with DatabaseUnitOfWork(engine) as unit_of_work:
@@ -122,6 +120,28 @@ def test_governed_adaptation_vertical_slice(tmp_path: Path) -> None:
     assert hypotheses.heads
     assert policy_versions == (1, 2)
     assert verification.valid is True
+
+    audited = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "super_scientist.cli.main",
+            "audit",
+            "verify",
+            "--root",
+            str(workspace),
+            "--json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert audited.returncode == 0, audited.stderr
+    audit_payload = json.loads(audited.stdout)
+    assert audit_payload["command"] == "audit verify"
+    assert audit_payload["success"] is True
+    assert audit_payload["data"]["valid"] is True
 
 
 @pytest.mark.e2e

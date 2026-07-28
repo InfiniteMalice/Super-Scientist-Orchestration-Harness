@@ -170,7 +170,7 @@ class PrimitiveEvaluationFrame(StrEnum):
 
 
 class EvaluationOutcome(StrEnum):
-    PASS = "PASS"
+    PASS = "PASS"  # nosec B105
     FAIL = "FAIL"
     ABSTAIN = "ABSTAIN"
 
@@ -222,7 +222,7 @@ class VerificationResultCategory(StrEnum):
 
 
 class VerificationOutcome(StrEnum):
-    PASS = "PASS"
+    PASS = "PASS"  # nosec B105
     FAIL = "FAIL"
     ABSTAIN = "ABSTAIN"
 

@@ -129,15 +129,11 @@ class AddEvidenceReceiptRef(AcceptedProposalReceiptRef):
 
 
 class EvidenceTrailNodeStageReceiptRef(AcceptedProposalReceiptRef):
-    proposal_type: Literal["propose_evidence_trail_nodes"] = (
-        "propose_evidence_trail_nodes"
-    )
+    proposal_type: Literal["propose_evidence_trail_nodes"] = "propose_evidence_trail_nodes"
 
 
 class EvidenceTrailRelationStageReceiptRef(AcceptedProposalReceiptRef):
-    proposal_type: Literal["propose_evidence_trail_relations"] = (
-        "propose_evidence_trail_relations"
-    )
+    proposal_type: Literal["propose_evidence_trail_relations"] = "propose_evidence_trail_relations"
 
 
 class ProposeClaimReceiptRef(AcceptedProposalReceiptRef):

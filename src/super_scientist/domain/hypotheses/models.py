@@ -48,7 +48,7 @@ class ExecutionMode(StrEnum):
 
 
 class VerificationOutcome(StrEnum):
-    PASS = "PASS"
+    PASS = "PASS"  # nosec B105
     FAIL = "FAIL"
     ABSTAIN = "ABSTAIN"
 

@@ -145,9 +145,7 @@ def test_node_repository_rejects_hash_json_and_relationship_corruption(
             repository.add(node.node_id, node, snapshot.version.created_at)
             connection.execute(text("DROP TRIGGER evidence_trail_nodes_no_update"))
             row = connection.execute(
-                text(
-                    "SELECT record_json FROM evidence_trail_nodes WHERE node_id = :node_id"
-                ),
+                text("SELECT record_json FROM evidence_trail_nodes WHERE node_id = :node_id"),
                 {"node_id": node.node_id},
             ).scalar_one()
             if damage == "hash":

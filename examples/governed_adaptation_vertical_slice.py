@@ -262,7 +262,7 @@ class Step:
 class VerticalSlice:
     def __init__(self, workspace: Path) -> None:
         workspace.mkdir(parents=True, exist_ok=True)
-        database_url = f"sqlite:///{(workspace / 'governed-adaptation.db').as_posix()}"
+        database_url = f"sqlite:///{(workspace / 'scientist-harness.db').as_posix()}"
         upgrade_database(database_url)
         self.engine = create_database_engine(database_url)
         self.artifacts = FileArtifactStore(workspace / "artifacts")
@@ -2952,9 +2952,9 @@ def _required[ValueT](value: ValueT | None) -> ValueT:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--workspace", type=Path, required=True)
+    parser.add_argument("--root", type=Path, required=True)
     arguments = parser.parse_args()
-    result = VerticalSlice(arguments.workspace).run()
+    result = VerticalSlice(arguments.root).run()
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     return 0
 

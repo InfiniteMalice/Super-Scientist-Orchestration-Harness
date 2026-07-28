@@ -184,11 +184,7 @@ def test_valid_complete_source_first_graph_is_sufficient(trail_fixture: TrailFix
 def test_modified_source_invalidates_exact_span(trail_fixture: TrailFixture) -> None:
     source = trail_fixture.inputs.sources[0]
     modified_inputs = trail_fixture.inputs.model_copy(
-        update={
-            "sources": (
-                source.model_copy(update={"artifact_bytes": b"changed source"}),
-            )
-        }
+        update={"sources": (source.model_copy(update={"artifact_bytes": b"changed source"}),)}
     )
 
     result = validate_trail(trail_fixture.snapshot, modified_inputs)
@@ -312,9 +308,7 @@ def test_explicit_causal_support_and_independent_causal_assessment_are_required(
         assessment.model_copy(
             update={
                 "provenance": assessment.provenance.model_copy(
-                    update={
-                        "assessed_at": snapshot.checks[0].checked_at - timedelta(minutes=1)
-                    }
+                    update={"assessed_at": snapshot.checks[0].checked_at - timedelta(minutes=1)}
                 )
             }
         )
@@ -380,9 +374,7 @@ def test_non_success_outcomes_are_never_collapsed(
     assessments = tuple(
         assessment.model_copy(
             update={
-                "provenance": assessment.provenance.model_copy(
-                    update={"result": assessment_result}
-                )
+                "provenance": assessment.provenance.model_copy(update={"result": assessment_result})
             }
         )
         if assessment.category is category

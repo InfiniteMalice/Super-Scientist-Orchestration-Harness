@@ -1,0 +1,24 @@
+diff --git a/src/super_scientist/quality/imported_pattern_firewall.py b/src/super_scientist/quality/imported_pattern_firewall.py
+--- a/src/super_scientist/quality/imported_pattern_firewall.py
++++ b/src/super_scientist/quality/imported_pattern_firewall.py
+@@ -28,3 +28,3 @@
+ )
+-ACTIVE_APPROVED_REGISTRY_HASH = "a57908a27492d82ae73d011b3c243d26b4b2efe352c07052261012ffab91cc72"
++ACTIVE_APPROVED_REGISTRY_HASH = "a02ea605444735c954f92fcfd83b9393c93148971c2c6666d0e421f4c161b45d"
+ ACTIVE_APPROVED_FIREWALL_POLICY_SHA256 = (
+@@ -40,3 +40,3 @@
+ ACTIVE_APPROVED_QUALITY_POLICY_HASH = (
+-    "a5dfc9857c5af5db9eec17ce1f57cd2d367e47f3a4b759aa8fda55a4f247e494"
++    "49ca2de6b619c28098c602ec9065118b4b4819482072402a203775e870f7e8b7"
+ )
+diff --git a/src/super_scientist/quality/runner.py b/src/super_scientist/quality/runner.py
+--- a/src/super_scientist/quality/runner.py
++++ b/src/super_scientist/quality/runner.py
+@@ -48,3 +48,7 @@
+     QualityCheck("build", (PYTHON, "-m", "build")),
+     QualityCheck("package", (PYTHON, "-m", "twine", "check", "dist/*")),
++    QualityCheck(
++        "wheel-install",
++        (PYTHON, "-m", "super_scientist.quality.wheel_smoke"),
++    ),
+ )

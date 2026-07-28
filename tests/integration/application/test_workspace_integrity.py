@@ -43,6 +43,13 @@ from super_scientist.providers.storage.schema import (
     governance_state,
     transactions,
 )
+from super_scientist.quality import imported_pattern_firewall, runner
+from super_scientist.quality.imported_pattern_firewall import (
+    QualityPolicyBinding,
+    current_quality_policy_binding,
+    quality_policy_hash,
+)
+from super_scientist.quality.runner import QualityCheck
 
 NOW = datetime(2026, 7, 13, 13, 0, tzinfo=UTC)
 
@@ -130,6 +137,95 @@ def integrity(tmp_path: Path) -> Iterator[IntegrityFixture]:
 def _verify(integrity: IntegrityFixture) -> object:
     with integrity.uow() as unit_of_work:
         return verify_workspace(unit_of_work.repositories(), integrity.artifacts)
+
+
+def test_workspace_verifier_recomputes_composite_quality_policy_hash(
+    integrity: IntegrityFixture,
+) -> None:
+    binding = current_quality_policy_binding()
+    tampered = binding.model_construct(
+        registry_hash=binding.registry_hash,
+        firewall_policy_sha256=binding.firewall_policy_sha256,
+        allowed_attribution_paths=binding.allowed_attribution_paths,
+        quality_policy_hash="f" * 64,
+    )
+
+    with integrity.uow() as unit_of_work:
+        result = verify_workspace(
+            unit_of_work.repositories(),
+            integrity.artifacts,
+            quality_policy_binding=tampered,
+        )
+
+    assert result.valid is False
+    assert "quality policy" in result.reason
+
+
+def test_workspace_verifier_rejects_self_consistent_nonactive_quality_policy(
+    integrity: IntegrityFixture,
+) -> None:
+    active = current_quality_policy_binding()
+    foreign_registry_hash = "a" * 64
+    foreign = QualityPolicyBinding(
+        registry_hash=foreign_registry_hash,
+        firewall_policy_sha256=active.firewall_policy_sha256,
+        allowed_attribution_paths=active.allowed_attribution_paths,
+        quality_policy_hash=quality_policy_hash(
+            registry_hash=foreign_registry_hash,
+            firewall_policy_sha256=active.firewall_policy_sha256,
+            allowed_attribution_paths=active.allowed_attribution_paths,
+        ),
+    )
+
+    with integrity.uow() as unit_of_work:
+        result = verify_workspace(
+            unit_of_work.repositories(),
+            integrity.artifacts,
+            quality_policy_binding=foreign,
+        )
+
+    assert result.valid is False
+    assert "approved quality policy anchor" in result.reason
+
+
+def test_workspace_verifier_uses_independent_anchor_when_all_executable_inputs_mutate(
+    integrity: IntegrityFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runner,
+        "CHECKS",
+        (
+            *runner.CHECKS,
+            QualityCheck(
+                "mutated-check",
+                (
+                    runner.PYTHON,
+                    "-m",
+                    "super_scientist.quality.wheel_smoke",
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        imported_pattern_firewall,
+        "PINNED_POLICY_SHA256",
+        "b" * 64,
+    )
+    monkeypatch.setattr(
+        imported_pattern_firewall,
+        "ALLOWED_ATTRIBUTION_PATHS",
+        ("docs/mutated-attribution.md",),
+    )
+
+    with integrity.uow() as unit_of_work:
+        result = verify_workspace(
+            unit_of_work.repositories(),
+            integrity.artifacts,
+        )
+
+    assert result.valid is False
+    assert "approved quality policy anchor" in result.reason
 
 
 @pytest.mark.parametrize("damage", ["missing", "tampered"])
