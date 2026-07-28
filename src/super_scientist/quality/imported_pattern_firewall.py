@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import stat
-import subprocess
+import subprocess  # nosec B404
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Literal, Self
@@ -446,7 +446,7 @@ def _git_scan_paths(project_root: Path) -> tuple[Path, ...]:
         "-z",
     )
     try:
-        completed = subprocess.run(
+        completed = subprocess.run(  # nosec B603
             argv,
             check=False,
             capture_output=True,
