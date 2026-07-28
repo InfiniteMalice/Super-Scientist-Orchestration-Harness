@@ -67,7 +67,14 @@ def test_repository_handbook_verifies_exact_source_snapshot_and_artifacts() -> N
 def test_manifest_commit_is_a_real_git_commit_and_bound_sources_match_worktree() -> None:
     declared = _repository_manifest()
     subprocess.run(
-        ("git", "cat-file", "-e", f"{declared.repository_commit}^{{commit}}"),
+        (
+            "git",
+            "-c",
+            f"safe.directory={REPOSITORY_ROOT}",
+            "cat-file",
+            "-e",
+            f"{declared.repository_commit}^{{commit}}",
+        ),
         cwd=REPOSITORY_ROOT,
         check=True,
         capture_output=True,
@@ -78,6 +85,8 @@ def test_manifest_commit_is_a_real_git_commit_and_bound_sources_match_worktree()
             completed = subprocess.run(
                 (
                     "git",
+                    "-c",
+                    f"safe.directory={REPOSITORY_ROOT}",
                     "diff",
                     "--quiet",
                     declared.repository_commit,
@@ -89,7 +98,13 @@ def test_manifest_commit_is_a_real_git_commit_and_bound_sources_match_worktree()
             )
             assert completed.returncode == 0
             committed = subprocess.run(
-                ("git", "show", f"{declared.repository_commit}:{binding.relative_path}"),
+                (
+                    "git",
+                    "-c",
+                    f"safe.directory={REPOSITORY_ROOT}",
+                    "show",
+                    f"{declared.repository_commit}:{binding.relative_path}",
+                ),
                 cwd=REPOSITORY_ROOT,
                 check=True,
                 capture_output=True,

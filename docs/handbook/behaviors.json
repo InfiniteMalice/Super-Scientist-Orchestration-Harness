@@ -1,223 +1,229 @@
 {
-  "behaviors": [
-    {
-      "behavior_id": "artifact-containment",
-      "contracts": [
-        "Content-addressed artifacts remain beneath the configured trusted root.",
-        "Static symlink and Windows reparse-point escapes fail closed."
-      ],
-      "dependencies": [],
-      "failure_modes": [
-        "Unavailable, non-regular, escaped, or hash-mismatched artifacts raise a fixed storage error."
-      ],
-      "governing_rule_version_ids": [
-        "rule-version-path-containment-v1"
-      ],
-      "inputs": [
-        "Immutable artifact bytes, media type, and a trusted storage root."
-      ],
-      "outputs": [
-        "A content-addressed artifact reference whose digest and size bind the stored bytes."
-      ],
-      "permissions": [
-        "Read and write only the configured artifact namespace."
-      ],
-      "postconditions": [
-        "Authoritative references resolve only to regular files with matching SHA-256 and size."
-      ],
-      "preconditions": [
-        "The configured root is a trusted local filesystem path."
-      ],
-      "related_behaviors": [
-        "protected-evaluation-separation"
-      ],
-      "source_bindings": [
-        {
-          "relative_path": "src/super_scientist/providers/storage/artifacts.py",
-          "repository_commit": "0a75ee7edc3c5a6679a2e510d69ef5482358c709",
-          "source_hash": "5502058494d8cf902bcb2b5964e2800c8ac952f57a5b39e3fba964732f35d2ca",
-          "symbol": "FileArtifactStore"
-        }
-      ],
-      "state_read": [
-        "Existing content-addressed artifact bytes and filesystem metadata."
-      ],
-      "state_written": [
-        "Immutable content-addressed files beneath the configured root."
-      ],
-      "summary": "Persist and retrieve immutable artifacts without allowing static path escapes.",
-      "test_paths": [
-        "tests/integration/storage/test_artifacts.py"
-      ],
-      "tools": [
-        "Python pathlib, lstat, hard links, and SHA-256."
-      ]
-    },
-    {
-      "behavior_id": "protected-evaluation-separation",
-      "contracts": [
-        "Protected expected outputs remain outside the ordinary repository set and main database.",
-        "Only strict hashes, aggregates, and checker outcomes cross the evaluator boundary."
-      ],
-      "dependencies": [
-        "artifact-containment"
-      ],
-      "failure_modes": [
-        "Malformed or desynchronized worker exchanges poison the capability channel.",
-        "Protected storage failures return fixed responses without answer or path leakage."
-      ],
-      "governing_rule_version_ids": [
-        "rule-version-protected-holdout-separation-v1"
-      ],
-      "inputs": [
-        "Protected answer bytes supplied only to separately scoped evaluation capabilities."
-      ],
-      "outputs": [
-        "Validated protected checker results containing non-reversible hashes and aggregates."
-      ],
-      "permissions": [
-        "Role-specific capabilities expose only answer reading, integrity auditing, result validation, or coordinator persistence."
-      ],
-      "postconditions": [
-        "Ordinary storage and serialized result DTOs contain no answer bytes or reversible references."
-      ],
-      "preconditions": [
-        "The protected store uses a physically distinct database and artifact root."
-      ],
-      "related_behaviors": [
-        "artifact-containment"
-      ],
-      "source_bindings": [
-        {
-          "relative_path": "src/super_scientist/providers/storage/protected_evaluation.py",
-          "repository_commit": "0a75ee7edc3c5a6679a2e510d69ef5482358c709",
-          "source_hash": "7d0176de4a80142bfb49eb5204a965923ff79c744abf82378427ddfdbd2e87e7",
-          "symbol": "ProtectedEvaluationStore"
-        }
-      ],
-      "state_read": [
-        "Protected expected-output metadata and content-addressed bytes through scoped readers."
-      ],
-      "state_written": [
-        "Protected metadata and artifacts, plus ordinary non-secret checker-result records."
-      ],
-      "summary": "Keep held-out expected outputs physically and capability-wise separate from candidates and ordinary storage.",
-      "test_paths": [
-        "tests/integration/storage/test_protected_evaluation_store.py"
-      ],
-      "tools": [
-        "Spawned-process strict JSON capabilities, SQLite, and content-addressed storage."
-      ]
-    },
-    {
-      "behavior_id": "transactional-admission-coordination",
-      "contracts": [
-        "Every durable proposal is normalized, governed, projected, decided, and audited in one transaction.",
-        "Exact replay resolves before new proposal execution and retains original authority."
-      ],
-      "dependencies": [
-        "workspace-integrity-verification"
-      ],
-      "failure_modes": [
-        "Integrity, programming, database, and filesystem failures propagate and roll back.",
-        "Safe malformed proposals become fixed durable rejections only when truthful identity is available."
-      ],
-      "governing_rule_version_ids": [
-        "rule-version-transaction-authority-v1"
-      ],
-      "inputs": [
-        "A strict typed proposal or bounded untrusted proposal attempt."
-      ],
-      "outputs": [
-        "One transaction decision and one policy-attributed audit event."
-      ],
-      "permissions": [
-        "Construct only the narrow read and write capabilities registered for the proposal kind."
-      ],
-      "postconditions": [
-        "Accepted projections, the decision, and the audit event commit atomically or not at all."
-      ],
-      "preconditions": [
-        "The workspace passes integrity verification and has an active registered governance policy."
-      ],
-      "related_behaviors": [
-        "workspace-integrity-verification"
-      ],
-      "source_bindings": [
-        {
-          "relative_path": "src/super_scientist/application/transactions/coordinator.py",
-          "repository_commit": "0a75ee7edc3c5a6679a2e510d69ef5482358c709",
-          "source_hash": "54a8be0625eaa17d8230a06270647e0de58bee9b99acd78ad7f1b25ca67e0875",
-          "symbol": "TransactionCoordinator"
-        }
-      ],
-      "state_read": [
-        "The complete verified workspace, replay records, active policy, and focused domain context."
-      ],
-      "state_written": [
-        "Accepted domain projections, one append-only decision, and one append-only audit event."
-      ],
-      "summary": "Coordinate governed domain proposals while preserving exact replay, audit, and atomicity.",
-      "test_paths": [
-        "tests/integration/application/test_transaction_coordinator.py"
-      ],
-      "tools": [
-        "SQLAlchemy unit of work and a fixed source-controlled proposal router."
-      ]
-    },
-    {
-      "behavior_id": "workspace-integrity-verification",
-      "contracts": [
-        "Reconstruct authoritative state and compare every governed projection before mutation or replay.",
-        "Reject tampered, orphaned, causally impossible, or unsupported durable records."
-      ],
-      "dependencies": [],
-      "failure_modes": [
-        "Any mismatch raises storage integrity failure and prevents the requested mutation."
-      ],
-      "governing_rule_version_ids": [
-        "rule-version-workspace-integrity-v1"
-      ],
-      "inputs": [
-        "Append-only records, audit history, policy snapshots, and rebuildable heads."
-      ],
-      "outputs": [
-        "A successful integrity result or a fixed integrity failure."
-      ],
-      "permissions": [
-        "Read authoritative repositories and replay through narrow in-memory capabilities."
-      ],
-      "postconditions": [
-        "Every verified projection exactly matches replayed authoritative history."
-      ],
-      "preconditions": [
-        "The database is opened with foreign-key enforcement and the supported migration head."
-      ],
-      "related_behaviors": [
-        "transactional-admission-coordination"
-      ],
-      "source_bindings": [
-        {
-          "relative_path": "src/super_scientist/application/workspace_integrity.py",
-          "repository_commit": "0a75ee7edc3c5a6679a2e510d69ef5482358c709",
-          "source_hash": "b351259e05306dca2f7a1d76749707f1f90e39f018833be3d5607fd36c491f1d",
-          "symbol": "verify_workspace"
-        }
-      ],
-      "state_read": [
-        "All authoritative records, projections, and the audit chain."
-      ],
-      "state_written": [],
-      "summary": "Reconcile the complete workspace against deterministic replay before durable operations.",
-      "test_paths": [
-        "tests/integration/application/test_workspace_integrity.py"
-      ],
-      "tools": [
-        "Strict record decoding, audit-chain verification, and deterministic domain replay."
-      ]
-    }
-  ],
-  "repository": "InfiniteMalice/Super-Scientist-Orchestration-Harness",
-  "repository_commit": "0a75ee7edc3c5a6679a2e510d69ef5482358c709",
-  "schema_version": 1
+    "behaviors":  [
+                      {
+                          "behavior_id":  "artifact-containment",
+                          "contracts":  [
+                                            "Content-addressed artifacts remain beneath the configured trusted root.",
+                                            "Static symlink and Windows reparse-point escapes fail closed."
+                                        ],
+                          "dependencies":  [
+
+                                           ],
+                          "failure_modes":  [
+                                                "Unavailable, non-regular, escaped, or hash-mismatched artifacts raise a fixed storage error."
+                                            ],
+                          "governing_rule_version_ids":  [
+                                                             "rule-version-path-containment-v1"
+                                                         ],
+                          "inputs":  [
+                                         "Immutable artifact bytes, media type, and a trusted storage root."
+                                     ],
+                          "outputs":  [
+                                          "A content-addressed artifact reference whose digest and size bind the stored bytes."
+                                      ],
+                          "permissions":  [
+                                              "Read and write only the configured artifact namespace."
+                                          ],
+                          "postconditions":  [
+                                                 "Authoritative references resolve only to regular files with matching SHA-256 and size."
+                                             ],
+                          "preconditions":  [
+                                                "The configured root is a trusted local filesystem path."
+                                            ],
+                          "related_behaviors":  [
+                                                    "protected-evaluation-separation"
+                                                ],
+                          "source_bindings":  [
+                                                  {
+                                                      "relative_path":  "src/super_scientist/providers/storage/artifacts.py",
+                                                      "repository_commit":  "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+                                                      "source_hash":  "da73930e63bef136ae522675f292249cfaf057d939983b3aecc8a39de6f0c0f5",
+                                                      "symbol":  "FileArtifactStore"
+                                                  }
+                                              ],
+                          "state_read":  [
+                                             "Existing content-addressed artifact bytes and filesystem metadata."
+                                         ],
+                          "state_written":  [
+                                                "Immutable content-addressed files beneath the configured root."
+                                            ],
+                          "summary":  "Persist and retrieve immutable artifacts without allowing static path escapes.",
+                          "test_paths":  [
+                                             "tests/integration/storage/test_artifacts.py"
+                                         ],
+                          "tools":  [
+                                        "Python pathlib, lstat, hard links, and SHA-256."
+                                    ]
+                      },
+                      {
+                          "behavior_id":  "protected-evaluation-separation",
+                          "contracts":  [
+                                            "Protected expected outputs remain outside the ordinary repository set and main database.",
+                                            "Only strict hashes, aggregates, and checker outcomes cross the evaluator boundary."
+                                        ],
+                          "dependencies":  [
+                                               "artifact-containment"
+                                           ],
+                          "failure_modes":  [
+                                                "Malformed or desynchronized worker exchanges poison the capability channel.",
+                                                "Protected storage failures return fixed responses without answer or path leakage."
+                                            ],
+                          "governing_rule_version_ids":  [
+                                                             "rule-version-protected-holdout-separation-v1"
+                                                         ],
+                          "inputs":  [
+                                         "Protected answer bytes supplied only to separately scoped evaluation capabilities."
+                                     ],
+                          "outputs":  [
+                                          "Validated protected checker results containing non-reversible hashes and aggregates."
+                                      ],
+                          "permissions":  [
+                                              "Role-specific capabilities expose only answer reading, integrity auditing, result validation, or coordinator persistence."
+                                          ],
+                          "postconditions":  [
+                                                 "Ordinary storage and serialized result DTOs contain no answer bytes or reversible references."
+                                             ],
+                          "preconditions":  [
+                                                "The protected store uses a physically distinct database and artifact root."
+                                            ],
+                          "related_behaviors":  [
+                                                    "artifact-containment"
+                                                ],
+                          "source_bindings":  [
+                                                  {
+                                                      "relative_path":  "src/super_scientist/providers/storage/protected_evaluation.py",
+                                                      "repository_commit":  "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+                                                      "source_hash":  "34827b9a96ab74052bc9a8d35648f51cfb3cb117991dff3490a9b141df6e1d3c",
+                                                      "symbol":  "ProtectedEvaluationStore"
+                                                  }
+                                              ],
+                          "state_read":  [
+                                             "Protected expected-output metadata and content-addressed bytes through scoped readers."
+                                         ],
+                          "state_written":  [
+                                                "Protected metadata and artifacts, plus ordinary non-secret checker-result records."
+                                            ],
+                          "summary":  "Keep held-out expected outputs physically and capability-wise separate from candidates and ordinary storage.",
+                          "test_paths":  [
+                                             "tests/integration/storage/test_protected_evaluation_store.py"
+                                         ],
+                          "tools":  [
+                                        "Spawned-process strict JSON capabilities, SQLite, and content-addressed storage."
+                                    ]
+                      },
+                      {
+                          "behavior_id":  "transactional-admission-coordination",
+                          "contracts":  [
+                                            "Every durable proposal is normalized, governed, projected, decided, and audited in one transaction.",
+                                            "Exact replay resolves before new proposal execution and retains original authority."
+                                        ],
+                          "dependencies":  [
+                                               "workspace-integrity-verification"
+                                           ],
+                          "failure_modes":  [
+                                                "Integrity, programming, database, and filesystem failures propagate and roll back.",
+                                                "Safe malformed proposals become fixed durable rejections only when truthful identity is available."
+                                            ],
+                          "governing_rule_version_ids":  [
+                                                             "rule-version-transaction-authority-v1"
+                                                         ],
+                          "inputs":  [
+                                         "A strict typed proposal or bounded untrusted proposal attempt."
+                                     ],
+                          "outputs":  [
+                                          "One transaction decision and one policy-attributed audit event."
+                                      ],
+                          "permissions":  [
+                                              "Construct only the narrow read and write capabilities registered for the proposal kind."
+                                          ],
+                          "postconditions":  [
+                                                 "Accepted projections, the decision, and the audit event commit atomically or not at all."
+                                             ],
+                          "preconditions":  [
+                                                "The workspace passes integrity verification and has an active registered governance policy."
+                                            ],
+                          "related_behaviors":  [
+                                                    "workspace-integrity-verification"
+                                                ],
+                          "source_bindings":  [
+                                                  {
+                                                      "relative_path":  "src/super_scientist/application/transactions/coordinator.py",
+                                                      "repository_commit":  "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+                                                      "source_hash":  "5e040b3572d732658e7982e37bac39a0330ced5cb568d4d613e39e96e65c13c7",
+                                                      "symbol":  "TransactionCoordinator"
+                                                  }
+                                              ],
+                          "state_read":  [
+                                             "The complete verified workspace, replay records, active policy, and focused domain context."
+                                         ],
+                          "state_written":  [
+                                                "Accepted domain projections, one append-only decision, and one append-only audit event."
+                                            ],
+                          "summary":  "Coordinate governed domain proposals while preserving exact replay, audit, and atomicity.",
+                          "test_paths":  [
+                                             "tests/integration/application/test_transaction_coordinator.py"
+                                         ],
+                          "tools":  [
+                                        "SQLAlchemy unit of work and a fixed source-controlled proposal router."
+                                    ]
+                      },
+                      {
+                          "behavior_id":  "workspace-integrity-verification",
+                          "contracts":  [
+                                            "Reconstruct authoritative state and compare every governed projection before mutation or replay.",
+                                            "Reject tampered, orphaned, causally impossible, or unsupported durable records."
+                                        ],
+                          "dependencies":  [
+
+                                           ],
+                          "failure_modes":  [
+                                                "Any mismatch raises storage integrity failure and prevents the requested mutation."
+                                            ],
+                          "governing_rule_version_ids":  [
+                                                             "rule-version-workspace-integrity-v1"
+                                                         ],
+                          "inputs":  [
+                                         "Append-only records, audit history, policy snapshots, and rebuildable heads."
+                                     ],
+                          "outputs":  [
+                                          "A successful integrity result or a fixed integrity failure."
+                                      ],
+                          "permissions":  [
+                                              "Read authoritative repositories and replay through narrow in-memory capabilities."
+                                          ],
+                          "postconditions":  [
+                                                 "Every verified projection exactly matches replayed authoritative history."
+                                             ],
+                          "preconditions":  [
+                                                "The database is opened with foreign-key enforcement and the supported migration head."
+                                            ],
+                          "related_behaviors":  [
+                                                    "transactional-admission-coordination"
+                                                ],
+                          "source_bindings":  [
+                                                  {
+                                                      "relative_path":  "src/super_scientist/application/workspace_integrity.py",
+                                                      "repository_commit":  "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+                                                      "source_hash":  "30431544df4d1c2983aa6320acb35e09aacbeec73640d3fa4e556d7f0cd85d84",
+                                                      "symbol":  "verify_workspace"
+                                                  }
+                                              ],
+                          "state_read":  [
+                                             "All authoritative records, projections, and the audit chain."
+                                         ],
+                          "state_written":  [
+
+                                            ],
+                          "summary":  "Reconcile the complete workspace against deterministic replay before durable operations.",
+                          "test_paths":  [
+                                             "tests/integration/application/test_workspace_integrity.py"
+                                         ],
+                          "tools":  [
+                                        "Strict record decoding, audit-chain verification, and deterministic domain replay."
+                                    ]
+                      }
+                  ],
+    "repository":  "InfiniteMalice/Super-Scientist-Orchestration-Harness",
+    "repository_commit":  "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+    "schema_version":  1
 }

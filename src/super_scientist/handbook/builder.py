@@ -441,9 +441,10 @@ def _git_checkout_path_is_clean(root: Path, commit: str, relative_path: str) -> 
 
 def _run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
     # Arguments are fixed Git operations plus validated OIDs/literal paths; the shell is disabled.
+    trusted_root = root.resolve(strict=True)
     return subprocess.run(  # nosec B603
-        ("git", *arguments),
-        cwd=root,
+        ("git", "-c", f"safe.directory={trusted_root}", *arguments),
+        cwd=trusted_root,
         check=False,
         capture_output=True,
         stdin=subprocess.DEVNULL,
