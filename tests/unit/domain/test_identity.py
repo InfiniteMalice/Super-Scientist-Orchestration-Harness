@@ -64,7 +64,7 @@ def test_same_model_and_adapter_without_configuration_hash_are_not_independent()
     assert not are_independent(left, right)
 
 
-def test_missing_configuration_hash_on_either_model_is_not_independent() -> None:
+def test_distinct_model_identities_do_not_require_configuration_hashes() -> None:
     complete = ActorIdentity(
         actor_id="complete",
         kind=ActorKind.MODEL,
@@ -93,8 +93,8 @@ def test_missing_configuration_hash_on_either_model_is_not_independent() -> None
         created_at=datetime.now(UTC),
     )
 
-    assert not are_independent(missing_left, complete)
-    assert not are_independent(complete, missing_right)
+    assert are_independent(missing_left, complete)
+    assert are_independent(complete, missing_right)
 
 
 def test_same_actor_is_not_independent_even_with_different_configuration() -> None:

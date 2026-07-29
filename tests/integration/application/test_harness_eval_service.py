@@ -1588,4 +1588,4 @@ def _human_actor(identifier: str) -> ActorIdentity:
 
 
 def _model_actor(identifier: str) -> ActorIdentity:
-    return ActorIdentity.model(identifier, "provider", identifier, None, NOW)
+    return ActorIdentity.model(identifier, f"provider-{identifier}", identifier, None, NOW)

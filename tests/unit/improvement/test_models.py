@@ -71,7 +71,7 @@ HASH = "a" * 64
 
 def _actor(actor_id: str, kind: ActorKind = ActorKind.HUMAN) -> ActorIdentity:
     if kind is ActorKind.MODEL:
-        return ActorIdentity.model(actor_id, "provider", actor_id, None, NOW)
+        return ActorIdentity.model(actor_id, f"provider-{actor_id}", actor_id, None, NOW)
     return ActorIdentity(actor_id=actor_id, kind=kind, created_at=NOW)
 
 

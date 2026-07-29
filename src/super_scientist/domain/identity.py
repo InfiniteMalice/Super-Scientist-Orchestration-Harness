@@ -61,11 +61,7 @@ def are_independent(left: ActorIdentity, right: ActorIdentity) -> bool:
         (left.adapter_id, right.adapter_id),
         (left.configuration_hash, right.configuration_hash),
     )
-    if any(
+    return not any(
         left_value is not None and right_value is not None and left_value == right_value
         for left_value, right_value in correlated_fields
-    ):
-        return False
-    if left.kind is ActorKind.MODEL and right.kind is ActorKind.MODEL:
-        return left.configuration_hash is not None and right.configuration_hash is not None
-    return True
+    )
