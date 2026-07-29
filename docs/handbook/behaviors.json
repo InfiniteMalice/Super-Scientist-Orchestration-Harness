@@ -36,7 +36,7 @@
                           "source_bindings":  [
                                                   {
                                                       "relative_path":  "src/super_scientist/providers/storage/artifacts.py",
-                                                      "repository_commit":  "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+                                                      "repository_commit":  "1ca0223f9969858de86a3c2d4e8b9660d3930d10",
                                                       "source_hash":  "da73930e63bef136ae522675f292249cfaf057d939983b3aecc8a39de6f0c0f5",
                                                       "symbol":  "FileArtifactStore"
                                                   }
@@ -92,8 +92,8 @@
                           "source_bindings":  [
                                                   {
                                                       "relative_path":  "src/super_scientist/providers/storage/protected_evaluation.py",
-                                                      "repository_commit":  "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
-                                                      "source_hash":  "34827b9a96ab74052bc9a8d35648f51cfb3cb117991dff3490a9b141df6e1d3c",
+                                                      "repository_commit":  "1ca0223f9969858de86a3c2d4e8b9660d3930d10",
+                                                      "source_hash":  "cb56d15f629f1e2bc0508f3a6a8b036dbb3937ae7b18af637fa1acdc862b7db5",
                                                       "symbol":  "ProtectedEvaluationStore"
                                                   }
                                               ],
@@ -148,7 +148,7 @@
                           "source_bindings":  [
                                                   {
                                                       "relative_path":  "src/super_scientist/application/transactions/coordinator.py",
-                                                      "repository_commit":  "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+                                                      "repository_commit":  "1ca0223f9969858de86a3c2d4e8b9660d3930d10",
                                                       "source_hash":  "5e040b3572d732658e7982e37bac39a0330ced5cb568d4d613e39e96e65c13c7",
                                                       "symbol":  "TransactionCoordinator"
                                                   }
@@ -203,7 +203,7 @@
                           "source_bindings":  [
                                                   {
                                                       "relative_path":  "src/super_scientist/application/workspace_integrity.py",
-                                                      "repository_commit":  "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+                                                      "repository_commit":  "1ca0223f9969858de86a3c2d4e8b9660d3930d10",
                                                       "source_hash":  "30431544df4d1c2983aa6320acb35e09aacbeec73640d3fa4e556d7f0cd85d84",
                                                       "symbol":  "verify_workspace"
                                                   }
@@ -224,6 +224,6 @@
                       }
                   ],
     "repository":  "InfiniteMalice/Super-Scientist-Orchestration-Harness",
-    "repository_commit":  "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+    "repository_commit":  "1ca0223f9969858de86a3c2d4e8b9660d3930d10",
     "schema_version":  1
 }

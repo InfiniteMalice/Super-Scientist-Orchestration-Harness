@@ -49,7 +49,7 @@
           "module": "src.super_scientist.providers.storage.artifacts",
           "relationship": "IMPLEMENTS",
           "relative_path": "src/super_scientist/providers/storage/artifacts.py",
-          "repository_commit": "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+          "repository_commit": "1ca0223f9969858de86a3c2d4e8b9660d3930d10",
           "source_hash": "da73930e63bef136ae522675f292249cfaf057d939983b3aecc8a39de6f0c0f5",
           "start_line": 19,
           "symbol": "FileArtifactStore",
@@ -107,16 +107,16 @@
       ],
       "source_locations": [
         {
-          "end_line": 308,
+          "end_line": 347,
           "kind": "CLASS",
           "module": "src.super_scientist.providers.storage.protected_evaluation",
           "relationship": "IMPLEMENTS",
           "relative_path": "src/super_scientist/providers/storage/protected_evaluation.py",
-          "repository_commit": "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
-          "source_hash": "34827b9a96ab74052bc9a8d35648f51cfb3cb117991dff3490a9b141df6e1d3c",
-          "start_line": 179,
+          "repository_commit": "1ca0223f9969858de86a3c2d4e8b9660d3930d10",
+          "source_hash": "cb56d15f629f1e2bc0508f3a6a8b036dbb3937ae7b18af637fa1acdc862b7db5",
+          "start_line": 216,
           "symbol": "ProtectedEvaluationStore",
-          "symbol_source_hash": "67e702c6cc965e6bc1dad45f61dfd2517ee2c5e73f7af07726f465939ed9a515",
+          "symbol_source_hash": "9ef472459f9f3e87fd1e5a8da2e0c5e5bf7af426de8224db50099723a93fddc2",
           "verification_method": "PYTHON_AST_SYMBOL_AND_SHA256"
         }
       ],
@@ -175,7 +175,7 @@
           "module": "src.super_scientist.application.transactions.coordinator",
           "relationship": "IMPLEMENTS",
           "relative_path": "src/super_scientist/application/transactions/coordinator.py",
-          "repository_commit": "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+          "repository_commit": "1ca0223f9969858de86a3c2d4e8b9660d3930d10",
           "source_hash": "5e040b3572d732658e7982e37bac39a0330ced5cb568d4d613e39e96e65c13c7",
           "start_line": 182,
           "symbol": "TransactionCoordinator",
@@ -235,7 +235,7 @@
           "module": "src.super_scientist.application.workspace_integrity",
           "relationship": "IMPLEMENTS",
           "relative_path": "src/super_scientist/application/workspace_integrity.py",
-          "repository_commit": "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+          "repository_commit": "1ca0223f9969858de86a3c2d4e8b9660d3930d10",
           "source_hash": "30431544df4d1c2983aa6320acb35e09aacbeec73640d3fa4e556d7f0cd85d84",
           "start_line": 621,
           "symbol": "verify_workspace",
@@ -390,7 +390,7 @@
               "module": "src.super_scientist.providers.storage.artifacts",
               "relationship": "IMPLEMENTS",
               "relative_path": "src/super_scientist/providers/storage/artifacts.py",
-              "repository_commit": "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+              "repository_commit": "1ca0223f9969858de86a3c2d4e8b9660d3930d10",
               "source_hash": "da73930e63bef136ae522675f292249cfaf057d939983b3aecc8a39de6f0c0f5",
               "start_line": 19,
               "symbol": "FileArtifactStore",
@@ -406,16 +406,16 @@
           "behavior_id": "protected-evaluation-separation",
           "source_locations": [
             {
-              "end_line": 308,
+              "end_line": 347,
               "kind": "CLASS",
               "module": "src.super_scientist.providers.storage.protected_evaluation",
               "relationship": "IMPLEMENTS",
               "relative_path": "src/super_scientist/providers/storage/protected_evaluation.py",
-              "repository_commit": "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
-              "source_hash": "34827b9a96ab74052bc9a8d35648f51cfb3cb117991dff3490a9b141df6e1d3c",
-              "start_line": 179,
+              "repository_commit": "1ca0223f9969858de86a3c2d4e8b9660d3930d10",
+              "source_hash": "cb56d15f629f1e2bc0508f3a6a8b036dbb3937ae7b18af637fa1acdc862b7db5",
+              "start_line": 216,
               "symbol": "ProtectedEvaluationStore",
-              "symbol_source_hash": "67e702c6cc965e6bc1dad45f61dfd2517ee2c5e73f7af07726f465939ed9a515",
+              "symbol_source_hash": "9ef472459f9f3e87fd1e5a8da2e0c5e5bf7af426de8224db50099723a93fddc2",
               "verification_method": "PYTHON_AST_SYMBOL_AND_SHA256"
             }
           ],
@@ -432,7 +432,7 @@
               "module": "src.super_scientist.application.transactions.coordinator",
               "relationship": "IMPLEMENTS",
               "relative_path": "src/super_scientist/application/transactions/coordinator.py",
-              "repository_commit": "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+              "repository_commit": "1ca0223f9969858de86a3c2d4e8b9660d3930d10",
               "source_hash": "5e040b3572d732658e7982e37bac39a0330ced5cb568d4d613e39e96e65c13c7",
               "start_line": 182,
               "symbol": "TransactionCoordinator",
@@ -453,7 +453,7 @@
               "module": "src.super_scientist.application.workspace_integrity",
               "relationship": "IMPLEMENTS",
               "relative_path": "src/super_scientist/application/workspace_integrity.py",
-              "repository_commit": "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+              "repository_commit": "1ca0223f9969858de86a3c2d4e8b9660d3930d10",
               "source_hash": "30431544df4d1c2983aa6320acb35e09aacbeec73640d3fa4e556d7f0cd85d84",
               "start_line": 621,
               "symbol": "verify_workspace",
@@ -470,9 +470,9 @@
       "name": "exact_source"
     }
   ],
-  "manifest_hash": "1f315d376c50adbc53cd3731dba9499437f5af14e7e4145edef390af724621cf",
+  "manifest_hash": "6fae96a3daea6f09dd2fd3b46b28b9fe58cb54066f488259acb474c52fd47e2a",
   "repository": "InfiniteMalice/Super-Scientist-Orchestration-Harness",
-  "repository_commit": "3f77443c39f4729c53fa9387f6a6d9a128ceb0f0",
+  "repository_commit": "1ca0223f9969858de86a3c2d4e8b9660d3930d10",
   "rule_to_behaviors": [
     {
       "behavior_ids": [
@@ -530,5 +530,5 @@
       "symbol": "ProtectedEvaluationStore"
     }
   ],
-  "source_tree_hash": "aa1b77e1caa921d760f68b59d7ab0fb394a168dab8fbd76f568f620d366b7a0a"
+  "source_tree_hash": "63fde575835a7d36a11292e27a06a7e858328af8d9f314f9109bde716a773637"
 }
