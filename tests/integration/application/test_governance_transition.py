@@ -573,6 +573,7 @@ def _transition(
         ),
         usage=_usage(2),
         failures=("one failed candidate retained",),
+        unmeasured_coverage_gaps=("live production behavior remained unmeasured",),
         rollback_target_id=prior.policy_hash,
         evaluator_audit_id=audit.evaluator_audit_id,
         decision=MeasurementDecision.ACCEPTED,

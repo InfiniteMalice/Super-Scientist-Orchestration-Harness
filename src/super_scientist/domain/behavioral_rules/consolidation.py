@@ -14,7 +14,7 @@ from super_scientist.domain.behavioral_rules.models import (
     RuleAction,
     RuleRegressionCase,
 )
-from super_scientist.domain.identity import ActorIdentity, ActorKind, are_independent
+from super_scientist.domain.identity import ActorIdentity, are_independent
 from super_scientist.domain.improvement.classification import VerificationLevel
 from super_scientist.domain.improvement.models import ActorRelationship, AssessmentOutcome
 from super_scientist.domain.primitives import UtcTimestamp
@@ -371,22 +371,7 @@ def rule_actors_are_independent(
 ) -> bool:
     """Reject actor aliases and correlated model/configuration identities."""
 
-    if not are_independent(left, right):
-        return False
-    correlated_fields = (
-        (left.provider_id, right.provider_id),
-        (left.model_id, right.model_id),
-        (left.adapter_id, right.adapter_id),
-        (left.configuration_hash, right.configuration_hash),
-    )
-    if any(
-        left_value is not None and right_value is not None and left_value == right_value
-        for left_value, right_value in correlated_fields
-    ):
-        return False
-    if left.kind is not ActorKind.MODEL or right.kind is not ActorKind.MODEL:
-        return True
-    return left.configuration_hash is not None and right.configuration_hash is not None
+    return are_independent(left, right)
 
 
 def _has_exact_review_quality(assessment: ReviewerAssessment) -> bool:

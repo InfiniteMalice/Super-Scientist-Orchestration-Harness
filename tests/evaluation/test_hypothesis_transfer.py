@@ -53,6 +53,19 @@ class FileManifest(_FrozenRecord):
     entries: tuple[ManifestEntry, ...] = Field(min_length=1)
 
 
+class PlanningOption(_FrozenRecord):
+    option_id: StableIdentifier
+    success_probability: float = Field(strict=True, ge=0.0, le=1.0)
+    information_gain: float = Field(strict=True, ge=0.0, le=1.0)
+    cost: int = Field(strict=True, gt=0)
+
+
+class PlanningScenario(_FrozenRecord):
+    scenario_id: StableIdentifier
+    budget: int = Field(strict=True, gt=0)
+    options: tuple[PlanningOption, ...] = Field(min_length=2)
+
+
 class Condition(StrEnum):
     DIRECT_DETERMINISTIC = "DIRECT_DETERMINISTIC"
     PLAN_AND_EXECUTE = "PLAN_AND_EXECUTE"
@@ -102,7 +115,13 @@ class TransferResult:
 
 @pytest.mark.parametrize(
     "fixture_id",
-    ["thermal-chamber", "exponential-decay", "equipment-incident", "software-maintenance"],
+    [
+        "thermal-chamber",
+        "exponential-decay",
+        "equipment-incident",
+        "software-maintenance",
+        "sensor-calibration-planning",
+    ],
 )
 def test_generic_loop_transfers_across_independent_fixtures(fixture_id: str) -> None:
     result = _run_transfer_fixture(fixture_id)
@@ -159,6 +178,9 @@ def _run_transfer_fixture(fixture_id: str) -> TransferResult:
         "manifest",
         "file_path",
         "retry_limit",
+        "planning_option",
+        "success_probability",
+        "budget",
     }
     contract_fields = tuple(
         sorted(
@@ -220,6 +242,8 @@ def _expected_value(fixture_id: str) -> object:
         return ("alarm", "pressure-drop", "pump-stop")
     if fixture_id == "software-maintenance":
         return ("retry-policy", "retry-policy-test")
+    if fixture_id == "sensor-calibration-planning":
+        return "cross-check-reference"
     raise AssertionError(f"unknown fixture {fixture_id}")
 
 
@@ -293,6 +317,9 @@ def _candidate(fixture_id: str, *, expected: object, correct: bool) -> object:
             if entry.declares_retry_limit or entry.has_matching_test
         )
         return selected if correct else selected[:1]
+    if fixture_id == "sensor-calibration-planning":
+        selected = _selected_planning_option(_planning_scenario())
+        return selected if correct else "recalibrate-primary"
     raise AssertionError(f"unknown fixture {fixture_id}")
 
 
@@ -320,6 +347,13 @@ def _checker_decision(fixture_id: str, candidate: object, expected: object) -> b
         )
         return candidate == required == expected and all(
             entry.content_hash for entry in manifest.entries
+        )
+    if fixture_id == "sensor-calibration-planning":
+        scenario = _planning_scenario()
+        return (
+            candidate == _selected_planning_option(scenario) == expected
+            and next(option for option in scenario.options if option.option_id == candidate).cost
+            <= scenario.budget
         )
     return _check_candidate(fixture_id, candidate, expected)
 
@@ -431,6 +465,45 @@ def _maintenance_manifest() -> FileManifest:
             ),
         ),
     )
+
+
+def _planning_scenario() -> PlanningScenario:
+    return PlanningScenario(
+        scenario_id="sensor-calibration-planning-1",
+        budget=4,
+        options=(
+            PlanningOption(
+                option_id="recalibrate-primary",
+                success_probability=0.82,
+                information_gain=0.70,
+                cost=3,
+            ),
+            PlanningOption(
+                option_id="cross-check-reference",
+                success_probability=0.76,
+                information_gain=0.95,
+                cost=2,
+            ),
+            PlanningOption(
+                option_id="replace-sensor",
+                success_probability=0.90,
+                information_gain=0.40,
+                cost=5,
+            ),
+        ),
+    )
+
+
+def _selected_planning_option(scenario: PlanningScenario) -> str:
+    eligible = tuple(option for option in scenario.options if option.cost <= scenario.budget)
+    return max(
+        eligible,
+        key=lambda option: (
+            option.success_probability * option.information_gain / option.cost,
+            option.success_probability,
+            option.option_id,
+        ),
+    ).option_id
 
 
 def _metrics(attempts: tuple[Attempt, ...], *, baseline_correct: bool) -> TransferMetrics:

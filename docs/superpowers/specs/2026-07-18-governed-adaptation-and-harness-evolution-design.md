@@ -420,7 +420,11 @@ stable `change_id`, change classification, proposer, evaluator and tier, groundi
 baseline and candidate versions, protected metrics, countermetrics, full performance
 trajectory, separate execution/search/evaluation/judging/human budgets, costs, compute,
 tokens, elapsed time, tool use, human interventions, failures, regressions, rollback
-target, `evaluator_audit_id`, decision, and decision authority.
+target, the schema-v2-required `unmeasured_coverage_gaps` tuple,
+`evaluator_audit_id`, decision, and decision authority. The tuple may be empty only
+when the producer explicitly asserts that no known coverage gaps remain; omitting it
+is invalid for new records. Immutable schema-v1 records remain readable and retain
+their original canonical bytes, but cannot be extended in place.
 
 It is required for persistent memory, rules, skills, harness code, evaluator changes,
 adapter candidates, research-process changes, quality-policy proposals, and governance

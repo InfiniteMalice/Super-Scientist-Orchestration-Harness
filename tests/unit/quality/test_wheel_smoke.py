@@ -4,6 +4,7 @@ import importlib
 import json
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from types import ModuleType
 
@@ -12,6 +13,14 @@ import pytest
 
 def _wheel_smoke() -> ModuleType:
     return importlib.import_module("super_scientist.quality.wheel_smoke")
+
+
+def _write_test_wheel(path: Path) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "package-0.2.0.dist-info/entry_points.txt",
+            "[console_scripts]\nscientist-harness = super_scientist.cli.bootstrap:main\n",
+        )
 
 
 def test_wheel_smoke_uses_built_distribution_and_fixed_cli_command() -> None:
@@ -34,6 +43,37 @@ def test_wheel_smoke_uses_built_distribution_and_fixed_cli_command() -> None:
     assert "--skip" not in (*plan.install_argv, *plan.smoke_argv)
 
 
+def test_project_wheel_rejects_path_configuration_files(tmp_path: Path) -> None:
+    wheel_smoke = _wheel_smoke()
+    wheel = tmp_path / "package-0.2.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("package.pth", "import injected\n")
+
+    with pytest.raises(ValueError, match="path configuration"):
+        wheel_smoke._verify_project_wheel(wheel)
+
+
+def test_dependency_free_smoke_bootstrap_preserves_exact_public_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bootstrap = importlib.import_module("super_scientist.cli.bootstrap")
+    monkeypatch.setattr(sys, "argv", ["scientist-harness", "--help", "--json"])
+
+    with pytest.raises(SystemExit) as raised:
+        bootstrap.main()
+
+    assert raised.value.code == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "command": "scientist-harness",
+        "data": None,
+        "decision": None,
+        "errors": [{"code": "INVALID_ARGUMENT", "message": "No such option: --json"}],
+        "schema_version": 1,
+        "success": False,
+    }
+
+
 def test_default_runner_applies_a_finite_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -51,14 +91,14 @@ def test_default_runner_applies_a_finite_timeout(
     assert observed["timeout"] == 300.0
 
 
-def test_executor_uses_host_dependencies_without_network_and_fails_safe_on_timeout(
+def test_executor_creates_an_isolated_environment_and_fails_safe_on_timeout(
     tmp_path: Path,
 ) -> None:
     wheel_smoke = _wheel_smoke()
     root = tmp_path / "repository"
     wheel = root / "dist" / "package-0.2.0-py3-none-any.whl"
     wheel.parent.mkdir(parents=True)
-    wheel.write_bytes(b"wheel")
+    _write_test_wheel(wheel)
     temp_parent = tmp_path / "scratch"
     temp_parent.mkdir()
     created = temp_parent / "ssoh-wheel-smoke-timeout"
@@ -86,7 +126,6 @@ def test_executor_uses_host_dependencies_without_network_and_fails_safe_on_timeo
             "-m",
             "venv",
             "--copies",
-            "--system-site-packages",
             str(created),
         )
     ]
@@ -165,7 +204,7 @@ def _run_fake_smoke(
     root = tmp_path / "repository"
     wheel = root / "dist" / "package-0.2.0-py3-none-any.whl"
     wheel.parent.mkdir(parents=True)
-    wheel.write_bytes(b"wheel")
+    _write_test_wheel(wheel)
     temp_parent = tmp_path / "scratch"
     temp_parent.mkdir()
     created = temp_parent / "ssoh-wheel-smoke-fixed"
@@ -221,7 +260,7 @@ def test_executor_stops_at_failed_setup_stage_and_cleans_temp(
     root = tmp_path / "repository"
     wheel = root / "dist" / "package-0.2.0-py3-none-any.whl"
     wheel.parent.mkdir(parents=True)
-    wheel.write_bytes(b"wheel")
+    _write_test_wheel(wheel)
     temp_parent = tmp_path / "scratch"
     temp_parent.mkdir()
     created = temp_parent / "ssoh-wheel-smoke-failure"
@@ -264,7 +303,7 @@ def test_executor_reports_missing_environment_executable_and_cleans_temp(
     root = tmp_path / "repository"
     wheel = root / "dist" / "package-0.2.0-py3-none-any.whl"
     wheel.parent.mkdir(parents=True)
-    wheel.write_bytes(b"wheel")
+    _write_test_wheel(wheel)
     temp_parent = tmp_path / "scratch"
     temp_parent.mkdir()
     created = temp_parent / "ssoh-wheel-smoke-missing-python"
@@ -295,7 +334,7 @@ def test_executor_reports_missing_installed_cli_and_cleans_temp(tmp_path: Path) 
     root = tmp_path / "repository"
     wheel = root / "dist" / "package-0.2.0-py3-none-any.whl"
     wheel.parent.mkdir(parents=True)
-    wheel.write_bytes(b"wheel")
+    _write_test_wheel(wheel)
     temp_parent = tmp_path / "scratch"
     temp_parent.mkdir()
     created = temp_parent / "ssoh-wheel-smoke-missing-cli"
@@ -336,7 +375,7 @@ def test_executor_converts_runner_exception_to_safe_failure_and_cleans_temp(
     root = tmp_path / "repository"
     wheel = root / "dist" / "package-0.2.0-py3-none-any.whl"
     wheel.parent.mkdir(parents=True)
-    wheel.write_bytes(b"wheel")
+    _write_test_wheel(wheel)
     temp_parent = tmp_path / "scratch"
     temp_parent.mkdir()
     created = temp_parent / "ssoh-wheel-smoke-exception"
@@ -365,6 +404,7 @@ def test_executor_converts_runner_exception_to_safe_failure_and_cleans_temp(
 def test_executor_uses_fixed_argv_accepts_exact_cli_envelope_and_cleans_temp(
     tmp_path: Path,
 ) -> None:
+    wheel_smoke = _wheel_smoke()
     envelope = json.dumps(
         {
             "command": "scientist-harness",
@@ -387,6 +427,8 @@ def test_executor_uses_fixed_argv_accepts_exact_cli_envelope_and_cleans_temp(
     assert tuple(stage.name for stage in result.stages) == ("venv", "install", "cli-smoke")
     assert calls[0][1:4] == ("-m", "venv", "--copies")
     assert Path(calls[1][-1]).name == "package-0.2.0-py3-none-any.whl"
+    assert Path(calls[2][0]).name == wheel_smoke.VENV_PYTHON_NAME
+    assert calls[2][1:4] == ("-I", "-m", "super_scientist.cli.bootstrap")
     assert calls[2][-2:] == ("--help", "--json")
     assert not created.exists()
 
@@ -433,7 +475,7 @@ def test_executor_never_deletes_unverified_temporary_path(tmp_path: Path) -> Non
     root = tmp_path / "repository"
     wheel = root / "dist" / "package-0.2.0-py3-none-any.whl"
     wheel.parent.mkdir(parents=True)
-    wheel.write_bytes(b"wheel")
+    _write_test_wheel(wheel)
     temp_parent = tmp_path / "scratch"
     temp_parent.mkdir()
     outside = tmp_path / "outside"

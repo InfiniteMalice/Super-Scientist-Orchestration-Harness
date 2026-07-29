@@ -264,6 +264,37 @@ def test_admission_rejects_self_or_circular_governance_records(cycle: str) -> No
         )
 
 
+@pytest.mark.parametrize("shared_field", ("configuration_hash", "provider_id", "model_id"))
+def test_admission_rejects_correlated_human_approval(shared_field: str) -> None:
+    from super_scientist.quality.policy_records import (
+        admit_quality_policy_records,
+        canonical_record_hash,
+    )
+
+    proposal, measurement, audit, approval = _record_chain()
+    shared_value = "b" * 64 if shared_field == "configuration_hash" else f"shared-{shared_field}"
+    correlated_evaluator = audit.evaluator.model_copy(update={shared_field: shared_value})
+    audit = audit.model_copy(update={"evaluator": correlated_evaluator})
+    measurement = measurement.model_copy(update={"evaluator": correlated_evaluator})
+    correlated_approver = approval.approver.model_copy(update={shared_field: shared_value})
+    measurement = measurement.model_copy(update={"decision_authority": correlated_approver})
+    approval = approval.model_copy(
+        update={
+            "approver": correlated_approver,
+            "measurement_sha256": canonical_record_hash(measurement),
+            "evaluator_audit_sha256": canonical_record_hash(audit),
+        }
+    )
+
+    with pytest.raises(ValueError, match="self or circular"):
+        admit_quality_policy_records(
+            proposal=proposal,
+            measurement=measurement,
+            evaluator_audit=audit,
+            approval=approval,
+        )
+
+
 def test_ledger_append_is_idempotent_but_changed_content_conflicts(tmp_path: Path) -> None:
     from super_scientist.quality.policy_records import (
         QualityPolicyRecordConflict,
@@ -540,6 +571,7 @@ def _record_chain() -> tuple[
         usage_by_category=_usage_breakdown(aggregate_usage),
         usage=aggregate_usage,
         failures=("attempt-1-failed",),
+        unmeasured_coverage_gaps=("built-wheel dependency installation remained unmeasured",),
         rollback_target_id=proposal.rollback_commit,
         evaluator_audit_id=audit.evaluator_audit_id,
         decision=MeasurementDecision.ACCEPTED,

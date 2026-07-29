@@ -114,6 +114,32 @@ def test_evaluator_audit_recomputes_independence() -> None:
 
 
 @pytest.mark.parametrize(
+    ("auditor_kind", "audited_role", "shared_field"),
+    (
+        (ActorKind.HUMAN, "evaluator", "configuration_hash"),
+        (ActorKind.TOOL, "proposer", "provider_id"),
+        (ActorKind.SERVICE, "candidate_producer", "model_id"),
+    ),
+)
+def test_evaluator_audit_rejects_correlated_aliases_across_actor_kinds(
+    auditor_kind: ActorKind,
+    audited_role: str,
+    shared_field: str,
+) -> None:
+    shared_value = "b" * 64 if shared_field == "configuration_hash" else f"shared-{shared_field}"
+    auditor = _actor("auditor", auditor_kind).model_copy(update={shared_field: shared_value})
+    audit = _audit(auditor=_actor("independent-auditor"), evaluator=_actor("evaluator"))
+    payload = audit.model_dump(mode="python")
+    payload["auditor"] = auditor
+    payload[audited_role] = getattr(audit, audited_role).model_copy(
+        update={shared_field: shared_value}
+    )
+
+    with pytest.raises(ValidationError, match="auditor must be independent"):
+        EvaluatorAuditRecord.model_validate(payload)
+
+
+@pytest.mark.parametrize(
     "weak_category",
     (
         VerificationLevel.RUBRIC_JUDGE,
@@ -146,6 +172,48 @@ def test_measurement_requires_complete_m0_through_mt_trajectory() -> None:
         *measurement.rejected_changes,
     )
     assert measurement.execution_budget != measurement.search_budget
+
+
+def test_measurement_requires_explicit_unmeasured_coverage_gaps() -> None:
+    payload = _measurement().model_dump(mode="python")
+    payload.pop("unmeasured_coverage_gaps", None)
+
+    with pytest.raises(ValidationError, match="unmeasured_coverage_gaps"):
+        SelfImprovementMeasurementRecord.model_validate(payload)
+
+
+def test_legacy_measurement_schema_preserves_immutable_missing_gap_bytes() -> None:
+    payload = _measurement().model_dump(mode="python")
+    payload["schema_version"] = 1
+    payload.pop("unmeasured_coverage_gaps")
+
+    measurement = SelfImprovementMeasurementRecord.model_validate(payload)
+
+    assert measurement.unmeasured_coverage_gaps is None
+    assert "unmeasured_coverage_gaps" not in measurement.model_dump(mode="json")
+
+
+def test_legacy_measurement_schema_cannot_be_reused_with_new_gap_data() -> None:
+    payload = _measurement().model_dump(mode="python")
+    payload["schema_version"] = 1
+
+    with pytest.raises(ValidationError, match="cannot be retroactively extended"):
+        SelfImprovementMeasurementRecord.model_validate(payload)
+
+
+def test_measurement_retains_unmeasured_coverage_gaps() -> None:
+    payload = _measurement().model_dump(mode="python")
+    payload["unmeasured_coverage_gaps"] = (
+        "production traffic remained unmeasured",
+        "long-horizon drift remained unmeasured",
+    )
+
+    measurement = SelfImprovementMeasurementRecord.model_validate(payload)
+
+    assert measurement.unmeasured_coverage_gaps == (
+        "production traffic remained unmeasured",
+        "long-horizon drift remained unmeasured",
+    )
 
 
 def test_measurement_rejects_best_only_or_unpartitioned_change_summaries() -> None:
@@ -504,6 +572,7 @@ def _measurement(
         usage_by_category=_usage_breakdown(execution=aggregate_usage),
         usage=aggregate_usage,
         failures=("one failed candidate retained",),
+        unmeasured_coverage_gaps=("production traffic remained unmeasured",),
         rollback_target_id="policy-v1",
         evaluator_audit_id="audit-1",
         decision=MeasurementDecision.ACCEPTED,

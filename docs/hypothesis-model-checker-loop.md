@@ -109,9 +109,12 @@ evidence boundary.
 
 ## Transfer Evaluation
 
-The offline evaluation exercises the same domain-neutral loop on four independently
+The offline evaluation exercises the same domain-neutral loop on five independently
 authored deterministic fixtures: thermal chamber, exponential decay, an immutable
-synthetic equipment-incident document, and an in-memory software-maintenance manifest.
+synthetic equipment-incident document, an in-memory software-maintenance manifest, and
+a sensor-calibration planning-under-uncertainty scenario with an explicit budget,
+success probabilities, information gains, and a deterministic expected-utility
+checker.
 It compares direct deterministic reasoning, ordinary plan-and-execute, retry with
 checker feedback, and the typed revision loop. Metrics are recomputed from condition
 attempts and remain separate: correctness, checker accuracy, false admission,

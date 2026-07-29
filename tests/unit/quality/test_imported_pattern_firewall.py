@@ -15,14 +15,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 POLICY_PATH = PROJECT_ROOT / "quality" / "imported-pattern-firewall-policy.json"
 TEXT_SUFFIXES = {
     ".cfg",
+    ".csv",
+    ".in",
     ".ini",
+    ".j2",
+    ".jinja",
     ".json",
     ".md",
     ".ps1",
     ".py",
+    ".pyi",
+    ".properties",
+    ".rst",
     ".sh",
     ".toml",
     ".txt",
+    ".tsv",
+    ".xml",
     ".yaml",
     ".yml",
 }
@@ -104,6 +113,9 @@ def test_firewall_fails_closed_for_missing_malformed_and_allowlist_drift(
         ("src/leak.py", "{term}"),
         ("tests/fixtures/leak.json", '{"value":"{term}"}'),
         ("examples/leak.py", "# {term}"),
+        ("src/package/leak.pyi", "# {term}"),
+        ("src/package/manifest.rst", "{term}"),
+        ("src/package/schema.xml", "<value>{term}</value>"),
         (".github/workflows/leak.yml", "name: {term}"),
         ("pyproject.toml", '[project]\nname = "{term}"\n'),
     ],
@@ -176,6 +188,77 @@ def test_firewall_scans_nested_generated_names_and_future_top_level_inventories(
         "future-config/dependencies.lock",
         "commands/release",
     }
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "body"),
+    [
+        (
+            "src/package/contracts.pyi",
+            "class PuzzleAdapter:\n"
+            "    def load(self, grid: object, cell_color: object) -> object: ...\n",
+        ),
+        (
+            "src/package/split_contract.py",
+            "class Grid:\n    pass\nclass CellColor:\n    pass\nclass PuzzleLoader:\n    pass\n",
+        ),
+        (
+            "src/package/split_contract.pyi",
+            "class Grid: ...\nclass CellColor: ...\nclass PuzzleAdapter: ...\n",
+        ),
+        (
+            "src/package/schema.json",
+            '{"properties":{"grid":{"type":"array"},"cell_color":{"type":"integer"},'
+            '"puzzle_loader":{"type":"string"}}}',
+        ),
+        ("src/grid_cell_adapter/__init__.py", '"""Package boundary."""\n'),
+    ],
+)
+def test_firewall_rejects_generic_spatial_adapter_contracts(
+    tmp_path: Path,
+    relative_path: str,
+    body: str,
+) -> None:
+    firewall = _firewall()
+    root = _minimal_repository(tmp_path)
+    target = root / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+
+    result = firewall.run_imported_pattern_firewall(root)
+
+    assert result.passed is False
+    assert any(
+        finding.code == "IMPORTED_CONTRACT_FOUND" and finding.path == relative_path
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "grid_size = 3\ncell_count = 9\n",
+        "adapter_id = 'provider'\ncolor = 'blue'\n",
+        "def load_adapter(adapter_id: str) -> str:\n    return adapter_id\n",
+        (
+            "GRID_SIZE = 3\nDEFAULT_COLOR = 'blue'\n"
+            "def count_cells(values: list[object]) -> int:\n    return len(values)\n"
+            "class ProviderClient:\n    pass\n"
+        ),
+    ],
+)
+def test_firewall_does_not_reject_individual_generic_identifiers(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    firewall = _firewall()
+    root = _minimal_repository(tmp_path)
+    (root / "src" / "safe.py").write_text(body, encoding="utf-8")
+
+    result = firewall.run_imported_pattern_firewall(root)
+
+    assert result.passed is True
+    assert result.findings == ()
 
 
 def test_git_inventory_scans_tracked_and_untracked_files_but_not_ignored_scratch(

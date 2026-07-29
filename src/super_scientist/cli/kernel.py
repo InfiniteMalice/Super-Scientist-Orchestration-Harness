@@ -103,13 +103,20 @@ class CliBoundaryError(ValueError):
 def _error_payload(error: Exception) -> dict[str, str]:
     if isinstance(error, CliBoundaryError):
         return {"code": error.code, "message": str(error)}
-    if isinstance(error, (JSONDecodeError, UnicodeError, ValidationError)):
-        return {"code": "INVALID_ARGUMENT", "message": str(error)}
+    if isinstance(error, ValidationError):
+        return {"code": "INVALID_ARGUMENT", "message": "input validation failed"}
+    if isinstance(error, (JSONDecodeError, UnicodeError)):
+        return {"code": "INVALID_ARGUMENT", "message": "input is invalid"}
     if isinstance(error, StorageIntegrityError):
-        return {"code": "STORAGE_INTEGRITY_ERROR", "message": str(error)}
+        return {
+            "code": "STORAGE_INTEGRITY_ERROR",
+            "message": "storage integrity verification failed",
+        }
     if isinstance(error, SQLAlchemyError):
-        return {"code": "STORAGE_ERROR", "message": str(error)}
-    return {"code": "COMMAND_FAILED", "message": str(error)}
+        return {"code": "STORAGE_ERROR", "message": "storage operation failed"}
+    if isinstance(error, OSError):
+        return {"code": "FILESYSTEM_ERROR", "message": "filesystem operation failed"}
+    return {"code": "COMMAND_FAILED", "message": "command failed"}
 
 
 def _command_boundary(
@@ -382,8 +389,11 @@ def init_command(
         policy_path.write_text(policy.model_dump_json(indent=2), encoding="utf-8")
     try:
         snapshot = load_policy(policy_path)
-    except (JSONDecodeError, UnicodeError, ValidationError) as error:
-        raise CliBoundaryError("INVALID_POLICY", str(error)) from error
+    except (JSONDecodeError, UnicodeError, ValidationError):
+        raise CliBoundaryError(
+            "INVALID_POLICY",
+            "governance policy is invalid",
+        ) from None
     url = _database_url(resolved)
     upgrade_database(url)
     engine = create_database_engine(url)

@@ -32,7 +32,7 @@ dev = [
 ]
 
 [project.scripts]
-scientist-harness = "super_scientist.cli.main:main"
+scientist-harness = "super_scientist.cli.bootstrap:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/super_scientist"]

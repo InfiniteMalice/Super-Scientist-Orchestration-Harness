@@ -1720,6 +1720,7 @@ def _measurement() -> SelfImprovementMeasurementRecord:
         ),
         usage=_usage(2),
         failures=("retained failed experiment",),
+        unmeasured_coverage_gaps=("live production behavior remained unmeasured",),
         rollback_target_id="policy-v1",
         evaluator_audit_id="audit-1",
         decision=MeasurementDecision.ACCEPTED,
@@ -1941,4 +1942,6 @@ def _human_actor(identifier: str) -> ActorIdentity:
 
 
 def _model_actor(identifier: str) -> ActorIdentity:
-    return ActorIdentity.model(identifier, "provider", identifier, None, NOW)
+    return ActorIdentity.model(
+        identifier, f"{identifier}-provider", identifier, None, NOW
+    ).model_copy(update={"configuration_hash": sha256_hex(identifier.encode("utf-8"))})

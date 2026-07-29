@@ -25,6 +25,7 @@ class FakeRecord(BaseModel):
     trail_version_id: str = ""
     rule_id: str = ""
     passed: bool = True
+    unmeasured_coverage_gaps: tuple[str, ...] = ()
 
 
 def _json_payload(result: CliResult) -> dict[str, object]:
@@ -96,8 +97,8 @@ def test_adaptation_grouped_commands_are_registered(arguments: tuple[str, ...]) 
 @pytest.mark.parametrize(
     ("content", "error_fragment"),
     [
-        pytest.param(b"{", "Expecting", id="malformed-json"),
-        pytest.param(b"\xff\xfe", "decode", id="invalid-utf8"),
+        pytest.param(b"{", "input is invalid", id="malformed-json"),
+        pytest.param(b"\xff\xfe", "input is invalid", id="invalid-utf8"),
         pytest.param(b"[]", "JSON object", id="array"),
         pytest.param(b"null", "JSON object", id="null"),
     ],
@@ -356,7 +357,11 @@ def test_improvement_report_returns_matching_measurements(
 ) -> None:
     snapshot = SimpleNamespace(
         measurements=(
-            FakeRecord(identifier="kept", change_id="change-1"),
+            FakeRecord(
+                identifier="kept",
+                change_id="change-1",
+                unmeasured_coverage_gaps=("production traffic remained unmeasured",),
+            ),
             FakeRecord(identifier="other", change_id="change-2"),
         )
     )
@@ -371,6 +376,9 @@ def test_improvement_report_returns_matching_measurements(
     assert result.exit_code == 0, result.output
     payload = _json_payload(result)
     assert [record["identifier"] for record in payload["data"]] == ["kept"]
+    assert payload["data"][0]["unmeasured_coverage_gaps"] == [
+        "production traffic remained unmeasured"
+    ]
 
 
 def test_progress_status_returns_current_plan_and_related_records(

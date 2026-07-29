@@ -58,6 +58,8 @@ _SHA256_ADAPTER: TypeAdapter[Sha256Hex] = TypeAdapter(Sha256Hex)
 _WORKER_JOIN_TIMEOUT_SECONDS = 5.0
 _WORKER_RESPONSE_TIMEOUT_SECONDS = 10.0
 _MAX_WORKER_MESSAGE_BYTES = 64 * 1024 * 1024
+_MAX_WORKER_REQUEST_NUMBER = (10**20) - 1
+_MAX_WORKER_REQUEST_ID = f"request-{_MAX_WORKER_REQUEST_NUMBER}"
 
 _protected_metadata = MetaData()
 _protected_expected_outputs = Table(
@@ -114,6 +116,41 @@ class _WorkerResponse(_StrictFrozenModel):
         if not self.ok and (self.error_code is None or self.error_message is None):
             raise ValueError("worker response error fields must exactly match failure status")
         return self
+
+
+def _worker_success_bytes(
+    request_id: str,
+    payload: object | None,
+) -> bytes:
+    wire_payload: object | None
+    if isinstance(payload, bytes):
+        wire_payload = {"base64": base64.b64encode(payload).decode("ascii")}
+    elif isinstance(payload, BaseModel):
+        wire_payload = payload.model_dump(mode="json")
+    else:
+        wire_payload = payload
+    return (
+        _WorkerResponse(
+            request_id=request_id,
+            ok=True,
+            payload=wire_payload,
+            error_code=None,
+            error_message=None,
+        )
+        .model_dump_json()
+        .encode("utf-8")
+    )
+
+
+def _maximum_expected_output_bytes(max_message_bytes: int) -> int:
+    empty_response_size = len(_worker_success_bytes(_MAX_WORKER_REQUEST_ID, b""))
+    if max_message_bytes < empty_response_size:
+        raise ValueError("worker message limit cannot contain an expected output response")
+    available_base64_bytes = max_message_bytes - empty_response_size
+    return (available_base64_bytes // 4) * 3
+
+
+_MAX_EXPECTED_OUTPUT_BYTES = _maximum_expected_output_bytes(_MAX_WORKER_MESSAGE_BYTES)
 
 
 class ProtectedExpectedOutputReceipt(_StrictFrozenModel):
@@ -217,6 +254,8 @@ class ProtectedEvaluationStore:
         validated_task_id = _STABLE_IDENTIFIER_ADAPTER.validate_python(task_id)
         if not isinstance(expected_output, bytes):
             raise TypeError("protected expected output must be bytes")
+        if len(expected_output) > _MAX_EXPECTED_OUTPUT_BYTES:
+            raise ValueError("protected expected output exceeds worker response limit")
         digest = sha256_hex(expected_output)
         with self._lock:
             engine, artifacts = self._resources()
@@ -385,6 +424,11 @@ class _ProcessCapability:
                 ) from error
 
     def _exchange(self, operation: str, payload: object | None) -> object | None:
+        if self._request_number >= _MAX_WORKER_REQUEST_NUMBER:
+            raise ProtectedCapabilityError(
+                "CAPABILITY_REQUEST_LIMIT_EXCEEDED",
+                "protected capability request limit exceeded",
+            )
         self._request_number += 1
         request_id = f"request-{self._request_number}"
         request = _WorkerRequest(
@@ -785,24 +829,7 @@ def _send_worker_success(
     request_id: str,
     payload: object | None,
 ) -> None:
-    wire_payload: object | None
-    if isinstance(payload, bytes):
-        wire_payload = {"base64": base64.b64encode(payload).decode("ascii")}
-    elif isinstance(payload, BaseModel):
-        wire_payload = payload.model_dump(mode="json")
-    else:
-        wire_payload = payload
-    transport.send_bytes(
-        _WorkerResponse(
-            request_id=request_id,
-            ok=True,
-            payload=wire_payload,
-            error_code=None,
-            error_message=None,
-        )
-        .model_dump_json()
-        .encode("utf-8")
-    )
+    transport.send_bytes(_worker_success_bytes(request_id, payload))
 
 
 def _send_worker_error(

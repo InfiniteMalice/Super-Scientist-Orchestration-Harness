@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess  # nosec B404
 import sys
@@ -27,7 +29,7 @@ ALLOWED_ATTRIBUTION_PATHS = (
     "docs/superpowers/specs/2026-07-11-super-scientist-foundation-design.md",
     "docs/superpowers/specs/2026-07-18-governed-adaptation-and-harness-evolution-design.md",
 )
-ACTIVE_APPROVED_REGISTRY_HASH = "a57908a27492d82ae73d011b3c243d26b4b2efe352c07052261012ffab91cc72"
+ACTIVE_APPROVED_REGISTRY_HASH = "a02ea605444735c954f92fcfd83b9393c93148971c2c6666d0e421f4c161b45d"
 ACTIVE_APPROVED_FIREWALL_POLICY_SHA256 = (
     "29e5dad156e9fba2196b6a4989187ca1051295779cf1a3e11cce7be41410db38"
 )
@@ -39,21 +41,30 @@ ACTIVE_APPROVED_ALLOWED_ATTRIBUTION_PATHS = (
     "docs/superpowers/specs/2026-07-18-governed-adaptation-and-harness-evolution-design.md",
 )
 ACTIVE_APPROVED_QUALITY_POLICY_HASH = (
-    "a5dfc9857c5af5db9eec17ce1f57cd2d367e47f3a4b759aa8fda55a4f247e494"
+    "49ca2de6b619c28098c602ec9065118b4b4819482072402a203775e870f7e8b7"
 )
 
 _TEXT_SUFFIXES = frozenset(
     {
         ".cfg",
+        ".csv",
+        ".in",
         ".ini",
+        ".j2",
+        ".jinja",
         ".json",
         ".lock",
         ".md",
         ".ps1",
         ".py",
+        ".pyi",
+        ".properties",
+        ".rst",
         ".sh",
         ".toml",
         ".txt",
+        ".tsv",
+        ".xml",
         ".yaml",
         ".yml",
     }
@@ -64,6 +75,7 @@ _IGNORED_TOP_LEVEL_NAMES = frozenset(
         ".git",
         ".hypothesis",
         ".mypy_cache",
+        ".pytest-measurement",
         ".pytest_cache",
         ".ruff_cache",
         ".superpowers",
@@ -117,6 +129,7 @@ type FindingCode = Literal[
     "POLICY_SCHEMA_INVALID",
     "POLICY_ALLOWLIST_MISMATCH",
     "DENIED_TERM_FOUND",
+    "IMPORTED_CONTRACT_FOUND",
     "TEXT_DECODE_FAILED",
     "UNSAFE_SCAN_PATH",
     "SCAN_FAILED",
@@ -422,6 +435,14 @@ def _scan_repository(
                         term_sha256=hashlib.sha256(term.encode("utf-8")).hexdigest(),
                     )
                 )
+        if _contains_imported_contract(path, relative, text):
+            findings.append(
+                FirewallFinding(
+                    code="IMPORTED_CONTRACT_FOUND",
+                    path=relative,
+                    message="an imported spatial adapter contract was found",
+                )
+            )
     return tuple(findings)
 
 
@@ -526,6 +547,72 @@ def _recursive_scan_paths(project_root: Path) -> tuple[Path, ...]:
 
 def _is_text_candidate(path: Path) -> bool:
     return not path.suffix or path.suffix.lower() in _TEXT_SUFFIXES
+
+
+def _contains_imported_contract(path: Path, relative: str, text: str) -> bool:
+    if _identifier_set_has_imported_contract(list(PurePosixPath(relative).parts)):
+        return True
+    suffix = path.suffix.lower()
+    if suffix in {".py", ".pyi"}:
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return False
+        return _identifier_set_has_imported_contract(_python_scope_identifiers(tree))
+    elif suffix == ".json":
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return False
+        return _identifier_set_has_imported_contract(list(_structured_keys(payload)))
+    elif suffix in {".toml", ".yaml", ".yml"}:
+        return _identifier_set_has_imported_contract(
+            [
+                match.group(1)
+                for line in text.splitlines()
+                if (match := re.match(r"\s*([A-Za-z_][A-Za-z0-9_-]*)\s*[:=]", line))
+            ]
+        )
+    return False
+
+
+def _python_scope_identifiers(root: ast.AST) -> list[str]:
+    identifiers: list[str] = []
+    for node in ast.walk(root):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            identifiers.append(node.name)
+        elif isinstance(node, ast.arg):
+            identifiers.append(node.arg)
+        elif isinstance(node, ast.Name):
+            identifiers.append(node.id)
+        elif isinstance(node, ast.Attribute):
+            identifiers.append(node.attr)
+    return identifiers
+
+
+def _structured_keys(value: object) -> tuple[str, ...]:
+    if isinstance(value, dict):
+        return tuple(str(key) for key in value) + tuple(
+            key for item in value.values() for key in _structured_keys(item)
+        )
+    if isinstance(value, list):
+        return tuple(key for item in value for key in _structured_keys(item))
+    return ()
+
+
+def _identifier_set_has_imported_contract(identifiers: list[str]) -> bool:
+    words = {
+        word.casefold()
+        for identifier in identifiers
+        for word in re.split(
+            r"[^A-Za-z0-9]+",
+            re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", identifier),
+        )
+        if word
+    }
+    return (
+        "grid" in words and bool(words & {"cell", "color"}) and bool(words & {"adapter", "loader"})
+    )
 
 
 def _unsafe_repository_path_reason(project_root: Path, path: Path) -> str | None:

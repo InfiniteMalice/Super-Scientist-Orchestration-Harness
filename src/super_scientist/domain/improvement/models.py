@@ -199,7 +199,7 @@ class PerformanceTrajectoryPoint(_StrictFrozenModel):
 
 
 class SelfImprovementMeasurementRecord(_StrictFrozenModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 2
     measurement_id: StableIdentifier
     change_id: StableIdentifier
     run_id: StableIdentifier
@@ -230,6 +230,10 @@ class SelfImprovementMeasurementRecord(_StrictFrozenModel):
     usage_by_category: ResourceUsageBreakdown
     usage: ResourceUsage
     failures: tuple[NonBlankText, ...]
+    unmeasured_coverage_gaps: tuple[NonBlankText, ...] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     rollback_target_id: StableIdentifier
     evaluator_audit_id: StableIdentifier
     decision: MeasurementDecision
@@ -239,6 +243,10 @@ class SelfImprovementMeasurementRecord(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_complete_measurement(self) -> SelfImprovementMeasurementRecord:
+        if self.schema_version == 2 and self.unmeasured_coverage_gaps is None:
+            raise ValueError("schema version 2 requires unmeasured_coverage_gaps")
+        if self.schema_version == 1 and self.unmeasured_coverage_gaps is not None:
+            raise ValueError("schema version 1 cannot be retroactively extended")
         if len(self.trajectory) < 2 or self.trajectory[0].step_index != 0:
             raise ValueError("measurement must retain complete m_0 through m_T trajectory")
         if len(self.trajectory) != self.expected_final_index + 1:

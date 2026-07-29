@@ -212,7 +212,10 @@ execution, hypothesis admission contracts, deterministic handbook generation, an
 matched-budget harness decisions.
 
 The vertical-slice simulator, measurement report, and metadata-only adapter records are
-deterministic fakes used to test contracts. Learned evaluation, primitive evolution,
-live model providers, experiment control, and training are interface-only,
+deterministic fakes used to test contracts. Each new schema-v2 measurement report
+explicitly lists its `unmeasured_coverage_gaps`, including live behavior outside the
+deterministic fixture; immutable schema-v1 records remain byte-stable and readable.
+Learned evaluation, primitive evolution, live model providers, experiment control, and
+training are interface-only,
 experimental, or deferred. S21-S29 are source inspirations marked not reproduced; no
 general improvement or compatibility with S29 follows from this architecture.

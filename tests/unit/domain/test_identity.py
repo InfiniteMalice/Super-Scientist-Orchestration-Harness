@@ -68,17 +68,29 @@ def test_missing_configuration_hash_on_either_model_is_not_independent() -> None
     complete = ActorIdentity(
         actor_id="complete",
         kind=ActorKind.MODEL,
-        provider_id="provider",
-        model_id="model",
-        adapter_id="adapter",
+        provider_id="provider-complete",
+        model_id="model-complete",
+        adapter_id="adapter-complete",
         configuration_hash="a" * 64,
         created_at=datetime.now(UTC),
     )
-    missing_left = complete.model_copy(
-        update={"actor_id": "missing-left", "configuration_hash": None}
+    missing_left = ActorIdentity(
+        actor_id="missing-left",
+        kind=ActorKind.MODEL,
+        provider_id="provider-left",
+        model_id="model-left",
+        adapter_id="adapter-left",
+        configuration_hash=None,
+        created_at=datetime.now(UTC),
     )
-    missing_right = complete.model_copy(
-        update={"actor_id": "missing-right", "configuration_hash": None}
+    missing_right = ActorIdentity(
+        actor_id="missing-right",
+        kind=ActorKind.MODEL,
+        provider_id="provider-right",
+        model_id="model-right",
+        adapter_id="adapter-right",
+        configuration_hash=None,
+        created_at=datetime.now(UTC),
     )
 
     assert not are_independent(missing_left, complete)
@@ -122,7 +134,7 @@ def test_exact_same_model_fingerprint_is_not_independent() -> None:
     assert not are_independent(left, right)
 
 
-def test_configuration_only_model_aliases_are_not_independent() -> None:
+def test_same_weights_with_different_adapters_are_not_independent() -> None:
     left = ActorIdentity(
         actor_id="left",
         kind=ActorKind.MODEL,
@@ -132,17 +144,61 @@ def test_configuration_only_model_aliases_are_not_independent() -> None:
         configuration_hash="a" * 64,
         created_at=datetime.now(UTC),
     )
-    right = left.model_copy(update={"actor_id": "right", "configuration_hash": "b" * 64})
+    right = left.model_copy(
+        update={
+            "actor_id": "right",
+            "adapter_id": "other-adapter",
+            "configuration_hash": "b" * 64,
+        }
+    )
 
     assert not are_independent(left, right)
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
-    [("model_id", "other-model"), ("adapter_id", "other-adapter")],
+    ("left_kind", "right_kind"),
+    tuple((left_kind, right_kind) for left_kind in ActorKind for right_kind in ActorKind),
 )
-def test_distinct_model_or_adapter_identity_is_independent(field: str, value: str) -> None:
-    left = ActorIdentity.model("left", "provider", "model", "adapter", datetime.now(UTC))
-    right = left.model_copy(update={"actor_id": "right", field: value})
+def test_shared_configuration_rejects_aliases_across_all_actor_kinds(
+    left_kind: ActorKind,
+    right_kind: ActorKind,
+) -> None:
+    def correlated_actor(actor_id: str, kind: ActorKind) -> ActorIdentity:
+        model_identity = (
+            {"provider_id": actor_id, "model_id": actor_id} if kind is ActorKind.MODEL else {}
+        )
+        return ActorIdentity(
+            actor_id=actor_id,
+            kind=kind,
+            created_at=datetime.now(UTC),
+            configuration_hash="a" * 64,
+            **model_identity,
+        )
+
+    assert not are_independent(
+        correlated_actor("left", left_kind),
+        correlated_actor("right", right_kind),
+    )
+
+
+def test_distinct_operational_identities_are_independent() -> None:
+    left = ActorIdentity(
+        actor_id="left",
+        kind=ActorKind.MODEL,
+        provider_id="provider-left",
+        model_id="model-left",
+        adapter_id="adapter-left",
+        configuration_hash="a" * 64,
+        created_at=datetime.now(UTC),
+    )
+    right = ActorIdentity(
+        actor_id="right",
+        kind=ActorKind.MODEL,
+        provider_id="provider-right",
+        model_id="model-right",
+        adapter_id="adapter-right",
+        configuration_hash="b" * 64,
+        created_at=datetime.now(UTC),
+    )
 
     assert are_independent(left, right)

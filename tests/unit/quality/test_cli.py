@@ -90,6 +90,7 @@ def test_quality_gate_json_preserves_exact_failure_code(
         "not_run",
         "not_run",
         "not_run",
+        "not_run",
     )
 
 

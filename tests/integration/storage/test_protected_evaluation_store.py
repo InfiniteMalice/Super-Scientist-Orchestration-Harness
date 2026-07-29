@@ -467,6 +467,53 @@ def test_protected_expected_output_identity_is_append_only_and_replay_safe(tmp_p
 
 
 @pytest.mark.integration
+def test_expected_output_wire_limit_rejects_before_persistence_and_accepts_readable_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protected_root = tmp_path / "protected"
+    monkeypatch.setattr(protected_evaluation_module, "_MAX_EXPECTED_OUTPUT_BYTES", 3)
+    store = ProtectedEvaluationStore(protected_root)
+    try:
+        with pytest.raises(ValueError, match="worker response limit"):
+            store.add_expected_output("too-large", b"four")
+
+        with closing(sqlite3.connect(protected_root / "protected.sqlite3")) as connection:
+            assert connection.execute(
+                "SELECT count(*) FROM protected_expected_outputs"
+            ).fetchone() == (0,)
+        assert not any(path.is_file() for path in (protected_root / "artifacts").rglob("*"))
+
+        receipt = store.add_expected_output("at-limit", b"max")
+        reader = store.answer_reader()
+        try:
+            assert receipt.size_bytes == 3
+            assert reader.read_expected_output("at-limit") == b"max"
+        finally:
+            reader.close()
+    finally:
+        store.close()
+
+
+def test_expected_output_limit_is_exact_for_largest_official_worker_response_id() -> None:
+    response_limit = 128
+    maximum = protected_evaluation_module._maximum_expected_output_bytes(response_limit)
+    largest_request_id = protected_evaluation_module._MAX_WORKER_REQUEST_ID
+
+    accepted = protected_evaluation_module._worker_success_bytes(
+        largest_request_id,
+        b"x" * maximum,
+    )
+    rejected = protected_evaluation_module._worker_success_bytes(
+        largest_request_id,
+        b"x" * (maximum + 1),
+    )
+
+    assert len(accepted) <= response_limit
+    assert len(rejected) > response_limit
+
+
+@pytest.mark.integration
 def test_concurrent_same_key_replays_are_serialized(tmp_path: Path) -> None:
     protected_root = tmp_path / "protected"
     store = ProtectedEvaluationStore(protected_root)

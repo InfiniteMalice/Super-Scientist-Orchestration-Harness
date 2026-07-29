@@ -51,23 +51,21 @@ class ActorIdentity(BaseModel):
 
 
 def are_independent(left: ActorIdentity, right: ActorIdentity) -> bool:
+    """Fail closed when actor IDs or any declared operational identity correlate."""
+
     if left.actor_id == right.actor_id:
         return False
+    correlated_fields = (
+        (left.provider_id, right.provider_id),
+        (left.model_id, right.model_id),
+        (left.adapter_id, right.adapter_id),
+        (left.configuration_hash, right.configuration_hash),
+    )
+    if any(
+        left_value is not None and right_value is not None and left_value == right_value
+        for left_value, right_value in correlated_fields
+    ):
+        return False
     if left.kind is ActorKind.MODEL and right.kind is ActorKind.MODEL:
-        if (
-            left.provider_id is None
-            or left.model_id is None
-            or right.provider_id is None
-            or right.model_id is None
-        ):
-            return False
-        return (
-            left.provider_id,
-            left.model_id,
-            left.adapter_id,
-        ) != (
-            right.provider_id,
-            right.model_id,
-            right.adapter_id,
-        )
+        return left.configuration_hash is not None and right.configuration_hash is not None
     return True
