@@ -327,7 +327,7 @@ def _object_graph_field_names(values: tuple[object, ...]) -> tuple[str, ...]:
             slot_names = (slots,) if isinstance(slots, str) else slots
             candidates = (*state_names, *slot_names)
         names.extend(
-            candidate.casefold().replace("-", "_")
+            "".join(character for character in candidate.casefold() if character.isalnum())
             for candidate in candidates
             if isinstance(candidate, str)
         )
@@ -337,11 +337,11 @@ def _object_graph_field_names(values: tuple[object, ...]) -> tuple[str, ...]:
 def _reject_forbidden_candidate_authority(root: object) -> None:
     forbidden_reference_fragments = ("protected://", "artifact://")
     forbidden_field_names = {
-        "answer_bytes",
-        "answer_reference",
-        "expected_output",
-        "protected_answer",
-        "protected_content",
+        "answerbytes",
+        "answerreference",
+        "expectedoutput",
+        "protectedanswer",
+        "protectedcontent",
     }
     values = _walk_object_graph_values(root)
     if forbidden_field_names.intersection(_object_graph_field_names(values)):
