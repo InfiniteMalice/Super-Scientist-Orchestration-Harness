@@ -353,7 +353,7 @@ def _preflight_import(
     source_artifact_store: ArtifactStore,
     clock: Clock,
 ) -> WorkspaceImportResult:
-    with TemporaryDirectory(prefix="ssöh-workspace-preflight-") as temporary:
+    with TemporaryDirectory(prefix="ssoh-workspace-preflight-") as temporary:
         root = Path(temporary)
         database_url = f"sqlite:///{(root / 'preflight.db').as_posix()}"
         upgrade_database(database_url)
@@ -796,12 +796,15 @@ def _require_protected_safe(value: object) -> None:
         raise ValueError("workspace export contains a prohibited live path")
 
 
-def _contains_live_path(value: object) -> bool:
+def _contains_live_path(value: object, *, path_field: bool = False) -> bool:
     if isinstance(value, Mapping):
-        return any(_contains_live_path(item) for item in value.values())
+        return any(
+            _contains_live_path(item, path_field=_is_path_field(str(key)))
+            for key, item in value.items()
+        )
     if isinstance(value, (tuple, list, frozenset)):
-        return any(_contains_live_path(item) for item in value)
-    if not isinstance(value, str):
+        return any(_contains_live_path(item, path_field=path_field) for item in value)
+    if not path_field or not isinstance(value, str):
         return False
     candidate = value.strip()
     lowered = candidate.lower()
@@ -809,6 +812,15 @@ def _contains_live_path(value: object) -> bool:
         lowered.startswith(("file://", "sqlite:///"))
         or PureWindowsPath(candidate).is_absolute()
         or PurePosixPath(candidate).is_absolute()
+    )
+
+
+def _is_path_field(field_name: str) -> bool:
+    normalized = field_name.casefold()
+    return (
+        normalized == "path"
+        or normalized.endswith(("_path", "_file", "_directory", "_root"))
+        or normalized in {"repository", "manifest", "output_dir"}
     )
 
 

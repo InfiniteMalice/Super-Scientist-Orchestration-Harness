@@ -314,13 +314,10 @@ def _cell_has_contents(cell: types.CellType) -> bool:
 
 def _reject_forbidden_candidate_authority(root: object) -> None:
     forbidden_reference_fragments = ("protected://", "artifact://")
-    forbidden_field_names = {"answer_reference", "answer_bytes", "expected_output"}
     for value in _walk_object_graph_values(root):
         if isinstance(value, str):
             lowered = value.lower()
-            if lowered in forbidden_field_names or any(
-                fragment in lowered for fragment in forbidden_reference_fragments
-            ):
+            if any(fragment in lowered for fragment in forbidden_reference_fragments):
                 raise ValueError("candidate context contains a reversible protected reference")
         if isinstance(value, bytes):
             lowered_bytes = value.lower()

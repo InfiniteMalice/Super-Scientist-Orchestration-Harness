@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import stat
 from collections.abc import Callable
 from contextlib import suppress
@@ -705,8 +706,8 @@ def _run_protected_role_worker(
         )
         transport.close()
         return
-    _send_worker_success(transport, "worker-startup", None)
     try:
+        _send_worker_success(transport, "worker-startup", None)
         while True:
             request = _receive_worker_request(transport)
             if request is None:
@@ -999,6 +1000,10 @@ def _prepare_private_root(root: Path) -> Path:
     resolved = absolute.resolve()
     if not resolved.is_dir():
         raise ValueError("protected root must be a directory")
+    if os.name != "nt":
+        resolved.chmod(0o700)
+        if stat.S_IMODE(resolved.stat().st_mode) != 0o700:
+            raise PermissionError("protected root permissions are not owner-only")
     return resolved
 
 

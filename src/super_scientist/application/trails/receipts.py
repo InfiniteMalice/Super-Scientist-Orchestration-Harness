@@ -61,44 +61,15 @@ class AcceptedProposalReceiptReader:
     def __init__(self, connection: Connection) -> None:
         self._transactions = TransactionRepository(connection)
         self._audit = AuditRepository(connection)
+        self._receipts: dict[str, AcceptedProposalReceipt] | None = None
 
     def get(self, proposal_id: str) -> AcceptedProposalReceipt | None:
-        transaction = self._transactions.get_by_proposal_id(proposal_id)
-        if transaction is None or not transaction.decision.accepted:
-            return None
-        proposal = transaction.proposal
-        if not isinstance(
-            proposal,
-            (
-                AddEvidence,
-                ProposeEvidenceTrailNodes,
-                ProposeEvidenceTrailRelations,
-                ProposeClaim,
-                TransitionClaim,
-            ),
-        ):
-            return None
-        matching_events = tuple(
-            event
-            for event in self._audit.list_all()
-            if _audit_event_matches(event, proposal, transaction.decision)
-        )
-        if len(matching_events) != 1:
-            return None
-        event = matching_events[0]
-        payload = json_compatible_payload(event.payload)
-        try:
-            governing_policy_hash = SHA256_ADAPTER.validate_python(payload["policy_hash"])
-        except (KeyError, ValidationError):
-            return None
-        return AcceptedProposalReceipt(
-            reference=_receipt_reference(proposal, transaction.proposal_hash, event),
-            proposal=proposal,
-            transaction_created_at=transaction.created_at,
-            audit_sequence=event.sequence,
-            audit_occurred_at=event.occurred_at,
-            governing_policy_hash=governing_policy_hash,
-        )
+        if self._receipts is None:
+            self._receipts = accepted_proposal_receipts(
+                self._transactions.list_all(),
+                self._audit.list_all(),
+            )
+        return self._receipts.get(proposal_id)
 
     def resolve(self, reference: TrailReceiptRef) -> AcceptedProposalReceipt | None:
         receipt = self.get(reference.proposal_id)

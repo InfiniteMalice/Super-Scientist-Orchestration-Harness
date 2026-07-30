@@ -30,6 +30,7 @@ from super_scientist.providers.storage.repositories import StorageIntegrityError
 from super_scientist.providers.storage.schema import governance_policies
 
 NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+pytestmark = pytest.mark.integration
 
 
 def test_policy_repository_decodes_mixed_history(tmp_path: Path) -> None:

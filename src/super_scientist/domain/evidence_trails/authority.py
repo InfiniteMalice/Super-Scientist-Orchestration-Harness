@@ -28,7 +28,7 @@ from super_scientist.domain.evidence_trails.models import (
     TrailNodeRole,
     TrailOutcome,
 )
-from super_scientist.domain.identity import ActorIdentity
+from super_scientist.domain.identity import ActorIdentity, are_independent
 from super_scientist.domain.improvement.classification import ExternalGrounding
 from super_scientist.domain.improvement.models import AssessmentOutcome
 from super_scientist.domain.primitives import NonBlankText, canonical_json_bytes, sha256_hex
@@ -445,25 +445,9 @@ def trail_actors_are_independent(
     left: ActorIdentity,
     right: ActorIdentity,
 ) -> bool:
-    """Apply Task 7 independence across IDs, model identity, and configurations."""
+    """Apply the shared fail-closed operational-identity rule."""
 
-    if left.actor_id == right.actor_id:
-        return False
-    if (
-        left.configuration_hash is not None
-        and right.configuration_hash is not None
-        and left.configuration_hash == right.configuration_hash
-    ):
-        return False
-    left_model = (left.provider_id, left.model_id, left.adapter_id)
-    right_model = (right.provider_id, right.model_id, right.adapter_id)
-    return not (
-        left.provider_id is not None
-        and left.model_id is not None
-        and right.provider_id is not None
-        and right.model_id is not None
-        and left_model == right_model
-    )
+    return are_independent(left, right)
 
 
 def canonical_node_set_hash(nodes: tuple[EvidenceTrailNode, ...]) -> str:

@@ -83,6 +83,12 @@ class CreateResearchRunHandler:
                 RejectionCode.ENTITY_ID_MISMATCH,
                 "research run creator must match proposal proposer",
             )
+        if not are_independent(proposal.proposer, proposal.run.final_validator):
+            return AdmissionEngine.rejected(
+                proposal.proposal_id,
+                RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+                "research run final validator must be independent of the proposer",
+            )
         if proposal.run.active_governance_policy_hash != context.active_policy.policy_hash:
             return AdmissionEngine.rejected(
                 proposal.proposal_id,

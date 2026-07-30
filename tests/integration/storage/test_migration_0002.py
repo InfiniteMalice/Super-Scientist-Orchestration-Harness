@@ -4,11 +4,12 @@ from pathlib import Path
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import Connection, inspect, text
+from sqlalchemy import Connection, create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from alembic import command
 from super_scientist.providers.storage.database import (
+    configure_database_engine,
     create_database_engine,
     upgrade_database,
 )
@@ -169,6 +170,18 @@ def test_sqlite_foreign_keys_are_enabled_on_every_fresh_engine_connection(
     finally:
         first_engine.dispose()
         second_engine.dispose()
+
+
+@pytest.mark.integration
+def test_alembic_compatible_engine_configuration_enables_sqlite_foreign_keys(
+    database_url: str,
+) -> None:
+    engine = configure_database_engine(create_engine(database_url))
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+    finally:
+        engine.dispose()
 
 
 def _table_names(database_url: str) -> set[str]:

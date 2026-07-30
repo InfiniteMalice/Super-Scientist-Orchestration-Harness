@@ -73,7 +73,7 @@ class ProgressPlanReadCapability(Protocol):
 
     def list_plans(self, run_id: str) -> tuple[ProgressPlan, ...]: ...
 
-    def list_subtasks(self) -> tuple[ProgressSubtask, ...]: ...
+    def list_subtasks(self, subtask_ids: tuple[str, ...]) -> tuple[ProgressSubtask, ...]: ...
 
 
 class ProgressEventReadCapability(Protocol):
@@ -207,7 +207,10 @@ class RecordProgressPlanHandler:
             existing_plan=capability.get_plan(proposal.plan.plan_version_id),
             prior_plans=capability.list_plans(proposal.plan.run_id),
             stored_subtask_ids=frozenset(
-                subtask.subtask_id for subtask in capability.list_subtasks()
+                subtask.subtask_id
+                for subtask in capability.list_subtasks(
+                    tuple(subtask.subtask_id for subtask in proposal.plan.subtasks)
+                )
             ),
         )
 

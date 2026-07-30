@@ -17,7 +17,7 @@ from super_scientist.domain.primitives import (
 GENESIS_HASH = "0" * 64
 AUDIT_SCHEMA_VERSION: Literal[1] = 1
 
-type JsonScalar = None | bool | int | float | str
+type JsonScalar = bool | int | float | str | None
 type FrozenJsonValue = JsonScalar | tuple[FrozenJsonValue, ...] | Mapping[str, FrozenJsonValue]
 type FrozenJsonMapping = Mapping[str, FrozenJsonValue]
 

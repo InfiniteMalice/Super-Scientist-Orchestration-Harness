@@ -131,32 +131,35 @@ def test_genuine_0001_database_upgrades_to_0006_without_changing_legacy_rows(
 def test_0006_foreign_keys_bind_rule_links_and_campaign_children(database_url: str) -> None:
     _upgrade_to(database_url, REVISION)
     engine = create_engine(database_url)
-    with engine.connect() as connection:
-        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
-        connection.commit()
-        with connection.begin():
-            with pytest.raises(IntegrityError):
-                connection.execute(
-                    text(
-                        "INSERT INTO behavior_rule_link_versions "
-                        "(link_version_id, behavior_id, version, rule_version_id, record_json, "
-                        "content_hash, created_at) VALUES "
-                        "('link-v1', 'behavior', 1, 'missing-rule', '{}', "
-                        "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', "
-                        "'2026-07-20T00:00:00+00:00')"
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+            connection.commit()
+            with connection.begin():
+                with pytest.raises(IntegrityError):
+                    connection.execute(
+                        text(
+                            "INSERT INTO behavior_rule_link_versions "
+                            "(link_version_id, behavior_id, version, rule_version_id, record_json, "
+                            "content_hash, created_at) VALUES "
+                            "('link-v1', 'behavior', 1, 'missing-rule', '{}', "
+                            "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', "
+                            "'2026-07-20T00:00:00+00:00')"
+                        )
                     )
-                )
-            with pytest.raises(IntegrityError):
-                connection.execute(
-                    text(
-                        "INSERT INTO harness_budgets "
-                        "(budget_id, campaign_id, variant, record_json, content_hash, created_at) "
-                        "VALUES ('budget', 'missing-campaign', 'EVOLVED_HARNESS', '{}', "
-                        "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', "
-                        "'2026-07-20T00:00:00+00:00')"
+                with pytest.raises(IntegrityError):
+                    connection.execute(
+                        text(
+                            "INSERT INTO harness_budgets "
+                            "(budget_id, campaign_id, variant, record_json, "
+                            "content_hash, created_at) "
+                            "VALUES ('budget', 'missing-campaign', 'EVOLVED_HARNESS', '{}', "
+                            "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', "
+                            "'2026-07-20T00:00:00+00:00')"
+                        )
                     )
-                )
-    engine.dispose()
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.integration

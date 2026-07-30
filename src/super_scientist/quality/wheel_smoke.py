@@ -112,13 +112,16 @@ def run_wheel_smoke(
     command_runner: CommandRunner = _run_fixed_command,
     temporary_directory_factory: TemporaryDirectoryFactory = tempfile.mkdtemp,
 ) -> WheelSmokeResult:
-    wheel = resolve_built_wheel(plan, project_root)
-    _verify_project_wheel(wheel)
-    parent = temp_parent.resolve(strict=True)
     stages: list[WheelSmokeStage] = []
     temporary_path: Path | None = None
+    parent: Path | None = None
     cleanup_authorized = False
+    current_stage = "selection"
     try:
+        wheel = resolve_built_wheel(plan, project_root)
+        _verify_project_wheel(wheel)
+        parent = temp_parent.resolve(strict=True)
+        current_stage = "venv"
         temporary_path = Path(temporary_directory_factory(prefix=_TEMP_PREFIX, dir=str(parent)))
         cleanup_authorized = _is_verified_temporary_directory(temporary_path, parent)
         if not cleanup_authorized:
@@ -171,6 +174,7 @@ def run_wheel_smoke(
             else argument
             for argument in plan.install_argv
         )
+        current_stage = "install"
         install = _run_stage("install", install_argv, command_runner)
         stages.append(install)
         if install.status != "passed":
@@ -186,15 +190,10 @@ def run_wheel_smoke(
                 )
             )
             return WheelSmokeResult(False, tuple(stages))
+        current_stage = "cli-smoke"
         smoke = _run_stage(
             "cli-smoke",
-            (
-                str(venv_python),
-                "-I",
-                "-m",
-                "super_scientist.cli.bootstrap",
-                *plan.smoke_argv[1:],
-            ),
+            (str(venv_cli), *plan.smoke_argv[1:]),
             command_runner,
             accept=_is_accepted_smoke_result,
         )
@@ -203,7 +202,7 @@ def run_wheel_smoke(
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         stages.append(
             WheelSmokeStage(
-                name=_next_stage_name(stages),
+                name=current_stage,
                 status="failed",
                 returncode=None,
                 stderr=f"wheel smoke failed safely: {type(exc).__name__}",
@@ -214,6 +213,7 @@ def run_wheel_smoke(
         if (
             cleanup_authorized
             and temporary_path is not None
+            and parent is not None
             and _is_verified_temporary_directory(temporary_path, parent)
         ):
             shutil.rmtree(temporary_path)
@@ -323,11 +323,6 @@ def _is_link_or_reparse(metadata: os.stat_result) -> bool:
         getattr(metadata, "st_file_attributes", 0)
         & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     )
-
-
-def _next_stage_name(stages: list[WheelSmokeStage]) -> str:
-    names = ("venv", "install", "cli-smoke")
-    return names[min(len(stages), len(names) - 1)]
 
 
 def main(argv: tuple[str, ...] | None = None) -> int:

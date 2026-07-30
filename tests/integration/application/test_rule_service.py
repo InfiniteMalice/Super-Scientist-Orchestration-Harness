@@ -1036,6 +1036,7 @@ def test_reviewer_import_requires_exact_deterministic_passed_provenance(
     }
 
 
+@pytest.mark.integration
 def test_promotion_only_protected_evaluation_and_rollback_do_not_block_staging(
     rule_runtime: RuleRuntime,
 ) -> None:

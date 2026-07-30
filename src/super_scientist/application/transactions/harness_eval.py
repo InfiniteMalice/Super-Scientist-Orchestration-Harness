@@ -299,24 +299,9 @@ class HarnessDecisionCapabilities:
     def append_authoritative(self, record: BaseModel) -> None:
         if not isinstance(record, HarnessDecision):
             raise TypeError(f"unsupported harness decision record: {type(record)!r}")
-        report = getattr(record, "_campaign_report", None)
-        del report
-        stored = HarnessDecisionRecord(
-            decision_id=record.decision_id,
-            campaign_id=record.campaign_id,
-            status=record.status,
-            admitted=record.admitted,
-            rationale=record.rationale,
-            authority_id=record.authority.actor_id,
-            rollback_target_id=record.rollback_target_id,
-            evaluator_audit_id=record.evaluator_audit_id,
-            measurement_id=record.measurement_id,
-            metric_result_ids=(),
-            confound_ids=(),
-            decided_at=record.decided_at,
-            governing_policy_hash=record.governing_policy_hash,
+        raise RuntimeError(
+            "harness decisions require append_decision_with_report for authoritative lineage"
         )
-        self.decisions.add(stored.decision_id, stored, stored.decided_at)
 
     def append_decision_with_report(
         self,

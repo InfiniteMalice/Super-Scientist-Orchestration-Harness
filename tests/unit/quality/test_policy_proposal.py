@@ -133,7 +133,7 @@ def test_quality_policy_hash_rejects_nonexact_or_noncanonical_allowlists(
 ) -> None:
     from super_scientist.quality.imported_pattern_firewall import quality_policy_hash
 
-    with pytest.raises((TypeError, ValueError, ValidationError)):
+    with pytest.raises(ValueError):
         quality_policy_hash(
             registry_hash="1" * 64,
             firewall_policy_sha256="2" * 64,

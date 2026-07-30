@@ -243,6 +243,7 @@ class GovernanceTransitionCapabilities:
     audits: EvaluatorAuditRepository
     measurements: SelfImprovementMeasurementRepository
     policies: PolicyRepository
+    projection_measurement: SelfImprovementMeasurementRecord
 
     def policy_snapshot(self) -> PolicySnapshot:
         return self.active_policy
@@ -277,15 +278,9 @@ class GovernanceTransitionCapabilities:
     def update_projection(self, record: BaseModel) -> None:
         if not isinstance(record, PolicySnapshot):
             raise TypeError(f"unsupported governance projection: {type(record)!r}")
-        candidate_measurements = (
-            measurement
-            for measurement in self.measurements.list_all()
-            if measurement.candidate_version_id == record.policy_hash
-        )
-        measurement = next(candidate_measurements, None)
-        if measurement is None:
-            raise RuntimeError("candidate policy lacks its projected measurement")
-        self.policies.add_and_activate(record, measurement.decided_at)
+        if self.projection_measurement.candidate_version_id != record.policy_hash:
+            raise RuntimeError("candidate policy does not match its authoritative measurement")
+        self.policies.add_and_activate(record, self.projection_measurement.decided_at)
 
 
 def fixed_adaptation_handlers() -> tuple[FixedAdaptationHandler, ...]:
@@ -360,5 +355,6 @@ def adaptation_capabilities(
             audits=EvaluatorAuditRepository(connection),
             measurements=SelfImprovementMeasurementRepository(connection),
             policies=PolicyRepository(connection),
+            projection_measurement=proposal.measurement,
         )
     raise TypeError(f"no fixed adaptation capability for proposal: {type(proposal)!r}")

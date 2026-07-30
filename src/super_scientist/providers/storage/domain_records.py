@@ -985,6 +985,29 @@ class _AppendOnlyRecordRepository[RecordT: BaseModel]:
         ).mappings()
         return tuple(self._decode_row(dict(row)) for row in rows)
 
+    def _list_by_relationship(
+        self,
+        column_name: str,
+        value: str | int,
+    ) -> tuple[RecordT, ...]:
+        _require_integrity(column_name in self._relationship_fields, "unknown relationship column")
+        rows = self._connection.execute(
+            select(self._table)
+            .where(self._table.c[column_name] == value)
+            .order_by(self._table.c[self._identifier_field])
+        ).mappings()
+        return tuple(self._decode_row(dict(row)) for row in rows)
+
+    def _get_many(self, record_ids: tuple[str, ...]) -> tuple[RecordT, ...]:
+        if not record_ids:
+            return ()
+        rows = self._connection.execute(
+            select(self._table)
+            .where(self._table.c[self._identifier_field].in_(record_ids))
+            .order_by(self._table.c[self._identifier_field])
+        ).mappings()
+        return tuple(self._decode_row(dict(row)) for row in rows)
+
     def add(self, record_id: str, record: RecordT, created_at: UtcTimestamp) -> None:
         _require_integrity(isinstance(record_id, str), "record identifier must be a string")
         try:
@@ -2025,6 +2048,9 @@ class ProgressPlanRepository(_AppendOnlyRecordRepository[ProgressPlan]):
             relationship_fields={"run_id": "run_id"},
         )
 
+    def list_for_run(self, run_id: str) -> tuple[ProgressPlan, ...]:
+        return self._list_by_relationship("run_id", run_id)
+
 
 class ProgressSubtaskRepository(_AppendOnlyRecordRepository[ProgressSubtask]):
     def __init__(self, connection: Connection) -> None:
@@ -2035,6 +2061,9 @@ class ProgressSubtaskRepository(_AppendOnlyRecordRepository[ProgressSubtask]):
             identifier_field="subtask_id",
             relationship_fields={"plan_version_id": "plan_version_id"},
         )
+
+    def get_many(self, subtask_ids: tuple[str, ...]) -> tuple[ProgressSubtask, ...]:
+        return self._get_many(subtask_ids)
 
 
 class ProgressEventRepository(_AppendOnlyRecordRepository[ProgressValidationEvent]):
@@ -2051,6 +2080,9 @@ class ProgressEventRepository(_AppendOnlyRecordRepository[ProgressValidationEven
             },
         )
 
+    def list_for_plan(self, plan_version_id: str) -> tuple[ProgressValidationEvent, ...]:
+        return self._list_by_relationship("plan_version_id", plan_version_id)
+
 
 class RunBudgetRepository(_AppendOnlyRecordRepository[BudgetAllocation]):
     def __init__(self, connection: Connection) -> None:
@@ -2064,6 +2096,9 @@ class RunBudgetRepository(_AppendOnlyRecordRepository[BudgetAllocation]):
                 "plan_version_id": "plan_version_id",
             },
         )
+
+    def list_for_plan(self, plan_version_id: str) -> tuple[BudgetAllocation, ...]:
+        return self._list_by_relationship("plan_version_id", plan_version_id)
 
 
 class RunCheckpointRepository(_AppendOnlyRecordRepository[RunCheckpoint]):
@@ -2694,6 +2729,15 @@ class EvaluatorHeadRepository:
         return evaluator_version_id
 
     def set(self, evaluator_version_id: str) -> None:
+        _require_integrity(
+            self._connection.execute(
+                select(evaluator_versions.c.evaluator_version_id).where(
+                    evaluator_versions.c.evaluator_version_id == evaluator_version_id
+                )
+            ).scalar_one_or_none()
+            == evaluator_version_id,
+            "evaluator head references a missing evaluator version",
+        )
         statement = sqlite_insert(evaluator_heads).values(
             singleton_id=1,
             evaluator_version_id=evaluator_version_id,

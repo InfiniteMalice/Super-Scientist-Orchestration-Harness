@@ -123,7 +123,9 @@
 
 ```python
 @pytest.mark.integration
-def test_coordinator_preserves_one_decision_and_audit_event_per_new_attempt(runtime: Runtime) -> None:
+def test_coordinator_preserves_one_decision_and_audit_event_per_new_attempt(
+    runtime: Runtime,
+) -> None:
     decision = runtime.service.submit(runtime.add_evidence_proposal("proposal-1", "key-1"))
     assert decision.accepted is True
     assert len(runtime.repositories().transactions.list_all()) == 1
@@ -219,7 +221,9 @@ def test_v1_policy_hash_is_unchanged(v1_policy_json: dict[str, object]) -> None:
 def test_v2_policy_hash_uses_its_exact_payload(v2_policy: GovernancePolicyV2) -> None:
     expected = sha256_hex(canonical_json_bytes(v2_policy.model_dump(mode="json")))
     assert policy_hash(v2_policy) == expected
-    assert policy_hash(v2_policy) != "26269abd13de9d63206eb6fe0465deb5b5ef5f99602a9d4ad89ea710cff3e7d9"
+    assert (
+        policy_hash(v2_policy) != "26269abd13de9d63206eb6fe0465deb5b5ef5f99602a9d4ad89ea710cff3e7d9"
+    )
 
 
 def test_policy_repository_decodes_mixed_history(policy_repository: PolicyRepository) -> None:
@@ -266,7 +270,9 @@ class GovernancePolicyV2(BaseModel):
     adaptation_requirements: tuple[AdaptationRequirement, ...] = Field(min_length=1)
 
 
-PolicyDocument = Annotated[GovernancePolicyV1 | GovernancePolicyV2, Field(discriminator="schema_version")]
+PolicyDocument = Annotated[
+    GovernancePolicyV1 | GovernancePolicyV2, Field(discriminator="schema_version")
+]
 
 
 class PolicySnapshot(BaseModel):
@@ -413,7 +419,9 @@ git commit -m "feat: add adaptation foundation storage"
 ```python
 @pytest.mark.parametrize("target", tuple(ChangeTarget))
 @pytest.mark.parametrize("persistence", tuple(PersistenceScope))
-def test_every_change_classification_round_trips(target: ChangeTarget, persistence: PersistenceScope) -> None:
+def test_every_change_classification_round_trips(
+    target: ChangeTarget, persistence: PersistenceScope
+) -> None:
     value = ChangeClassification(
         target=target,
         loop_closure=LoopClosure.HUMAN_ON_LOOP,
@@ -436,7 +444,9 @@ def test_every_change_classification_round_trips(target: ChangeTarget, persisten
         "confidence_as_evidence",
     ],
 )
-def test_prohibited_adaptive_operations_fail_closed(authority_fixture: AuthorityFixture, operation: str) -> None:
+def test_prohibited_adaptive_operations_fail_closed(
+    authority_fixture: AuthorityFixture, operation: str
+) -> None:
     decision = authority_fixture.attempt(operation)
     assert decision.accepted is False
     assert decision.reasons[0].code in {
@@ -446,7 +456,9 @@ def test_prohibited_adaptive_operations_fail_closed(authority_fixture: Authority
     }
 
 
-def test_execution_state_is_not_part_of_persistent_configuration(config_fixture: ConfigFixture) -> None:
+def test_execution_state_is_not_part_of_persistent_configuration(
+    config_fixture: ConfigFixture,
+) -> None:
     version = config_fixture.configuration_version()
     assert "execution_state" not in version.model_dump()
     assert ConfigurationDiff.between(version, version).changed_layers == ()
@@ -918,7 +930,9 @@ def test_exact_duplicate_cannot_create_second_active_rule(rule_fixture: RuleFixt
     assert decision.reasons[0].code is RejectionCode.DUPLICATE_RULE
 
 
-def test_contradiction_requires_explicit_boundary_and_both_regressions(rule_fixture: RuleFixture) -> None:
+def test_contradiction_requires_explicit_boundary_and_both_regressions(
+    rule_fixture: RuleFixture,
+) -> None:
     proposal = rule_fixture.contradictory_consolidation_without_boundary()
     decision = rule_fixture.submit(proposal)
     assert decision.accepted is False
@@ -1072,13 +1086,17 @@ def test_incompatible_meaning_requires_major_version(primitive_fixture: Primitiv
     assert result.code == "INCOMPATIBLE_MEANING_REQUIRES_MAJOR"
 
 
-def test_experimental_primitive_cannot_enter_claim_schema(primitive_fixture: PrimitiveFixture) -> None:
+def test_experimental_primitive_cannot_enter_claim_schema(
+    primitive_fixture: PrimitiveFixture,
+) -> None:
     decision = primitive_fixture.try_claim_schema_admission(PrimitiveStatus.EXPERIMENTAL)
     assert decision.accepted is False
     assert decision.reasons[0].code is RejectionCode.EXPERIMENTAL_PRIMITIVE_QUARANTINED
 
 
-def test_primitive_and_its_evaluator_cannot_approve_each_other(primitive_fixture: PrimitiveFixture) -> None:
+def test_primitive_and_its_evaluator_cannot_approve_each_other(
+    primitive_fixture: PrimitiveFixture,
+) -> None:
     decision = primitive_fixture.submit_circular_evaluation()
     assert decision.accepted is False
     assert decision.reasons[0].code is RejectionCode.CIRCULAR_EVALUATOR_APPROVAL
@@ -1378,7 +1396,9 @@ def test_source_change_marks_behavior_stale(repository_fixture: RepositoryFixtur
 
 
 @pytest.mark.parametrize("escape", ["../outside.py", "linked/outside.py"])
-def test_manifest_cannot_escape_repository(repository_fixture: RepositoryFixture, escape: str) -> None:
+def test_manifest_cannot_escape_repository(
+    repository_fixture: RepositoryFixture, escape: str
+) -> None:
     with pytest.raises(PathContainmentError):
         verify_handbook(repository_fixture.root, repository_fixture.manifest(path=escape))
 ```
@@ -1449,18 +1469,24 @@ git commit -m "feat: add verified behavior handbook"
 
 ```python
 def test_unmatched_budgets_are_incomparable(campaign_fixture: CampaignFixture) -> None:
-    result = compare_budgets(campaign_fixture.baseline_budget, campaign_fixture.extra_attempt_budget)
+    result = compare_budgets(
+        campaign_fixture.baseline_budget, campaign_fixture.extra_attempt_budget
+    )
     assert result.comparable is False
     assert result.mismatches == ("attempts",)
 
 
-def test_discovery_gain_without_transfer_is_benchmark_specific(campaign_fixture: CampaignFixture) -> None:
+def test_discovery_gain_without_transfer_is_benchmark_specific(
+    campaign_fixture: CampaignFixture,
+) -> None:
     decision = decide_campaign(campaign_fixture.discovery_gain_transfer_failure())
     assert decision.status is HarnessDecisionStatus.BENCHMARK_SPECIFIC
     assert decision.admitted is False
 
 
-def test_candidate_graph_contains_no_protected_capability(campaign_fixture: CampaignFixture) -> None:
+def test_candidate_graph_contains_no_protected_capability(
+    campaign_fixture: CampaignFixture,
+) -> None:
     graph_types = campaign_fixture.walk_candidate_object_graph_types()
     assert ProtectedAnswerReader not in graph_types
     assert ProtectedEvaluationStore not in graph_types
@@ -1752,7 +1778,9 @@ git commit -m "docs: prove governed adaptation vertical slice"
     "mutation",
     ["remove_term", "broaden_allowed_path", "modify_policy", "mismatch_digest"],
 )
-def test_imported_pattern_policy_tampering_fails(firewall_fixture: FirewallFixture, mutation: str) -> None:
+def test_imported_pattern_policy_tampering_fails(
+    firewall_fixture: FirewallFixture, mutation: str
+) -> None:
     result = firewall_fixture.run_after(mutation)
     assert result.passed is False
     assert result.findings

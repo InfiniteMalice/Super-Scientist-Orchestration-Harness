@@ -30,6 +30,7 @@ from super_scientist.domain.evidence_trails.models import (
     TrailValidationResult,
 )
 from super_scientist.domain.evidence_trails.validation import (
+    _has_cycle,
     validate_report_binding,
     validate_trail,
 )
@@ -42,6 +43,15 @@ from super_scientist.kernel.transactions.models import (
     RecordEvidenceTrailVersion,
 )
 from tests.unit.evidence_trails.conftest import with_fresh_source_first
+
+
+def test_cycle_detection_handles_trails_larger_than_the_python_recursion_limit() -> None:
+    node_ids = {f"node-{index}" for index in range(1_500)}
+    acyclic_edges = {(f"node-{index}", f"node-{index + 1}") for index in range(1_499)}
+
+    assert _has_cycle(node_ids, acyclic_edges) is False
+    assert _has_cycle(node_ids, {*acyclic_edges, ("node-1499", "node-0")}) is True
+
 
 if TYPE_CHECKING:
     from conftest import TrailFixture

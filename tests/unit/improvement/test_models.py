@@ -260,6 +260,64 @@ def test_measurement_reconciles_point_category_and_aggregate_usage() -> None:
         PerformanceTrajectoryPoint.model_validate(point_payload)
 
 
+def test_measurement_accepts_mathematically_equal_float_usage_groupings() -> None:
+    category_values = (
+        (1_000_000_000.0, 1_000_000_000.0, 10_000_000_000_000_000.0, 0.2, 0.3),
+        (0.2, 4.4, 1.1, 1_000_000_000.0, 0.1),
+    )
+
+    def usage(cost_usd: float) -> ResourceUsage:
+        return ResourceUsage(
+            cost_usd=cost_usd,
+            compute_units=0.0,
+            tokens=0,
+            elapsed_seconds=0.0,
+            tool_calls=0,
+            human_interventions=0,
+        )
+
+    points = []
+    for step_index, values in enumerate(category_values):
+        breakdown = ResourceUsageBreakdown(
+            **dict(
+                zip(
+                    ("execution", "search", "evaluation", "judging", "human"),
+                    (usage(value) for value in values),
+                    strict=True,
+                )
+            )
+        )
+        points.append(
+            _trajectory_point(step_index).model_copy(
+                update={"usage_by_category": breakdown, "usage": usage(sum(values))}
+            )
+        )
+    category_totals = tuple(
+        sum(category_values[row][column] for row in range(2)) for column in range(5)
+    )
+    breakdown = ResourceUsageBreakdown(
+        **dict(
+            zip(
+                ("execution", "search", "evaluation", "judging", "human"),
+                (usage(value) for value in category_totals),
+                strict=True,
+            )
+        )
+    )
+    payload = _measurement().model_dump(mode="python")
+    payload.update(
+        {
+            "trajectory": tuple(point.model_dump(mode="python") for point in points),
+            "usage_by_category": breakdown.model_dump(mode="python"),
+            "usage": usage(sum(point.usage.cost_usd for point in points)).model_dump(mode="python"),
+        }
+    )
+
+    measurement = SelfImprovementMeasurementRecord.model_validate(payload)
+
+    assert measurement.usage.cost_usd == sum(point.usage.cost_usd for point in points)
+
+
 def test_measurement_binds_peak_final_change_grounding_and_full_history() -> None:
     payload = _measurement().model_dump(mode="python")
     final_observation = payload["final_observation"]

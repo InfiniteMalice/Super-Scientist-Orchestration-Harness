@@ -104,6 +104,7 @@ from super_scientist.providers.storage.domain_records import (
     ResearchRunRepository,
     SelfImprovementMeasurementRepository,
 )
+from super_scientist.providers.storage.repositories import StorageIntegrityError
 from super_scientist.providers.storage.schema import (
     configuration_versions,
     evaluator_audits,
@@ -352,6 +353,37 @@ def test_v2_research_run_lifecycle_requires_accepted_final_validation(
     engine.dispose()
 
 
+@pytest.mark.integration
+def test_research_run_rejects_a_self_nominated_final_validator(tmp_path: Path) -> None:
+    policy = _phase_a_policy()
+    coordinator, uow_factory, engine = _coordinator(tmp_path, policy)
+    proposer = _human_actor("run-proposer")
+    run = _run().model_copy(
+        update={
+            "creator": proposer,
+            "final_validator": proposer,
+            "active_governance_policy_hash": policy.policy_hash,
+        }
+    )
+
+    decision = coordinator.submit(
+        CreateResearchRun(
+            proposal_id="create-self-validated-run",
+            idempotency_key="create-self-validated-run-key",
+            proposer=proposer,
+            approval=Approval(approver=_human_actor("approver"), approved_at=NOW),
+            run=run,
+        )
+    )
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+    with uow_factory() as unit_of_work:
+        assert unit_of_work.connection is not None
+        assert ResearchRunRepository(unit_of_work.connection).get(run.run_id) is None
+    engine.dispose()
+
+
 def test_fixed_router_declares_all_phase_a_adaptation_handlers(tmp_path: Path) -> None:
     policy = _snapshot(GovernancePolicy(required_claim_checks=("source_exists",)))
     coordinator, _, engine = _coordinator(tmp_path, policy)
@@ -372,6 +404,19 @@ def test_fixed_router_declares_all_phase_a_adaptation_handlers(tmp_path: Path) -
         )
         == proposal_types
     )
+    engine.dispose()
+
+
+@pytest.mark.integration
+def test_evaluator_head_rejects_a_missing_evaluator_before_write(tmp_path: Path) -> None:
+    policy = _phase_a_policy()
+    _, uow_factory, engine = _coordinator(tmp_path, policy)
+    with (
+        pytest.raises(StorageIntegrityError, match="missing evaluator version"),
+        uow_factory() as unit_of_work,
+    ):
+        assert unit_of_work.connection is not None
+        domain_records.EvaluatorHeadRepository(unit_of_work.connection).set("missing-evaluator")
     engine.dispose()
 
 

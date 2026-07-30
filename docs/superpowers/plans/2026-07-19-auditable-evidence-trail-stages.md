@@ -62,6 +62,7 @@ def test_proposal_union_adds_exactly_two_trail_stage_kinds_in_order() -> None:
         "bind_report_sentence",
     ]
 
+
 def test_accepted_node_stage_is_transactional_audited_and_has_no_projection(runtime) -> None:
     decision = runtime.coordinator.submit(runtime.node_stage_proposal())
     assert decision.accepted
@@ -86,6 +87,7 @@ class ProposeEvidenceTrailNodes(ProposalBase):
     classification: ChangeClassification
     source_receipts: tuple[AddEvidenceReceiptRef, ...] = Field(min_length=1)
     nodes: tuple[EvidenceTrailNode, ...] = Field(min_length=1)
+
 
 class ProposeEvidenceTrailRelations(ProposalBase):
     proposal_type: Literal["propose_evidence_trail_relations"] = "propose_evidence_trail_relations"
@@ -145,7 +147,9 @@ def test_graph_successors_require_new_stage_and_transition_claim_receipts(runtim
     v2 = runtime.accept_graph_successor(v1)
     v3 = runtime.accept_graph_successor(v2)
     assert (v1.claim_version_id, v2.claim_version_id, v3.claim_version_id) == (
-        "claim-1:1", "claim-1:2", "claim-1:3"
+        "claim-1:1",
+        "claim-1:2",
+        "claim-1:3",
     )
     assert runtime.snapshot(v1.trail_version_id) == v1
 ```
@@ -192,10 +196,13 @@ Run: `pytest tests/unit/evidence_trails/test_authority_hardening.py tests/integr
 - [ ] **Step 1: Add RED transitions for CONFLICTED, INSUFFICIENT, UNANSWERABLE, and forged status**
 
 ```python
-@pytest.mark.parametrize("assessment_result, expected", [
-    (AssessmentOutcome.FAILED, TrailOutcome.INSUFFICIENT),
-    (AssessmentOutcome.ABSTAINED, TrailOutcome.UNANSWERABLE),
-])
+@pytest.mark.parametrize(
+    "assessment_result, expected",
+    [
+        (AssessmentOutcome.FAILED, TrailOutcome.INSUFFICIENT),
+        (AssessmentOutcome.ABSTAINED, TrailOutcome.UNANSWERABLE),
+    ],
+)
 def test_finalize_derives_successor_status(assessment_result, expected, successor_draft):
     proposal = finalize_with_result(successor_draft, assessment_result)
     assert proposal.trail_version.status is expected

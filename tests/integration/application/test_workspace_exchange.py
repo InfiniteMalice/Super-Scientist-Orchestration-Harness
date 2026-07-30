@@ -432,6 +432,14 @@ def test_workspace_export_rejects_noncanonical_and_prohibited_bundle_shapes(
         canonical_json_bytes(live_path["records"][0]["proposal"])
     )
     _rehash_bundle_payload(live_path)
+    non_path_text = copy.deepcopy(base)
+    non_path_text["records"][0]["proposal"]["evidence"]["provenance"]["note"] = (
+        "The source cited C:\\private as an example, not as a live path."
+    )
+    non_path_text["records"][0]["proposal_hash"] = sha256_hex(
+        canonical_json_bytes(non_path_text["records"][0]["proposal"])
+    )
+    _rehash_bundle_payload(non_path_text)
 
     for payload, message in (
         (duplicate_policy, "policies"),
@@ -447,6 +455,8 @@ def test_workspace_export_rejects_noncanonical_and_prohibited_bundle_shapes(
     ):
         with pytest.raises(ValueError, match=message):
             exchange.WorkspaceExport.model_validate_json(json.dumps(payload))
+
+    assert exchange.WorkspaceExport.model_validate_json(json.dumps(non_path_text))
 
 
 def test_empty_workspace_export_uses_active_policy_as_bootstrap(tmp_path: Path) -> None:

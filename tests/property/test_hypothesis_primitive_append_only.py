@@ -619,8 +619,7 @@ def test_database_rejects_admission_with_no_declared_revision_rows(tmp_path: Pat
             update={"admission_decision_id": "admission-direct-zero-revisions"}
         )
         with pytest.raises(IntegrityError):
-            _insert_direct_admission(connection, direct)
-            connection.commit()
+            _insert_direct_admission_and_commit(connection, direct)
     finally:
         if connection.in_transaction():
             connection.rollback()
@@ -648,14 +647,11 @@ def test_database_rejects_admission_with_incomplete_revision_prefix(tmp_path: Pa
             }
         )
         with pytest.raises(IntegrityError):
-            _insert_direct_admission_revision(
+            _insert_incomplete_revision_prefix_and_commit(
                 connection,
                 direct,
-                position=0,
                 revision_id=records.revision.revision_id,
             )
-            _insert_direct_admission(connection, direct)
-            connection.commit()
     finally:
         if connection.in_transaction():
             connection.rollback()
@@ -1489,6 +1485,30 @@ def _insert_direct_admission(
             created_at=record.decided_at.isoformat(),
         )
     )
+
+
+def _insert_direct_admission_and_commit(
+    connection: Connection,
+    record: HypothesisAdmissionDecisionRecord,
+) -> None:
+    _insert_direct_admission(connection, record)
+    connection.commit()
+
+
+def _insert_incomplete_revision_prefix_and_commit(
+    connection: Connection,
+    record: HypothesisAdmissionDecisionRecord,
+    *,
+    revision_id: str,
+) -> None:
+    _insert_direct_admission_revision(
+        connection,
+        record,
+        position=0,
+        revision_id=revision_id,
+    )
+    _insert_direct_admission(connection, record)
+    connection.commit()
 
 
 def _insert_direct_admission_revision(

@@ -99,6 +99,7 @@ from super_scientist.providers.storage.domain_records import (
     CounterexampleRecordRepository,
     ExecutableModelSpecRepository,
     HypothesisAdmissionDecisionRepository,
+    HypothesisAdmissionStatus,
     HypothesisHeadRepository,
     HypothesisRevisionRepository,
     HypothesisVersionRepository,
@@ -534,15 +535,11 @@ def test_full_failed_check_revision_and_successor_admission_preserves_history(
         assert versions.get(resulting.hypothesis_version_id) is not None
         assert HypothesisRevisionRepository(uow.connection).get(revision.revision_id) is not None
         assert CounterexampleRecordRepository(uow.connection).list_all()
-        assert HypothesisHeadRepository(uow.connection).get(resulting.hypothesis_id) == (
+        stored_head = HypothesisHeadRepository(uow.connection).get(resulting.hypothesis_id)
+        assert stored_head == (
             resulting.hypothesis_version_id,
             2,
-            # Compare the exact stored status by value below.
-            HypothesisHeadRepository(uow.connection).get(resulting.hypothesis_id)[2],  # type: ignore[index]
-        )
-        assert (
-            HypothesisHeadRepository(uow.connection).get(resulting.hypothesis_id)[2].value  # type: ignore[index]
-            == ImportedPatternStatus.TRANSFER_VALIDATED.value
+            HypothesisAdmissionStatus.TRANSFER_VALIDATED,
         )
         verification = verify_workspace(uow.repositories(), runtime.artifacts)
         assert verification.valid, verification.reason

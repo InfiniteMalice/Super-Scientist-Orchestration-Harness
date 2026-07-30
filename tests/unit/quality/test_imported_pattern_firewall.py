@@ -408,3 +408,19 @@ def test_firewall_validates_allowed_path_before_attribution_skip(tmp_path: Path)
         finding.code == "UNSAFE_SCAN_PATH" and finding.path == firewall.ALLOWED_ATTRIBUTION_PATHS[0]
         for finding in result.findings
     )
+
+
+def test_policy_loader_normalizes_filesystem_failures_to_value_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    firewall = _firewall()
+    root = _minimal_repository(tmp_path)
+
+    def fail_read(_path: Path) -> bytes:
+        raise PermissionError("machine-specific access failure")
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read)
+
+    with pytest.raises(ValueError, match="unable to read"):
+        firewall.load_imported_pattern_policy(root)

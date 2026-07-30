@@ -75,10 +75,10 @@ class ProgressPlanCapabilities:
         return self.plans.get(plan_version_id)
 
     def list_plans(self, run_id: str) -> tuple[ProgressPlan, ...]:
-        return tuple(plan for plan in self.plans.list_all() if plan.run_id == run_id)
+        return self.plans.list_for_run(run_id)
 
-    def list_subtasks(self) -> tuple[ProgressSubtask, ...]:
-        return self.subtasks.list_all()
+    def list_subtasks(self, subtask_ids: tuple[str, ...]) -> tuple[ProgressSubtask, ...]:
+        return self.subtasks.get_many(subtask_ids)
 
     def append_authoritative(self, record: BaseModel) -> None:
         if isinstance(record, ProgressPlan):
@@ -119,7 +119,7 @@ class ProgressEventCapabilities:
         return self.events.get(event_id)
 
     def list_plans(self, run_id: str) -> tuple[ProgressPlan, ...]:
-        return tuple(plan for plan in self.plans.list_all() if plan.run_id == run_id)
+        return self.plans.list_for_run(run_id)
 
     def get_progress_head_event(self, run_id: str) -> ProgressValidationEvent | None:
         head = self.head.get(run_id)
@@ -195,19 +195,13 @@ class RunCheckpointCapabilities:
         return self.checkpoints.get(checkpoint_id)
 
     def list_events(self, plan_version_id: str) -> tuple[ProgressValidationEvent, ...]:
-        return tuple(
-            event for event in self.events.list_all() if event.plan_version_id == plan_version_id
-        )
+        return self.events.list_for_plan(plan_version_id)
 
     def list_plans(self, run_id: str) -> tuple[ProgressPlan, ...]:
-        return tuple(plan for plan in self.plans.list_all() if plan.run_id == run_id)
+        return self.plans.list_for_run(run_id)
 
     def list_budgets(self, plan_version_id: str) -> tuple[BudgetAllocation, ...]:
-        return tuple(
-            budget
-            for budget in self.budgets.list_all()
-            if budget.plan_version_id == plan_version_id
-        )
+        return self.budgets.list_for_plan(plan_version_id)
 
     def append_authoritative(self, record: BaseModel) -> None:
         if not isinstance(record, RunCheckpoint):
@@ -245,16 +239,10 @@ class CompletionCapabilities:
         return self.decisions.get(completion_decision_id)
 
     def list_events(self, plan_version_id: str) -> tuple[ProgressValidationEvent, ...]:
-        return tuple(
-            event for event in self.events.list_all() if event.plan_version_id == plan_version_id
-        )
+        return self.events.list_for_plan(plan_version_id)
 
     def list_budgets(self, plan_version_id: str) -> tuple[BudgetAllocation, ...]:
-        return tuple(
-            budget
-            for budget in self.budgets.list_all()
-            if budget.plan_version_id == plan_version_id
-        )
+        return self.budgets.list_for_plan(plan_version_id)
 
     def has_retained_evidence(self, evidence_id: str) -> bool:
         return self.evidence.contains(evidence_id)

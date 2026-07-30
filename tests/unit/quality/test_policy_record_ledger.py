@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -467,7 +468,7 @@ def _symlink_or_skip(link: Path, target: Path, *, target_is_directory: bool = Fa
     try:
         link.symlink_to(target, target_is_directory=target_is_directory)
     except OSError as error:
-        if target_is_directory:
+        if target_is_directory and os.name == "nt":
             junction = subprocess.run(
                 ("cmd.exe", "/c", "mklink", "/J", str(link), str(target)),
                 check=False,

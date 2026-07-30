@@ -23,7 +23,7 @@ def test_cli_uses_public_click_exceptions_and_pinned_compatibility_line() -> Non
     assert "from click import ClickException" in source
     assert "typer==0.19.2" in project["project"]["dependencies"]
     assert "click==8.3.3" in project["project"]["dependencies"]
-    assert "pydantic>=2.11,<3" in project["project"]["dependencies"]
+    assert "pydantic>=2.12,<3" in project["project"]["dependencies"]
     assert version("typer") == "0.19.2"
     assert version("click") == "8.3.3"
     assert issubclass(main.JsonEnvelopeGroup, click.Group)
@@ -59,6 +59,7 @@ def test_quality_gate_json_records_every_fixed_check(
     )
     assert all(item["status"] == "passed" for item in payload["data"]["checks"])
     assert all(item["returncode"] == 0 for item in payload["data"]["checks"])
+    assert all(item["argv"][0] == "{python}" for item in payload["data"]["checks"])
 
 
 def test_quality_gate_json_preserves_exact_failure_code(

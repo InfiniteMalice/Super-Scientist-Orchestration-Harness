@@ -11,10 +11,10 @@ identity, partition manifests, and per-variant budgets. Task membership is exclu
 the five required partitions and cannot change within that campaign version:
 
 1. harness-discovery tasks;
-2. harness-transfer tasks;
+2. harness-validation tasks;
 3. harness-regression tasks;
-4. harness-safety tasks; and
-5. held-out challenge tasks.
+4. harness-transfer tasks; and
+5. harness-safety tasks.
 
 Discovery performance is evidence about discovery only. It is never treated as transfer
 performance.
@@ -64,8 +64,25 @@ not a partial promotion.
 
 ## Collapse reporting
 
-Evaluator collapse is reported across fourteen independent dimensions. The evaluator
-records every dimension separately and emits explicit findings for prohibited patterns:
+Evaluator collapse is reported across these fourteen independent metric dimensions:
+
+- protected performance;
+- external performance;
+- calibration;
+- response diversity;
+- hypothesis diversity;
+- source diversity;
+- experiment diversity;
+- adapter-output entropy;
+- repeated-error rate;
+- confidence/error coupling;
+- evaluator disagreement;
+- catastrophic regression;
+- task-distribution narrowing; and
+- externally grounded data proportion.
+
+The evaluator records every metric dimension separately and emits explicit findings for
+these nine prohibited patterns:
 
 - score saturation;
 - verdict monoculture;

@@ -427,9 +427,8 @@ def test_executor_uses_fixed_argv_accepts_exact_cli_envelope_and_cleans_temp(
     assert tuple(stage.name for stage in result.stages) == ("venv", "install", "cli-smoke")
     assert calls[0][1:4] == ("-m", "venv", "--copies")
     assert Path(calls[1][-1]).name == "package-0.2.0-py3-none-any.whl"
-    assert Path(calls[2][0]).name == wheel_smoke.VENV_PYTHON_NAME
-    assert calls[2][1:4] == ("-I", "-m", "super_scientist.cli.bootstrap")
-    assert calls[2][-2:] == ("--help", "--json")
+    assert Path(calls[2][0]).name == wheel_smoke.VENV_CLI_NAME
+    assert calls[2][1:] == ("--help", "--json")
     assert not created.exists()
 
 
@@ -502,6 +501,24 @@ def test_executor_never_deletes_unverified_temporary_path(tmp_path: Path) -> Non
     assert result.passed is False
     assert calls == []
     assert sentinel.read_text(encoding="utf-8") == "retain"
+
+
+def test_executor_converts_preparation_failure_to_structured_result(tmp_path: Path) -> None:
+    wheel_smoke = _wheel_smoke()
+    root = tmp_path / "repository"
+    root.mkdir()
+    temp_parent = tmp_path / "scratch"
+    temp_parent.mkdir()
+
+    result = wheel_smoke.run_wheel_smoke(
+        wheel_smoke.build_wheel_smoke_plan((Path("dist") / "missing-0.2.0-py3-none-any.whl",)),
+        project_root=root,
+        temp_parent=temp_parent,
+    )
+
+    assert result.passed is False
+    assert tuple(stage.name for stage in result.stages) == ("selection",)
+    assert result.stages[0].stderr == "wheel smoke failed safely: FileNotFoundError"
 
 
 def test_executor_rejects_symlinked_wheel(tmp_path: Path) -> None:

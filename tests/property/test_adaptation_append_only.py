@@ -105,8 +105,8 @@ def test_append_only_repository_rejects_corrupt_stored_records(
 ) -> None:
     repository, connection, engine = _repository(tmp_path)
     try:
-        with engine.begin() as connection:
-            connection.execute(
+        with engine.begin() as write_connection:
+            write_connection.execute(
                 insert(research_runs).values(
                     run_id="run-1",
                     record_json=record_json,

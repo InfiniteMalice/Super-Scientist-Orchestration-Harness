@@ -129,16 +129,19 @@ def test_generic_loop_transfers_across_independent_fixtures(fixture_id: str) -> 
     assert result.domain_contract_fields == ()
     assert result.imported_code_used is False
     assert tuple(run.condition for run in result.condition_runs) == tuple(Condition)
-    assert result.metrics.correctness is not None
-    assert result.metrics.checker_accuracy is not None
-    assert result.metrics.false_admission is not None
-    assert result.metrics.diversity is not None
-    assert result.metrics.revision_utility is not None
-    assert result.metrics.unsupported_model is not None
-    assert result.metrics.abstention is not None
+    bounded_metrics = (
+        result.metrics.correctness,
+        result.metrics.checker_accuracy,
+        result.metrics.false_admission,
+        result.metrics.diversity,
+        result.metrics.revision_utility,
+        result.metrics.unsupported_model,
+        result.metrics.abstention,
+        result.metrics.transfer,
+        result.metrics.regression,
+    )
+    assert all(0.0 <= value <= 1.0 for value in bounded_metrics)
     assert result.metrics.cost > 0
-    assert result.metrics.transfer is not None
-    assert result.metrics.regression is not None
 
 
 def test_metrics_are_recomputed_from_real_attempts_not_fixture_constants() -> None:

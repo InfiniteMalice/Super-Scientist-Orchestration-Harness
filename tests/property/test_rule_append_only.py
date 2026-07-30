@@ -243,6 +243,7 @@ def test_repositories_reject_missing_incident_and_assessment_references(
             )
         connection.rollback()
 
+        connection.close()
         engine.dispose()
         engine, connection = _connection(tmp_path, "missing-incident.db")
         for incident in records.incidents:

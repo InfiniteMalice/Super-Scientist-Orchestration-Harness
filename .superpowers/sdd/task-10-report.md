@@ -31,13 +31,13 @@ simulation, evidence, stable-hypothesis, revision, and admission lineage.
 - Verification mechanism and result categories are materialized separately and constrained
   as exact formal-verifier, independent-deterministic-checker, or learned-judge pairs.
   Model execution mode is materialized through exact composite model/result relationships.
-  Retained simulation results can only describe a closed source-controlled builtin simulator;
+  Retained simulation results can only describe a closed source-controlled built-in simulator;
   metadata-only model artifacts remain inert specifications and cannot produce simulations.
 - Model specifications carry either content hash, media type, size, and inert name metadata,
   or one of two closed source-controlled simulator names. The strict contract and relational
   shape reject source text, import paths, entry points, argv, commands, URLs, executable
   fields, arbitrary simulator names, and mixed artifact/simulator authority.
-- Every record is strict, frozen, schema-versioned, canonically serialized, content hashed,
+- Every record is strict, frozen, schema-versioned, canonically serialized, content-hashed,
   and decoded with unknown-field rejection. All public repositories accept only the current
   SQLAlchemy connection; the existing generic repository machinery remains private.
 - Update and delete triggers protect all 27 authoritative and normalized-reference history
@@ -56,7 +56,7 @@ simulation, evidence, stable-hypothesis, revision, and admission lineage.
 ## Canonical review fixes
 
 - `SimulationResultRecord` and the database reject `METADATA_ONLY`. Verification and
-  counterexample records with simulation references require the closed builtin execution mode.
+  counterexample records with simulation references require the closed built-in execution mode.
 - Executable models, verification mechanisms, simulations, verification results, and
   counterexamples materialize the stable hypothesis owning their exact hypothesis version.
   Fixed repositories derive that scope from the retained version row rather than accepting it

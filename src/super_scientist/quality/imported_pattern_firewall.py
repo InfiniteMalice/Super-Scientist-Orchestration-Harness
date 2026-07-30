@@ -249,10 +249,13 @@ def approved_quality_policy_binding() -> QualityPolicyBinding:
 
 def load_imported_pattern_policy(project_root: Path) -> ImportedPatternPolicy:
     policy_path = project_root / Path(POLICY_RELATIVE_PATH.as_posix())
-    unsafe_reason = _unsafe_repository_path_reason(project_root, policy_path)
-    if unsafe_reason is not None:
-        raise ValueError(unsafe_reason)
-    raw = policy_path.read_bytes()
+    try:
+        unsafe_reason = _unsafe_repository_path_reason(project_root, policy_path)
+        if unsafe_reason is not None:
+            raise ValueError(unsafe_reason)
+        raw = policy_path.read_bytes()
+    except OSError as error:
+        raise ValueError("unable to read the imported-pattern policy safely") from error
     actual_digest = hashlib.sha256(raw).hexdigest()
     if actual_digest != PINNED_POLICY_SHA256:
         raise ValueError("imported-pattern policy digest does not match the reviewed pin")

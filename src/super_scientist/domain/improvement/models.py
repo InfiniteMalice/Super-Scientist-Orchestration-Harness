@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from enum import StrEnum
 from typing import Literal
 
@@ -191,7 +192,7 @@ class PerformanceTrajectoryPoint(_StrictFrozenModel):
             *self.rejected_change_ids,
         ):
             raise ValueError("admitted and rejected changes must partition attempted changes")
-        if self.usage != self.usage_by_category.aggregate():
+        if not _usage_matches(self.usage, self.usage_by_category.aggregate()):
             raise ValueError("point aggregate usage must equal its per-category usage")
         if ExternalGrounding.NONE in self.grounding:
             raise ValueError("trajectory points require external grounding")
@@ -298,12 +299,13 @@ class SelfImprovementMeasurementRecord(_StrictFrozenModel):
             trajectory_total = _sum_usage(
                 tuple(getattr(point.usage_by_category, category) for point in self.trajectory)
             )
-            if recorded != trajectory_total:
+            if not _usage_matches(recorded, trajectory_total):
                 raise ValueError(
                     "measurement per-category usage must equal the complete trajectory usage"
                 )
-        if self.usage != self.usage_by_category.aggregate() or self.usage != _sum_usage(
-            tuple(point.usage for point in self.trajectory)
+        if not _usage_matches(self.usage, self.usage_by_category.aggregate()) or not _usage_matches(
+            self.usage,
+            _sum_usage(tuple(point.usage for point in self.trajectory)),
         ):
             raise ValueError("measurement aggregate usage must equal reconciled trajectory usage")
         if ExternalGrounding.NONE in self.grounding:
@@ -329,6 +331,23 @@ def _sum_usage(usages: tuple[ResourceUsage, ...]) -> ResourceUsage:
     for field_name in _RESOURCE_FIELDS:
         values[field_name] = sum(getattr(usage, field_name) for usage in usages)
     return ResourceUsage.model_validate(values)
+
+
+def _usage_matches(left: ResourceUsage, right: ResourceUsage) -> bool:
+    return (
+        left.tokens == right.tokens
+        and left.tool_calls == right.tool_calls
+        and left.human_interventions == right.human_interventions
+        and all(
+            math.isclose(
+                getattr(left, field_name),
+                getattr(right, field_name),
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+            for field_name in ("cost_usd", "compute_units", "elapsed_seconds")
+        )
+    )
 
 
 def _observation_matches_trajectory(

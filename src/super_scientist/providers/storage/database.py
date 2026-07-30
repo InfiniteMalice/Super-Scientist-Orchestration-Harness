@@ -12,22 +12,25 @@ from alembic import command
 from super_scientist.providers.storage.repositories import RepositorySet
 
 
-def create_database_engine(url: str) -> Engine:
-    engine = create_engine(url, future=True)
+def _enable_sqlite_foreign_keys(
+    dbapi_connection: DBAPIConnection,
+    _: _ConnectionRecord,
+) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
+
+
+def configure_database_engine(engine: Engine) -> Engine:
     if engine.dialect.name == "sqlite":
-
-        @event.listens_for(engine, "connect")
-        def enable_sqlite_foreign_keys(
-            dbapi_connection: DBAPIConnection,
-            _: _ConnectionRecord,
-        ) -> None:
-            cursor = dbapi_connection.cursor()
-            try:
-                cursor.execute("PRAGMA foreign_keys=ON")
-            finally:
-                cursor.close()
-
+        event.listen(engine, "connect", _enable_sqlite_foreign_keys)
     return engine
+
+
+def create_database_engine(url: str) -> Engine:
+    return configure_database_engine(create_engine(url, future=True))
 
 
 def upgrade_database(url: str) -> None:

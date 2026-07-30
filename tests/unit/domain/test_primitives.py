@@ -1,5 +1,3 @@
-import subprocess
-
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
@@ -45,20 +43,12 @@ def test_sha256_type_accepts_canonical_digest() -> None:
     assert TypeAdapter(Sha256Hex).validate_python("a" * 64) == "a" * 64
 
 
-def test_git_object_id_contract_accepts_the_real_repository_head_and_sha256_format() -> None:
+def test_git_object_id_contract_accepts_sha1_and_sha256_formats() -> None:
     git_object_id = getattr(primitives, "GitObjectId", None)
     assert git_object_id is not None, "GitObjectId contract is missing"
-    completed = subprocess.run(
-        ("git", "rev-parse", "HEAD"),
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    repository_head = completed.stdout.strip()
-    assert len(repository_head) == 40
 
     adapter = TypeAdapter(git_object_id)
-    assert adapter.validate_python(repository_head) == repository_head
+    assert adapter.validate_python("b" * 40) == "b" * 40
     assert adapter.validate_python("a" * 64) == "a" * 64
     for invalid in ("A" * 40, "a" * 39, "a" * 41, "g" * 40, " a" * 20):
         with pytest.raises(ValidationError):

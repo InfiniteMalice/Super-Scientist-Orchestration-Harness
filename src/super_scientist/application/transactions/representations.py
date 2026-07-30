@@ -119,46 +119,16 @@ class RepresentationReceiptReader:
     def __init__(self, connection: Connection) -> None:
         self._transactions = TransactionRepository(connection)
         self._audit = AuditRepository(connection)
+        self._receipts: dict[str, RepresentationReceipt] | None = None
 
     def resolve(self, reference: AcceptedPrimitiveReceiptRef) -> RepresentationReceipt | None:
-        transaction = self._transactions.get_by_proposal_id(reference.proposal_id)
-        if transaction is None or not transaction.decision.accepted:
-            return None
-        proposal = transaction.proposal
-        if not isinstance(
-            proposal,
-            (
-                ProposePrimitiveVersion,
-                RecordPrimitiveEvaluation,
-                RecordEvaluatorAudit,
-                RecordSelfImprovementMeasurement,
-            ),
-        ):
-            return None
-        matches = tuple(
-            event
-            for event in self._audit.list_all()
-            if _audit_matches(event, proposal, transaction)
-        )
-        if len(matches) != 1:
-            return None
-        event = matches[0]
-        expected_reference = _receipt_reference(proposal, transaction, event)
-        if expected_reference != reference:
-            return None
-        payload = json_compatible_payload(event.payload)
-        try:
-            governing_policy_hash = SHA256_ADAPTER.validate_python(payload["policy_hash"])
-        except (KeyError, ValidationError):
-            return None
-        return RepresentationReceipt(
-            reference=expected_reference,
-            proposal=proposal,
-            transaction_created_at=transaction.created_at,
-            audit_sequence=event.sequence,
-            audit_occurred_at=event.occurred_at,
-            governing_policy_hash=governing_policy_hash,
-        )
+        if self._receipts is None:
+            self._receipts = representation_receipts(
+                self._transactions.list_all(),
+                self._audit.list_all(),
+            )
+        receipt = self._receipts.get(reference.proposal_id)
+        return receipt if receipt is not None and receipt.reference == reference else None
 
 
 def representation_receipts(

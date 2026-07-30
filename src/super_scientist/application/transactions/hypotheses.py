@@ -174,36 +174,16 @@ class HypothesisReceiptReader:
     def __init__(self, connection: Connection) -> None:
         self._transactions = TransactionRepository(connection)
         self._audit = AuditRepository(connection)
+        self._receipts: dict[str, HypothesisReceipt] | None = None
 
     def resolve(self, reference: AcceptedHypothesisReceiptRef) -> HypothesisReceipt | None:
-        transaction = self._transactions.get_by_proposal_id(reference.proposal_id)
-        if transaction is None or not transaction.decision.accepted:
-            return None
-        proposal = transaction.proposal
-        if not _is_receipt_proposal(proposal):
-            return None
-        matches = tuple(
-            event
-            for event in self._audit.list_all()
-            if _audit_matches(event, proposal, transaction)
-        )
-        if len(matches) != 1:
-            return None
-        event = matches[0]
-        expected = _receipt_reference(proposal, transaction, event)
-        if expected != reference:
-            return None
-        policy_hash = _audit_policy_hash(event)
-        if policy_hash is None:
-            return None
-        return HypothesisReceipt(
-            reference=expected,
-            proposal=proposal,
-            transaction_created_at=transaction.created_at,
-            audit_sequence=event.sequence,
-            audit_occurred_at=event.occurred_at,
-            governing_policy_hash=policy_hash,
-        )
+        if self._receipts is None:
+            self._receipts = hypothesis_receipts(
+                self._transactions.list_all(),
+                self._audit.list_all(),
+            )
+        receipt = self._receipts.get(reference.proposal_id)
+        return receipt if receipt is not None and receipt.reference == reference else None
 
 
 def hypothesis_receipts(

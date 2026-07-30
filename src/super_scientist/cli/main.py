@@ -1,5 +1,7 @@
 import sys
+import tempfile
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
@@ -143,12 +145,30 @@ app.add_typer(harness_eval_app, name="harness-eval")
 def _quality_result_payload(result: QualityCheckResult) -> dict[str, object]:
     return {
         "name": result.name,
-        "argv": result.argv,
+        "argv": tuple(
+            "{python}" if argument == sys.executable else _portable_quality_text(argument)
+            for argument in result.argv
+        ),
         "status": result.status,
         "returncode": result.returncode,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
+        "stdout": _portable_quality_text(result.stdout),
+        "stderr": _portable_quality_text(result.stderr),
     }
+
+
+def _portable_quality_text(value: str) -> str:
+    portable = value
+    replacements = (
+        (sys.executable, "{python}"),
+        (str(Path.cwd().resolve()), "{project-root}"),
+        (str(Path(sys.prefix).resolve()), "{python-prefix}"),
+        (str(Path(tempfile.gettempdir()).resolve()), "{temp-root}"),
+        (str(Path.home().resolve()), "{home}"),
+    )
+    for machine_path, placeholder in replacements:
+        portable = portable.replace(machine_path, placeholder)
+        portable = portable.replace(machine_path.replace("\\", "/"), placeholder)
+    return portable
 
 
 @app.command("quality-gate")

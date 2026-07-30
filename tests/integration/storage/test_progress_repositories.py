@@ -94,6 +94,12 @@ def test_fixed_progress_repositories_round_trip_all_six_record_types(tmp_path: P
         assert ProgressSubtaskRepository(connection).get(subtask.subtask_id) == subtask
         assert ProgressEventRepository(connection).get(event.event_id) == event
         assert RunBudgetRepository(connection).get(budget.budget_id) == budget
+        assert ProgressPlanRepository(connection).list_for_run(plan.run_id) == (plan,)
+        assert ProgressPlanRepository(connection).list_for_run("other-run") == ()
+        assert ProgressSubtaskRepository(connection).get_many((subtask.subtask_id,)) == (subtask,)
+        assert ProgressSubtaskRepository(connection).get_many(()) == ()
+        assert ProgressEventRepository(connection).list_for_plan(plan.plan_version_id) == (event,)
+        assert RunBudgetRepository(connection).list_for_plan(plan.plan_version_id) == (budget,)
         assert RunCheckpointRepository(connection).get(checkpoint.checkpoint_id) == checkpoint
         assert (
             CompletionDecisionRepository(connection).get(completion.completion_decision_id)

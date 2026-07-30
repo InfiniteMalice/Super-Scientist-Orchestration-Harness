@@ -102,6 +102,8 @@ def handbook_build(
     declared = _manifest(manifest_path)
     try:
         built = build_handbook(repository_root, declared)
+    except PathContainmentError as error:
+        raise CliBoundaryError("PATH_CONTAINMENT_ERROR", str(error)) from error
     except HandbookBuildError as error:
         emit(
             "handbook build",

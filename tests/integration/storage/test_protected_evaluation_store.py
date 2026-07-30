@@ -845,6 +845,16 @@ def test_protected_root_and_database_shapes_fail_closed(tmp_path: Path) -> None:
     recovered.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission contract")
+def test_protected_root_is_created_with_owner_only_permissions(tmp_path: Path) -> None:
+    protected_root = tmp_path / "group-readable" / "protected"
+    protected_root.parent.mkdir(mode=0o755)
+
+    prepared = protected_evaluation_module._prepare_private_root(protected_root)
+
+    assert prepared.stat().st_mode & 0o077 == 0
+
+
 @pytest.mark.integration
 @pytest.mark.parametrize(
     ("case_name", "mutation_sql"),
@@ -1235,7 +1245,7 @@ def test_shared_answer_reader_serializes_32_concurrent_requests(tmp_path: Path) 
         barrier = Barrier(32)
 
         def read_once(_: int) -> bytes:
-            barrier.wait()
+            barrier.wait(timeout=10)
             return reader.read_expected_output("task-1")
 
         with ThreadPoolExecutor(max_workers=32) as executor:
@@ -1261,7 +1271,7 @@ def test_coordinator_gateway_serializes_32_concurrent_uow_appends(tmp_path: Path
             barrier = Barrier(32)
 
             def append_once(index: int) -> None:
-                barrier.wait()
+                barrier.wait(timeout=10)
                 gateway.append_result(_checker_result(result_id=f"result-{index}"))
 
             try:

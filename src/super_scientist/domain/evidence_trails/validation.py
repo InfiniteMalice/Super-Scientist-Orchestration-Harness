@@ -613,22 +613,26 @@ def _has_cycle(node_ids: set[str], edges: set[tuple[str, str]]) -> bool:
     for source, target in edges:
         if source in adjacency and target in adjacency:
             adjacency[source].add(target)
-    visiting: set[str] = set()
-    visited: set[str] = set()
-
-    def visit(node_id: str) -> bool:
-        if node_id in visiting:
-            return True
-        if node_id in visited:
-            return False
-        visiting.add(node_id)
-        if any(visit(target) for target in adjacency[node_id]):
-            return True
-        visiting.remove(node_id)
-        visited.add(node_id)
-        return False
-
-    return any(visit(node_id) for node_id in sorted(node_ids))
+    state = {node_id: 0 for node_id in node_ids}
+    for root in sorted(node_ids):
+        if state[root] != 0:
+            continue
+        state[root] = 1
+        stack = [(root, iter(sorted(adjacency[root])))]
+        while stack:
+            _, targets = stack[-1]
+            try:
+                target = next(targets)
+            except StopIteration:
+                finished, _ = stack.pop()
+                state[finished] = 2
+                continue
+            if state[target] == 1:
+                return True
+            if state[target] == 0:
+                state[target] = 1
+                stack.append((target, iter(sorted(adjacency[target]))))
+    return False
 
 
 def source_actor_id_for(

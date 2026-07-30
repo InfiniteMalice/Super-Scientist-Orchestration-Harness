@@ -329,3 +329,40 @@ def test_handbook_verify_maps_nested_path_failures_to_boundary_error(
     assert result.exit_code == 2
     payload = _json_payload(result)
     assert payload["errors"] == [{"code": "PATH_CONTAINMENT_ERROR", "message": "source escaped"}]
+
+
+def test_handbook_build_maps_nested_path_failures_to_boundary_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    manifest = repository / "manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(handbook, "_manifest", lambda _path: object())
+
+    def fail_build(_root: Path, _manifest: object) -> object:
+        raise PathContainmentError("source escaped")
+
+    monkeypatch.setattr(handbook, "build_handbook", fail_build)
+
+    result = runner.invoke(
+        app,
+        [
+            "handbook",
+            "build",
+            "--root",
+            str(tmp_path),
+            "--repository",
+            str(repository),
+            "--manifest",
+            str(manifest),
+            "--output-dir",
+            "generated",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 2
+    payload = _json_payload(result)
+    assert payload["errors"] == [{"code": "PATH_CONTAINMENT_ERROR", "message": "source escaped"}]

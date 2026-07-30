@@ -48,7 +48,9 @@ def test_primitive_version_storage_round_trip_is_exact() -> None:
         {"proposer": _actor("different-proposer", model=True)},
     ),
 )
-def test_primitive_record_hash_changes_for_semantically_distinct_identity(changed: dict[str, object]) -> None:
+def test_primitive_record_hash_changes_for_semantically_distinct_identity(
+    changed: dict[str, object],
+) -> None:
     original = primitive_version_to_storage(_version())
     candidate = primitive_version_to_storage(_version().model_copy(update=changed))
     assert canonical_json_bytes(original.model_dump(mode="json")) != canonical_json_bytes(
@@ -135,8 +137,7 @@ class PrimitiveVersionAppender:
     _versions: PrimitiveVersionRepository
     _stages: PrimitiveStageHistoryReader
 
-    def append_version(self, primitive: PrimitiveVersion) -> None:
-        ...
+    def append_version(self, primitive: PrimitiveVersion) -> None: ...
 ```
 
 - [x] **Step 4: Update coordinator wiring and projection methods to consume only their role writer**
@@ -163,8 +164,14 @@ Run: `python -m pytest tests/integration/application/test_representation_service
 @pytest.mark.parametrize("use", tuple(PrimitiveUse))
 def test_protected_primitive_use_requires_storage_resolved_exact_head(use: PrimitiveUse) -> None:
     assert primitive_use_rejection("missing", resolver=_Resolver(), use=use) is QUARANTINED
-    assert primitive_use_rejection("candidate", resolver=_Resolver(head_only=True), use=use) is QUARANTINED
-    assert primitive_use_rejection("candidate", resolver=_Resolver(mismatched=True), use=use) is QUARANTINED
+    assert (
+        primitive_use_rejection("candidate", resolver=_Resolver(head_only=True), use=use)
+        is QUARANTINED
+    )
+    assert (
+        primitive_use_rejection("candidate", resolver=_Resolver(mismatched=True), use=use)
+        is QUARANTINED
+    )
 ```
 
 - [x] **Step 2: Run the exact unit tests and confirm RED because the gate accepts caller state**
@@ -187,7 +194,11 @@ def primitive_use_rejection(
     head = resolver.get_head(retained.primitive_id)
     if head != (retained.primitive_version_id, retained.semantic_version, retained.status):
         return RejectionCode.EXPERIMENTAL_PRIMITIVE_QUARANTINED
-    return None if status_is_promotable(retained.status) else RejectionCode.EXPERIMENTAL_PRIMITIVE_QUARANTINED
+    return (
+        None
+        if status_is_promotable(retained.status)
+        else RejectionCode.EXPERIMENTAL_PRIMITIVE_QUARANTINED
+    )
 ```
 
 - [x] **Step 4: Update the real storage consumer and integration assertion**
