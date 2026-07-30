@@ -4,8 +4,8 @@
 > Python syntax verifies locations only and does not infer behavioral truth.
 
 - Repository: `InfiniteMalice/Super-Scientist-Orchestration-Harness`
-- Repository commit: `b09dea10e1d588c7dbac89d59d021db45c291ef8`
-- Manifest SHA-256: `e91786cb83b8cb19c20d7c9937a6d99de750388654b846bb0b4f45336cb7e019`
+- Repository commit: `dafa9f460d10af1e1ce2a29d924b8e8b1573c56e`
+- Manifest SHA-256: `e072d4867e2956f9621e40a903436b4b602ad8083a6743ee8fa48730164a231f`
 - Source-tree SHA-256: `3f38dc3b153dd055318f3ed0393021db73d58fb7cac09d1cef56db31539304de`
 
 ## Level 1: Summary
@@ -110,7 +110,7 @@ Governing rule versions:
 
 ### `artifact-containment`
 
-- Commit: `b09dea10e1d588c7dbac89d59d021db45c291ef8`
+- Commit: `dafa9f460d10af1e1ce2a29d924b8e8b1573c56e`
   - Source: `src/super_scientist/providers/storage/artifacts.py:19` through line 150
   - Symbol: `FileArtifactStore`
   - File SHA-256: `da73930e63bef136ae522675f292249cfaf057d939983b3aecc8a39de6f0c0f5`
@@ -122,7 +122,7 @@ Tests:
 
 ### `protected-evaluation-separation`
 
-- Commit: `b09dea10e1d588c7dbac89d59d021db45c291ef8`
+- Commit: `dafa9f460d10af1e1ce2a29d924b8e8b1573c56e`
   - Source: `src/super_scientist/providers/storage/protected_evaluation.py:218` through line 349
   - Symbol: `ProtectedEvaluationStore`
   - File SHA-256: `00217e95f7a613167d8793427189c979c8ea1c5dae38e4bc4c62a2ed3db7bd0c`
@@ -134,7 +134,7 @@ Tests:
 
 ### `transactional-admission-coordination`
 
-- Commit: `b09dea10e1d588c7dbac89d59d021db45c291ef8`
+- Commit: `dafa9f460d10af1e1ce2a29d924b8e8b1573c56e`
   - Source: `src/super_scientist/application/transactions/coordinator.py:182` through line 638
   - Symbol: `TransactionCoordinator`
   - File SHA-256: `5e040b3572d732658e7982e37bac39a0330ced5cb568d4d613e39e96e65c13c7`
@@ -146,7 +146,7 @@ Tests:
 
 ### `workspace-integrity-verification`
 
-- Commit: `b09dea10e1d588c7dbac89d59d021db45c291ef8`
+- Commit: `dafa9f460d10af1e1ce2a29d924b8e8b1573c56e`
   - Source: `src/super_scientist/application/workspace_integrity.py:621` through line 682
   - Symbol: `verify_workspace`
   - File SHA-256: `30431544df4d1c2983aa6320acb35e09aacbeec73640d3fa4e556d7f0cd85d84`
