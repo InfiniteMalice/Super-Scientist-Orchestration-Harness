@@ -29,7 +29,7 @@ def test_wheel_smoke_uses_built_distribution_and_fixed_cli_command() -> None:
     plan = wheel_smoke.build_wheel_smoke_plan((Path("dist/package-0.2.0-py3-none-any.whl"),))
 
     assert plan.wheel_path == Path("dist/package-0.2.0-py3-none-any.whl")
-    assert plan.smoke_argv[-3:] == ("scientist-harness", "--help", "--json")
+    assert plan.smoke_argv[-3:] == ("scientist-harness", "--version", "--json")
     assert plan.install_argv[:-1] == (
         "{venv-python}",
         "-m",
@@ -53,24 +53,22 @@ def test_project_wheel_rejects_path_configuration_files(tmp_path: Path) -> None:
         wheel_smoke._verify_project_wheel(wheel)
 
 
-def test_dependency_free_smoke_bootstrap_preserves_exact_public_envelope(
+def test_dependency_free_smoke_bootstrap_returns_successful_version_envelope(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     bootstrap = importlib.import_module("super_scientist.cli.bootstrap")
-    monkeypatch.setattr(sys, "argv", ["scientist-harness", "--help", "--json"])
+    monkeypatch.setattr(sys, "argv", ["scientist-harness", "--version", "--json"])
 
-    with pytest.raises(SystemExit) as raised:
-        bootstrap.main()
+    bootstrap.main()
 
-    assert raised.value.code == 2
     assert json.loads(capsys.readouterr().out) == {
-        "command": "scientist-harness",
-        "data": None,
+        "command": "version",
+        "data": {"version": "0.2.0"},
         "decision": None,
-        "errors": [{"code": "INVALID_ARGUMENT", "message": "No such option: --json"}],
+        "errors": [],
         "schema_version": 1,
-        "success": False,
+        "success": True,
     }
 
 
@@ -401,10 +399,40 @@ def test_executor_converts_runner_exception_to_safe_failure_and_cleans_temp(
     assert not created.exists()
 
 
-def test_executor_uses_fixed_argv_accepts_exact_cli_envelope_and_cleans_temp(
+def test_executor_uses_fixed_argv_accepts_successful_version_json_and_cleans_temp(
     tmp_path: Path,
 ) -> None:
     wheel_smoke = _wheel_smoke()
+    envelope = json.dumps(
+        {
+            "command": "version",
+            "data": {"version": "0.2.0"},
+            "decision": None,
+            "errors": [],
+            "schema_version": 1,
+            "success": True,
+        },
+        sort_keys=True,
+    )
+
+    result, calls, created = _run_fake_smoke(
+        tmp_path,
+        smoke_returncode=0,
+        smoke_stdout=envelope,
+    )
+
+    assert result.passed is True
+    assert tuple(stage.name for stage in result.stages) == ("venv", "install", "cli-smoke")
+    assert calls[0][1:4] == ("-m", "venv", "--copies")
+    assert Path(calls[1][-1]).name == "package-0.2.0-py3-none-any.whl"
+    assert Path(calls[2][0]).name == wheel_smoke.VENV_CLI_NAME
+    assert calls[2][1:] == ("--version", "--json")
+    assert not created.exists()
+
+
+def test_executor_rejects_the_former_json_parser_error_and_still_cleans_temp(
+    tmp_path: Path,
+) -> None:
     envelope = json.dumps(
         {
             "command": "scientist-harness",
@@ -416,27 +444,10 @@ def test_executor_uses_fixed_argv_accepts_exact_cli_envelope_and_cleans_temp(
         },
         sort_keys=True,
     )
-
-    result, calls, created = _run_fake_smoke(
-        tmp_path,
-        smoke_returncode=2,
-        smoke_stdout=envelope,
-    )
-
-    assert result.passed is True
-    assert tuple(stage.name for stage in result.stages) == ("venv", "install", "cli-smoke")
-    assert calls[0][1:4] == ("-m", "venv", "--copies")
-    assert Path(calls[1][-1]).name == "package-0.2.0-py3-none-any.whl"
-    assert Path(calls[2][0]).name == wheel_smoke.VENV_CLI_NAME
-    assert calls[2][1:] == ("--help", "--json")
-    assert not created.exists()
-
-
-def test_executor_rejects_arbitrary_cli_failure_and_still_cleans_temp(tmp_path: Path) -> None:
     result, _, created = _run_fake_smoke(
         tmp_path,
         smoke_returncode=2,
-        smoke_stdout='{"success": false, "errors": [{"code": "OTHER"}]}',
+        smoke_stdout=envelope,
     )
 
     assert result.passed is False
@@ -447,13 +458,13 @@ def test_executor_rejects_arbitrary_cli_failure_and_still_cleans_temp(tmp_path: 
 @pytest.mark.parametrize(
     ("returncode", "stdout", "expected_passed"),
     [
-        (0, "help text", True),
+        (0, "help text", False),
         (3, "", False),
         (2, "{", False),
         (2, "[]", False),
     ],
 )
-def test_executor_accepts_only_success_or_the_exact_fixed_cli_envelope(
+def test_executor_accepts_only_exit_zero_successful_version_json(
     tmp_path: Path,
     returncode: int,
     stdout: str,

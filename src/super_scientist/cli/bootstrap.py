@@ -3,33 +3,30 @@ from __future__ import annotations
 import json
 import sys
 
-_DEPENDENCY_FREE_SMOKE_ARGUMENTS = ("--help", "--json")
+from super_scientist import __version__
+
+_DEPENDENCY_FREE_VERSION_ARGUMENTS = ("--version", "--json")
 
 
 def main() -> None:
     """Preserve the fixed package smoke without importing runtime dependencies."""
 
-    if tuple(sys.argv[1:]) == _DEPENDENCY_FREE_SMOKE_ARGUMENTS:
+    if tuple(sys.argv[1:]) == _DEPENDENCY_FREE_VERSION_ARGUMENTS:
         print(
             json.dumps(
                 {
-                    "command": "scientist-harness",
-                    "data": None,
+                    "command": "version",
+                    "data": {"version": __version__},
                     "decision": None,
-                    "errors": [
-                        {
-                            "code": "INVALID_ARGUMENT",
-                            "message": "No such option: --json",
-                        }
-                    ],
+                    "errors": [],
                     "schema_version": 1,
-                    "success": False,
+                    "success": True,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
             )
         )
-        raise SystemExit(2)
+        return
 
     from super_scientist.cli.main import main as application_main
 

@@ -13,6 +13,8 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 
+from super_scientist import __version__
+
 # This quality check executes only fixed reviewed argv and never enables a shell.
 IS_WINDOWS = os.name == "nt"
 VENV_PYTHON_NAME = "python.exe" if IS_WINDOWS else "python"
@@ -87,7 +89,7 @@ def build_wheel_smoke_plan(distributions: tuple[Path, ...]) -> WheelSmokePlan:
             "--no-deps",
             str(normalized),
         ),
-        smoke_argv=("scientist-harness", "--help", "--json"),
+        smoke_argv=("scientist-harness", "--version", "--json"),
     )
 
 
@@ -238,9 +240,7 @@ def _run_stage(
 
 
 def _is_accepted_smoke_result(completed: subprocess.CompletedProcess[str]) -> bool:
-    if completed.returncode == 0:
-        return True
-    if completed.returncode != 2:
+    if completed.returncode != 0:
         return False
     try:
         payload = json.loads(completed.stdout)
@@ -248,16 +248,13 @@ def _is_accepted_smoke_result(completed: subprocess.CompletedProcess[str]) -> bo
         return False
     if not isinstance(payload, dict):
         return False
-    errors = payload.get("errors")
     return (
         payload.get("schema_version") == 1
-        and payload.get("command") == "scientist-harness"
-        and payload.get("success") is False
-        and isinstance(errors, list)
-        and len(errors) == 1
-        and isinstance(errors[0], dict)
-        and errors[0].get("code") == "INVALID_ARGUMENT"
-        and errors[0].get("message") == "No such option: --json"
+        and payload.get("command") == "version"
+        and payload.get("success") is True
+        and payload.get("data") == {"version": __version__}
+        and payload.get("decision") is None
+        and payload.get("errors") == []
     )
 
 
