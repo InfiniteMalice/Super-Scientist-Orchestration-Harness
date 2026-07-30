@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hmac
 import types
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from decimal import Decimal
 from types import MappingProxyType
@@ -312,9 +312,41 @@ def _cell_has_contents(cell: types.CellType) -> bool:
     return True
 
 
+def _object_graph_field_names(values: tuple[object, ...]) -> tuple[str, ...]:
+    names: list[str] = []
+    for value in values:
+        candidates: Iterable[object]
+        if isinstance(value, Mapping):
+            candidates = value.keys()
+        elif is_dataclass(value) and not isinstance(value, type):
+            candidates = (field.name for field in fields(value))
+        else:
+            state = getattr(value, "__dict__", None)
+            state_names = state.keys() if isinstance(state, dict) else ()
+            slots = getattr(type(value), "__slots__", ())
+            slot_names = (slots,) if isinstance(slots, str) else slots
+            candidates = (*state_names, *slot_names)
+        names.extend(
+            candidate.casefold().replace("-", "_")
+            for candidate in candidates
+            if isinstance(candidate, str)
+        )
+    return tuple(names)
+
+
 def _reject_forbidden_candidate_authority(root: object) -> None:
     forbidden_reference_fragments = ("protected://", "artifact://")
-    for value in _walk_object_graph_values(root):
+    forbidden_field_names = {
+        "answer_bytes",
+        "answer_reference",
+        "expected_output",
+        "protected_answer",
+        "protected_content",
+    }
+    values = _walk_object_graph_values(root)
+    if forbidden_field_names.intersection(_object_graph_field_names(values)):
+        raise ValueError("candidate context contains protected content")
+    for value in values:
         if isinstance(value, str):
             lowered = value.lower()
             if any(fragment in lowered for fragment in forbidden_reference_fragments):

@@ -283,6 +283,35 @@ def test_sealed_context_rejects_reversible_reference_bytes() -> None:
         create_candidate_execution_context((public,), _budget())
 
 
+def test_candidate_context_rejects_raw_protected_content_field() -> None:
+    context = _candidate_context()
+    object.__setattr__(
+        context.input_reader,
+        "_inputs",
+        {"protected_answer": SECRET},
+    )
+
+    with pytest.raises(ValueError, match="protected content"):
+        CandidateExecutionContext(
+            input_reader=context.input_reader,
+            budget=_budget(),
+        )
+
+
+def test_candidate_context_allows_field_name_text_as_an_ordinary_value() -> None:
+    context = _candidate_context()
+    object.__setattr__(
+        context.input_reader,
+        "_inputs",
+        {"label": "protected_answer"},
+    )
+
+    CandidateExecutionContext(
+        input_reader=context.input_reader,
+        budget=_budget(),
+    )
+
+
 def test_candidate_context_factory_seals_public_input_authority() -> None:
     public = _public_input()
 
