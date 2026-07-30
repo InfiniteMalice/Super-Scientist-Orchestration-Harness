@@ -432,6 +432,7 @@ def _git_checkout_path_is_clean(root: Path, commit: str, relative_path: str) -> 
         "diff",
         "--quiet",
         "--no-ext-diff",
+        "--ignore-cr-at-eol",
         commit,
         "--",
         f":(literal){relative_path}",

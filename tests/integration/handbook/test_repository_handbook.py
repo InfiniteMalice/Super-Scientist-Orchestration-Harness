@@ -258,6 +258,7 @@ def test_fresh_autocrlf_clone_regenerates_byte_identical_handbook_artifacts(
         str(seed),
         str(clone),
     )
+    _git(clone, "config", "core.autocrlf", "false")
     cloned_manifest = BehaviorManifest.model_validate_json(
         (clone / "docs" / "handbook" / "behaviors.json").read_bytes()
     )

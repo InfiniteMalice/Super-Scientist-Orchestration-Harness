@@ -248,6 +248,12 @@ def test_source_hashes_are_reproducible_across_git_checkout_line_endings(
         check=True,
         capture_output=True,
     )
+    subprocess.run(
+        ("git", "config", "core.autocrlf", "false"),
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
     autocrlf_build = build_handbook(clone, declared)
 
     assert lf_build.source_tree_hash == autocrlf_build.source_tree_hash
