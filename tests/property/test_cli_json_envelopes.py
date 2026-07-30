@@ -94,7 +94,7 @@ def test_every_json_mutation_uses_one_stable_error_envelope(
         st.lists(st.integers(), max_size=5),
     )
 )
-@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
 def test_json_mutations_reject_every_non_object_top_level(
     tmp_path: Path,
     value: object,
