@@ -23,8 +23,8 @@ change durable state.
 
 Each source binding uses the strict `GitObjectId` contract, so SHA-1 and SHA-256 Git
 object formats are accepted while arbitrary SHA-256-looking repository identifiers are
-not silently substituted for a Git contract. The initial manifest binds sources to the
-real Git commit `1ca0223f9969858de86a3c2d4e8b9660d3930d10`. Generated artifacts live in
+not silently substituted for a Git contract. The current manifest binds sources to the
+real Git commit `5efcc4881d89bf28cad4328c515d6ad6419d550c`. Generated artifacts live in
 a later commit, so this is deliberately a source-snapshot identifier rather than an
 impossible self-reference to the commit containing the generated files. Verification
 requires that the bound repository-canonical source still match both that commit and
