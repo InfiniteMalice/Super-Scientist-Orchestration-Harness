@@ -2729,23 +2729,29 @@ class EvaluatorHeadRepository:
         return evaluator_version_id
 
     def set(self, evaluator_version_id: str) -> None:
+        try:
+            validated_version_id = STABLE_IDENTIFIER_ADAPTER.validate_python(evaluator_version_id)
+        except (TypeError, ValueError) as error:
+            raise StorageIntegrityError(
+                "storage integrity error: invalid evaluator head"
+            ) from error
         _require_integrity(
             self._connection.execute(
                 select(evaluator_versions.c.evaluator_version_id).where(
-                    evaluator_versions.c.evaluator_version_id == evaluator_version_id
+                    evaluator_versions.c.evaluator_version_id == validated_version_id
                 )
             ).scalar_one_or_none()
-            == evaluator_version_id,
+            == validated_version_id,
             "evaluator head references a missing evaluator version",
         )
         statement = sqlite_insert(evaluator_heads).values(
             singleton_id=1,
-            evaluator_version_id=evaluator_version_id,
+            evaluator_version_id=validated_version_id,
         )
         self._connection.execute(
             statement.on_conflict_do_update(
                 index_elements=[evaluator_heads.c.singleton_id],
-                set_={"evaluator_version_id": evaluator_version_id},
+                set_={"evaluator_version_id": validated_version_id},
             )
         )
 

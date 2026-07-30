@@ -420,6 +420,19 @@ def test_evaluator_head_rejects_a_missing_evaluator_before_write(tmp_path: Path)
     engine.dispose()
 
 
+@pytest.mark.integration
+def test_evaluator_head_rejects_an_invalid_identifier_before_write(tmp_path: Path) -> None:
+    policy = _phase_a_policy()
+    _, uow_factory, engine = _coordinator(tmp_path, policy)
+    with (
+        pytest.raises(StorageIntegrityError, match="invalid evaluator head"),
+        uow_factory() as unit_of_work,
+    ):
+        assert unit_of_work.connection is not None
+        domain_records.EvaluatorHeadRepository(unit_of_work.connection).set("")
+    engine.dispose()
+
+
 def test_workspace_integrity_rejects_untransactional_task4_record(tmp_path: Path) -> None:
     policy = _phase_a_policy()
     _, uow_factory, engine = _coordinator(tmp_path, policy)
