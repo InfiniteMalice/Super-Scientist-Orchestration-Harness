@@ -18,7 +18,8 @@ def test_ci_installs_checkout_editably_for_source_coverage() -> None:
     assert workflow.count('python -m pip install -e ".[dev]"') == 2
 
 
-def test_ci_jobs_have_finite_timeouts() -> None:
+def test_ci_jobs_have_finite_and_workload_appropriate_timeouts() -> None:
     workflow = Path(".github/workflows/quality.yml").read_text(encoding="utf-8")
 
-    assert workflow.count("timeout-minutes: 15") == 2
+    assert workflow.count("timeout-minutes: 120") == 1
+    assert workflow.count("timeout-minutes: 15") == 1
