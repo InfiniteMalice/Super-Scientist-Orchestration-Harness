@@ -18,6 +18,12 @@ def test_ci_installs_checkout_editably_for_source_coverage() -> None:
     assert workflow.count('python -m pip install -e ".[dev]"') == 2
 
 
+def test_ci_checks_out_exact_pull_request_head_for_provenance() -> None:
+    workflow = Path(".github/workflows/quality.yml").read_text(encoding="utf-8")
+
+    assert workflow.count("ref: ${{ github.event.pull_request.head.sha }}") == 2
+
+
 def test_ci_jobs_have_finite_and_workload_appropriate_timeouts() -> None:
     workflow = Path(".github/workflows/quality.yml").read_text(encoding="utf-8")
 
