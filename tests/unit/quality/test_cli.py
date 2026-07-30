@@ -62,6 +62,15 @@ def test_quality_gate_json_records_every_fixed_check(
     assert all(item["argv"][0] == "{python}" for item in payload["data"]["checks"])
 
 
+def test_quality_gate_evidence_sanitizes_repr_escaped_machine_paths() -> None:
+    escaped_home = str(Path.home().resolve()).replace("\\", "\\\\")
+
+    portable = main._portable_quality_text(f"path = '{escaped_home}\\\\artifact.json'")
+
+    assert escaped_home not in portable
+    assert "{home}" in portable
+
+
 def test_quality_gate_json_preserves_exact_failure_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

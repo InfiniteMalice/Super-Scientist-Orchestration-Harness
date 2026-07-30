@@ -166,6 +166,7 @@ def _portable_quality_text(value: str) -> str:
         (str(Path.home().resolve()), "{home}"),
     )
     for machine_path, placeholder in replacements:
+        portable = portable.replace(machine_path.replace("\\", "\\\\"), placeholder)
         portable = portable.replace(machine_path, placeholder)
         portable = portable.replace(machine_path.replace("\\", "/"), placeholder)
     return portable
