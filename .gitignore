@@ -1,6 +1,7 @@
 .worktrees/
 .superpowers/
 .coverage
+.coverage.*
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/

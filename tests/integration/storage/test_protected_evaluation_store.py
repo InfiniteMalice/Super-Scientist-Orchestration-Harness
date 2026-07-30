@@ -735,8 +735,14 @@ def test_capability_response_timeout_is_typed_and_close_terminates_worker() -> N
     assert transport.closed is True
     assert process.terminated is True
     assert process.closed is True
-    assert transport.poll_timeouts
-    assert all(timeout > 0 for timeout in transport.poll_timeouts)
+    assert transport.poll_timeouts == [
+        protected_evaluation_module._WORKER_STARTUP_TIMEOUT_SECONDS,
+        protected_evaluation_module._WORKER_RESPONSE_TIMEOUT_SECONDS,
+    ]
+    assert (
+        protected_evaluation_module._WORKER_STARTUP_TIMEOUT_SECONDS
+        > protected_evaluation_module._WORKER_RESPONSE_TIMEOUT_SECONDS
+    )
 
 
 def test_protocol_desynchronization_permanently_poisons_capability_channel() -> None:

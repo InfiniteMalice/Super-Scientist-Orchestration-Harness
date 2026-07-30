@@ -57,6 +57,7 @@ _PROTECTED_MEDIA_TYPE = "application/octet-stream"
 _STABLE_IDENTIFIER_ADAPTER: TypeAdapter[StableIdentifier] = TypeAdapter(StableIdentifier)
 _SHA256_ADAPTER: TypeAdapter[Sha256Hex] = TypeAdapter(Sha256Hex)
 _WORKER_JOIN_TIMEOUT_SECONDS = 5.0
+_WORKER_STARTUP_TIMEOUT_SECONDS = 60.0
 _WORKER_RESPONSE_TIMEOUT_SECONDS = 10.0
 _MAX_WORKER_MESSAGE_BYTES = 64 * 1024 * 1024
 _MAX_WORKER_REQUEST_NUMBER = (10**20) - 1
@@ -367,7 +368,10 @@ class _ProcessCapability:
         self._closed = False
         self._request_number = 0
         try:
-            self._receive_response("worker-startup")
+            self._receive_response(
+                "worker-startup",
+                timeout_seconds=_WORKER_STARTUP_TIMEOUT_SECONDS,
+            )
         except ProtectedCapabilityError:
             self._channel_usable = False
             raise
@@ -440,9 +444,14 @@ class _ProcessCapability:
         self._transport.send_bytes(request.model_dump_json().encode("utf-8"))
         return self._receive_response(request_id)
 
-    def _receive_response(self, request_id: str) -> object | None:
+    def _receive_response(
+        self,
+        request_id: str,
+        *,
+        timeout_seconds: float = _WORKER_RESPONSE_TIMEOUT_SECONDS,
+    ) -> object | None:
         try:
-            response_ready = self._transport.poll(_WORKER_RESPONSE_TIMEOUT_SECONDS)
+            response_ready = self._transport.poll(timeout_seconds)
         except (EOFError, OSError) as error:
             raise ProtectedCapabilityError(
                 "CAPABILITY_WORKER_UNAVAILABLE",
