@@ -1,3 +1,4 @@
+import re
 import sys
 import tempfile
 from collections.abc import Sequence
@@ -166,9 +167,17 @@ def _portable_quality_text(value: str) -> str:
         (str(Path.home().resolve()), "{home}"),
     )
     for machine_path, placeholder in replacements:
-        portable = portable.replace(machine_path.replace("\\", "\\\\"), placeholder)
-        portable = portable.replace(machine_path, placeholder)
-        portable = portable.replace(machine_path.replace("\\", "/"), placeholder)
+        for variant in (
+            machine_path.replace("\\", "\\\\"),
+            machine_path,
+            machine_path.replace("\\", "/"),
+        ):
+            portable = re.sub(
+                re.escape(variant),
+                placeholder,
+                portable,
+                flags=re.IGNORECASE,
+            )
     return portable
 
 

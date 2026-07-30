@@ -71,6 +71,15 @@ def test_quality_gate_evidence_sanitizes_repr_escaped_machine_paths() -> None:
     assert "{home}" in portable
 
 
+def test_quality_gate_evidence_sanitizes_case_variant_machine_paths() -> None:
+    case_variant_home = str(Path.home().resolve()).swapcase()
+
+    portable = main._portable_quality_text(f"path = '{case_variant_home}/artifact.json'")
+
+    assert case_variant_home not in portable
+    assert "{home}" in portable
+
+
 def test_quality_gate_json_preserves_exact_failure_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
