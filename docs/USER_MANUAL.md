@@ -69,9 +69,9 @@ Use the nine-entry code registry. Treat the narrative count as an open documenta
 ## `MAN-02` — Safety and Authority Summary
 
 > **WARNING:** Admission does not prove scientific truth. Admission proves compliance with recorded constraints and inputs.
-
+>
 > **WARNING:** A proposal is untrusted input. A proposal is not committed state.
-
+>
 > **CAUTION:** If audit integrity fails, stop the affected operation. Do not bypass the integrity check.
 
 The harness owns admission and committed state.
@@ -189,7 +189,7 @@ Installation and dependency audit can access the configured package index.
 
 Use one field order for every role. A role name describes responsibility, not a new authority source.
 
-#### `ROLE-RESEARCH-PROPOSER` — Research proposer
+### `ROLE-RESEARCH-PROPOSER` — Research proposer
 
 **Capability status:** Implemented contract; model operation is interface only.
 
@@ -836,7 +836,7 @@ A second prompt to the same model is not necessarily independent review.
 
 The stage order follows `TransactionCoordinator`, `AdmissionEngine`, and replay tests.
 
-#### `KERNEL-STAGE-01` — Verify workspace integrity
+### `KERNEL-STAGE-01` — Verify workspace integrity
 
 **Capability status:** Implemented.
 
@@ -1170,7 +1170,7 @@ Every current stage requires independent human approval and exact active-policy 
 
 The template fields below apply to each stage. Each issue table uses defined rejection codes only.
 
-#### `HYPOTHESIS-STAGE-01` — Propose a hypothesis version
+### `HYPOTHESIS-STAGE-01` — Propose a hypothesis version
 
 **Capability status:** Implemented. **Goal:** Retain version one. **Primary actor:** `ROLE-HYPOTHESIS-PROPOSER`. **Suggested model type:** High-diversity hypothesis model.
 
@@ -1178,8 +1178,10 @@ The template fields below apply to each stage. Each issue table uses defined rej
 
 **Outputs:** Append-only hypothesis version and receipt. **Acceptance conditions:** Actor, policy, evidence, chronology, and first-version lineage pass.
 
-**Possible issues:** | Symptom | Probable cause | Resolution | Verification |
-| --- | --- | --- | --- | --- |
+**Possible issues:**
+
+| Symptom | Probable cause | Resolution | Verification |
+| --- | --- | --- | --- |
 | `INVALID_LINEAGE` | A successor used the proposal stage | Use `ReviseHypothesis` | Inspect hypothesis history |
 
 **Rollback or retry behavior:** Rejection remains durable; exact retry replays. **Authority boundary:** The stage does not advance a head. **Source references:** `ProposeHypothesisVersionHandler`; hypothesis service tests.
@@ -1192,8 +1194,10 @@ The template fields below apply to each stage. Each issue table uses defined rej
 
 **Outputs:** Model record and receipt. **Acceptance conditions:** Mode shape, candidate lineage, actor, policy, and chronology pass.
 
-**Possible issues:** | Symptom | Probable cause | Resolution | Verification |
-| --- | --- | --- | --- | --- |
+**Possible issues:**
+
+| Symptom | Probable cause | Resolution | Verification |
+| --- | --- | --- | --- |
 | `INVALID_PROPOSAL` | Unsupported execution shape | Use `METADATA_ONLY` or a registered simulator | Inspect `ExecutionMode` |
 
 **Rollback or retry behavior:** Metadata stays inert. **Authority boundary:** `METADATA_ONLY` cannot execute. **Source references:** `RegisterExecutableModelHandler`; model-execution tests.
@@ -1206,8 +1210,10 @@ The template fields below apply to each stage. Each issue table uses defined rej
 
 **Outputs:** Mechanism record and receipt. **Acceptance conditions:** Candidate, actor, policy, and chronology match.
 
-**Possible issues:** | Symptom | Probable cause | Resolution | Verification |
-| --- | --- | --- | --- | --- |
+**Possible issues:**
+
+| Symptom | Probable cause | Resolution | Verification |
+| --- | --- | --- | --- |
 | `INVALID_LINEAGE` | Wrong candidate receipt | Use the exact accepted receipt | Resolve receipt from audit history |
 
 **Rollback or retry behavior:** Append a new proposal for changed metadata. **Authority boundary:** Mechanism metadata is not a result. **Source references:** `RegisterVerificationMechanismHandler`; hypothesis tests.
@@ -1220,8 +1226,10 @@ The template fields below apply to each stage. Each issue table uses defined rej
 
 **Outputs:** Simulation record and receipt. **Acceptance conditions:** Schemas, seed, bounds, output, policy, and chronology match.
 
-**Possible issues:** | Symptom | Probable cause | Resolution | Verification |
-| --- | --- | --- | --- | --- |
+**Possible issues:**
+
+| Symptom | Probable cause | Resolution | Verification |
+| --- | --- | --- | --- |
 | `INSUFFICIENT_GROUNDING` | Output does not reproduce | Recompute from exact retained input | Run simulator tests |
 
 **Rollback or retry behavior:** Failed attempts remain durable. **Authority boundary:** No arbitrary model artifact executes. **Source references:** `RecordSimulationResultHandler`; simulator tests.
@@ -1234,8 +1242,10 @@ The template fields below apply to each stage. Each issue table uses defined rej
 
 **Outputs:** Verification record and receipt. **Acceptance conditions:** All lineage and provenance gates pass.
 
-**Possible issues:** | Symptom | Probable cause | Resolution | Verification |
-| --- | --- | --- | --- | --- |
+**Possible issues:**
+
+| Symptom | Probable cause | Resolution | Verification |
+| --- | --- | --- | --- |
 | `INDEPENDENT_REVIEW_REQUIRED` | Provenance or search evidence is insufficient | Use the correct independent mechanism | Inspect result discriminator and provenance |
 
 **Rollback or retry behavior:** Append a corrected result; do not overwrite. **Authority boundary:** Learned results cannot claim deterministic authority. **Source references:** `RecordVerificationResultHandler`; hypothesis tests.
@@ -1248,8 +1258,10 @@ The template fields below apply to each stage. Each issue table uses defined rej
 
 **Outputs:** Counterexample record and receipt. **Acceptance conditions:** Failed search, candidate, evidence, policy, and chronology match.
 
-**Possible issues:** | Symptom | Probable cause | Resolution | Verification |
-| --- | --- | --- | --- | --- |
+**Possible issues:**
+
+| Symptom | Probable cause | Resolution | Verification |
+| --- | --- | --- | --- |
 | `INVALID_LINEAGE` | Counterexample does not bind failed retained search | Use the exact failed receipt | Inspect verification history |
 
 **Rollback or retry behavior:** The counterexample remains append-only. **Authority boundary:** Confidence cannot erase a counterexample. **Source references:** `RecordCounterexampleHandler`; counterexample tests.
@@ -1262,8 +1274,10 @@ The template fields below apply to each stage. Each issue table uses defined rej
 
 **Outputs:** Revision and successor hypothesis records. **Acceptance conditions:** Version, receipts, changes, policy, and chronology form one chain.
 
-**Possible issues:** | Symptom | Probable cause | Resolution | Verification |
-| --- | --- | --- | --- | --- |
+**Possible issues:**
+
+| Symptom | Probable cause | Resolution | Verification |
+| --- | --- | --- | --- |
 | `INVALID_LINEAGE` | Noncontiguous or cosmetic revision | Create the immediate successor with explicit scientific changes | Inspect revision chain |
 
 **Rollback or retry behavior:** The failed predecessor remains. **Authority boundary:** Revision does not admit the successor. **Source references:** `ReviseHypothesisHandler`; revision tests.
@@ -1276,8 +1290,10 @@ The template fields below apply to each stage. Each issue table uses defined rej
 
 **Outputs:** `HypothesisAdmissionDecision` and updated head. **Acceptance conditions:** Every named prerequisite passes exactly.
 
-**Possible issues:** | Symptom | Probable cause | Resolution | Verification |
-| --- | --- | --- | --- | --- |
+**Possible issues:**
+
+| Symptom | Probable cause | Resolution | Verification |
+| --- | --- | --- | --- |
 | `INDEPENDENT_REVIEW_REQUIRED` | Human or support authority is incomplete | Supply independent retained support | Run focused hypothesis tests and `audit verify` |
 
 **Rollback or retry behavior:** A successor must name the current head as rollback target. **Authority boundary:** Admission is not scientific truth. **Source references:** `AdmitHypothesisHandler`; admission and transfer tests.
@@ -1351,7 +1367,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** policy snapshot and active pointer..
+**Outputs:** policy snapshot and active pointer.
 
 **Acceptance conditions:** Require genuinely empty state.
 
@@ -1388,7 +1404,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** policy transition..
+**Outputs:** policy transition.
 
 **Acceptance conditions:** Reject policy mismatch or circular authority.
 
@@ -1425,7 +1441,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** hash-verified evidence..
+**Outputs:** hash-verified evidence.
 
 **Acceptance conditions:** Reject hash mismatch.
 
@@ -1462,7 +1478,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** durable run records..
+**Outputs:** durable run records.
 
 **Acceptance conditions:** Reject dependency or budget errors.
 
@@ -1499,7 +1515,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** two hypotheses..
+**Outputs:** two hypotheses.
 
 **Acceptance conditions:** Reject missing grounding.
 
@@ -1536,7 +1552,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** model record..
+**Outputs:** model record.
 
 **Acceptance conditions:** Reject unknown execution.
 
@@ -1573,7 +1589,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** simulation and checks..
+**Outputs:** simulation and checks.
 
 **Acceptance conditions:** Reject non-reproducible output.
 
@@ -1610,7 +1626,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** trail records..
+**Outputs:** trail records.
 
 **Acceptance conditions:** Reject span or receipt mismatch.
 
@@ -1647,7 +1663,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** progress summary..
+**Outputs:** progress summary.
 
 **Acceptance conditions:** Reject correlated validation.
 
@@ -1684,7 +1700,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** `FALSE_FINISH` rejection..
+**Outputs:** `FALSE_FINISH` rejection.
 
 **Acceptance conditions:** Keep unfinished work open.
 
@@ -1721,7 +1737,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** revision records..
+**Outputs:** revision records.
 
 **Acceptance conditions:** Reject broken lineage.
 
@@ -1758,7 +1774,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** proposed rule..
+**Outputs:** proposed rule.
 
 **Acceptance conditions:** Reject duplicate or missing evidence.
 
@@ -1795,7 +1811,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** five assessments..
+**Outputs:** five assessments.
 
 **Acceptance conditions:** Reject correlated roles.
 
@@ -1832,7 +1848,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** consolidation..
+**Outputs:** consolidation.
 
 **Acceptance conditions:** Reject unresolved conflict.
 
@@ -1869,7 +1885,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** regression records..
+**Outputs:** regression records.
 
 **Acceptance conditions:** Reject missing case bindings.
 
@@ -1906,7 +1922,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** handbook mapping..
+**Outputs:** handbook mapping.
 
 **Acceptance conditions:** Reject `STALE_HANDBOOK_MAPPING`.
 
@@ -1943,7 +1959,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** iterations..
+**Outputs:** iterations.
 
 **Acceptance conditions:** Reject `UNMATCHED_BUDGETS`.
 
@@ -1980,7 +1996,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** `BENCHMARK_SPECIFIC` decision..
+**Outputs:** `BENCHMARK_SPECIFIC` decision.
 
 **Acceptance conditions:** Do not promote.
 
@@ -2017,7 +2033,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** `ADMITTED` decision..
+**Outputs:** `ADMITTED` decision.
 
 **Acceptance conditions:** Reject failed transfer or regression.
 
@@ -2054,7 +2070,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** content-addressed report..
+**Outputs:** content-addressed report.
 
 **Acceptance conditions:** Reject incomplete measurement.
 
@@ -2091,7 +2107,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 3. Submit each mutation through deterministic admission.
 4. Verify the durable output.
 
-**Outputs:** valid report..
+**Outputs:** valid report.
 
 **Acceptance conditions:** Fail closed on any mismatch.
 
@@ -2118,7 +2134,7 @@ For every stage below, the durable controller is `TransactionCoordinator` unless
 | `ROLE-ADVERSARIAL-REVIEWER` | `ADVERSARIAL` | Which counterexamples or unsafe edge cases break the rule? | Adversarial falsification model |
 | `ROLE-VERIFICATION-REVIEWER` | `VERIFICATION` | Do evidence and regression tests support the proposed boundary? | Deterministic checker with evidence model |
 
-#### `ROLE-SEMANTIC-REVIEWER` — semantic reviewer
+### `ROLE-SEMANTIC-REVIEWER` — semantic reviewer
 
 **Capability status:** Implemented assessment role.
 
