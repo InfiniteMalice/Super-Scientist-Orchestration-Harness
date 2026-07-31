@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -7,10 +8,10 @@ from functools import wraps
 from json import JSONDecodeError
 from pathlib import Path
 from types import TracebackType
-from typing import Annotated, ParamSpec
+from typing import Annotated, NoReturn, ParamSpec
 
 import typer
-from pydantic import ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -22,12 +23,17 @@ from super_scientist.config.models import GovernancePolicy
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
 from super_scientist.domain.evidence.models import EvidenceRecord, EvidenceSpan
 from super_scientist.domain.identity import ActorIdentity, ActorKind
-from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
+from super_scientist.domain.primitives import (
+    StableIdentifier,
+    canonical_json_bytes,
+    sha256_hex,
+)
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
     Approval,
-    Proposal,
     ProposalAttempt,
+    ProposalBase,
+    ProposalKind,
     ProposeClaim,
     TransactionDecision,
 )
@@ -48,6 +54,10 @@ Root = Annotated[Path, typer.Option()]
 JsonOutput = Annotated[bool, typer.Option("--json")]
 Source = Annotated[str, typer.Option()]
 InputFile = Annotated[Path, typer.Option(exists=True, dir_okay=False, readable=True)]
+JsonInputFile = Annotated[
+    Path,
+    typer.Option("--input", exists=True, dir_okay=False, readable=True),
+]
 MediaType = Annotated[str, typer.Option()]
 Proposition = Annotated[str, typer.Option()]
 Scope = Annotated[str, typer.Option()]
@@ -57,6 +67,31 @@ SelfApprove = Annotated[bool, typer.Option()]
 EvidenceId = Annotated[str, typer.Argument()]
 ClaimId = Annotated[str, typer.Argument()]
 CommandParameters = ParamSpec("CommandParameters")
+STABLE_IDENTIFIER_ADAPTER: TypeAdapter[str] = TypeAdapter(StableIdentifier)
+
+_TRUSTED_ENVELOPE_FIELDS = frozenset(
+    {"approval", "idempotency_key", "proposal_id", "proposal_type", "proposer"}
+)
+_RUNTIME_EXTENSION_FIELDS = frozenset(
+    {
+        "command",
+        "command_line",
+        "entry_point",
+        "executable",
+        "executable_path",
+        "module",
+        "module_name",
+        "provider",
+        "provider_id",
+        "python",
+        "python_source",
+        "shell",
+        "shell_command",
+        "source_code",
+        "uri",
+        "url",
+    }
+)
 
 
 class CliBoundaryError(ValueError):
@@ -68,17 +103,26 @@ class CliBoundaryError(ValueError):
 def _error_payload(error: Exception) -> dict[str, str]:
     if isinstance(error, CliBoundaryError):
         return {"code": error.code, "message": str(error)}
-    if isinstance(error, (JSONDecodeError, ValidationError)):
-        return {"code": "INVALID_ARGUMENT", "message": str(error)}
+    if isinstance(error, ValidationError):
+        return {"code": "INVALID_ARGUMENT", "message": "input validation failed"}
+    if isinstance(error, (JSONDecodeError, UnicodeError)):
+        return {"code": "INVALID_ARGUMENT", "message": "input is invalid"}
     if isinstance(error, StorageIntegrityError):
-        return {"code": "STORAGE_INTEGRITY_ERROR", "message": str(error)}
+        return {
+            "code": "STORAGE_INTEGRITY_ERROR",
+            "message": "storage integrity verification failed",
+        }
     if isinstance(error, SQLAlchemyError):
-        return {"code": "STORAGE_ERROR", "message": str(error)}
-    return {"code": "COMMAND_FAILED", "message": str(error)}
+        return {"code": "STORAGE_ERROR", "message": "storage operation failed"}
+    if isinstance(error, OSError):
+        return {"code": "FILESYSTEM_ERROR", "message": "filesystem operation failed"}
+    return {"code": "COMMAND_FAILED", "message": "command failed"}
 
 
 def _command_boundary(
     command: str,
+    *,
+    integrity_exit_code: int = 2,
 ) -> Callable[
     [Callable[CommandParameters, None]],
     Callable[CommandParameters, None],
@@ -98,7 +142,8 @@ def _command_boundary(
                 raise
             except Exception as error:
                 emit(command, False, json_output, errors=[_error_payload(error)])
-                raise typer.Exit(code=2) from None
+                exit_code = integrity_exit_code if isinstance(error, StorageIntegrityError) else 2
+                raise typer.Exit(code=exit_code) from None
 
         return wrapped
 
@@ -146,9 +191,148 @@ def _json_fallback(value: object) -> object:
 def _submit_intent(
     runtime: Runtime,
     attempt: ProposalAttempt,
-    create_proposal: Callable[[], Proposal],
+    create_proposal: Callable[[], object],
 ) -> TransactionDecision:
     return runtime.service.submit_intent(attempt, create_proposal)
+
+
+def load_json_object(path: Path) -> dict[str, object]:
+    """Decode one capability-safe strict UTF-8 JSON object."""
+
+    text = path.read_bytes().decode("utf-8")
+    parsed = json.loads(
+        text,
+        object_pairs_hook=_unique_json_object,
+        parse_constant=_reject_json_constant,
+    )
+    if not isinstance(parsed, dict):
+        raise CliBoundaryError("INVALID_ARGUMENT", "input must contain one JSON object")
+    _reject_input_authority(parsed)
+    _reject_runtime_extensions(parsed)
+    return parsed
+
+
+def validate_stable_identifier(value: str) -> str:
+    identifier = STABLE_IDENTIFIER_ADAPTER.validate_python(value)
+    if (
+        identifier in {".", ".."}
+        or "/" in identifier
+        or "\\" in identifier
+        or any(ord(character) < 32 for character in identifier)
+    ):
+        raise CliBoundaryError(
+            "INVALID_ARGUMENT",
+            "identifier must be a stable identifier, not a path",
+        )
+    return identifier
+
+
+def submit_json_mutation(
+    *,
+    root: Path,
+    command: str,
+    proposal_kind: ProposalKind,
+    proposal_model: type[ProposalBase],
+    payload: Mapping[str, object],
+    json_output: bool,
+    human_command: str | None = None,
+) -> None:
+    """Submit a fixed proposal type through one trusted coordinator boundary."""
+
+    with build_runtime(root) as runtime:
+        intent_digest = sha256_hex(
+            canonical_json_bytes(
+                {
+                    "proposal_kind": proposal_kind,
+                    "payload": payload,
+                }
+            )
+        )
+        intent_key = f"cli-{proposal_kind}-{intent_digest}"
+        actor = _actor(runtime.clock)
+        attempt = ProposalAttempt(
+            proposal_id=_intent_identifier("proposal", intent_key),
+            idempotency_key=intent_key,
+            proposer=actor,
+            proposal_kind=proposal_kind,
+            intent_digest=intent_digest,
+        )
+
+        def create_proposal() -> BaseModel:
+            document = dict(payload)
+            document.update(
+                {
+                    "proposal_id": attempt.proposal_id,
+                    "idempotency_key": attempt.idempotency_key,
+                    "proposer": actor.model_dump(mode="json"),
+                }
+            )
+            return proposal_model.model_validate_json(canonical_json_bytes(document))
+
+        decision = _submit_intent(runtime, attempt, create_proposal)
+        emit(
+            command,
+            decision.accepted,
+            json_output,
+            human_command=human_command,
+            data={
+                "proposal_id": attempt.proposal_id,
+                "idempotency_key": attempt.idempotency_key,
+                "proposal_kind": proposal_kind,
+            },
+            decision=decision.model_dump(mode="json"),
+        )
+        if not decision.accepted:
+            raise typer.Exit(code=2)
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise CliBoundaryError(
+                "INVALID_ARGUMENT",
+                f"duplicate JSON object key: {key}",
+            )
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> NoReturn:
+    raise CliBoundaryError("INVALID_ARGUMENT", f"invalid JSON numeric constant: {value}")
+
+
+def _reject_input_authority(payload: Mapping[str, object]) -> None:
+    forbidden = sorted(_TRUSTED_ENVELOPE_FIELDS.intersection(payload))
+    if forbidden:
+        raise CliBoundaryError(
+            "INVALID_ARGUMENT",
+            f"input cannot supply trusted transaction field: {forbidden[0]}",
+        )
+
+
+def _reject_runtime_extensions(value: object) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            normalized = key.casefold().replace("-", "_")
+            if normalized in _RUNTIME_EXTENSION_FIELDS:
+                raise CliBoundaryError(
+                    "INVALID_ARGUMENT",
+                    f"input field is not permitted at the CLI boundary: {key}",
+                )
+            _reject_runtime_extensions(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _reject_runtime_extensions(item)
+        return
+    if isinstance(value, str) and (
+        "://" in value.casefold() or value.casefold().startswith("www.")
+    ):
+        raise CliBoundaryError(
+            "INVALID_ARGUMENT",
+            "URLs are not permitted at the CLI boundary",
+        )
 
 
 def build_runtime(root: Path) -> Runtime:
@@ -205,8 +389,11 @@ def init_command(
         policy_path.write_text(policy.model_dump_json(indent=2), encoding="utf-8")
     try:
         snapshot = load_policy(policy_path)
-    except (JSONDecodeError, UnicodeError, ValidationError) as error:
-        raise CliBoundaryError("INVALID_POLICY", str(error)) from error
+    except (JSONDecodeError, UnicodeError, ValidationError):
+        raise CliBoundaryError(
+            "INVALID_POLICY",
+            "governance policy is invalid",
+        ) from None
     url = _database_url(resolved)
     upgrade_database(url)
     engine = create_database_engine(url)

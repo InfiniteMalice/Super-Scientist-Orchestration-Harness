@@ -4,14 +4,33 @@ from pathlib import Path
 from types import TracebackType
 
 from alembic.config import Config
-from sqlalchemy import Connection, Engine, create_engine
+from sqlalchemy import Connection, Engine, create_engine, event
+from sqlalchemy.engine.interfaces import DBAPIConnection
+from sqlalchemy.pool.base import _ConnectionRecord
 
 from alembic import command
 from super_scientist.providers.storage.repositories import RepositorySet
 
 
+def _enable_sqlite_foreign_keys(
+    dbapi_connection: DBAPIConnection,
+    _: _ConnectionRecord,
+) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
+
+
+def configure_database_engine(engine: Engine) -> Engine:
+    if engine.dialect.name == "sqlite":
+        event.listen(engine, "connect", _enable_sqlite_foreign_keys)
+    return engine
+
+
 def create_database_engine(url: str) -> Engine:
-    return create_engine(url, future=True)
+    return configure_database_engine(create_engine(url, future=True))
 
 
 def upgrade_database(url: str) -> None:

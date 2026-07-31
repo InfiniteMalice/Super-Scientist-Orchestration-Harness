@@ -1,9 +1,10 @@
 # Super Scientist Orchestration Harness
 
-The project is currently an **epistemic-kernel vertical slice**, not a complete
-scientific research system. It provides typed evidence and claim records, deterministic
-proposal admission, SQLite-backed transactions, content-addressed local artifacts, an
-active governance-policy hash, a tamper-evident audit chain, and a stable local CLI.
+Version 0.2.0 is a **governed-adaptation vertical slice**, not a complete scientific
+research system. It provides typed evidence and claim records, deterministic proposal
+admission, governed policy transitions, research/progress/evidence-trail records,
+behavioral-rule and hypothesis contracts, matched-budget harness evaluation,
+content-addressed local artifacts, a tamper-evident audit chain, and a stable local CLI.
 It does not claim to establish scientific truth.
 
 ## Why This Exists
@@ -55,9 +56,15 @@ research state, not a claim that automation can replace scientific judgment.
 - Exercise deterministic admission failures such as self-approval, missing evidence,
   illegal claim transitions, and idempotency conflicts.
 - Verify the audit chain, stored policy, projections, and artifact bytes.
+- Export an integrity-checked canonical workspace bundle and reconstruct it in an empty
+  workspace through the same coordinator intents.
+- Run the deterministic 21-step governed-adaptation example with synthetic
+  thermal-chamber and equipment-incident data.
 - Run the repository quality gate that CI uses.
 
-See `docs/examples/kernel-vertical-slice.md` for the deterministic offline walk-through.
+See `docs/examples/kernel-vertical-slice.md` for the original byte-compatible kernel
+walk-through and `docs/examples/governed-adaptation-vertical-slice.md` for the 0.2.0
+offline demonstration.
 
 ## Install
 
@@ -138,6 +145,14 @@ history, and artifact bytes. Configuration-only model aliases cannot approve one
 another, and unsupported proof-bearing claim statuses fail closed for review.
 Integrity errors stop the affected operation. See `SECURITY.md` for details.
 
+Workspace exchange serializes only strict schema-versioned policy snapshots,
+authoritative proposals and decisions, rebuildable projection expectations, and
+content-addressed artifact metadata. Artifact bytes move out of band and are rehashed.
+The bundle excludes protected answers, protected-store references, live filesystem
+paths, and executable configuration. Import into a nonempty workspace is not a merge:
+identical stable intents replay, while changed content under an existing identity
+produces an audited conflict.
+
 The quality command is a development operation, separate from scientific runtime
 authority. It executes only the eight source-controlled checks in its fixed registry:
 
@@ -180,9 +195,14 @@ the implementation docs explicitly say otherwise.
 
 ## Roadmap
 
-Later subsystems may add hypotheses, experiments, orchestration, source-linked memory,
-complete research runs, provider integrations, and separately governed model or
-training support. None of those capabilities is available in this kernel slice.
+The implemented slice is local, deterministic, and offline. Its built-in simulators,
+metadata-only training fixture, and synthetic examples are deterministic fakes for
+testing authority boundaries; they are not empirical scientific reproduction.
+Representational-primitives admission, open-ended orchestration, live experiment
+control, provider integrations, arbitrary model execution, and real training remain
+experimental, interface-only, or deferred as documented by each subsystem.
 
 The implemented architecture, governance, claim lifecycle, and security limits are
 documented in `ARCHITECTURE.md`, `GOVERNANCE.md`, `CLAIM_LEDGER.md`, and `SECURITY.md`.
+Operational reproduction and the attacker model are in `REPRODUCIBILITY.md` and
+`THREAT_MODEL.md`.

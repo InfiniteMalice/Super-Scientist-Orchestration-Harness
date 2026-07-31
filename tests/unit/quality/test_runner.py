@@ -28,6 +28,10 @@ def test_quality_registry_is_fixed_and_complete_for_kernel_slice() -> None:
         QualityCheck("dependencies", (sys.executable, "-m", "pip_audit")),
         QualityCheck("build", (sys.executable, "-m", "build")),
         QualityCheck("package", (sys.executable, "-m", "twine", "check", "dist/*")),
+        QualityCheck(
+            "wheel-install",
+            (sys.executable, "-m", "super_scientist.quality.wheel_smoke"),
+        ),
     )
     assert tuple(CHECKS) == expected
 
@@ -64,6 +68,7 @@ def test_report_records_failure_and_marks_remaining_checks_not_run(
         "not_run",
         "not_run",
         "not_run",
+        "not_run",
     )
     assert results[1].returncode == 7
     assert results[1].stdout == "output"
@@ -88,7 +93,9 @@ def test_runner_expands_distributions_in_sorted_order(
     monkeypatch.setattr(runner, "glob", lambda pattern: ["dist/z.whl", "dist/a.tar.gz"])
 
     assert runner.run_quality_gate() == 0
-    assert calls[-1] == (*CHECKS[-1].argv[:-1], "dist/a.tar.gz", "dist/z.whl")
+    package = next(check for check in CHECKS if check.name == "package")
+    assert calls[-2] == (*package.argv[:-1], "dist/a.tar.gz", "dist/z.whl")
+    assert calls[-1] == CHECKS[-1].argv
 
 
 def test_runner_removes_stale_distributions_before_build(
@@ -100,6 +107,8 @@ def test_runner_removes_stale_distributions_before_build(
     distribution_directory.mkdir()
     (distribution_directory / "stale.whl").write_bytes(b"stale")
     calls: list[tuple[str, ...]] = []
+    build = next(check for check in CHECKS if check.name == "build")
+    package = next(check for check in CHECKS if check.name == "package")
 
     def pass_check(
         argv: tuple[str, ...],
@@ -107,7 +116,7 @@ def test_runner_removes_stale_distributions_before_build(
         check: bool,
     ) -> subprocess.CompletedProcess[str]:
         assert check is False
-        if argv == CHECKS[-2].argv:
+        if argv == build.argv:
             assert not distribution_directory.exists()
             distribution_directory.mkdir()
             (distribution_directory / "current.whl").write_bytes(b"current")
@@ -117,7 +126,8 @@ def test_runner_removes_stale_distributions_before_build(
     monkeypatch.setattr(runner.subprocess, "run", pass_check)
 
     assert runner.run_quality_gate() == 0
-    assert calls[-1] == (*CHECKS[-1].argv[:-1], str(Path("dist") / "current.whl"))
+    assert calls[-2] == (*package.argv[:-1], str(Path("dist") / "current.whl"))
+    assert calls[-1] == CHECKS[-1].argv
 
 
 def test_runner_fails_when_no_distribution_exists(
@@ -140,7 +150,8 @@ def test_runner_fails_when_no_distribution_exists(
     monkeypatch.setattr(runner, "glob", lambda pattern: [])
 
     assert runner.run_quality_gate() == 1
-    assert calls == len(CHECKS) - 1
+    package_index = next(index for index, check in enumerate(CHECKS) if check.name == "package")
+    assert calls == package_index
     assert capsys.readouterr().err == "no distributions matched dist/*\n"
 
 
@@ -165,9 +176,11 @@ def test_report_records_missing_distribution_as_failed(
 
     assert runner.run_quality_gate(reporter=results.append) == 1
     assert len(results) == len(CHECKS)
-    assert results[-1].name == "package"
-    assert results[-1].status == "failed"
-    assert results[-1].stderr == "no distributions matched dist/*"
+    assert results[-2].name == "package"
+    assert results[-2].status == "failed"
+    assert results[-2].stderr == "no distributions matched dist/*"
+    assert results[-1].name == "wheel-install"
+    assert results[-1].status == "not_run"
 
 
 def test_runner_returns_exact_failure_without_reporting(

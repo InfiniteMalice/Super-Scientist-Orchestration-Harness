@@ -839,15 +839,21 @@ from super_scientist.kernel.audit.chain import append_event, verify_chain
 
 
 def test_audit_chain_verifies_in_order() -> None:
-    first = append_event(None, "event-1", "transaction", {"decision": "accepted"}, datetime.now(UTC))
-    second = append_event(first, "event-2", "transaction", {"decision": "rejected"}, datetime.now(UTC))
+    first = append_event(
+        None, "event-1", "transaction", {"decision": "accepted"}, datetime.now(UTC)
+    )
+    second = append_event(
+        first, "event-2", "transaction", {"decision": "rejected"}, datetime.now(UTC)
+    )
     result = verify_chain([first, second])
     assert result.valid
     assert result.checked_events == 2
 
 
 def test_audit_chain_detects_payload_tampering() -> None:
-    event = append_event(None, "event-1", "transaction", {"decision": "accepted"}, datetime.now(UTC))
+    event = append_event(
+        None, "event-1", "transaction", {"decision": "accepted"}, datetime.now(UTC)
+    )
     tampered = event.model_copy(update={"payload": {"decision": "rejected"}})
     result = verify_chain([tampered])
     assert not result.valid
@@ -1392,9 +1398,7 @@ def test_proposer_cannot_approve_own_claim() -> None:
 
 def test_replay_returns_prior_decision() -> None:
     prior = AdmissionEngine.rejected("p-old", RejectionCode.PERMISSION_DENIED, "denied")
-    current = context().model_copy(
-        update={"prior_decision_by_idempotency_key": {"k-1": prior}}
-    )
+    current = context().model_copy(update={"prior_decision_by_idempotency_key": {"k-1": prior}})
     proposal = ProposeClaim.model_construct(
         proposal_id="p-1", idempotency_key="k-1", proposer=actor("a")
     )
@@ -2393,7 +2397,9 @@ class KernelService:
                 return prior.decision.model_copy(update={"replayed": True})
             context = AdmissionContext(
                 active_policy=self._active_policy,
-                evidence_by_id={item.evidence_id: item for item in repositories.evidence.list_all()},
+                evidence_by_id={
+                    item.evidence_id: item for item in repositories.evidence.list_all()
+                },
                 claim_by_id={item.claim_id: item for item in repositories.claims.list_heads()},
                 prior_decision_by_idempotency_key={},
             )
@@ -2553,6 +2559,7 @@ from typing import Any
 
 import typer
 
+
 def json_envelope(
     command: str,
     success: bool,
@@ -2589,7 +2596,13 @@ Create `src/super_scientist/cli/main.py`:
 ```python
 import typer
 
-from super_scientist.cli.kernel import audit_app, claim_app, evidence_app, init_command, transaction_app
+from super_scientist.cli.kernel import (
+    audit_app,
+    claim_app,
+    evidence_app,
+    init_command,
+    transaction_app,
+)
 
 app = typer.Typer(no_args_is_help=True)
 app.command("init")(init_command)
@@ -2756,7 +2769,12 @@ def evidence_show(
     with DatabaseUnitOfWork(runtime.engine) as uow:
         record = uow.repositories().evidence.get(evidence_id)
     if record is None:
-        emit("evidence show", False, json_output, errors=[{"code": "NOT_FOUND", "message": evidence_id}])
+        emit(
+            "evidence show",
+            False,
+            json_output,
+            errors=[{"code": "NOT_FOUND", "message": evidence_id}],
+        )
         raise typer.Exit(code=4)
     emit("evidence show", True, json_output, data=record.model_dump(mode="json"))
 
@@ -2813,7 +2831,9 @@ def claim_history(
     runtime = build_runtime(root)
     with DatabaseUnitOfWork(runtime.engine) as uow:
         history = uow.repositories().claims.history(claim_id)
-    emit("claim history", True, json_output, data=[item.model_dump(mode="json") for item in history])
+    emit(
+        "claim history", True, json_output, data=[item.model_dump(mode="json") for item in history]
+    )
 
 
 @transaction_app.command("list")
@@ -2909,7 +2929,9 @@ def test_offline_kernel_workflow(tmp_path: Path) -> None:
     assert run_cli(tmp_path, "init")["success"] is True
     evidence_file = tmp_path / "observation.txt"
     evidence_file.write_text("At x=1, y=2.", encoding="utf-8")
-    added = run_cli(tmp_path, "evidence", "add", "--source", "fixture://x1", "--file", str(evidence_file))
+    added = run_cli(
+        tmp_path, "evidence", "add", "--source", "fixture://x1", "--file", str(evidence_file)
+    )
     assert added["decision"]["accepted"] is True
     rejected = run_cli(
         tmp_path,

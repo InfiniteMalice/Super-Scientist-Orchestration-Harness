@@ -2,10 +2,11 @@
 
 ## Scope
 
-This document describes only the implemented epistemic-kernel vertical slice. The
-slice accepts typed evidence and claim proposals, makes deterministic decisions, and
-persists records locally. It has no orchestration loop, hypothesis or experiment model,
-research-run state machine, learned memory, model provider, or training subsystem.
+This document describes the implemented transactional epistemic-kernel slice. The
+slice accepts typed evidence, claim, governed-adaptation, and hypothesis-loop proposals,
+makes deterministic decisions, and persists records locally. It has no autonomous
+orchestration loop, live experiment control, arbitrary model provider, learned memory,
+or training subsystem.
 
 ## Dependency Rule
 
@@ -14,9 +15,10 @@ policy:
 
 ```text
 CLI and composition
-    -> application transaction service
-        -> admission, audit, transactions, claim checks
-            -> evidence, claims, identity, canonical primitives
+    -> bounded domain application services
+        -> shared transaction coordinator and fixed proposal router
+            -> domain admission handlers and narrow projectors
+                -> audit, transactions, evidence, identity, canonical primitives
 
 SQLite and filesystem providers
     -> typed domain and kernel records
@@ -36,7 +38,9 @@ learned projection and does not reproduce HarnessBridge.
 ## Storage Boundaries
 
 SQLite stores policy snapshots, the active policy reference, evidence metadata, claim
-versions and heads, proposals and decisions, and audit events. Alembic owns the schema.
+versions and heads, governed-adaptation records, hypothesis/model/checker/revision
+records and hypothesis heads, proposals and decisions, and audit events. Alembic owns
+the schema.
 Each application submission opens `BEGIN IMMEDIATE`; accepted projection changes, the
 transaction decision, and the audit append commit or roll back together. Append-only
 tables have SQLite triggers that reject update and delete. Claim heads and the active
@@ -57,11 +61,15 @@ projects a `HASH_VERIFIED` copy. Failure is a durable audited
 
 ## Proposal And Admission Flow
 
-The public proposal union is `AddEvidence`, `ProposeClaim`, and `TransitionClaim`;
-`InvalidProposal` is an internal durable rejection envelope. Every normal proposal
-carries a proposal identifier, idempotency key, proposer identity, and optional
-approval. Intent submission first supplies a typed `ProposalAttempt` containing stable
-proposal/idempotency identifiers, proposer identity, and expected proposal kind.
+The public proposal union includes the original evidence and claim operations plus the
+fixed governed-adaptation domains. The hypothesis slice contributes exactly eight
+operations: propose a hypothesis version, register a model, register a verification
+mechanism, record a simulation, record a verification, record a counterexample, revise,
+and admit. `InvalidProposal` remains an internal durable rejection envelope. Every
+normal proposal carries a proposal identifier, idempotency key, proposer identity, and
+optional approval. Intent submission first supplies a typed `ProposalAttempt`
+containing stable proposal/idempotency identifiers, proposer identity, and expected
+proposal kind.
 Submission follows this flow:
 
 ```text
@@ -118,6 +126,17 @@ transition records and effective-state projection, is adapted conceptually from
 transactional workflow validation [S12]. The transaction model is project-specific,
 does not reproduce Mnemosyne, and does not make scientific-truth guarantees.
 
+Hypothesis stages additionally bind exact accepted upstream receipts. Trusted committed
+transaction and audit times bound caller-authored record and approval times: they may
+neither predate retained dependencies nor exceed the current transaction's persistence
+time. Audit sequence preserves durable order and breaks equal-time ties. A fixed registry
+can execute only the source-controlled thermal-chamber and exponential-decay simulators;
+metadata-only model artifacts remain inert. Admission alone can advance a hypothesis
+head after transfer validation, exact evidence and revision lineage, deterministic
+counterexample search, evaluator audit, self-improvement measurement, primitive-use
+checks, rollback binding, and independent human authority. See
+`docs/hypothesis-model-checker-loop.md` for the complete boundary.
+
 ## Audit Chain
 
 Each durably attributable non-replayed decision produces an immutable audit event
@@ -133,6 +152,12 @@ authoritative evidence artifact. `scientist-harness audit verify` exposes that w
 workspace check through a storage-only runtime and returns nonzero for corruption even
 when a missing active policy prevents normal service construction; an empty chain in a
 genuinely empty or initialized workspace is valid.
+
+For hypothesis state, verification also replays accepted transactions in audit order
+through the same fixed handlers with only their narrow write capabilities, then compares
+the rebuilt append-only records and heads with storage. A forged or missing receipt,
+record, or head therefore fails integrity verification rather than becoming a new
+authority source.
 
 Workspace verification decodes every registered governance policy, not only the active
 or audit-referenced rows, and requires exactly zero or one `governance_state` row with
@@ -153,3 +178,44 @@ exception classes. Typer's documented custom `cls` extension still requires its
 
 Source metadata for [S07] and [S12] is maintained in
 `docs/sources/source-register.yaml`.
+
+## Workspace Exchange
+
+`export_workspace()` first runs whole-workspace integrity verification, then builds a
+strict schema-version-1 `WorkspaceExport`. Policies, transaction records, rebuildable
+projection expectations, and content-addressed artifact references are unique and
+sorted by stable identity. Each proposal and the whole bundle have canonical SHA-256
+hashes. Replay order is retained separately from sort order so reconstruction preserves
+the original governing policy and event sequence.
+
+The bundle is a portable integrity description, not a database dump. It contains no
+SQLite path, artifact-root path, protected expected answer, protected-store reference,
+or executable configuration. Artifact references contain only digest, byte count, and
+media type; bytes are transferred between caller-supplied artifact stores and verified
+against those references.
+
+`import_workspace()` reparses the canonical JSON through the strict model, validates
+every policy, proposal, decision, artifact, projection expectation, and bundle hash,
+and bootstraps only a genuinely empty target. It then replays records in retained order
+through `TransactionCoordinator.submit_intent()`. Exact stable intents are idempotent.
+Changed canonical content under an existing proposal or idempotency identity becomes a
+durable audited `IDEMPOTENCY_CONFLICT`; it is never treated as an update. A conflict
+returns before claiming projection equivalence. A conflict-free import must re-export
+to exactly the source bundle.
+
+## Capability Status
+
+Implemented components include transactional proposal admission, V1-to-V2 and governed
+V2 policy transitions, deterministic workspace verification and exchange, progress and
+evidence-trail contracts, append-only behavioral-rule records, fixed simulator
+execution, hypothesis admission contracts, deterministic handbook generation, and
+matched-budget harness decisions.
+
+The vertical-slice simulator, measurement report, and metadata-only adapter records are
+deterministic fakes used to test contracts. Each new schema-v2 measurement report
+explicitly lists its `unmeasured_coverage_gaps`, including live behavior outside the
+deterministic fixture; immutable schema-v1 records remain byte-stable and readable.
+Learned evaluation, primitive evolution, live model providers, experiment control, and
+training are interface-only,
+experimental, or deferred. S21-S29 are source inspirations marked not reproduced; no
+general improvement or compatibility with S29 follows from this architecture.

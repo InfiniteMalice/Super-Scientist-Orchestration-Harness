@@ -7,17 +7,136 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
+from super_scientist.config.models import PolicySnapshot
+from super_scientist.domain.behavioral_rules.models import (
+    BehavioralRuleVersion,
+    ConsolidationProposal,
+    ReviewerAssessment,
+    RuleIncident,
+)
 from super_scientist.domain.claims.models import AtomicClaim
+from super_scientist.domain.configurations.models import ConfigurationVersion
+from super_scientist.domain.evaluators.models import (
+    EvaluatorSuccessionDecision,
+    EvaluatorVersion,
+)
 from super_scientist.domain.evidence.models import EvidenceRecord
+from super_scientist.domain.evidence_trails.models import (
+    AddEvidenceReceiptRef,
+    EvidenceTrailNode,
+    EvidenceTrailNodeStageReceiptRef,
+    EvidenceTrailRelation,
+    EvidenceTrailSnapshot,
+    EvidenceTrailVersion,
+    ReportSentenceBinding,
+    TrailAssessment,
+    TrailCheckResult,
+)
+from super_scientist.domain.harness_eval.models import (
+    CampaignIteration,
+    FixedCheckerConfiguration,
+    HarnessCampaign,
+    HarnessCampaignReport,
+    HarnessConfound,
+    HarnessDecision,
+    HarnessVariant,
+    ProtectedCheckerResult,
+)
+from super_scientist.domain.hypotheses.models import (
+    CounterexampleReceiptRef,
+    CounterexampleRecord,
+    ExecutableModelSpec,
+    HypothesisAdmissionDecision,
+    HypothesisCandidateReceiptRef,
+    HypothesisRevisionReceiptRef,
+    HypothesisSpec,
+    ModelSpecReceiptRef,
+    RevisionRecord,
+    SimulationResult,
+    SimulationResultReceiptRef,
+    VerificationMechanismReceiptRef,
+    VerificationMechanismSpec,
+    VerificationResult,
+    VerificationResultReceiptRef,
+)
+from super_scientist.domain.hypotheses.models import (
+    EvaluatorAuditReceiptRef as HypothesisEvaluatorAuditReceiptRef,
+)
+from super_scientist.domain.hypotheses.models import (
+    SelfImprovementMeasurementReceiptRef as HypothesisMeasurementReceiptRef,
+)
 from super_scientist.domain.identity import ActorIdentity
+from super_scientist.domain.improvement.models import (
+    ChangeClassification,
+    EvaluatorAuditRecord,
+    SelfImprovementMeasurementRecord,
+)
 from super_scientist.domain.primitives import (
     NonBlankText,
     Sha256Hex,
     StableIdentifier,
     UtcTimestamp,
 )
+from super_scientist.domain.progress.models import (
+    BudgetAllocation,
+    CompletionDecision,
+    CompletionProposal,
+    ProgressPlan,
+    ProgressValidationEvent,
+    RunCheckpoint,
+)
+from super_scientist.domain.representations.models import (
+    EvaluatorAuditReceiptRef,
+    PrimitiveEvaluation,
+    PrimitiveEvaluationReceiptRef,
+    PrimitiveVersion,
+    PrimitiveVersionReceiptRef,
+    SelfImprovementMeasurementReceiptRef,
+)
+from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 
-type ProposalKind = Literal["add_evidence", "propose_claim", "transition_claim"]
+type ProposalKind = Literal[
+    "add_evidence",
+    "propose_claim",
+    "transition_claim",
+    "create_research_run",
+    "append_research_run_event",
+    "record_configuration_version",
+    "record_evaluator_audit",
+    "record_self_improvement_measurement",
+    "propose_evaluator_version",
+    "decide_evaluator_succession",
+    "propose_governance_policy_transition",
+    "record_progress_plan",
+    "append_progress_event",
+    "record_run_budget",
+    "record_run_checkpoint",
+    "decide_completion",
+    "propose_evidence_trail_nodes",
+    "propose_evidence_trail_relations",
+    "record_evidence_trail_version",
+    "bind_report_sentence",
+    "record_rule_incident",
+    "propose_behavioral_rule",
+    "import_reviewer_assessment",
+    "consolidate_behavioral_rule",
+    "propose_primitive_version",
+    "record_primitive_evaluation",
+    "admit_primitive_version",
+    "propose_hypothesis_version",
+    "register_executable_model",
+    "register_verification_mechanism",
+    "record_simulation_result",
+    "record_verification_result",
+    "record_counterexample",
+    "revise_hypothesis",
+    "admit_hypothesis",
+    "create_harness_campaign",
+    "record_harness_iteration",
+    "record_harness_protected_result",
+    "record_harness_confound",
+    "decide_harness_campaign",
+]
 
 
 class RejectionCode(StrEnum):
@@ -32,6 +151,20 @@ class RejectionCode(StrEnum):
     PERMISSION_DENIED = "PERMISSION_DENIED"
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
     POLICY_HASH_MISMATCH = "POLICY_HASH_MISMATCH"
+    MISSING_ENTITY = "MISSING_ENTITY"
+    INVALID_LINEAGE = "INVALID_LINEAGE"
+    INSUFFICIENT_GROUNDING = "INSUFFICIENT_GROUNDING"
+    PROHIBITED_CLOSED_LOOP = "PROHIBITED_CLOSED_LOOP"
+    UNMATCHED_BUDGETS = "UNMATCHED_BUDGETS"
+    PROTECTED_DATA_ACCESS = "PROTECTED_DATA_ACCESS"
+    STALE_HANDBOOK_MAPPING = "STALE_HANDBOOK_MAPPING"
+    INVALID_DEPENDENCY = "INVALID_DEPENDENCY"
+    FALSE_FINISH = "FALSE_FINISH"
+    CIRCULAR_EVALUATOR_APPROVAL = "CIRCULAR_EVALUATOR_APPROVAL"
+    BENCHMARK_SPECIFIC_ADMISSION = "BENCHMARK_SPECIFIC_ADMISSION"
+    DUPLICATE_RULE = "DUPLICATE_RULE"
+    UNRESOLVED_RULE_CONFLICT = "UNRESOLVED_RULE_CONFLICT"
+    EXPERIMENTAL_PRIMITIVE_QUARANTINED = "EXPERIMENTAL_PRIMITIVE_QUARANTINED"
 
 
 class Approval(BaseModel):
@@ -79,6 +212,286 @@ class TransitionClaim(ProposalBase):
     next_claim: AtomicClaim
 
 
+class CreateResearchRun(ProposalBase):
+    proposal_type: Literal["create_research_run"] = "create_research_run"
+    run: ResearchRun
+
+
+class AppendResearchRunEvent(ProposalBase):
+    proposal_type: Literal["append_research_run_event"] = "append_research_run_event"
+    event: ResearchRunEvent
+
+
+class RecordConfigurationVersion(ProposalBase):
+    proposal_type: Literal["record_configuration_version"] = "record_configuration_version"
+    configuration_version: ConfigurationVersion
+    classification: ChangeClassification
+
+
+class RecordEvaluatorAudit(ProposalBase):
+    proposal_type: Literal["record_evaluator_audit"] = "record_evaluator_audit"
+    evaluator_audit: EvaluatorAuditRecord
+
+
+class RecordSelfImprovementMeasurement(ProposalBase):
+    proposal_type: Literal["record_self_improvement_measurement"] = (
+        "record_self_improvement_measurement"
+    )
+    measurement: SelfImprovementMeasurementRecord
+
+
+class ProposeEvaluatorVersion(ProposalBase):
+    proposal_type: Literal["propose_evaluator_version"] = "propose_evaluator_version"
+    evaluator_version: EvaluatorVersion
+    classification: ChangeClassification
+
+
+class DecideEvaluatorSuccession(ProposalBase):
+    proposal_type: Literal["decide_evaluator_succession"] = "decide_evaluator_succession"
+    succession_decision: EvaluatorSuccessionDecision
+    classification: ChangeClassification
+
+
+class ProposeGovernancePolicyTransition(ProposalBase):
+    proposal_type: Literal["propose_governance_policy_transition"] = (
+        "propose_governance_policy_transition"
+    )
+    research_run: ResearchRun
+    evaluator_audit: EvaluatorAuditRecord
+    measurement: SelfImprovementMeasurementRecord
+    candidate_policy_snapshot: PolicySnapshot
+    prior_policy_hash: Sha256Hex
+    rollback_policy_hash: Sha256Hex
+    classification: ChangeClassification
+
+
+class RecordProgressPlan(ProposalBase):
+    proposal_type: Literal["record_progress_plan"] = "record_progress_plan"
+    plan: ProgressPlan
+
+
+class AppendProgressEvent(ProposalBase):
+    proposal_type: Literal["append_progress_event"] = "append_progress_event"
+    event: ProgressValidationEvent
+
+
+class RecordRunBudget(ProposalBase):
+    proposal_type: Literal["record_run_budget"] = "record_run_budget"
+    budget: BudgetAllocation
+
+
+class RecordRunCheckpoint(ProposalBase):
+    proposal_type: Literal["record_run_checkpoint"] = "record_run_checkpoint"
+    checkpoint: RunCheckpoint
+
+
+class DecideCompletion(ProposalBase):
+    proposal_type: Literal["decide_completion"] = "decide_completion"
+    completion_proposal: CompletionProposal
+    completion_decision: CompletionDecision
+
+
+class ProposeEvidenceTrailNodes(ProposalBase):
+    proposal_type: Literal["propose_evidence_trail_nodes"] = "propose_evidence_trail_nodes"
+    trail_id: StableIdentifier
+    trail_version_id: StableIdentifier
+    classification: ChangeClassification
+    source_receipts: tuple[AddEvidenceReceiptRef, ...] = Field(min_length=1)
+    nodes: tuple[EvidenceTrailNode, ...] = Field(min_length=1)
+
+
+class ProposeEvidenceTrailRelations(ProposalBase):
+    proposal_type: Literal["propose_evidence_trail_relations"] = "propose_evidence_trail_relations"
+    trail_id: StableIdentifier
+    trail_version_id: StableIdentifier
+    classification: ChangeClassification
+    node_stage_receipt: EvidenceTrailNodeStageReceiptRef
+    node_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    nodes_hash: Sha256Hex
+    relations: tuple[EvidenceTrailRelation, ...]
+
+
+class RecordEvidenceTrailVersion(ProposalBase):
+    proposal_type: Literal["record_evidence_trail_version"] = "record_evidence_trail_version"
+    trail_version: EvidenceTrailVersion
+    nodes: tuple[EvidenceTrailNode, ...] = Field(min_length=1)
+    relations: tuple[EvidenceTrailRelation, ...]
+    checks: tuple[TrailCheckResult, ...] = Field(min_length=1)
+    assessments: tuple[TrailAssessment, ...] = Field(min_length=1)
+
+    def snapshot(self) -> EvidenceTrailSnapshot:
+        return EvidenceTrailSnapshot(
+            version=self.trail_version,
+            nodes=self.nodes,
+            relations=self.relations,
+            checks=self.checks,
+            assessments=self.assessments,
+        )
+
+
+class BindReportSentence(ProposalBase):
+    proposal_type: Literal["bind_report_sentence"] = "bind_report_sentence"
+    binding: ReportSentenceBinding
+
+
+class RecordRuleIncident(ProposalBase):
+    proposal_type: Literal["record_rule_incident"] = "record_rule_incident"
+    classification: ChangeClassification
+    incident: RuleIncident
+
+
+class ProposeBehavioralRule(ProposalBase):
+    proposal_type: Literal["propose_behavioral_rule"] = "propose_behavioral_rule"
+    classification: ChangeClassification
+    rule_version: BehavioralRuleVersion
+
+
+class ImportReviewerAssessment(ProposalBase):
+    proposal_type: Literal["import_reviewer_assessment"] = "import_reviewer_assessment"
+    classification: ChangeClassification
+    assessment: ReviewerAssessment
+
+
+class ConsolidateBehavioralRule(ProposalBase):
+    proposal_type: Literal["consolidate_behavioral_rule"] = "consolidate_behavioral_rule"
+    classification: ChangeClassification
+    consolidation: ConsolidationProposal
+    measurement_id: StableIdentifier
+    evaluator_audit_id: StableIdentifier
+    rollback_rule_version_id: StableIdentifier
+
+
+class ProposePrimitiveVersion(ProposalBase):
+    proposal_type: Literal["propose_primitive_version"] = "propose_primitive_version"
+    classification: ChangeClassification
+    primitive_version: PrimitiveVersion
+
+
+class RecordPrimitiveEvaluation(ProposalBase):
+    proposal_type: Literal["record_primitive_evaluation"] = "record_primitive_evaluation"
+    classification: ChangeClassification
+    candidate_receipt: PrimitiveVersionReceiptRef
+    evaluation: PrimitiveEvaluation
+
+
+class AdmitPrimitiveVersion(ProposalBase):
+    proposal_type: Literal["admit_primitive_version"] = "admit_primitive_version"
+    classification: ChangeClassification
+    candidate_receipt: PrimitiveVersionReceiptRef
+    old_frame_evaluation_receipt: PrimitiveEvaluationReceiptRef
+    new_frame_evaluation_receipt: PrimitiveEvaluationReceiptRef
+    evaluator_audit_receipt: EvaluatorAuditReceiptRef | None
+    measurement_receipt: SelfImprovementMeasurementReceiptRef | None
+    rollback_primitive_version_id: StableIdentifier
+    integrated_at: UtcTimestamp
+
+
+class ProposeHypothesisVersion(ProposalBase):
+    proposal_type: Literal["propose_hypothesis_version"] = "propose_hypothesis_version"
+    classification: ChangeClassification
+    hypothesis: HypothesisSpec
+
+
+class RegisterExecutableModel(ProposalBase):
+    proposal_type: Literal["register_executable_model"] = "register_executable_model"
+    classification: ChangeClassification
+    hypothesis_receipt: HypothesisCandidateReceiptRef
+    model_spec: ExecutableModelSpec
+
+
+class RegisterVerificationMechanism(ProposalBase):
+    proposal_type: Literal["register_verification_mechanism"] = "register_verification_mechanism"
+    classification: ChangeClassification
+    hypothesis_receipt: HypothesisCandidateReceiptRef
+    mechanism_spec: VerificationMechanismSpec
+
+
+class RecordSimulationResult(ProposalBase):
+    proposal_type: Literal["record_simulation_result"] = "record_simulation_result"
+    classification: ChangeClassification
+    hypothesis_receipt: HypothesisCandidateReceiptRef
+    model_receipt: ModelSpecReceiptRef
+    simulation_result: SimulationResult
+
+
+class RecordVerificationResult(ProposalBase):
+    proposal_type: Literal["record_verification_result"] = "record_verification_result"
+    classification: ChangeClassification
+    hypothesis_receipt: HypothesisCandidateReceiptRef
+    mechanism_receipt: VerificationMechanismReceiptRef
+    model_receipt: ModelSpecReceiptRef | None
+    simulation_receipts: tuple[SimulationResultReceiptRef, ...]
+    verification_result: VerificationResult
+
+
+class RecordCounterexample(ProposalBase):
+    proposal_type: Literal["record_counterexample"] = "record_counterexample"
+    classification: ChangeClassification
+    hypothesis_receipt: HypothesisCandidateReceiptRef
+    model_receipt: ModelSpecReceiptRef | None
+    simulation_receipts: tuple[SimulationResultReceiptRef, ...]
+    verification_result_receipts: tuple[VerificationResultReceiptRef, ...] = Field(min_length=1)
+    counterexample: CounterexampleRecord
+
+
+class ReviseHypothesis(ProposalBase):
+    proposal_type: Literal["revise_hypothesis"] = "revise_hypothesis"
+    classification: ChangeClassification
+    prior_hypothesis_receipt: HypothesisCandidateReceiptRef
+    triggering_result_receipts: tuple[VerificationResultReceiptRef, ...] = Field(min_length=1)
+    counterexample_receipts: tuple[CounterexampleReceiptRef, ...]
+    resulting_hypothesis: HypothesisSpec
+    revision: RevisionRecord
+
+
+class AdmitHypothesis(ProposalBase):
+    proposal_type: Literal["admit_hypothesis"] = "admit_hypothesis"
+    classification: ChangeClassification
+    hypothesis_receipt: HypothesisCandidateReceiptRef
+    model_receipts: tuple[ModelSpecReceiptRef, ...] = Field(min_length=1)
+    verification_result_receipts: tuple[VerificationResultReceiptRef, ...] = Field(min_length=1)
+    counterexample_search_receipts: tuple[VerificationResultReceiptRef, ...] = Field(min_length=1)
+    revision_receipts: tuple[HypothesisRevisionReceiptRef, ...]
+    evaluator_audit_receipt: HypothesisEvaluatorAuditReceiptRef
+    measurement_receipt: HypothesisMeasurementReceiptRef
+    rollback_hypothesis_version_id: StableIdentifier | None
+    integrated_at: UtcTimestamp
+    admission_decision: HypothesisAdmissionDecision
+
+
+class CreateHarnessCampaign(ProposalBase):
+    proposal_type: Literal["create_harness_campaign"] = "create_harness_campaign"
+    campaign: HarnessCampaign
+
+
+class RecordHarnessIteration(ProposalBase):
+    proposal_type: Literal["record_harness_iteration"] = "record_harness_iteration"
+    iteration: CampaignIteration
+    governing_policy_hash: Sha256Hex
+
+
+class RecordHarnessProtectedResult(ProposalBase):
+    proposal_type: Literal["record_harness_protected_result"] = "record_harness_protected_result"
+    observation_id: StableIdentifier
+    partition_manifest_id: StableIdentifier
+    variant: HarnessVariant
+    evaluator_version_id: StableIdentifier
+    checker_configuration: FixedCheckerConfiguration
+    result: ProtectedCheckerResult
+    governing_policy_hash: Sha256Hex
+
+
+class RecordHarnessConfound(ProposalBase):
+    proposal_type: Literal["record_harness_confound"] = "record_harness_confound"
+    confound: HarnessConfound
+
+
+class DecideHarnessCampaign(ProposalBase):
+    proposal_type: Literal["decide_harness_campaign"] = "decide_harness_campaign"
+    report: HarnessCampaignReport
+    decision: HarnessDecision
+
+
 class InvalidProposal(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
@@ -91,7 +504,47 @@ class InvalidProposal(BaseModel):
 
 
 Proposal = Annotated[
-    AddEvidence | ProposeClaim | TransitionClaim | InvalidProposal,
+    AddEvidence
+    | ProposeClaim
+    | TransitionClaim
+    | CreateResearchRun
+    | AppendResearchRunEvent
+    | RecordConfigurationVersion
+    | RecordEvaluatorAudit
+    | RecordSelfImprovementMeasurement
+    | ProposeEvaluatorVersion
+    | DecideEvaluatorSuccession
+    | ProposeGovernancePolicyTransition
+    | RecordProgressPlan
+    | AppendProgressEvent
+    | RecordRunBudget
+    | RecordRunCheckpoint
+    | DecideCompletion
+    | ProposeEvidenceTrailNodes
+    | ProposeEvidenceTrailRelations
+    | RecordEvidenceTrailVersion
+    | BindReportSentence
+    | RecordRuleIncident
+    | ProposeBehavioralRule
+    | ImportReviewerAssessment
+    | ConsolidateBehavioralRule
+    | ProposePrimitiveVersion
+    | RecordPrimitiveEvaluation
+    | AdmitPrimitiveVersion
+    | ProposeHypothesisVersion
+    | RegisterExecutableModel
+    | RegisterVerificationMechanism
+    | RecordSimulationResult
+    | RecordVerificationResult
+    | RecordCounterexample
+    | ReviseHypothesis
+    | AdmitHypothesis
+    | CreateHarnessCampaign
+    | RecordHarnessIteration
+    | RecordHarnessProtectedResult
+    | RecordHarnessConfound
+    | DecideHarnessCampaign
+    | InvalidProposal,
     Field(discriminator="proposal_type"),
 ]
 

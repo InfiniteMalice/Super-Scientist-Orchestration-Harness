@@ -1,6 +1,7 @@
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+from super_scientist.domain import primitives
 from super_scientist.domain.primitives import (
     NonBlankText,
     Sha256Hex,
@@ -40,3 +41,15 @@ def test_sha256_type_requires_lowercase_64_hex(value: str) -> None:
 
 def test_sha256_type_accepts_canonical_digest() -> None:
     assert TypeAdapter(Sha256Hex).validate_python("a" * 64) == "a" * 64
+
+
+def test_git_object_id_contract_accepts_sha1_and_sha256_formats() -> None:
+    git_object_id = getattr(primitives, "GitObjectId", None)
+    assert git_object_id is not None, "GitObjectId contract is missing"
+
+    adapter = TypeAdapter(git_object_id)
+    assert adapter.validate_python("b" * 40) == "b" * 40
+    assert adapter.validate_python("a" * 64) == "a" * 64
+    for invalid in ("A" * 40, "a" * 39, "a" * 41, "g" * 40, " a" * 20):
+        with pytest.raises(ValidationError):
+            adapter.validate_python(invalid)

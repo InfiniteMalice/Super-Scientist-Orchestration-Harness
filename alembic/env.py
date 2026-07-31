@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
+from super_scientist.providers.storage.database import configure_database_engine
 from super_scientist.providers.storage.schema import metadata
 
 config = context.config
@@ -28,6 +29,7 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+    configure_database_engine(connectable)
 
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)

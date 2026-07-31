@@ -1,0 +1,7 @@
+{
+  "authority": "NON_AUTHORITATIVE_GENERATED_PROJECTION",
+  "approval_record": "docs/reviews/quality-policy-records/approval.json",
+  "approval_record_sha256": "48b90474878ccaaaef98ef35ecd61e17cbd771dc96bb5f6a17195f1e91a55145",
+  "pending_proposal_record": "docs/reviews/quality-policy-records/pending-proposal.json",
+  "pending_proposal_record_sha256": "222347082e430fc490ae9720c52f25649f708a6a8ce5a113fd80defc3bffcaea"
+}

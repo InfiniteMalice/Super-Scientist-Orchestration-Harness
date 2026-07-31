@@ -21,7 +21,7 @@ class VerificationState(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
-type JsonScalar = None | bool | int | float | str
+type JsonScalar = bool | int | float | str | None
 type FrozenJsonValue = (
     JsonScalar
     | tuple[FrozenJsonValue, ...]

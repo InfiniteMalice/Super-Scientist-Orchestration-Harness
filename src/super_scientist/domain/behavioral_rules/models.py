@@ -1,0 +1,391 @@
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Annotated, Literal, Self
+
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
+
+from super_scientist.domain.identity import ActorIdentity
+from super_scientist.domain.improvement.models import AssessmentProvenance
+from super_scientist.domain.primitives import (
+    NonBlankText,
+    Sha256Hex,
+    StableIdentifier,
+    UtcTimestamp,
+)
+
+
+class _StrictFrozenModel(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+
+def _strip_semantic_version(value: object) -> object:
+    return value.strip() if isinstance(value, str) else value
+
+
+SemanticVersion = Annotated[
+    str,
+    BeforeValidator(_strip_semantic_version),
+    Field(
+        strict=True,
+        min_length=5,
+        max_length=32,
+        pattern=(
+            r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+            r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+            r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+        ),
+    ),
+]
+
+
+class RuleIncidentKind(StrEnum):
+    ACCEPTED_HUMAN_REVIEW = "ACCEPTED_HUMAN_REVIEW"
+    VERIFIED_FAILURE = "VERIFIED_FAILURE"
+    REPRODUCED_BUG = "REPRODUCED_BUG"
+    FAILED_SCIENTIFIC_WORKFLOW = "FAILED_SCIENTIFIC_WORKFLOW"
+    SECURITY_INCIDENT = "SECURITY_INCIDENT"
+    QUALITY_GATE_FAILURE = "QUALITY_GATE_FAILURE"
+    REPEATED_MISTAKE = "REPEATED_MISTAKE"
+    VALIDATED_COUNTEREXAMPLE = "VALIDATED_COUNTEREXAMPLE"
+
+
+class RuleStatus(StrEnum):
+    PROPOSED = "PROPOSED"
+    UNDER_REVIEW = "UNDER_REVIEW"
+    ACTIVE = "ACTIVE"
+    EXPERIMENTAL = "EXPERIMENTAL"
+    QUARANTINED = "QUARANTINED"
+    SUPERSEDED = "SUPERSEDED"
+    DEPRECATED = "DEPRECATED"
+    REJECTED = "REJECTED"
+
+
+class RuleAuthority(StrEnum):
+    CONSTITUTIONAL = "CONSTITUTIONAL"
+    GOVERNANCE = "GOVERNANCE"
+    PROJECT = "PROJECT"
+    DOMAIN = "DOMAIN"
+    COMPONENT = "COMPONENT"
+    TASK = "TASK"
+    RUN_LOCAL = "RUN_LOCAL"
+
+
+class ReviewerRole(StrEnum):
+    SEMANTIC = "SEMANTIC"
+    CONFLICT = "CONFLICT"
+    ABSTRACTION = "ABSTRACTION"
+    ADVERSARIAL = "ADVERSARIAL"
+    VERIFICATION = "VERIFICATION"
+
+
+class ConflictClassification(StrEnum):
+    TRUE_LOGICAL_CONTRADICTION = "TRUE_LOGICAL_CONTRADICTION"
+    OVERLAPPING_SCOPE = "OVERLAPPING_SCOPE"
+    MISSING_PRECONDITION_OR_EXCEPTION = "MISSING_PRECONDITION_OR_EXCEPTION"
+    PRECEDENCE = "PRECEDENCE"
+    TEMPORAL_VERSION = "TEMPORAL_VERSION"
+    ENVIRONMENT_OR_MODEL_DEPENDENCE = "ENVIRONMENT_OR_MODEL_DEPENDENCE"
+    COMPETING_FAILURE_MODES = "COMPETING_FAILURE_MODES"
+    INVALID_OR_OUTDATED_RULES = "INVALID_OR_OUTDATED_RULES"
+    MEASUREMENT_CONFLICT = "MEASUREMENT_CONFLICT"
+
+
+class OverlapClassification(StrEnum):
+    EXACT_DUPLICATE = "EXACT_DUPLICATE"
+    SEMANTIC_DUPLICATE = "SEMANTIC_DUPLICATE"
+    NARROWER_INSTANCE = "NARROWER_INSTANCE"
+    BROADER_REFORMULATION = "BROADER_REFORMULATION"
+    PARTIAL_OVERLAP = "PARTIAL_OVERLAP"
+    SAME_TRIGGER_DIFFERENT_ACTION = "SAME_TRIGGER_DIFFERENT_ACTION"
+    DIFFERENT_TRIGGER_SAME_ACTION = "DIFFERENT_TRIGGER_SAME_ACTION"
+    NON_REDUNDANT = "NON_REDUNDANT"
+
+
+class RuleAction(StrEnum):
+    ACCEPT = "ACCEPT"
+    ACCEPT_WITH_REVISION = "ACCEPT_WITH_REVISION"
+    MERGE_WITH_EXISTING = "MERGE_WITH_EXISTING"
+    SPLIT = "SPLIT"
+    QUARANTINE = "QUARANTINE"
+    REJECT = "REJECT"
+    ESCALATE_TO_HUMAN = "ESCALATE_TO_HUMAN"
+
+
+class RecurrenceRepair(StrEnum):
+    ABSTRACTION = "ABSTRACTION"
+    TRIGGER = "TRIGGER"
+    RETRIEVAL = "RETRIEVAL"
+    ENFORCEMENT = "ENFORCEMENT"
+    SCOPE = "SCOPE"
+
+
+class RuleIncident(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    incident_id: StableIdentifier
+    incident_kind: RuleIncidentKind
+    summary: NonBlankText
+    evidence_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    observed_at: UtcTimestamp
+    reported_by: ActorIdentity
+    recorded_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator("evidence_ids")
+    @classmethod
+    def require_unique_evidence_ids(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        return _require_unique(value, "evidence_ids")
+
+
+class BehavioralRuleVersion(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    rule_version_id: StableIdentifier
+    rule_id: StableIdentifier
+    semantic_version: SemanticVersion
+    title: NonBlankText
+    canonical_statement: NonBlankText
+    rationale: NonBlankText
+    authority: RuleAuthority
+    scope: tuple[NonBlankText, ...] = Field(min_length=1)
+    triggers: tuple[NonBlankText, ...] = Field(min_length=1)
+    required_behavior: tuple[NonBlankText, ...] = Field(min_length=1)
+    prohibited_behavior: tuple[NonBlankText, ...]
+    exceptions: tuple[NonBlankText, ...]
+    decision_boundary: NonBlankText
+    precedence_rule_ids: tuple[StableIdentifier, ...]
+    source_incident_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    evidence_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    counterexamples: tuple[NonBlankText, ...]
+    regression_test_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    retrieval_terms: tuple[NonBlankText, ...] = Field(min_length=1)
+    aliases: tuple[NonBlankText, ...]
+    related_rule_ids: tuple[StableIdentifier, ...]
+    conflict_rule_ids: tuple[StableIdentifier, ...]
+    supersedes_rule_version_ids: tuple[StableIdentifier, ...]
+    status: RuleStatus
+    creator: ActorIdentity
+    approver: ActorIdentity | None
+    created_at: UtcTimestamp
+    approved_at: UtcTimestamp | None
+    governing_policy_hash: Sha256Hex
+
+    @field_validator(
+        "precedence_rule_ids",
+        "source_incident_ids",
+        "evidence_ids",
+        "regression_test_ids",
+        "related_rule_ids",
+        "conflict_rule_ids",
+        "supersedes_rule_version_ids",
+    )
+    @classmethod
+    def require_unique_identifier_references(
+        cls,
+        value: tuple[str, ...],
+        info: object,
+    ) -> tuple[str, ...]:
+        field_name = getattr(info, "field_name", "references")
+        return _require_unique(value, str(field_name))
+
+
+class ReviewerAssessment(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    assessment_id: StableIdentifier
+    role: ReviewerRole
+    provenance: AssessmentProvenance
+    proposal_id: StableIdentifier
+    rule_version_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    incident_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    overlap: OverlapClassification | None
+    conflict: ConflictClassification | None
+    findings: tuple[NonBlankText, ...] = Field(min_length=1)
+    candidate_statement: NonBlankText | None
+    scope: tuple[NonBlankText, ...]
+    triggers: tuple[NonBlankText, ...]
+    exceptions: tuple[NonBlankText, ...]
+    counterexamples: tuple[NonBlankText, ...]
+    regression_test_ids: tuple[StableIdentifier, ...]
+    recommended_action: RuleAction
+    uncertainty: tuple[NonBlankText, ...]
+
+    @field_validator("rule_version_ids", "incident_ids", "regression_test_ids")
+    @classmethod
+    def require_unique_references(
+        cls,
+        value: tuple[str, ...],
+        info: object,
+    ) -> tuple[str, ...]:
+        field_name = getattr(info, "field_name", "references")
+        return _require_unique(value, str(field_name))
+
+
+class RuleConsolidationDecision(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    consolidation_decision_id: StableIdentifier
+    proposal_id: StableIdentifier
+    consumed_assessment_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    consumed_incident_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    resulting_rule_version_id: StableIdentifier | None
+    action: RuleAction
+    rationale: NonBlankText
+    separating_variable: NonBlankText | None
+    decision_boundary: NonBlankText | None
+    accepted_recommendations: tuple[NonBlankText, ...]
+    rejected_recommendations: tuple[NonBlankText, ...]
+    preserved_dissent: tuple[NonBlankText, ...]
+    decided_by: ActorIdentity
+    decided_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator("consumed_assessment_ids", "consumed_incident_ids")
+    @classmethod
+    def require_unique_consumed_references(
+        cls,
+        value: tuple[str, ...],
+        info: object,
+    ) -> tuple[str, ...]:
+        field_name = getattr(info, "field_name", "references")
+        return _require_unique(value, str(field_name))
+
+    @model_validator(mode="after")
+    def require_result_for_rule_producing_action(self) -> Self:
+        result_is_required = self.action not in {
+            RuleAction.REJECT,
+            RuleAction.ESCALATE_TO_HUMAN,
+        }
+        if result_is_required and self.resulting_rule_version_id is None:
+            raise ValueError("resulting_rule_version_id is required for a rule-producing action")
+        if not result_is_required and self.resulting_rule_version_id is not None:
+            raise ValueError("resulting_rule_version_id must be null for a non-producing action")
+        return self
+
+
+class RuleRegressionCase(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    regression_case_id: StableIdentifier
+    rule_version_id: StableIdentifier
+    incident_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    test_id: StableIdentifier
+    scenario: NonBlankText
+    expected_behavior: NonBlankText
+    created_by: ActorIdentity
+    created_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator("incident_ids")
+    @classmethod
+    def require_unique_incident_ids(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        return _require_unique(value, "incident_ids")
+
+
+class RecommendationDisposition(_StrictFrozenModel):
+    assessment_id: StableIdentifier
+    recommended_action: RuleAction
+    accepted: bool
+    explanation: NonBlankText
+
+
+class ConsolidationProposal(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    consolidation_decision_id: StableIdentifier
+    review_proposal_id: StableIdentifier
+    assessment_ids: tuple[StableIdentifier, ...] = Field(min_length=5)
+    incident_ids: tuple[StableIdentifier, ...] = Field(min_length=1)
+    candidate_rule: BehavioralRuleVersion
+    regression_cases: tuple[RuleRegressionCase, ...] = Field(min_length=1)
+    action: RuleAction
+    overlap: OverlapClassification | None
+    conflict: ConflictClassification | None
+    separating_variable: NonBlankText | None
+    separating_boundary_test_id: StableIdentifier | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    recommendation_dispositions: tuple[RecommendationDisposition, ...] = Field(min_length=5)
+    preserved_findings: tuple[NonBlankText, ...] = Field(min_length=1)
+    preserved_dissent: tuple[NonBlankText, ...]
+    recurrence_incident_ids: tuple[StableIdentifier, ...]
+    recurrence_repairs: tuple[RecurrenceRepair, ...]
+    integrated_by: ActorIdentity
+    integrated_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator(
+        "assessment_ids",
+        "incident_ids",
+        "recurrence_incident_ids",
+    )
+    @classmethod
+    def require_unique_identifiers(
+        cls,
+        value: tuple[str, ...],
+        info: object,
+    ) -> tuple[str, ...]:
+        return _require_unique(value, str(getattr(info, "field_name", "references")))
+
+    @field_validator("recurrence_repairs")
+    @classmethod
+    def require_unique_repairs(
+        cls,
+        value: tuple[RecurrenceRepair, ...],
+    ) -> tuple[RecurrenceRepair, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("recurrence_repairs must contain unique values")
+        return value
+
+    @model_validator(mode="after")
+    def require_exact_candidate_bindings(self) -> Self:
+        disposition_ids = tuple(item.assessment_id for item in self.recommendation_dispositions)
+        if disposition_ids != self.assessment_ids:
+            raise ValueError(
+                "recommendation dispositions must exactly match assessment_ids in canonical order"
+            )
+        if self.incident_ids != self.candidate_rule.source_incident_ids:
+            raise ValueError("candidate rule must retain the exact consolidation incidents")
+        if self.integrated_by != self.candidate_rule.creator:
+            raise ValueError("candidate rule creator must be the consolidation integrator")
+        if self.governing_policy_hash != self.candidate_rule.governing_policy_hash:
+            raise ValueError("candidate rule must name the consolidation policy")
+        for regression_case in self.regression_cases:
+            if (
+                regression_case.rule_version_id != self.candidate_rule.rule_version_id
+                or regression_case.created_by != self.integrated_by
+                or regression_case.governing_policy_hash != self.governing_policy_hash
+            ):
+                raise ValueError("regression cases must bind the candidate, integrator, and policy")
+        regression_test_ids = tuple(item.test_id for item in self.regression_cases)
+        if len(set(regression_test_ids)) != len(regression_test_ids):
+            raise ValueError("regression cases must use unique test identifiers")
+        if not set(regression_test_ids).issubset(self.candidate_rule.regression_test_ids):
+            raise ValueError("every regression case test must be declared by the candidate")
+        if any(
+            not set(item.incident_ids).issubset(self.candidate_rule.source_incident_ids)
+            for item in self.regression_cases
+        ):
+            raise ValueError("regression cases must bind retained candidate incidents")
+        cases_by_test_id = {item.test_id: item for item in self.regression_cases}
+        if self.conflict is not None:
+            if (
+                self.separating_boundary_test_id is None
+                or self.separating_boundary_test_id not in cases_by_test_id
+            ):
+                raise ValueError("conflict consolidation requires a separating-boundary test")
+        elif self.separating_boundary_test_id is not None:
+            raise ValueError("non-conflict consolidation cannot name a separating-boundary test")
+        if not set(self.recurrence_incident_ids).issubset(self.incident_ids):
+            raise ValueError("recurrence incidents must remain in the candidate rule")
+        if self.recurrence_incident_ids and not self.recurrence_repairs:
+            raise ValueError("recurrence requires at least one named recurrence repair")
+        return self
+
+
+def _require_unique(value: tuple[str, ...], field_name: str) -> tuple[str, ...]:
+    if len(set(value)) != len(value):
+        raise ValueError(f"{field_name} must contain unique identifiers")
+    return value

@@ -32,6 +32,21 @@ eight fixed source-controlled argument vectors and exposes no arbitrary command,
 selection, skip, or threshold input. Its dependency audit may use network access. This
 fixed developer tooling is not research-run execution authority.
 
+## Model Execution Boundary
+
+Hypothesis model records are data, not executable authority. `METADATA_ONLY` records
+require content-addressed artifact metadata and are never executed. The only executable
+mode selects one of two immutable, source-controlled deterministic simulators by fixed
+identifier. Unknown identifiers reject. Records cannot provide import paths, entry
+points, source text, argument vectors, shell commands, filesystem paths, or network
+locations.
+
+Built-in simulation accepts strict numeric input, exact schemas and seeds, and bounded
+step and state sizes. It uses in-memory state and has no filesystem, network,
+subprocess, dynamic-import, `eval`, or `exec` path. A submitted simulation result is
+re-executed through the fixed registry before it can be retained. Model type describes
+metadata and never broadens this boundary.
+
 ## Filesystem And Artifact Boundary
 
 Artifact references are SHA-256-derived relative paths beneath the configured root.
@@ -56,6 +71,27 @@ SQLite is also a local trust boundary. Append-only triggers reject updates and d
 to policy snapshots, evidence records, claim versions, transactions, and audit events,
 but an attacker with database-file or process-level access is outside the kernel's
 authorization boundary.
+
+## Workspace Exchange Boundary
+
+An imported bundle and its source artifact store are untrusted. The strict
+`WorkspaceExport` schema rejects extras and coercions; canonical proposal, bundle,
+policy, decision, and projection hashes are checked before the target is declared
+equivalent. Records are submitted through stable coordinator intents under their
+recorded governing policy. Same-identity content changes produce audited conflicts
+rather than replacement.
+
+The JSON bundle contains digest-only artifact references. Artifact bytes move between
+explicit stores and are checked for media type, size, digest, and content-derived
+location. Exported object graphs are scanned fail closed for protected-answer fields,
+protected-store or database references, live paths, and executable configuration. This
+is a structural boundary, not a data-loss-prevention system: operators must still keep
+secrets and sensitive research content out of ordinary evidence and proposal fields.
+
+Import is intended for an empty workspace or an exact idempotent replay. It is not a
+general merge, backup encryption, sandbox, signature, origin authentication, or
+authorization protocol. Bundle hashing detects modification under the local hash
+assumptions but does not establish who produced the bundle.
 
 ## Integrity And Secrets
 
@@ -86,6 +122,16 @@ recorded as authoritative policy attribution.
 Exact replay does not readmit under current policy, but it fails closed when that policy
 registration or active pointer is missing or inconsistent.
 
+Hypothesis downstream stages require exact accepted transaction and audit receipts.
+Receipt hashes and trusted committed transaction and audit times bind content and causal
+bounds. Caller timestamps confer no authority, cannot predate retained dependencies,
+and cannot exceed the current transaction's persistence time; audit sequence preserves
+durable order and breaks equal-time ties. Workspace verification replays accepted
+hypothesis mutations using the same fixed handlers and compares rebuilt records and
+heads with storage. Deleted or altered stage records, forged receipts,
+non-reproducible simulations, unresolved counterexamples, and tampered hypothesis heads
+therefore fail closed.
+
 The kernel has no secret store, credential broker, runtime redaction service, or
 dedicated secret scanner. Do not put API keys, credentials, private tokens, or regulated
 data in evidence files, policy files, CLI arguments, logs, or the workspace. Core use
@@ -108,3 +154,5 @@ checks, direct database-file tampering, denial of service through large local in
 dependency and build-tool compromise, and disclosure through user-managed backups or
 logs. The audit chain is tamper-evident under its hash and storage assumptions; it is not
 an external timestamp, signature, remote attestation, or guarantee of scientific truth.
+See `THREAT_MODEL.md` for assets, trust boundaries, attacker capabilities, controls,
+and explicit non-goals.

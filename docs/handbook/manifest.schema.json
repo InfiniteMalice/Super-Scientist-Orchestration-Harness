@@ -1,0 +1,232 @@
+{
+  "$defs": {
+    "BehaviorEntry": {
+      "additionalProperties": false,
+      "description": "Human-authored behavior truth; source syntax never fills these fields.",
+      "properties": {
+        "behavior_id": {
+          "minLength": 1,
+          "title": "Behavior Id",
+          "type": "string"
+        },
+        "contracts": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Contracts",
+          "type": "array"
+        },
+        "dependencies": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Dependencies",
+          "type": "array"
+        },
+        "failure_modes": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Failure Modes",
+          "type": "array"
+        },
+        "governing_rule_version_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Governing Rule Version Ids",
+          "type": "array"
+        },
+        "inputs": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Inputs",
+          "type": "array"
+        },
+        "outputs": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Outputs",
+          "type": "array"
+        },
+        "permissions": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Permissions",
+          "type": "array"
+        },
+        "postconditions": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Postconditions",
+          "type": "array"
+        },
+        "preconditions": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Preconditions",
+          "type": "array"
+        },
+        "related_behaviors": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Related Behaviors",
+          "type": "array"
+        },
+        "source_bindings": {
+          "items": {
+            "$ref": "#/$defs/SourceBinding"
+          },
+          "minItems": 1,
+          "title": "Source Bindings",
+          "type": "array"
+        },
+        "state_read": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "State Read",
+          "type": "array"
+        },
+        "state_written": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "State Written",
+          "type": "array"
+        },
+        "summary": {
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "test_paths": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Test Paths",
+          "type": "array"
+        },
+        "tools": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Tools",
+          "type": "array"
+        }
+      },
+      "required": [
+        "behavior_id",
+        "summary",
+        "contracts",
+        "inputs",
+        "outputs",
+        "preconditions",
+        "postconditions",
+        "failure_modes",
+        "state_read",
+        "state_written",
+        "tools",
+        "permissions",
+        "dependencies",
+        "governing_rule_version_ids",
+        "source_bindings",
+        "test_paths",
+        "related_behaviors"
+      ],
+      "title": "BehaviorEntry",
+      "type": "object"
+    },
+    "SourceBinding": {
+      "additionalProperties": false,
+      "description": "A human-authored claim that a behavior is implemented at one source symbol.",
+      "properties": {
+        "relative_path": {
+          "minLength": 1,
+          "title": "Relative Path",
+          "type": "string"
+        },
+        "repository_commit": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "title": "Repository Commit",
+          "type": "string"
+        },
+        "source_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Hash",
+          "type": "string"
+        },
+        "symbol": {
+          "minLength": 1,
+          "title": "Symbol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository_commit",
+        "relative_path",
+        "symbol",
+        "source_hash"
+      ],
+      "title": "SourceBinding",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "behaviors": {
+      "items": {
+        "$ref": "#/$defs/BehaviorEntry"
+      },
+      "minItems": 1,
+      "title": "Behaviors",
+      "type": "array"
+    },
+    "repository": {
+      "minLength": 1,
+      "title": "Repository",
+      "type": "string"
+    },
+    "repository_commit": {
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+      "title": "Repository Commit",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "repository",
+    "repository_commit",
+    "behaviors"
+  ],
+  "title": "BehaviorManifest",
+  "type": "object"
+}

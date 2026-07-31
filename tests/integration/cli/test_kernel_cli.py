@@ -5,11 +5,13 @@ from pathlib import Path
 from typing import Protocol
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from typer.testing import CliRunner
 
 from super_scientist.cli import kernel
 from super_scientist.cli.main import app
+from super_scientist.providers.storage.repositories import StorageIntegrityError
 
 runner = CliRunner()
 
@@ -280,7 +282,108 @@ def test_init_reports_migration_failure_as_json_error(
     assert result.exit_code == 2
     payload = json_payload(result)
     assert payload["success"] is False
-    assert payload["errors"] == [{"code": "STORAGE_ERROR", "message": "migration unavailable"}]
+    assert payload["errors"] == [{"code": "STORAGE_ERROR", "message": "storage operation failed"}]
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_error"),
+    [
+        (
+            "pydantic",
+            {"code": "INVALID_ARGUMENT", "message": "input validation failed"},
+        ),
+        (
+            "sqlalchemy",
+            {"code": "STORAGE_ERROR", "message": "storage operation failed"},
+        ),
+        (
+            "storage",
+            {
+                "code": "STORAGE_INTEGRITY_ERROR",
+                "message": "storage integrity verification failed",
+            },
+        ),
+        (
+            "filesystem",
+            {"code": "FILESYSTEM_ERROR", "message": "filesystem operation failed"},
+        ),
+        (
+            "unexpected",
+            {"code": "COMMAND_FAILED", "message": "command failed"},
+        ),
+    ],
+)
+def test_cli_failure_envelopes_do_not_expose_exception_secrets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+    expected_error: dict[str, str],
+) -> None:
+    secret = "secret-token-7f4d"
+    absolute_path = r"C:\sensitive\workspace\records.json"
+    sql = "SELECT record_json FROM evidence_records"
+    record_json = '{"record":"classified"}'
+    sensitive_detail = f"{secret} {absolute_path} {sql} {record_json}"
+
+    if failure_kind == "pydantic":
+        try:
+            kernel.GovernancePolicy.model_validate(
+                {
+                    "schema_version": sensitive_detail,
+                    "required_claim_checks": ["source_exists"],
+                }
+            )
+        except ValidationError as validation_error:
+            failure: Exception = validation_error
+        else:
+            pytest.fail("adversarial fixture must produce a validation error")
+    elif failure_kind == "sqlalchemy":
+        failure = SQLAlchemyError(sensitive_detail)
+    elif failure_kind == "storage":
+        failure = StorageIntegrityError(sensitive_detail)
+    elif failure_kind == "filesystem":
+        failure = OSError(sensitive_detail)
+    else:
+        failure = RuntimeError(sensitive_detail)
+
+    def fail_upgrade(_url: str) -> None:
+        raise failure
+
+    monkeypatch.setattr(kernel, "upgrade_database", fail_upgrade)
+
+    result = runner.invoke(app, ["init", "--root", str(tmp_path), "--json"])
+
+    assert result.exit_code == 2
+    payload = json_payload(result)
+    assert payload["errors"] == [expected_error]
+    serialized = json.dumps(payload, sort_keys=True)
+    for forbidden in (secret, absolute_path, sql, record_json):
+        assert forbidden not in serialized
+
+
+def test_invalid_policy_envelope_does_not_expose_validation_input(
+    tmp_path: Path,
+) -> None:
+    secret = "policy-secret-0e12"
+    policy_path = tmp_path / "governance-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": secret,
+                "required_claim_checks": ["source_exists"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["init", "--root", str(tmp_path), "--json"])
+
+    assert result.exit_code == 2
+    payload = json_payload(result)
+    assert payload["errors"] == [
+        {"code": "INVALID_POLICY", "message": "governance policy is invalid"}
+    ]
+    assert secret not in json.dumps(payload)
 
 
 def test_uninitialized_runtime_reports_json_error(tmp_path: Path) -> None:

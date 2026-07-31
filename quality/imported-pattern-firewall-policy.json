@@ -1,0 +1,23 @@
+{
+  "allowed_attribution_paths": [
+    "docs/sources/source-register.yaml",
+    "docs/superpowers/plans/2026-07-11-epistemic-kernel-vertical-slice.md",
+    "docs/superpowers/plans/2026-07-18-governed-adaptation-and-harness-evolution.md",
+    "docs/superpowers/specs/2026-07-11-super-scientist-foundation-design.md",
+    "docs/superpowers/specs/2026-07-18-governed-adaptation-and-harness-evolution-design.md"
+  ],
+  "denied_terms": [
+    "ARC-AGI",
+    "Abstraction and Reasoning Corpus",
+    "AggyAI",
+    "CUDA",
+    "PEFT",
+    "Torch",
+    "Transformers",
+    "colored cell",
+    "dataset loader",
+    "grid transformation",
+    "spatial grid"
+  ],
+  "policy_version": 1
+}

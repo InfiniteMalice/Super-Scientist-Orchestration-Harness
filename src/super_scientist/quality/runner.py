@@ -47,6 +47,10 @@ CHECKS = (
     QualityCheck("dependencies", (PYTHON, "-m", "pip_audit")),
     QualityCheck("build", (PYTHON, "-m", "build")),
     QualityCheck("package", (PYTHON, "-m", "twine", "check", "dist/*")),
+    QualityCheck(
+        "wheel-install",
+        (PYTHON, "-m", "super_scientist.quality.wheel_smoke"),
+    ),
 )
 
 
@@ -70,6 +74,7 @@ def run_quality_gate(reporter: QualityReporter | None = None) -> int:
                     print(message, file=sys.stderr)
                 else:
                     reporter(QualityCheckResult(check.name, argv, 1, stderr=message))
+                    _report_not_run(CHECKS[index + 1 :], reporter)
                 return 1
             argv = (*check.argv[:-1], *distributions)
         if reporter is None:

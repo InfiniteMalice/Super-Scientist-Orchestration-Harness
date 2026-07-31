@@ -10,7 +10,7 @@ from sqlalchemy import Connection, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from super_scientist.config.loader import policy_hash
-from super_scientist.config.models import GovernancePolicy, PolicySnapshot
+from super_scientist.config.models import PolicyDocument, PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus
 from super_scientist.domain.evidence.models import EvidenceRecord, VerificationState
 from super_scientist.domain.identity import ActorKind
@@ -23,24 +23,110 @@ from super_scientist.domain.primitives import (
 from super_scientist.kernel.audit.chain import append_event, verify_chain
 from super_scientist.kernel.audit.models import AuditEvent
 from super_scientist.kernel.transactions.models import Proposal, TransactionDecision
+from super_scientist.providers.storage.integrity_records import (
+    AdaptationIntegritySnapshot,
+    HypothesisIntegritySnapshot,
+    ProgressIntegritySnapshot,
+    RepresentationIntegritySnapshot,
+    RuleIntegritySnapshot,
+    TrailIntegritySnapshot,
+)
 from super_scientist.providers.storage.schema import (
     audit_events,
     claim_heads,
     claim_versions,
+    completion_decisions,
+    configuration_versions,
+    counterexample_records,
+    evaluator_audits,
+    evaluator_collapse_records,
+    evaluator_heads,
+    evaluator_succession_decisions,
+    evaluator_versions,
     evidence_records,
+    evidence_trail_assessments,
+    evidence_trail_checks,
+    evidence_trail_heads,
+    evidence_trail_nodes,
+    evidence_trail_relations,
+    evidence_trail_versions,
+    executable_model_specs,
     governance_policies,
     governance_state,
+    hypothesis_admission_decisions,
+    hypothesis_heads,
+    hypothesis_revisions,
+    hypothesis_versions,
+    primitive_evaluations,
+    primitive_heads,
+    primitive_versions,
+    progress_events,
+    progress_heads,
+    progress_plans,
+    progress_subtasks,
+    report_sentence_bindings,
+    research_run_events,
+    research_run_heads,
+    research_runs,
+    run_budgets,
+    run_checkpoints,
+    self_improvement_measurements,
+    simulation_results,
     transactions,
+    verification_mechanism_specs,
+    verification_results,
 )
 
 PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
 TIMESTAMP_ADAPTER: TypeAdapter[UtcTimestamp] = TypeAdapter(UtcTimestamp)
 SHA256_ADAPTER: TypeAdapter[Sha256Hex] = TypeAdapter(Sha256Hex)
+POLICY_DOCUMENT_ADAPTER: TypeAdapter[PolicyDocument] = TypeAdapter(PolicyDocument)
 _STORAGE_TYPE_KEY = "__super_scientist_storage_type__"
 _STORAGE_ITEMS_KEY = "items"
 _STORAGE_ENUMS: dict[str, type[Enum]] = {
     enum_type.__name__: enum_type for enum_type in (ActorKind, ClaimStatus, VerificationState)
 }
+_STRICT_JSON_PROPOSAL_TYPES = frozenset(
+    {
+        "create_research_run",
+        "append_research_run_event",
+        "record_configuration_version",
+        "record_evaluator_audit",
+        "record_self_improvement_measurement",
+        "propose_evaluator_version",
+        "decide_evaluator_succession",
+        "propose_governance_policy_transition",
+        "record_progress_plan",
+        "append_progress_event",
+        "record_run_budget",
+        "record_run_checkpoint",
+        "decide_completion",
+        "propose_evidence_trail_nodes",
+        "propose_evidence_trail_relations",
+        "record_evidence_trail_version",
+        "bind_report_sentence",
+        "record_rule_incident",
+        "propose_behavioral_rule",
+        "import_reviewer_assessment",
+        "consolidate_behavioral_rule",
+        "create_harness_campaign",
+        "record_harness_iteration",
+        "record_harness_protected_result",
+        "record_harness_confound",
+        "decide_harness_campaign",
+        "propose_primitive_version",
+        "record_primitive_evaluation",
+        "admit_primitive_version",
+        "propose_hypothesis_version",
+        "register_executable_model",
+        "register_verification_mechanism",
+        "record_simulation_result",
+        "record_verification_result",
+        "record_counterexample",
+        "revise_hypothesis",
+        "admit_hypothesis",
+    }
+)
 
 
 class StorageIntegrityError(ValueError):
@@ -243,9 +329,16 @@ def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
             if raw_intent_fingerprint is None
             else SHA256_ADAPTER.validate_python(raw_intent_fingerprint)
         )
-        proposal = PROPOSAL_ADAPTER.validate_python(_load_storage_json(proposal_json))
+        raw_proposal = json.loads(proposal_json)
+        if (
+            isinstance(raw_proposal, dict)
+            and raw_proposal.get("proposal_type") in _STRICT_JSON_PROPOSAL_TYPES
+        ):
+            proposal = PROPOSAL_ADAPTER.validate_json(proposal_json)
+        else:
+            proposal = PROPOSAL_ADAPTER.validate_python(_decode_storage_value(raw_proposal))
         decision = TransactionDecision.model_validate_json(decision_json)
-        _validated_timestamp(datetime.fromisoformat(created_at))
+        validated_created_at = _validated_timestamp(datetime.fromisoformat(created_at))
     except (TypeError, ValueError) as error:
         raise StorageIntegrityError(
             "storage integrity error: invalid transaction record"
@@ -271,6 +364,7 @@ def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
         proposal_hash=stored_hash,
         decision=decision,
         intent_fingerprint=intent_fingerprint,
+        created_at=validated_created_at,
     )
 
 
@@ -308,7 +402,7 @@ def _decode_policy_row(
     policy_json = _stored_str(row, "policy_json")
     created_at = _stored_str(row, "created_at")
     try:
-        policy = GovernancePolicy.model_validate_json(policy_json)
+        policy = POLICY_DOCUMENT_ADAPTER.validate_json(policy_json)
         _validated_timestamp(datetime.fromisoformat(created_at))
     except (TypeError, ValueError) as error:
         raise StorageIntegrityError(
@@ -333,6 +427,7 @@ class StoredTransaction(BaseModel):
     proposal_hash: str
     decision: TransactionDecision
     intent_fingerprint: Sha256Hex | None = None
+    created_at: UtcTimestamp
 
 
 class EvidenceRepository:
@@ -636,7 +731,14 @@ class TransactionRepository:
     ) -> None:
         dumped_proposal = proposal.model_dump(mode="python", warnings="none")
         validated_proposal = PROPOSAL_ADAPTER.validate_python(dumped_proposal)
-        proposal_json = _storage_json(validated_proposal.model_dump(mode="python", warnings="none"))
+        if validated_proposal.proposal_type in _STRICT_JSON_PROPOSAL_TYPES:
+            proposal_json = canonical_json_bytes(
+                validated_proposal.model_dump(mode="json", warnings="none")
+            ).decode("utf-8")
+        else:
+            proposal_json = _storage_json(
+                validated_proposal.model_dump(mode="python", warnings="none")
+            )
         decision_json = _validated_model_json(TransactionDecision, decision)
         validated_decision = TransactionDecision.model_validate_json(decision_json)
         validated_occurred_at = _validated_timestamp(occurred_at)
@@ -843,6 +945,140 @@ class RepositorySet:
         self.audit = AuditRepository(connection)
         self.policies = PolicyRepository(connection)
 
+    def adaptation_integrity_snapshot(self) -> AdaptationIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            ConfigurationVersionRepository,
+            EvaluatorAuditRepository,
+            EvaluatorCollapseRepository,
+            EvaluatorHeadRepository,
+            EvaluatorSuccessionRepository,
+            EvaluatorVersionRepository,
+            ResearchRunEventRepository,
+            ResearchRunHeadRepository,
+            ResearchRunRepository,
+            SelfImprovementMeasurementRepository,
+        )
+
+        return AdaptationIntegritySnapshot(
+            research_runs=ResearchRunRepository(self._connection).list_all(),
+            research_run_events=ResearchRunEventRepository(self._connection).list_all(),
+            configuration_versions=ConfigurationVersionRepository(self._connection).list_all(),
+            evaluator_audits=EvaluatorAuditRepository(self._connection).list_all(),
+            measurements=SelfImprovementMeasurementRepository(self._connection).list_all(),
+            evaluator_versions=EvaluatorVersionRepository(self._connection).list_all(),
+            evaluator_succession_decisions=EvaluatorSuccessionRepository(
+                self._connection
+            ).list_all(),
+            evaluator_collapse_records=EvaluatorCollapseRepository(self._connection).list_all(),
+            research_run_heads=ResearchRunHeadRepository(self._connection).list_all(),
+            evaluator_head=EvaluatorHeadRepository(self._connection).get(),
+        )
+
+    def progress_integrity_snapshot(self) -> ProgressIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            CompletionDecisionRepository,
+            ProgressEventRepository,
+            ProgressHeadRepository,
+            ProgressPlanRepository,
+            ProgressSubtaskRepository,
+            RunBudgetRepository,
+            RunCheckpointRepository,
+        )
+
+        return ProgressIntegritySnapshot(
+            plans=ProgressPlanRepository(self._connection).list_all(),
+            subtasks=ProgressSubtaskRepository(self._connection).list_all(),
+            events=ProgressEventRepository(self._connection).list_all(),
+            budgets=RunBudgetRepository(self._connection).list_all(),
+            checkpoints=RunCheckpointRepository(self._connection).list_all(),
+            completion_decisions=CompletionDecisionRepository(self._connection).list_all(),
+            heads=ProgressHeadRepository(self._connection).list_all(),
+        )
+
+    def trail_integrity_snapshot(self) -> TrailIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            EvidenceTrailAssessmentRepository,
+            EvidenceTrailCheckRepository,
+            EvidenceTrailHeadRepository,
+            EvidenceTrailNodeRepository,
+            EvidenceTrailRelationRepository,
+            EvidenceTrailVersionRepository,
+            ReportSentenceBindingRepository,
+        )
+
+        return TrailIntegritySnapshot(
+            versions=EvidenceTrailVersionRepository(self._connection).list_all(),
+            nodes=EvidenceTrailNodeRepository(self._connection).list_all(),
+            relations=EvidenceTrailRelationRepository(self._connection).list_all(),
+            checks=EvidenceTrailCheckRepository(self._connection).list_all(),
+            assessments=EvidenceTrailAssessmentRepository(self._connection).list_all(),
+            bindings=ReportSentenceBindingRepository(self._connection).list_all(),
+            heads=EvidenceTrailHeadRepository(self._connection).list_all(),
+        )
+
+    def rule_integrity_snapshot(self) -> RuleIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            BehavioralRuleHeadRepository,
+            BehavioralRuleVersionRepository,
+            ReviewerAssessmentRepository,
+            RuleConsolidationDecisionRepository,
+            RuleIncidentRepository,
+            RuleRegressionCaseRepository,
+        )
+
+        return RuleIntegritySnapshot(
+            incidents=RuleIncidentRepository(self._connection).list_all(),
+            versions=BehavioralRuleVersionRepository(self._connection).list_all(),
+            assessments=ReviewerAssessmentRepository(self._connection).list_all(),
+            decisions=RuleConsolidationDecisionRepository(self._connection).list_all(),
+            regressions=RuleRegressionCaseRepository(self._connection).list_all(),
+            heads=BehavioralRuleHeadRepository(self._connection).list_all(),
+        )
+
+    def representation_integrity_snapshot(self) -> RepresentationIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            PrimitiveEvaluationRepository,
+            PrimitiveHeadRepository,
+            PrimitiveVersionRepository,
+            VerificationMechanismSpecRepository,
+            VerificationResultRepository,
+        )
+
+        return RepresentationIntegritySnapshot(
+            versions=PrimitiveVersionRepository(self._connection).list_all(),
+            evaluations=PrimitiveEvaluationRepository(self._connection).list_all(),
+            verification_mechanisms=VerificationMechanismSpecRepository(
+                self._connection
+            ).list_all(),
+            verification_results=VerificationResultRepository(self._connection).list_all(),
+            heads=PrimitiveHeadRepository(self._connection).list_all(),
+        )
+
+    def hypothesis_integrity_snapshot(self) -> HypothesisIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            CounterexampleRecordRepository,
+            ExecutableModelSpecRepository,
+            HypothesisAdmissionDecisionRepository,
+            HypothesisHeadRepository,
+            HypothesisRevisionRepository,
+            HypothesisVersionRepository,
+            SimulationResultRepository,
+            VerificationMechanismSpecRepository,
+            VerificationResultRepository,
+        )
+
+        return HypothesisIntegritySnapshot(
+            versions=HypothesisVersionRepository(self._connection).list_all(),
+            models=ExecutableModelSpecRepository(self._connection).list_all(),
+            mechanisms=VerificationMechanismSpecRepository(self._connection).list_all(),
+            simulations=SimulationResultRepository(self._connection).list_all(),
+            results=VerificationResultRepository(self._connection).list_all(),
+            counterexamples=CounterexampleRecordRepository(self._connection).list_all(),
+            revisions=HypothesisRevisionRepository(self._connection).list_all(),
+            admissions=HypothesisAdmissionDecisionRepository(self._connection).list_all(),
+            heads=HypothesisHeadRepository(self._connection).list_all(),
+        )
+
     def has_durable_state(self) -> bool:
         tables = (
             governance_policies,
@@ -852,6 +1088,42 @@ class RepositorySet:
             claim_heads,
             transactions,
             audit_events,
+            research_runs,
+            research_run_events,
+            configuration_versions,
+            self_improvement_measurements,
+            evaluator_audits,
+            evaluator_versions,
+            evaluator_succession_decisions,
+            evaluator_collapse_records,
+            research_run_heads,
+            evaluator_heads,
+            progress_plans,
+            progress_subtasks,
+            progress_events,
+            run_budgets,
+            run_checkpoints,
+            completion_decisions,
+            progress_heads,
+            evidence_trail_versions,
+            evidence_trail_nodes,
+            evidence_trail_relations,
+            evidence_trail_checks,
+            evidence_trail_assessments,
+            report_sentence_bindings,
+            evidence_trail_heads,
+            primitive_versions,
+            primitive_evaluations,
+            primitive_heads,
+            hypothesis_versions,
+            executable_model_specs,
+            verification_mechanism_specs,
+            simulation_results,
+            verification_results,
+            counterexample_records,
+            hypothesis_revisions,
+            hypothesis_admission_decisions,
+            hypothesis_heads,
         )
         return any(
             self._connection.execute(select(table).limit(1)).first() is not None for table in tables

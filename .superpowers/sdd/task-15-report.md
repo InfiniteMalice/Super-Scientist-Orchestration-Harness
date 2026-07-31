@@ -1,0 +1,360 @@
+# Task 15 implementation report
+
+## Scope
+
+Implemented fair, protected harness-evolution evaluation for the approved governed
+adaptation design. The change adds immutable campaign and partition models, exact
+multi-dimensional budgets, output-only protected evaluation, transaction-coordinator
+handlers, append-only reporting and decision records, and report-only evaluator-collapse
+diagnostics.
+
+No Task 16 behavior is included.
+
+## Capability boundaries
+
+- Candidate execution receives only public task input and an immutable budget.
+- The coordinator receives public manifests and hashes, never protected answers.
+- The evaluator receives an answer-reader capability, already-produced candidate bytes,
+  and a fixed checker. It exposes no candidate invocation API.
+- Task 13 `ProtectedCheckerResult` is the single strict DTO at the protected boundary.
+- The transaction handler creates a coordinator-local protected gateway from the active
+  database connection, appends within that unit of work, and closes the gateway before
+  returning.
+- The decision authority consumes only safe durable records and cannot use a collapse
+  diagnostic as promotion authority.
+
+These boundaries keep protected data and authority out of the candidate, service, ordinary
+database, audit events, and exports.
+
+## TDD evidence
+
+Initial RED:
+
+```text
+4 collection errors in 2.20s
+```
+
+The errors were the expected missing Task 15 application package and collapse model.
+
+Initial GREEN sequence:
+
+```text
+48 passed in 2.40s
+7 passed in 34.14s
+55 passed in 29.75s
+55 passed in 29.20s
+```
+
+Evaluator-succession hardening RED:
+
+```text
+test_evaluator_change_is_retained_as_a_confound_and_public_lineage
+AssertionError: assert False is True
+```
+
+The old lineage rule rejected a changed evaluator even when the change had a durable
+`EVALUATOR_CHANGED` confound. The minimal fix binds the protected result to the evaluator
+recorded on its public observation. Targeted GREEN was `1 passed in 6.60s`; the complete
+Task 15 slice then passed `56 passed in 34.32s` and, after replacing the coverage-hostile
+spawned validator in that orchestration fixture with a strict in-process test double,
+`56 passed in 15.50s`.
+
+## Compatibility evidence
+
+The Task 13 protected store, migration 0006, append-only property, and evaluator-succession
+suite first printed `79 passed in 118.56s`, but an outer 120-second wrapper returned 124
+after pytest had completed. A fresh controlled-temp rerun exited zero:
+
+```text
+79 passed in 147.37s
+```
+
+The managed sandbox cannot access pytest's default user temp directory, so subsequent gates
+use a workspace-owned `--basetemp` and disable pytest's cache provider.
+
+## Coverage and quality gates
+
+The first focused ownership measurement was 77.59%. Coverage-guided tests then exercised
+substantive invalid-state, authority, lineage, rollback, and evaluator-succession behavior
+without changing frozen production source. The final focused gate combines two
+non-overlapping shards:
+
+```text
+79 Task 15 domain/application/adversarial/collapse tests
+16 evaluator-succession tests
+95 total
+90.1628664495% branch-aware coverage
+coverage report --fail-under=90: exit 0
+```
+
+Static and security gates:
+
+```text
+Ruff check: PASS
+Ruff format (owned files): PASS
+mypy: Success, no issues in 104 source files
+Bandit medium/high severity recursive scan: PASS
+pip-audit: No known vulnerabilities found
+```
+
+`pip-audit` skipped the unpublished local distribution as expected. Python UTF-8 mode and
+a workspace cache were required because the virtualenv path contains `ö` and the managed
+sandbox blocks the default user cache. Its network retry completed successfully.
+
+Adjacency:
+
+```text
+93 passed in 108.15s
+```
+
+That suite covered the transaction coordinator, adaptation foundation and authority,
+adaptation append-only properties, and migrations 0004 through 0006.
+
+Fresh non-overlapping inventory:
+
+```text
+A2 unit/adversarial/e2e/evaluation: 1008 passed, 3 skipped in 162.25s
+B application/CLI/handbook integration: 333 passed, 3 expected stale-handbook failures
+C storage integration: 161 passed, 3 skipped in 621.40s
+D property: 213 passed in 774.54s
+combined branch-aware coverage: 90.8715431581%
+coverage report --fail-under=90: exit 0
+```
+
+The three B failures are provenance guards: the repository handbook is intentionally not
+rebound to dirty source or an old commit. After this implementation is committed, the
+handbook will be regenerated against that real commit in a separate documentation commit
+and B plus the affected provenance/artifact gates will be rerun on final `HEAD`.
+
+Packaging:
+
+```text
+isolated sdist and wheel build: PASS
+Twine check (sdist and wheel): PASS
+fresh wheel install with declared dependencies: PASS
+installed-wheel role/UoW/non-retention smoke: PASS
+```
+
+The smoke imported from fresh `site-packages`, verified candidate/evaluator role
+separation and non-leaking output, released a closed answer-reader capability, and proved
+that a protected gateway append visible inside the active unit of work disappears after a
+forced rollback.
+
+## Risks and operational notes
+
+- Budget mismatches and evaluator changes make a campaign incomparable unless independently
+  resolved; they are not normalized away.
+- Discovery results do not count as transfer evidence.
+- Collapse reports are non-authoritative and cannot promote a candidate.
+- Protected worker behavior is covered by the unchanged Task 13 compatibility suite; the
+  Task 15 orchestration fixture uses a strict in-process validator only to avoid Windows
+  coverage tracing interfering with spawned worker startup.
+- Existing campaign records remain decodable because the new 0006 JSON fields are optional
+  with strict defaults; no database schema migration is added.
+
+## Review hardening round 1
+
+The first canonical review identified four blocking authority and evidence-lineage gaps.
+This round is limited to those findings:
+
+1. Replace structural candidate input authority with an exact sealed adapter created by a
+   fixed factory, and reject recursively nested protected/evaluator authority.
+2. Bind decisions to a canonical accepted campaign hash plus the exact stored partition
+   and budget children.
+3. Reconcile every report metric and result identifier to complete authoritative
+   observation, protected-result, checker, variant, partition, evaluator, and metric-value
+   lineage before a durable decision can be accepted.
+4. Content-address fixed checker configurations over every semantic field and bind the
+   unchanged Task 13 result DTO through the Task 15 transaction proposal.
+
+Production changes will follow strict RED-to-GREEN tests. The ledger-deferred minor review
+items remain out of scope.
+
+### Review reproduction and design rationale
+
+The candidate-authority reproduction first failed at collection because the sealed factory
+did not exist (`1 error in 2.56s`). The checker-addressing reproduction likewise failed at
+collection because the canonical hash function did not exist (`1 error in 2.67s`). The
+encoded attack matrices then covered 20 immutable campaign mutations, 11 metric/result
+mutations, five protected checker/evaluator binding mutations, and direct plus recursively
+wrapped candidate authority (ordinary state, slots, closures, bound methods, protected
+store, evaluator, validator, gateway, and reversible references).
+
+The implementation uses four fail-closed bindings:
+
+- Candidate code can receive only the exact private public-input adapter returned by
+  `create_candidate_execution_context`; the context revalidates its budget and recursively
+  walks concrete owned state without invoking arbitrary properties.
+- Accepted campaigns retain a canonical hash of the complete strict campaign DTO. Decision
+  reads also reconstruct and compare every stored partition and every stored budget field,
+  so report-only evaluator, version, manifest, membership, or budget changes cannot pass.
+- Every decision metric is reconstructed from the exact accepted iteration proposal,
+  protected-result proposal, immutable metric record, partition membership, variant,
+  evaluator/checker configuration, metric values, and complete result set. Negative or
+  failed candidate observations deterministically force the catastrophic flag.
+- Fixed checker hashes cover checker identity/version/kind, ordered metric identifiers,
+  evaluator identity, and evaluator version. Protected-result transaction proposals bind
+  that configuration to the unchanged Task 13 `ProtectedCheckerResult`.
+
+Audit and measurement support for admission now names the complete canonical protected
+result set, exact baseline/candidate versions, evaluator lineage, producer, rollback, and
+policy. Report aggregates are never admission authority.
+
+### Review GREEN and final gates
+
+Focused functional progression:
+
+```text
+candidate authority adversarial GREEN: 14 passed
+campaign + metric mutation matrices: 2 passed (31 embedded mutations)
+focused unit/adversarial/service/improvement: 229 passed in 37.58s
+final focused coverage suite: 74 passed in 45.18s
+branch-aware Task 15 coverage: 90.89055064581918%
+coverage report --fail-under=90: exit 0
+```
+
+The final candidate matrix additionally exercises every direct and wrapped protected role,
+duplicate/invalid public inputs, reversible reference bytes, and method/default/closure
+graph traversal.
+
+Compatibility and adjacency:
+
+```text
+short-temp protected storage: 50 passed in 103.63s
+Task 13 + migration 0006 + append-only + evaluator succession: 79 passed in 119.69s
+transaction/adaptation/migrations 0004-0006 adjacency: 93 passed in 88.26s
+```
+
+Static and security:
+
+```text
+Ruff check src tests: PASS
+Ruff format, 10 owned files: PASS
+mypy: Success, no issues in 91 source files
+Bandit recursive medium/high scan: PASS
+pip-audit: No known vulnerabilities found
+```
+
+`pip-audit` skipped only the unpublished local distribution. An all-repository Ruff format
+probe identified 18 pre-existing non-owned formatting differences; the owned-file format
+gate is clean.
+
+Packaging and installed-wheel smoke:
+
+```text
+isolated Hatchling sdist and wheel build: PASS
+Twine check, sdist and wheel: PASS
+fresh installed-wheel functional smoke: PASS
+```
+
+The no-network functional smoke force-reinstalled the current same-version wheel into the
+dependency-complete fresh environment and imported from `site-packages`. It verified
+sealed candidate authority, checker/config/evaluator/metric identity changes, canonical
+campaign and cross-partition result-reuse rejection, a valid public decision construction,
+same-unit-of-work protected-result visibility followed by forced rollback, and absence of
+the protected literal from the main database.
+
+The handbook manifest does not bind any changed source in this review round
+(`protected_evaluation.py` and `artifacts.py` remain unchanged), so no handbook refresh or
+separate documentation commit is required.
+
+## Review hardening round 2
+
+The second canonical review identified three remaining blocking completeness, metric
+direction, and package-facade gaps. This round is limited to those findings:
+
+1. Treat every resultless authoritative iteration as incomplete evidence, including
+   unresolved, negative, and failed outcomes, so it cannot disappear from reconciliation
+   or support a promotable/durable decision.
+2. Make each metric direction immutable checker-authored configuration, include it in the
+   checker content address and protected-result identity, and require report direction to
+   match that authority exactly.
+3. Export the sole sealed candidate-context factory from the package facade.
+
+### Round 2 RED and design rationale
+
+The combined reviewer reproductions initially failed as expected:
+
+```text
+5 failed in 9.87s
+```
+
+The package facade omitted `create_candidate_execution_context`; resultless unresolved
+and negative observations incorrectly reached `INDEPENDENT_REVIEW_REQUIRED` instead of
+failing closed as missing evidence; and report models did not yet admit a direction field
+for authoritative reconciliation. Isolating completeness produced `2 failed, 1 passed in
+11.39s`; the already-safe failed observation with a claimed result identifier but no
+protected record remained rejected. A separate lower-is-better evaluator reproduction
+then failed `1 failed in 2.75s` because an exact match still emitted the higher-is-better
+value.
+
+The domain model already rejects a failed outcome without a result identifier because
+`result_id` and `outcome` must be present together. The final matrix makes that invariant
+explicit, then separately proves that a failed observation with a claimed result identifier
+but no protected record cannot become complete evidence.
+
+The minimal implementation closes those gaps at their authority boundaries:
+
+- Authoritative reconciliation now requires a protected result identifier for every
+  iteration. A resultless authoritative observation makes the decision evidence
+  incomplete regardless of its reported outcome.
+- `FixedCheckerConfiguration.metric_higher_is_better` is an exact, length-aligned tuple
+  that participates in both the canonical checker hash and protected result identity.
+  Evaluators emit direction-aware metric values, and decision reconciliation derives one
+  immutable direction per group from stored checker lineage and rejects report mutation.
+- The application package facade exports `create_candidate_execution_context`; direct
+  construction with the public in-memory reader remains rejected by the exact sealed
+  context boundary.
+
+### Round 2 GREEN and final gates
+
+Focused functional progression:
+
+```text
+lower-is-better evaluator targeted GREEN: 1 passed in 2.25s
+reviewer subset GREEN: 6 passed in 13.97s
+full Task 15 focused suite: 239 passed in 49.55s
+final focused coverage suite: 80 passed in 64.97s
+branch-aware Task 15 coverage: 91.0629654705484%
+coverage report --fail-under=90: exit 0
+```
+
+The final focused coverage measurement covered 1,061 of 1,135 statements and 284 of 342
+branches across the four Task 15 domain/application ownership modules.
+
+Protected-storage compatibility:
+
+```text
+Task 13 + migration 0006 + append-only + evaluator succession:
+79 passed in 119.66s
+```
+
+Static, security, and dependency gates:
+
+```text
+Ruff check src tests: PASS
+Ruff format, 6 owned files: PASS
+mypy: Success, no issues in 91 source files
+Bandit recursive medium/high scan: PASS
+pip-audit: No known vulnerabilities found
+```
+
+`pip-audit` skipped only the unpublished local distribution.
+
+Packaging and installed-wheel package-root smoke:
+
+```text
+isolated Hatchling sdist and wheel build: PASS
+Twine check, sdist and wheel: PASS
+force-install current wheel into fresh environment: PASS
+fresh installed-wheel package-root smoke: PASS
+```
+
+The smoke ran outside the repository, imported the facade from `site-packages`, constructed
+a sealed context only through the facade factory, verified that direct facade construction
+with the public reader is rejected, and proved that checker hashes differ when only metric
+direction changes.
+
+The handbook manifest still binds only unchanged `protected_evaluation.py` and
+`artifacts.py` source for the relevant protected behavior. This round changes only
+application/domain code and tests, so no handbook refresh is required.
