@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -208,6 +209,8 @@ def test_source_tree_and_symbol_hashes_are_exact(repository_root: Path) -> None:
 def test_source_hashes_are_reproducible_across_git_checkout_line_endings(
     tmp_path: Path,
 ) -> None:
+    git_executable = shutil.which("git")
+    assert git_executable is not None, "Git executable is required for this test"
     source_lf = b"def public_function(value: int) -> int:\n    return value + 1\n"
     canonical_hash = sha256_hex(source_lf)
     seed = tmp_path / "seed"
@@ -222,7 +225,7 @@ def test_source_hashes_are_reproducible_across_git_checkout_line_endings(
         ("add", "src/sample.py", "tests/test_sample.py"),
         ("commit", "--quiet", "-m", "canonical source"),
     ):
-        subprocess.run(("git", *arguments), cwd=seed, check=True, capture_output=True)
+        subprocess.run((git_executable, *arguments), cwd=seed, check=True, capture_output=True)
     declared = manifest(
         seed,
         behavior_entry(
@@ -235,7 +238,7 @@ def test_source_hashes_are_reproducible_across_git_checkout_line_endings(
     clone = tmp_path / "autocrlf-clone"
     subprocess.run(
         (
-            "git",
+            git_executable,
             "-c",
             "core.autocrlf=true",
             "clone",
@@ -249,7 +252,7 @@ def test_source_hashes_are_reproducible_across_git_checkout_line_endings(
         capture_output=True,
     )
     subprocess.run(
-        ("git", "config", "core.autocrlf", "false"),
+        (git_executable, "config", "core.autocrlf", "false"),
         cwd=clone,
         check=True,
         capture_output=True,
