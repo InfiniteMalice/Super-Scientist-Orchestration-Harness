@@ -66,6 +66,9 @@ See `docs/examples/kernel-vertical-slice.md` for the original byte-compatible ke
 walk-through and `docs/examples/governed-adaptation-vertical-slice.md` for the 0.2.0
 offline demonstration.
 
+See the [User Manual](docs/USER_MANUAL.md) for installation, roles, authority limits,
+workflow stages, troubleshooting, security boundaries, and LLM assignment guidance.
+
 ## Install
 
 Python 3.12 or newer is required. A core installation has no model SDK, GPU, training,
