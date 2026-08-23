@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 import super_scientist.domain.harness_eval as harness_eval
+import super_scientist.domain.harness_eval.matrix as matrix_module
 from super_scientist.domain.harness_eval.evidence_chains import (
     HarnessCellEvidenceChain,
     HarnessEvidenceSnapshotIndex,
@@ -1610,3 +1611,64 @@ def test_maximum_shape_matrix_emits_24512_comparisons_within_runtime_bound() -> 
     assert analysis.confounds == ()
     assert len(analysis.comparisons) == 24_512
     assert elapsed < 180.0
+
+
+def test_oversized_matrix_rejects_before_constructing_cartesian_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    models = tuple(
+        ModelIdentity(model_id=f"overflow-model-{index:03d}", model_version="v1")
+        for index in range(256)
+    )
+    harnesses = tuple(
+        HarnessIdentity(harness_id=f"overflow-harness-{index:03d}", harness_version="v1")
+        for index in range(256)
+    )
+    model_budgets = tuple(
+        ModelBudgetBinding.build(model=model, budget=_budget(model)) for model in models
+    )
+    coordinate = ModelHarnessCoordinate(
+        model=models[0],
+        harness=harnesses[0],
+        partition=HarnessPartition.HARNESS_DISCOVERY_TASKS,
+    )
+    values: dict[str, object] = {
+        "protocol_id": "oversized-matrix",
+        "version": 1,
+        "models": tuple(model.model_dump(mode="python") for model in models),
+        "harnesses": tuple(harness.model_dump(mode="python") for harness in harnesses),
+        "partitions": tuple(HarnessPartition),
+        "task_set_id": "task-set-a",
+        "task_set_hash": HASH_A,
+        "verifier_id": "verifier-a",
+        "verifier_version": "v1",
+        "checker_id": "checker-a",
+        "checker_version": "v1",
+        "artifact_ids": ("artifact-a",),
+        "random_seed": 7,
+        "output_schema_hash": HASH_A,
+        "model_budgets": tuple(binding.model_dump(mode="python") for binding in model_budgets),
+        "matched_resource_envelope_hash": evaluation_resource_envelope_hash(_budget(models[0])),
+        "expected_grid": tuple(coordinate.model_dump(mode="python") for _ in range(4)),
+        "comparison_kinds": (ModelHarnessComparisonKind.MODEL_HELD_CONSTANT,),
+        "governing_policy_hash": HASH_A,
+    }
+
+    def unexpected_coordinate_construction(*args: object, **kwargs: object) -> None:
+        raise AssertionError("oversized grid must reject before coordinate construction")
+
+    monkeypatch.setattr(
+        matrix_module,
+        "ModelHarnessCoordinate",
+        unexpected_coordinate_construction,
+    )
+
+    for construct in (
+        lambda: ModelHarnessProtocol.build(**values),
+        lambda: ModelHarnessProtocol.model_validate(values),
+    ):
+        with pytest.raises(
+            ValidationError,
+            match="model-harness Cartesian grid exceeds 256 cells",
+        ):
+            construct()

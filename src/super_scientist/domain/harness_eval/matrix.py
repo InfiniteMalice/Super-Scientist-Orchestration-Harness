@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
 # The 256-cell grid reaches this maximum at 128 models x 2 harnesses x 1 partition
 # when all non-transfer comparison families are declared.
+MAX_MODEL_HARNESS_GRID_CELLS = MAX_EVALUATION_ITEMS
 MAX_MODEL_HARNESS_COMPARISONS = 24_512
 MAX_MODEL_BUDGET_BINDING_CANONICAL_BYTES = 65_536
 MAX_MODEL_HARNESS_PROTOCOL_CANONICAL_BYTES = 1_048_576
@@ -242,6 +243,25 @@ class _ModelHarnessProtocolPayload(_StrictFrozenModel):
         max_length=len(ModelHarnessComparisonKind),
     )
     governing_policy_hash: Sha256Hex
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_oversized_declared_grid(cls, values: Any) -> Any:
+        if not isinstance(values, Mapping):
+            return values
+        models = values.get("models")
+        harnesses = values.get("harnesses")
+        partitions = values.get("partitions")
+        if not (
+            isinstance(models, tuple)
+            and isinstance(harnesses, tuple)
+            and isinstance(partitions, tuple)
+        ):
+            return values
+        declared_grid_cells = len(models) * len(harnesses) * len(partitions)
+        if declared_grid_cells > MAX_MODEL_HARNESS_GRID_CELLS:
+            raise ValueError("model-harness Cartesian grid exceeds 256 cells")
+        return values
 
     @field_validator("models")
     @classmethod

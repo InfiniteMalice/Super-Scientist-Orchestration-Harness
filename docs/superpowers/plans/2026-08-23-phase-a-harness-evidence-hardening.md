@@ -185,6 +185,27 @@ no comparisons unless cell, chain, and index chain-receipt sets are exact.
 - [x] Run focused harness/campaign/protected/strict parsing, Phase A, static/authority gates, and
   near-limit maximum-shape performance.
 
+## Round 7: Matrix Cartesian Preflight
+
+### Problem and invariant
+
+`ModelHarnessProtocol` currently constructs the declared model-by-harness-by-partition Cartesian
+tuple in an after-validator. Pydantic can therefore deeply validate caller-supplied nested records,
+and the after-validator can begin coordinate allocation, before the protocol rejects a grid whose
+declared axis product exceeds the 256-cell limit.
+
+Before either build or direct parsing validates nested protocol records, the protocol payload must
+multiply the three raw outer collection lengths with Python integers. If the product exceeds 256,
+validation must stop with the fixed error `model-harness Cartesian grid exceeds 256 cells`. The
+valid 256-cell boundary and the complete 24,512-comparison maximum must remain unchanged.
+
+### TDD and verification
+
+- [x] Witness RED for both public construction paths with 256 models, 256 harnesses, five
+  partitions, and a four-coordinate supplied grid.
+- [x] Add an O(1) before-validator that does not iterate axes or construct coordinates.
+- [x] Preserve valid maximum-shape analysis and run focused, Phase A, static, and authority gates.
+
 ## Global Constraints
 
 - Preserve protected-evaluation and `HarnessCampaign` behavior.
