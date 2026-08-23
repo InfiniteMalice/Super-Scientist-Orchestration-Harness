@@ -4,9 +4,11 @@ from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
+from pydantic_core import to_jsonable_python
 
 from super_scientist.domain.cognition import (
     CapabilityAssertion,
+    CapabilityDisposition,
     CapabilityEvidenceStatus,
     CapabilityProfile,
     CapabilityRequirement,
@@ -93,12 +95,13 @@ def _request(
     candidates: tuple[str, ...] = ("peer-a", "peer-b", "peer-c", "peer-d"),
     prohibited: tuple[tuple[str, str], ...] = (),
     required: tuple[CapabilityRequirement, ...] | None = None,
+    preferred: tuple[CapabilityRequirement, ...] = (),
 ) -> CohortRequest:
     return CohortRequest.build(
         request_id="cohort-request-a",
         task_id="task-a",
         required_capabilities=(_requirement(),) if required is None else required,
-        preferred_capabilities=(),
+        preferred_capabilities=preferred,
         min_members=min_members,
         max_members=max_members,
         candidate_actor_ids=candidates,
@@ -271,6 +274,228 @@ def test_cohort_plan_binds_exact_request_hash() -> None:
     assert plan.request_content_hash == request.content_hash
 
 
+def test_cohort_plan_retains_exact_grounding_inputs_in_canonical_actor_order() -> None:
+    request = _request(candidates=("peer-a", "peer-b", "peer-c"))
+    peer_a = _profile("peer-a")
+    peer_b = _profile("peer-b")
+
+    plan = build_cohort(request, (peer_b, peer_a))
+
+    assert plan.request_snapshot == request
+    assert plan.resolved_candidate_profiles == (peer_a, peer_b)
+
+
+def test_cohort_plan_parser_recomputes_excluded_unknown_assessment_from_profile() -> None:
+    request = _request(
+        candidates=("peer-a", "peer-b"),
+        required=(_requirement("requirement-a"), _requirement("requirement-b")),
+    )
+    plan = build_cohort(
+        request,
+        (
+            _profile("peer-a"),
+            _profile("peer-b", status=CapabilityEvidenceStatus.UNKNOWN),
+        ),
+    )
+    payload = plan.model_dump(mode="python")
+    ranked = list(payload["ranked_candidates"])
+    excluded = ranked[1]
+    assert isinstance(excluded, dict)
+    assessments = list(excluded["assessments"])
+    first = assessments[0]
+    assert isinstance(first, dict)
+    first.update(
+        disposition=CapabilityDisposition.SATISFIED,
+        evidence_status=CapabilityEvidenceStatus.VERIFIED,
+        matched_assertion_ids=("assertion-peer-b",),
+        verified_assertion_ids=("assertion-peer-b",),
+        missing_dimensions=(),
+        failed_dimensions=(),
+    )
+    excluded["assessments"] = tuple(assessments)
+    excluded["required_satisfied"] = 1
+    payload["ranked_candidates"] = tuple(ranked)
+
+    with pytest.raises(ValidationError, match="recomputed grounded candidate evidence"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
+def test_cohort_plan_parser_rejects_preferred_requirement_snapshot_zeroing() -> None:
+    request = _request(
+        candidates=("peer-a",),
+        preferred=(_requirement("requirement-preferred"),),
+    )
+    payload = build_cohort(request, (_profile("peer-a"),)).model_dump(mode="python")
+    ranked = list(payload["ranked_candidates"])
+    candidate = ranked[0]
+    assert isinstance(candidate, dict)
+    assessments = list(candidate["assessments"])
+    preferred = assessments[1]
+    assert isinstance(preferred, dict)
+    requirement = preferred["requirement"]
+    assert isinstance(requirement, dict)
+    requirement["evidence_snapshot_hash"] = "0" * 64
+    candidate["assessments"] = tuple(assessments)
+    payload["ranked_candidates"] = tuple(ranked)
+    members = list(payload["members"])
+    member = members[0]
+    assert isinstance(member, dict)
+    member_assessments = list(member["assessments"])
+    member_preferred = member_assessments[1]
+    assert isinstance(member_preferred, dict)
+    member_requirement = member_preferred["requirement"]
+    assert isinstance(member_requirement, dict)
+    member_requirement["evidence_snapshot_hash"] = "0" * 64
+    member["assessments"] = tuple(member_assessments)
+    payload["members"] = tuple(members)
+
+    with pytest.raises(ValidationError, match="recomputed grounded candidate evidence"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
+def test_cohort_plan_parser_rejects_profile_hash_mutation_mirrored_in_hash_list() -> None:
+    plan = build_cohort(
+        _request(candidates=("peer-a", "peer-b")),
+        (_profile("peer-a"), _profile("peer-b")),
+    )
+    payload = plan.model_dump(mode="python")
+    ranked = list(payload["ranked_candidates"])
+    excluded = ranked[1]
+    assert isinstance(excluded, dict)
+    original_hash = excluded["profile_content_hash"]
+    excluded["profile_content_hash"] = "0" * 64
+    payload["ranked_candidates"] = tuple(ranked)
+    payload["profile_content_hashes"] = tuple(
+        sorted(
+            "0" * 64 if digest == original_hash else digest
+            for digest in payload["profile_content_hashes"]
+        )
+    )
+
+    with pytest.raises(ValidationError, match="recomputed grounded candidate evidence"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
+def test_cohort_plan_parser_rejects_equal_derived_assessment_and_tie_mutation() -> None:
+    plan = build_cohort(
+        _request(max_members=1, candidates=("peer-a", "peer-b", "peer-c")),
+        (
+            _profile("peer-a"),
+            _profile("peer-b", status=CapabilityEvidenceStatus.UNKNOWN),
+            _profile("peer-c", status=CapabilityEvidenceStatus.UNKNOWN),
+        ),
+    )
+    payload = plan.model_dump(mode="python")
+    ranked = list(payload["ranked_candidates"])
+    for excluded in ranked[1:]:
+        assert isinstance(excluded, dict)
+        assessments = list(excluded["assessments"])
+        assessment = assessments[0]
+        assert isinstance(assessment, dict)
+        actor_id = excluded["actor_id"]
+        assessment.update(
+            disposition=CapabilityDisposition.SATISFIED,
+            evidence_status=CapabilityEvidenceStatus.VERIFIED,
+            matched_assertion_ids=(f"assertion-{actor_id}",),
+            verified_assertion_ids=(f"assertion-{actor_id}",),
+            missing_dimensions=(),
+            failed_dimensions=(),
+        )
+        excluded["assessments"] = tuple(assessments)
+        excluded["required_satisfied"] = 1
+    payload["ranked_candidates"] = tuple(ranked)
+    payload["tie_sets"] = (("peer-a", "peer-b", "peer-c"),)
+    payload["tie_group_ranks"] = (
+        {"schema_version": 1, "required_satisfied": 1, "preferred_satisfied": 0},
+    )
+
+    with pytest.raises(ValidationError, match="recomputed grounded candidate evidence"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
+def test_cohort_plan_parser_rejects_resolved_candidate_reclassified_as_unresolved() -> None:
+    plan = build_cohort(
+        _request(candidates=("peer-a", "peer-b")),
+        (_profile("peer-a"), _profile("peer-b")),
+    )
+    payload = plan.model_dump(mode="python")
+    ranked = tuple(payload["ranked_candidates"])
+    excluded = ranked[1]
+    assert isinstance(excluded, dict)
+    excluded_hash = excluded["profile_content_hash"]
+    payload["ranked_candidates"] = (ranked[0],)
+    payload["excluded_actor_ids"] = ()
+    payload["unresolved_candidate_actor_ids"] = ("peer-b",)
+    payload["profile_content_hashes"] = tuple(
+        digest for digest in payload["profile_content_hashes"] if digest != excluded_hash
+    )
+    payload["tie_sets"] = ()
+    payload["tie_group_ranks"] = ()
+
+    with pytest.raises(ValidationError, match="candidate roster partition"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
+def test_cohort_plan_rejects_grounding_input_snapshot_above_byte_limit() -> None:
+    actor_ids = tuple(f"peer-{index:02d}" for index in range(34))
+    constraints = tuple(f"{index:02d}-" + "x" * 1997 for index in range(64))
+    profiles = []
+    for actor_id in actor_ids:
+        values = _profile(actor_id).model_dump(mode="python", exclude={"content_hash"})
+        values["execution_constraints"] = constraints
+        profiles.append(CapabilityProfile.build(**values))
+
+    with pytest.raises(ValidationError, match="grounding inputs exceed"):
+        build_cohort(
+            _request(max_members=1, candidates=actor_ids),
+            tuple(profiles),
+        )
+
+
+def test_cohort_plan_revalidates_preconstructed_profile_snapshot() -> None:
+    plan = build_cohort(
+        _request(candidates=("peer-a",)),
+        (_profile("peer-a"),),
+    )
+    payload = plan.model_dump(mode="python")
+    invalid_hash = "0" * 64
+    payload["resolved_candidate_profiles"] = (
+        plan.resolved_candidate_profiles[0].model_copy(
+            update={"content_hash": invalid_hash}
+        ),
+    )
+    ranked = list(payload["ranked_candidates"])
+    candidate = ranked[0]
+    assert isinstance(candidate, dict)
+    candidate["profile_content_hash"] = invalid_hash
+    payload["ranked_candidates"] = tuple(ranked)
+    members = list(payload["members"])
+    member = members[0]
+    assert isinstance(member, dict)
+    member["profile_content_hash"] = invalid_hash
+    payload["members"] = tuple(members)
+    payload["profile_content_hashes"] = (invalid_hash,)
+
+    with pytest.raises(ValidationError, match="capability profile"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
+def test_cohort_plan_revalidates_preconstructed_request_snapshot() -> None:
+    plan = build_cohort(
+        _request(candidates=("peer-a",)),
+        (_profile("peer-a"),),
+    )
+    payload = plan.model_dump(mode="python")
+    invalid_hash = "0" * 64
+    payload["request_snapshot"] = plan.request_snapshot.model_copy(
+        update={"content_hash": invalid_hash}
+    )
+    payload["request_content_hash"] = invalid_hash
+
+    with pytest.raises(ValidationError, match="cohort request"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
 def test_cohort_request_parser_rejects_constraints_changed_under_same_hash() -> None:
     request = _request(max_members=1)
     assert hasattr(request, "content_hash")
@@ -291,7 +516,9 @@ def _two_member_plan() -> CohortPlan:
 
 def _rehash_plan_payload(payload: dict[str, object]) -> dict[str, object]:
     unhashed = {key: value for key, value in payload.items() if key != "content_hash"}
-    payload["content_hash"] = sha256_hex(canonical_json_bytes(unhashed))
+    payload["content_hash"] = sha256_hex(
+        canonical_json_bytes(to_jsonable_python(unhashed))
+    )
     return payload
 
 

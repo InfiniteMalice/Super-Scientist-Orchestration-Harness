@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 
 from super_scientist.domain.cognition.models import (
     CapabilityAssessment,
@@ -15,6 +16,22 @@ from super_scientist.domain.cognition.models import (
     CohortRequest,
     CohortTieRank,
 )
+
+
+@dataclass(frozen=True)
+class _CohortDerivation:
+    resolved_candidate_profiles: tuple[CapabilityProfile, ...]
+    members: tuple[CohortMember, ...]
+    excluded_actor_ids: tuple[str, ...]
+    coverage: tuple[CapabilityCoverage, ...]
+    unresolved_requirement_ids: tuple[str, ...]
+    unresolved_candidate_actor_ids: tuple[str, ...]
+    ranked_candidates: tuple[CohortRankedCandidate, ...]
+    tie_sets: tuple[tuple[str, ...], ...]
+    tie_group_ranks: tuple[CohortTieRank, ...]
+    evidence_snapshot_hashes: tuple[str, ...]
+    profile_content_hashes: tuple[str, ...]
+    minimum_size_met: bool
 
 
 def assess_capability(
@@ -36,10 +53,10 @@ def assess_capability(
     return CapabilityAssessment.from_matches(profile, requirement, matching, verified)
 
 
-def build_cohort(
+def _derive_cohort(
     request: CohortRequest,
     profiles: tuple[CapabilityProfile, ...],
-) -> CohortPlan:
+) -> _CohortDerivation:
     candidate_ids = request.candidate_actor_ids
     candidate_id_set = set(candidate_ids)
     declared_profiles = tuple(
@@ -157,11 +174,8 @@ def build_cohort(
     unresolved = tuple(
         item.requirement.requirement_id for item in coverage if not item.satisfying_actor_ids
     )
-    return CohortPlan.build(
-        cohort_plan_id=f"{request.request_id}:plan",
-        request_id=request.request_id,
-        request_content_hash=request.content_hash,
-        task_id=request.task_id,
+    return _CohortDerivation(
+        resolved_candidate_profiles=candidates,
         members=members,
         excluded_actor_ids=excluded_actor_ids,
         coverage=coverage,
@@ -175,6 +189,32 @@ def build_cohort(
         ),
         profile_content_hashes=tuple(sorted(profile.content_hash for profile in candidates)),
         minimum_size_met=len(members) >= request.min_members,
+    )
+
+
+def build_cohort(
+    request: CohortRequest,
+    profiles: tuple[CapabilityProfile, ...],
+) -> CohortPlan:
+    derived = _derive_cohort(request, profiles)
+    return CohortPlan.build(
+        cohort_plan_id=f"{request.request_id}:plan",
+        request_id=request.request_id,
+        request_content_hash=request.content_hash,
+        request_snapshot=request,
+        task_id=request.task_id,
+        resolved_candidate_profiles=derived.resolved_candidate_profiles,
+        members=derived.members,
+        excluded_actor_ids=derived.excluded_actor_ids,
+        coverage=derived.coverage,
+        unresolved_requirement_ids=derived.unresolved_requirement_ids,
+        unresolved_candidate_actor_ids=derived.unresolved_candidate_actor_ids,
+        ranked_candidates=derived.ranked_candidates,
+        tie_sets=derived.tie_sets,
+        tie_group_ranks=derived.tie_group_ranks,
+        evidence_snapshot_hashes=derived.evidence_snapshot_hashes,
+        profile_content_hashes=derived.profile_content_hashes,
+        minimum_size_met=derived.minimum_size_met,
         governing_policy_hash=request.governing_policy_hash,
     )
 

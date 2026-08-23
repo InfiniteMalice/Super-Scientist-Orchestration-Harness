@@ -29,6 +29,7 @@ MAX_COGNITION_ITEMS = 64
 MAX_IDENTIFIER_LENGTH = 200
 MAX_TEXT_LENGTH = 2_000
 MAX_ERROR_CORRELATION_SAMPLES = 1_000_000
+MAX_COHORT_GROUNDING_INPUT_BYTES = 4 * 1024 * 1024
 
 
 def _strip_text(value: object) -> object:
@@ -667,7 +668,11 @@ class _CohortPlanPayload(_StrictFrozenModel):
     cohort_plan_id: BoundedIdentifier
     request_id: BoundedIdentifier
     request_content_hash: Sha256Hex
+    request_snapshot: CohortRequest
     task_id: BoundedIdentifier
+    resolved_candidate_profiles: tuple[CapabilityProfile, ...] = Field(
+        max_length=MAX_COGNITION_ITEMS
+    )
     members: tuple[CohortMember, ...] = Field(max_length=MAX_COGNITION_ITEMS)
     excluded_actor_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_COGNITION_ITEMS)
     coverage: tuple[CapabilityCoverage, ...] = Field(max_length=MAX_COGNITION_ITEMS)
@@ -721,6 +726,48 @@ class _CohortPlanPayload(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_cross_field_integrity(self) -> Self:
+        request = self.request_snapshot
+        if (
+            self.request_id != request.request_id
+            or self.request_content_hash != request.content_hash
+            or self.task_id != request.task_id
+            or self.governing_policy_hash != request.governing_policy_hash
+        ):
+            raise ValueError("cohort plan must exactly match its retained request snapshot")
+
+        profile_actor_ids = tuple(
+            profile.actor_id for profile in self.resolved_candidate_profiles
+        )
+        if profile_actor_ids != tuple(sorted(profile_actor_ids)):
+            raise ValueError("cohort candidate profile snapshots must use canonical actor order")
+        if len(set(profile_actor_ids)) != len(profile_actor_ids):
+            raise ValueError("cohort candidate profile snapshots must have unique actor IDs")
+        if len({profile.profile_id for profile in self.resolved_candidate_profiles}) != len(
+            self.resolved_candidate_profiles
+        ):
+            raise ValueError("cohort candidate profile snapshots must have unique profile IDs")
+        if len({profile.content_hash for profile in self.resolved_candidate_profiles}) != len(
+            self.resolved_candidate_profiles
+        ):
+            raise ValueError(
+                "cohort candidate profile snapshots must have unique content hashes"
+            )
+        if not set(profile_actor_ids).issubset(request.candidate_actor_ids):
+            raise ValueError(
+                "cohort candidate profile snapshots must belong to the fixed candidate roster"
+            )
+        grounding_input_bytes = canonical_json_bytes(
+            {
+                "request_snapshot": request.model_dump(mode="json"),
+                "resolved_candidate_profiles": tuple(
+                    profile.model_dump(mode="json")
+                    for profile in self.resolved_candidate_profiles
+                ),
+            }
+        )
+        if len(grounding_input_bytes) > MAX_COHORT_GROUNDING_INPUT_BYTES:
+            raise ValueError("cohort grounding inputs exceed the Phase A byte limit")
+
         member_actor_ids = tuple(member.actor_id for member in self.members)
         if len(set(member_actor_ids)) != len(member_actor_ids):
             raise ValueError("cohort plan members must have unique actor IDs")
@@ -753,6 +800,17 @@ class _CohortPlanPayload(_StrictFrozenModel):
             raise ValueError("unresolved candidate actor cannot be a selected cohort member")
         if unresolved_candidates & excluded:
             raise ValueError("cohort plan excluded and unresolved actors must be disjoint")
+        roster = set(request.candidate_actor_ids)
+        resolved_profiles = set(profile_actor_ids)
+        if (
+            selected | excluded != resolved_profiles
+            or unresolved_candidates != roster - resolved_profiles
+            or selected | excluded | unresolved_candidates != roster
+        ):
+            raise ValueError(
+                "cohort selected, excluded, and unresolved sets must exactly match the "
+                "candidate roster partition"
+            )
 
         ranked_actor_ids = tuple(candidate.actor_id for candidate in self.ranked_candidates)
         if len(set(ranked_actor_ids)) != len(ranked_actor_ids):
@@ -912,6 +970,33 @@ class _CohortPlanPayload(_StrictFrozenModel):
         if self.profile_content_hashes != expected_profile_hashes:
             raise ValueError(
                 "profile content hashes must exactly match grounded ranking evidence"
+            )
+
+        from super_scientist.domain.cognition.grounding import _derive_cohort
+
+        derived = _derive_cohort(request, self.resolved_candidate_profiles)
+        if (
+            self.ranked_candidates != derived.ranked_candidates
+            or self.profile_content_hashes != derived.profile_content_hashes
+            or self.evidence_snapshot_hashes != derived.evidence_snapshot_hashes
+        ):
+            raise ValueError(
+                "cohort plan must exactly match recomputed grounded candidate evidence"
+            )
+        if (
+            self.members != derived.members
+            or self.excluded_actor_ids != derived.excluded_actor_ids
+            or self.coverage != derived.coverage
+            or self.unresolved_requirement_ids != derived.unresolved_requirement_ids
+            or self.unresolved_candidate_actor_ids
+            != derived.unresolved_candidate_actor_ids
+            or self.tie_sets != derived.tie_sets
+            or self.tie_group_ranks != derived.tie_group_ranks
+            or self.minimum_size_met != derived.minimum_size_met
+        ):
+            raise ValueError(
+                "cohort selection, coverage, gaps, and ties must exactly match recomputed "
+                "grounding inputs"
             )
         return self
 
