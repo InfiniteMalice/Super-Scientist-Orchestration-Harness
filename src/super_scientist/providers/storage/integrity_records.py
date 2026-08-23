@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from super_scientist.providers.storage.domain_records import (
         CounterexampleRecord,
         ExecutableModelSpecRecord,
+        HandbookVerificationRecord,
         HarnessBudgetRecord,
         HarnessCampaignRecord,
         HarnessConfoundRecord,
@@ -130,6 +131,13 @@ class HarnessIntegritySnapshot:
     confounds: tuple[HarnessConfoundRecord, ...]
     decisions: tuple[HarnessDecisionRecord, ...]
     heads: tuple[tuple[str, str, HarnessDecisionStatus], ...]
+
+
+@dataclass(frozen=True)
+class HandbookIntegritySnapshot:
+    """Fixed read-only handbook-verification view used only for integrity checks."""
+
+    verifications: tuple[HandbookVerificationRecord, ...]
 
 
 @dataclass(frozen=True)

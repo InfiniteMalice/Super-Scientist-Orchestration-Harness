@@ -25,6 +25,7 @@ from super_scientist.kernel.audit.models import AuditEvent
 from super_scientist.kernel.transactions.models import Proposal, TransactionDecision
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
+    HandbookIntegritySnapshot,
     HarnessIntegritySnapshot,
     HypothesisIntegritySnapshot,
     ProgressIntegritySnapshot,
@@ -1080,6 +1081,15 @@ class RepositorySet:
             confounds=HarnessConfoundRepository(self._connection).list_all(),
             decisions=HarnessDecisionRepository(self._connection).list_all(),
             heads=HarnessCampaignHeadRepository(self._connection).list_all(),
+        )
+
+    def handbook_integrity_snapshot(self) -> HandbookIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            HandbookVerificationRepository,
+        )
+
+        return HandbookIntegritySnapshot(
+            verifications=HandbookVerificationRepository(self._connection).list_all(),
         )
 
     def representation_integrity_snapshot(self) -> RepresentationIntegritySnapshot:

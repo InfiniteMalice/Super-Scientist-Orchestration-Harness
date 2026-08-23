@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 
 from pydantic import TypeAdapter
@@ -172,6 +173,7 @@ from super_scientist.domain.representations.models import (
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 from super_scientist.evaluation.claim_drift.deterministic import run_deterministic_checks
 from super_scientist.evaluation.claim_drift.models import CheckOutcome
+from super_scientist.handbook import BehaviorManifest, verify_handbook
 from super_scientist.kernel.audit.models import (
     AuditEvent,
     AuditVerification,
@@ -249,6 +251,7 @@ from super_scientist.providers.storage.domain_records import (
 )
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
+    HandbookIntegritySnapshot,
     HarnessIntegritySnapshot,
     HypothesisIntegritySnapshot,
     ProgressIntegritySnapshot,
@@ -671,6 +674,7 @@ def verify_workspace(
         trails = repositories.trail_integrity_snapshot()
         rules = repositories.rule_integrity_snapshot()
         harness = repositories.harness_integrity_snapshot()
+        handbook = repositories.handbook_integrity_snapshot()
         representations = repositories.representation_integrity_snapshot()
         hypotheses = repositories.hypothesis_integrity_snapshot()
         transactions = repositories.transactions.list_all()
@@ -699,6 +703,7 @@ def verify_workspace(
             transactions,
             events,
         )
+        _require_handbook_verification_consistency(handbook, policies)
         _require_artifact_consistency(evidence, artifact_store)
         _require_claim_evidence_consistency(repositories, heads, evidence)
     except (KeyError, OSError, SQLAlchemyError, TypeError, ValueError) as error:
@@ -2967,6 +2972,50 @@ def _require_artifact_consistency(
             f"authoritative evidence {record.evidence_id} is not hash verified",
         )
         verify_artifact_binding(record, artifact_store)
+
+
+def _require_handbook_verification_consistency(
+    handbook: HandbookIntegritySnapshot,
+    policies: tuple[PolicySnapshot, ...],
+) -> None:
+    """Verify non-transaction handbook records against retained source bindings."""
+
+    if not handbook.verifications:
+        return
+    repository_root = Path(__file__).resolve().parents[3]
+    handbook_root = repository_root / "docs" / "handbook"
+    manifest = BehaviorManifest.model_validate_json((handbook_root / "behaviors.json").read_bytes())
+    expected_json_bytes = (handbook_root / "handbook.json").read_bytes()
+    expected_markdown_bytes = (handbook_root / "handbook.md").read_bytes()
+    registered_policy_hashes = {policy.policy_hash for policy in policies}
+    for record in handbook.verifications:
+        result = verify_handbook(
+            repository_root,
+            manifest,
+            repository_commit=record.repository_commit,
+            expected_json_bytes=expected_json_bytes,
+            expected_markdown_bytes=expected_markdown_bytes,
+        )
+        _require(
+            record.governing_policy_hash in registered_policy_hashes,
+            "handbook verification names an unregistered governance policy",
+        )
+        _require(
+            result.provenance_verified
+            and record.manifest_hash == result.manifest_hash
+            and record.repository_commit == result.repository_commit
+            and record.source_hashes == result.source_hashes
+            and record.generated_artifact_hash == result.generated_artifact_hash
+            and record.stale_locations == result.stale_locations
+            and record.missing_symbols == result.missing_symbols
+            and record.outcome
+            is (
+                AssessmentOutcome.PASSED
+                if result.valid
+                else AssessmentOutcome.FAILED
+            ),
+            "handbook verification does not match its canonical source and manifest bindings",
+        )
 
 
 def _require_claim_evidence_consistency(

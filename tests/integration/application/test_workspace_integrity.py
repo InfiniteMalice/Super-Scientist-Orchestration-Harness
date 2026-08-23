@@ -23,6 +23,7 @@ from super_scientist.domain.evidence.models import (
 )
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
+from super_scientist.handbook import create_verification_record, verify_handbook
 from super_scientist.kernel.audit.chain import append_event
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
@@ -39,13 +40,17 @@ from super_scientist.providers.storage.database import (
     create_database_engine,
     upgrade_database,
 )
-from super_scientist.providers.storage.domain_records import RuleIncidentRepository
+from super_scientist.providers.storage.domain_records import (
+    HandbookVerificationRepository,
+    RuleIncidentRepository,
+)
 from super_scientist.providers.storage.repositories import StorageIntegrityError
 from super_scientist.providers.storage.schema import (
     audit_events,
     claim_heads,
     governance_policies,
     governance_state,
+    handbook_verification_records,
     transactions,
 )
 from super_scientist.quality import imported_pattern_firewall, runner
@@ -130,6 +135,62 @@ class IntegrityFixture:
             )
             connection.execute(delete(governance_state))
 
+    def record_handbook_verification(self) -> None:
+        repository_root = Path(__file__).resolve().parents[3]
+        handbook_root = repository_root / "docs" / "handbook"
+        from super_scientist.handbook import BehaviorManifest
+
+        manifest = BehaviorManifest.model_validate_json(
+            (handbook_root / "behaviors.json").read_bytes()
+        )
+        result = verify_handbook(
+            repository_root,
+            manifest,
+            repository_commit=manifest.repository_commit,
+            expected_json_bytes=(handbook_root / "handbook.json").read_bytes(),
+            expected_markdown_bytes=(handbook_root / "handbook.md").read_bytes(),
+        )
+        record = create_verification_record(
+            result,
+            verification_id="workspace-handbook-verification",
+            verified_at=NOW,
+            governing_policy_hash=self.policy.policy_hash,
+        )
+        with self.engine.begin() as connection:
+            HandbookVerificationRepository(connection).add(
+                record.verification_id,
+                record,
+                record.verified_at,
+            )
+
+    def tamper_handbook_source_hash(self) -> None:
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql("DROP TRIGGER handbook_verification_records_no_update")
+            row = connection.execute(
+                select(handbook_verification_records.c.record_json).where(
+                    handbook_verification_records.c.verification_id
+                    == "workspace-handbook-verification"
+                )
+            ).one()
+            record = json.loads(str(row.record_json))
+            record["source_hashes"] = ["0" * 64]
+            connection.execute(
+                update(handbook_verification_records)
+                .where(
+                    handbook_verification_records.c.verification_id
+                    == "workspace-handbook-verification"
+                )
+                .values(
+                    record_json=canonical_json_bytes(record).decode("utf-8"),
+                    content_hash=sha256_hex(canonical_json_bytes(record)),
+                )
+            )
+            connection.exec_driver_sql(
+                "CREATE TRIGGER handbook_verification_records_no_update "
+                "BEFORE UPDATE ON handbook_verification_records "
+                "BEGIN SELECT RAISE(ABORT, 'append-only table'); END"
+            )
+
 
 @pytest.fixture
 def integrity(tmp_path: Path) -> Iterator[IntegrityFixture]:
@@ -170,6 +231,14 @@ def test_rule_only_state_counts_as_durable(integrity: IntegrityFixture) -> None:
 
     assert result.valid is False
     assert "active registered policy" in (result.reason or "")
+
+
+def test_handbook_source_tampering_invalidates_workspace(integrity: IntegrityFixture) -> None:
+    integrity.record_handbook_verification()
+    assert _verify(integrity).valid is True
+    integrity.tamper_handbook_source_hash()
+
+    assert _verify(integrity).valid is False
 
 
 def test_workspace_verifier_recomputes_composite_quality_policy_hash(
