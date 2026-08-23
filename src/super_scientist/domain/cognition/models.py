@@ -633,6 +633,14 @@ class CohortMember(_StrictFrozenModel):
     assessments: tuple[CapabilityAssessment, ...] = Field(max_length=MAX_COGNITION_ITEMS)
 
 
+class CohortRankedCandidate(CohortMember):
+    """Grounded score evidence for every resolved candidate, selected or excluded."""
+
+    @property
+    def rank_key(self) -> tuple[int, int]:
+        return (self.required_satisfied, self.preferred_satisfied)
+
+
 class CapabilityCoverage(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     requirement: CapabilityRequirement
@@ -667,6 +675,9 @@ class _CohortPlanPayload(_StrictFrozenModel):
         max_length=MAX_COGNITION_ITEMS
     )
     unresolved_candidate_actor_ids: tuple[BoundedIdentifier, ...] = Field(
+        max_length=MAX_COGNITION_ITEMS
+    )
+    ranked_candidates: tuple[CohortRankedCandidate, ...] = Field(
         max_length=MAX_COGNITION_ITEMS
     )
     tie_sets: tuple[tuple[BoundedIdentifier, ...], ...] = Field(
@@ -743,6 +754,34 @@ class _CohortPlanPayload(_StrictFrozenModel):
         if unresolved_candidates & excluded:
             raise ValueError("cohort plan excluded and unresolved actors must be disjoint")
 
+        ranked_actor_ids = tuple(candidate.actor_id for candidate in self.ranked_candidates)
+        if len(set(ranked_actor_ids)) != len(ranked_actor_ids):
+            raise ValueError("cohort ranked candidates must have unique actor IDs")
+        expected_ranked_candidates = tuple(
+            sorted(
+                self.ranked_candidates,
+                key=lambda item: (
+                    -item.required_satisfied,
+                    -item.preferred_satisfied,
+                    item.actor_id,
+                ),
+            )
+        )
+        if self.ranked_candidates != expected_ranked_candidates:
+            raise ValueError("cohort ranked candidates must use canonical score and actor order")
+        if set(ranked_actor_ids) != known_actors:
+            raise ValueError(
+                "cohort ranked candidates must exactly cover resolved candidate actors"
+            )
+        if len({candidate.profile_id for candidate in self.ranked_candidates}) != len(
+            self.ranked_candidates
+        ):
+            raise ValueError("cohort ranked candidates must have unique profile IDs")
+        if len(
+            {candidate.profile_content_hash for candidate in self.ranked_candidates}
+        ) != len(self.ranked_candidates):
+            raise ValueError("cohort ranked candidates must have unique profile content hashes")
+
         tied_actors = {actor_id for tie_set in self.tie_sets for actor_id in tie_set}
         if not tied_actors.issubset(known_actors):
             raise ValueError("cohort plan tie sets must reference declared cohort actors")
@@ -757,27 +796,32 @@ class _CohortPlanPayload(_StrictFrozenModel):
         coverage_by_id = {
             item.requirement.requirement_id: item.requirement for item in self.coverage
         }
-        for member in self.members:
+        def require_grounded_assessments(
+            candidate: CohortMember | CohortRankedCandidate,
+            *,
+            label: str,
+        ) -> None:
             assessment_ids = tuple(
-                assessment.requirement.requirement_id for assessment in member.assessments
+                assessment.requirement.requirement_id
+                for assessment in candidate.assessments
             )
             if len(set(assessment_ids)) != len(assessment_ids):
-                raise ValueError("cohort member assessments must have unique requirement IDs")
+                raise ValueError(f"{label} assessments must have unique requirement IDs")
             if assessment_ids[: len(coverage_ids)] != coverage_ids:
                 raise ValueError(
-                    "cohort member assessments must begin with canonical required coverage"
+                    f"{label} assessments must begin with canonical required coverage"
                 )
             if assessment_ids[len(coverage_ids) :] != tuple(
                 sorted(assessment_ids[len(coverage_ids) :])
             ):
-                raise ValueError("cohort member preferred assessments must be canonically sorted")
-            for assessment in member.assessments:
+                raise ValueError(f"{label} preferred assessments must be canonically sorted")
+            for assessment in candidate.assessments:
                 if (
-                    assessment.profile_id != member.profile_id
-                    or assessment.actor_id != member.actor_id
+                    assessment.profile_id != candidate.profile_id
+                    or assessment.actor_id != candidate.actor_id
                 ):
                     raise ValueError(
-                        "cohort member profile identity must match every retained assessment"
+                        f"{label} profile identity must match every retained assessment"
                     )
                 requirement_id = assessment.requirement.requirement_id
                 if (
@@ -785,31 +829,59 @@ class _CohortPlanPayload(_StrictFrozenModel):
                     and assessment.requirement != coverage_by_id[requirement_id]
                 ):
                     raise ValueError(
-                        "cohort member required assessment must match retained coverage"
+                        f"{label} required assessment must match retained coverage"
                     )
             required_count = sum(
                 assessment.disposition is CapabilityDisposition.SATISFIED
-                for assessment in member.assessments[: len(coverage_ids)]
+                for assessment in candidate.assessments[: len(coverage_ids)]
             )
             preferred_count = sum(
                 assessment.disposition is CapabilityDisposition.SATISFIED
-                for assessment in member.assessments[len(coverage_ids) :]
+                for assessment in candidate.assessments[len(coverage_ids) :]
             )
             if (
-                member.required_satisfied != required_count
-                or member.preferred_satisfied != preferred_count
+                candidate.required_satisfied != required_count
+                or candidate.preferred_satisfied != preferred_count
             ):
-                raise ValueError("cohort member assessment counts must match dispositions")
+                raise ValueError(f"{label} assessment counts must match dispositions")
 
-        members_by_actor = {member.actor_id: member for member in self.members}
-        for tie_set, rank in zip(self.tie_sets, self.tie_group_ranks, strict=True):
-            for actor_id in tie_set:
-                tied_member = members_by_actor.get(actor_id)
-                if tied_member is not None and (
-                    tied_member.required_satisfied != rank.required_satisfied
-                    or tied_member.preferred_satisfied != rank.preferred_satisfied
-                ):
-                    raise ValueError("cohort plan tie set rank must match retained member score")
+        for member in self.members:
+            require_grounded_assessments(member, label="cohort member")
+
+        for candidate in self.ranked_candidates:
+            require_grounded_assessments(candidate, label="cohort ranked candidate")
+
+        ranked_by_actor = {candidate.actor_id: candidate for candidate in self.ranked_candidates}
+        for member in self.members:
+            ranked_candidate = ranked_by_actor[member.actor_id]
+            if member.model_dump(mode="python") != ranked_candidate.model_dump(mode="python"):
+                raise ValueError(
+                    "cohort member must exactly match its grounded ranking evidence"
+                )
+
+        score_groups: dict[tuple[int, int], list[str]] = {}
+        for candidate in self.ranked_candidates:
+            score_groups.setdefault(candidate.rank_key, []).append(candidate.actor_id)
+        expected_tie_sets = tuple(
+            tuple(actor_ids)
+            for actor_ids in score_groups.values()
+            if len(actor_ids) > 1
+        )
+        expected_tie_group_ranks = tuple(
+            CohortTieRank(
+                required_satisfied=score[0],
+                preferred_satisfied=score[1],
+            )
+            for score, actor_ids in score_groups.items()
+            if len(actor_ids) > 1
+        )
+        if (
+            self.tie_sets != expected_tie_sets
+            or self.tie_group_ranks != expected_tie_group_ranks
+        ):
+            raise ValueError(
+                "cohort plan tie groups must exactly match grounded ranking evidence"
+            )
 
         for coverage in self.coverage:
             if not set(coverage.satisfying_actor_ids).issubset(selected):
@@ -834,11 +906,13 @@ class _CohortPlanPayload(_StrictFrozenModel):
         )
         if self.unresolved_requirement_ids != expected_unresolved:
             raise ValueError("unresolved requirements must exactly match uncovered requirements")
-        member_hashes = {member.profile_content_hash for member in self.members}
-        if not member_hashes.issubset(self.profile_content_hashes):
-            raise ValueError("cohort member profile content hash must be retained by the plan")
-        if len(self.profile_content_hashes) != len(known_actors):
-            raise ValueError("profile content hashes must exactly cover resolved candidate actors")
+        expected_profile_hashes = tuple(
+            sorted(candidate.profile_content_hash for candidate in self.ranked_candidates)
+        )
+        if self.profile_content_hashes != expected_profile_hashes:
+            raise ValueError(
+                "profile content hashes must exactly match grounded ranking evidence"
+            )
         return self
 
 
@@ -1025,6 +1099,7 @@ __all__ = [
     "CohortMember",
     "CohortPlan",
     "CohortPlanReceiptRef",
+    "CohortRankedCandidate",
     "CohortRequest",
     "CohortTieRank",
     "DiversityAssessment",

@@ -11,6 +11,7 @@ from super_scientist.domain.cognition.models import (
     CapabilityRequirement,
     CohortMember,
     CohortPlan,
+    CohortRankedCandidate,
     CohortRequest,
     CohortTieRank,
 )
@@ -91,6 +92,17 @@ def build_cohort(
         for score in score_order
         if len(score_groups[score]) > 1
     )
+    ranked_candidates = tuple(
+        CohortRankedCandidate(
+            actor_id=profile.actor_id,
+            profile_id=profile.profile_id,
+            profile_content_hash=profile.content_hash,
+            required_satisfied=score[0],
+            preferred_satisfied=score[1],
+            assessments=assessments,
+        )
+        for score, profile, assessments in ranked
+    )
 
     prohibited = {frozenset(pair) for pair in request.prohibited_combinations}
     selected: list[tuple[tuple[int, int], CapabilityProfile, tuple[CapabilityAssessment, ...]]] = []
@@ -155,6 +167,7 @@ def build_cohort(
         coverage=coverage,
         unresolved_requirement_ids=unresolved,
         unresolved_candidate_actor_ids=missing_candidates,
+        ranked_candidates=ranked_candidates,
         tie_sets=tie_sets,
         tie_group_ranks=tie_group_ranks,
         evidence_snapshot_hashes=tuple(

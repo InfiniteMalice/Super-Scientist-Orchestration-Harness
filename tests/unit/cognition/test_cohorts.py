@@ -143,6 +143,37 @@ def test_cohort_plan_parser_rejects_reversed_ranked_tie_sets() -> None:
         CohortPlan.model_validate(_rehash_plan_payload(payload))
 
 
+def test_cohort_plan_parser_requires_complete_tie_evidence_for_excluded_candidates() -> None:
+    profiles = (
+        _profile("peer-d", status=CapabilityEvidenceStatus.UNKNOWN),
+        _profile("peer-b"),
+        _profile("peer-c", status=CapabilityEvidenceStatus.UNKNOWN),
+        _profile("peer-a"),
+    )
+    payload = build_cohort(_request(max_members=2), profiles).model_dump(mode="python")
+    payload["tie_sets"] = ()
+    payload["tie_group_ranks"] = ()
+
+    with pytest.raises(ValidationError, match="grounded ranking evidence"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
+def test_cohort_plan_parser_rejects_fabricated_excluded_tie_rank() -> None:
+    profiles = (
+        _profile("peer-d", status=CapabilityEvidenceStatus.UNKNOWN),
+        _profile("peer-b"),
+        _profile("peer-c", status=CapabilityEvidenceStatus.UNKNOWN),
+        _profile("peer-a"),
+    )
+    payload = build_cohort(_request(max_members=2), profiles).model_dump(mode="python")
+    ranks = list(payload["tie_group_ranks"])
+    ranks[1] = {**ranks[1], "preferred_satisfied": 1}
+    payload["tie_group_ranks"] = tuple(ranks)
+
+    with pytest.raises(ValidationError, match="grounded ranking evidence"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
 def test_fixed_candidates_and_prohibited_combinations_are_honored_purely() -> None:
     plan = build_cohort(
         _request(
@@ -359,5 +390,7 @@ def test_cohort_plan_parser_rejects_member_profile_binding_drift(mutation: str) 
         members[0]["assessments"] = tuple(assessments)
     payload["members"] = tuple(members)
 
-    with pytest.raises(ValidationError, match="member profile"):
+    with pytest.raises(
+        ValidationError, match=r"member profile|grounded ranking evidence"
+    ):
         CohortPlan.model_validate(_rehash_plan_payload(payload))

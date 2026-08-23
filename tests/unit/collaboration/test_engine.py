@@ -500,6 +500,18 @@ def test_candidate_validation_errors_never_echo_secret_input(
             '{"evidence_ids":["sk-private-evidence"],"finding":"supported"}',
             "sk-private-evidence",
         ),
+        (
+            '{"evidence_ids":["evidence-api-key-sk-private-marker"],"finding":"supported"}',
+            "sk-private-marker",
+        ),
+        (
+            '{"evidence_ids":["evidence-sha256:' + "a" * 63 + '"],"finding":"supported"}',
+            "evidence-sha256",
+        ),
+        (
+            '{"evidence_ids":["evidence-sha256:' + "A" * 64 + '"],"finding":"supported"}',
+            "evidence-sha256",
+        ),
     ),
 )
 def test_candidate_content_rejects_private_keys_aliases_and_secret_values(
@@ -526,10 +538,16 @@ def test_candidate_content_accepts_closed_public_finding_and_evidence_ids(
     contribution = _contribution(
         session_factory("peer-a"),
         "peer-a",
-        candidate_content='{"evidence_ids":["evidence-a"],"finding":"supported"}',
+        candidate_content=(
+            '{"evidence_ids":["evidence-sha256:' + "a" * 64 + '"]'
+            ',"finding":"supported"}'
+        ),
     )
 
-    assert contribution.candidate_content == '{"evidence_ids":["evidence-a"],"finding":"supported"}'
+    assert contribution.candidate_content == (
+        '{"evidence_ids":["evidence-sha256:' + "a" * 64 + '"]'
+        ',"finding":"supported"}'
+    )
 
 
 def test_collaboration_evidence_has_no_promotion_authority(

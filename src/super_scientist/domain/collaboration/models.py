@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from datetime import datetime
 from decimal import Decimal
@@ -241,11 +242,27 @@ class PublicCandidateFinding(StrEnum):
     INCONCLUSIVE = "inconclusive"
 
 
+_PUBLIC_EVIDENCE_REF = re.compile(r"evidence-sha256:[0-9a-f]{64}\Z")
+
+
+def _require_public_evidence_ref(value: object) -> str:
+    if not isinstance(value, str) or not _PUBLIC_EVIDENCE_REF.fullmatch(value):
+        raise ValueError("public candidate evidence references must be SHA-256 receipts")
+    return value
+
+
+PublicEvidenceRef = Annotated[
+    str,
+    BeforeValidator(_require_public_evidence_ref),
+    Field(strict=True, min_length=80, max_length=80),
+]
+
+
 class _PublicCandidatePayload(_StrictFrozenModel):
     """Closed public surface: no free-form or executable candidate payloads."""
 
     finding: PublicCandidateFinding
-    evidence_ids: tuple[BoundedIdentifier, ...] = Field(
+    evidence_ids: tuple[PublicEvidenceRef, ...] = Field(
         default=(), max_length=MAX_COLLABORATION_ITEMS
     )
 
@@ -254,10 +271,7 @@ class _PublicCandidatePayload(_StrictFrozenModel):
     def require_canonical_evidence_ids(
         cls, values: tuple[str, ...]
     ) -> tuple[str, ...]:
-        canonical = _canonical_unique(values, "evidence_ids")
-        if any(not evidence_id.startswith("evidence-") for evidence_id in canonical):
-            raise ValueError("public candidate evidence IDs must use the evidence- namespace")
-        return canonical
+        return _canonical_unique(values, "evidence_ids")
 
 
 def _canonical_edges(
