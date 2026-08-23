@@ -15,6 +15,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic import ValidationError as PydanticValidationError
 
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.primitives import (
@@ -64,9 +65,12 @@ def _require_strict_actor_identity_input(
     value: object,
     info: ValidationInfo,
 ) -> object:
-    if isinstance(value, ActorIdentity):
-        return value
-    if not isinstance(value, dict):
+    raw = (
+        value.model_dump(mode="python", warnings=False)
+        if isinstance(value, ActorIdentity)
+        else value
+    )
+    if not isinstance(raw, dict):
         raise ValueError("Phase A actor identity must be a strict object")
     string_fields = (
         "actor_id",
@@ -76,14 +80,14 @@ def _require_strict_actor_identity_input(
         "configuration_hash",
     )
     if any(
-        field_name in value
-        and value[field_name] is not None
-        and not isinstance(value[field_name], str)
+        field_name in raw
+        and raw[field_name] is not None
+        and not isinstance(raw[field_name], str)
         for field_name in string_fields
     ):
         raise ValueError("Phase A actor identity scalars must be strict")
-    created_at = value.get("created_at")
-    kind = value.get("kind")
+    created_at = raw.get("created_at")
+    kind = raw.get("kind")
     if info.mode == "python" and not isinstance(kind, ActorKind):
         raise ValueError("Phase A actor identity kind must be a strict ActorKind")
     if info.mode == "json" and not isinstance(kind, str):
@@ -92,9 +96,14 @@ def _require_strict_actor_identity_input(
         raise ValueError("Phase A actor identity timestamp must be a strict datetime")
     if info.mode == "json" and not isinstance(created_at, str):
         raise ValueError("Phase A actor identity JSON timestamp must be a string")
-    if info.mode == "json":
-        return ActorIdentity.model_validate(value)
-    return value
+    try:
+        if info.mode == "json":
+            parsed = ActorIdentity.model_validate(raw)
+        else:
+            parsed = ActorIdentity.model_validate(raw, strict=True)
+    except (PydanticValidationError, TypeError, ValueError):
+        raise ValueError("Phase A actor identity is invalid") from None
+    return parsed
 
 
 BoundedActorIdentity = Annotated[
@@ -105,7 +114,12 @@ BoundedActorIdentity = Annotated[
 
 
 class _StrictFrozenModel(BaseModel):
-    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    model_config = ConfigDict(
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        hide_input_in_errors=True,
+    )
 
 
 def _require_canonical_unique(

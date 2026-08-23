@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from collections import Counter
 from collections.abc import Callable
 
 import pytest
@@ -59,6 +61,47 @@ def _advance(
         tool_ids=("tool-a",),
     )
     return advance_collaboration(session, state, request, contribution, unit_usage())
+
+
+def _toggle_declared_edge(
+    session: CollaborationSession,
+    state: CollaborationState,
+    edge_name: str,
+    event_id: str,
+) -> CollaborationState:
+    edge = {
+        "e0": ("peer-a", "peer-b"),
+        "e1": ("peer-b", "peer-a"),
+    }[edge_name]
+    enabled_edges = set(state.topology.enabled_edges)
+    enabling = edge not in enabled_edges
+    if enabling:
+        enabled_edges.add(edge)
+    else:
+        enabled_edges.remove(edge)
+    after = TopologySnapshot.build(
+        active_peer_ids=state.topology.active_peer_ids,
+        enabled_edges=tuple(sorted(enabled_edges)),
+    )
+    return apply_topology_event(
+        session,
+        state,
+        TopologyEvent.build(
+            event_id=event_id,
+            session_id=session.session_id,
+            sequence=len(state.topology_events) + 1,
+            before_topology_hash=state.topology.content_hash,
+            operation=(
+                TopologyOperation.ENABLE_EDGE
+                if enabling
+                else TopologyOperation.DISABLE_EDGE
+            ),
+            peer_id=None,
+            edge=edge,
+            reason_code="CYCLE_PROJECTION_REGRESSION",
+            after_topology_hash=after.content_hash,
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -368,6 +411,57 @@ def test_repeated_operational_cycle_is_detected_through_engine_evolution(
         evaluate_termination(state).reason
         is CollaborationTerminationReason.REPEATED_STATE_LOOP
     )
+
+
+def test_decision_hash_authenticates_cycle_projection_occurrence_counts(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory(
+        "peer-a",
+        "peer-b",
+        max_topology_changes=8,
+        max_topology_churn=8,
+        max_state_repetitions=2,
+        completion_count=8,
+    )
+
+    def evolve(path_name: str, path: tuple[str, ...]) -> CollaborationState:
+        state = initial_collaboration_state(session)
+        for position, edge_name in enumerate(path, start=1):
+            state = _toggle_declared_edge(
+                session,
+                state,
+                edge_name,
+                f"event-{path_name}-{position}",
+            )
+        return state
+
+    first = evolve("first", ("e0", "e0", "e1", "e1", "e0"))
+    second = evolve("second", ("e0", "e1", "e1", "e0", "e0"))
+
+    assert first.topology == second.topology
+    assert first.topology_history[-2] == second.topology_history[-2]
+    assert Counter(first.cycle_projection_hashes) != Counter(
+        second.cycle_projection_hashes
+    )
+    assert first.observed_state_hashes[-1] != second.observed_state_hashes[-1]
+    assert evaluate_termination(first).reason is None
+    assert evaluate_termination(second).reason is None
+
+    first = _toggle_declared_edge(session, first, "e0", "event-first-6")
+    second = _toggle_declared_edge(session, second, "e0", "event-second-6")
+
+    assert (
+        evaluate_termination(first).reason
+        is CollaborationTerminationReason.REPEATED_STATE_LOOP
+    )
+    assert evaluate_termination(second).reason is None
+    assert CollaborationState.model_validate_json(
+        json.dumps(first.model_dump(mode="json"))
+    ) == first
+    assert CollaborationState.model_validate_json(
+        json.dumps(second.model_dump(mode="json"))
+    ) == second
 
 
 def test_direct_parser_rejects_fabricated_semantic_state_observations(

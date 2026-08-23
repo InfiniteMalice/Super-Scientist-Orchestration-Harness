@@ -13,6 +13,7 @@ from super_scientist.domain.cognition import (
 )
 from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord, EvidenceSpan
 from super_scientist.domain.identity import ActorIdentity, ActorKind
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
     Proposal,
@@ -311,6 +312,46 @@ def test_cognition_rejects_coercive_nested_actor_kind() -> None:
             diversity_fingerprint=fingerprint,
             governing_policy_hash="f" * 64,
         )
+
+
+def test_cognition_revalidates_preconstructed_actor_identity() -> None:
+    malformed_actor = _actor().model_copy(update={"kind": "model"})
+    fingerprint = DiversityFingerprint(
+        fingerprint_id="fingerprint-copied-actor",
+        model_family=None,
+        model_version=None,
+        scale_class=None,
+        provider=None,
+        adapter_hash=None,
+        configuration_hash=None,
+        prompt_strategy=None,
+        methodological_prior=None,
+        tools=None,
+        evidence_partitions=None,
+        modalities=None,
+        previous_error_clusters=None,
+        prior_task_specializations=None,
+    )
+
+    valid = CapabilityProfile.build(
+        profile_id="profile-copied-actor",
+        actor=_actor(),
+        diversity_fingerprint=fingerprint,
+        governing_policy_hash="f" * 64,
+    )
+    payload = valid.model_dump(mode="python")
+    payload["actor"] = malformed_actor
+    rehashed = valid.model_copy(update={"actor": malformed_actor}).model_dump(
+        mode="json", warnings=False
+    )
+    payload["content_hash"] = sha256_hex(
+        canonical_json_bytes(
+            {key: value for key, value in rehashed.items() if key != "content_hash"}
+        )
+    )
+
+    with pytest.raises(ValidationError, match="actor identity"):
+        CapabilityProfile(**payload)
 
 
 def test_strict_capability_assessment_parser_rejects_self_report_as_satisfied() -> None:

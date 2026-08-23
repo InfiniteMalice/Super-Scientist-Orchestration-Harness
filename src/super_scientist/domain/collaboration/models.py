@@ -998,6 +998,16 @@ class _CollaborationStatePayload(_StrictFrozenModel):
         request_ids: set[str] = set()
         contribution_depths: dict[str, int] = {}
         completed = False
+        initial_cycle_projection = collaboration_cycle_projection_hash(
+            session=self.session,
+            topology=topology,
+            peer_contribution_counts=peer_counts,
+            contribution_kind_counts=contribution_kind_counts,
+            last_peer_id=last_peer_id,
+            usage=usage,
+            completed=completed,
+        )
+        cycle_projection_counts[initial_cycle_projection] += 1
         initial_semantic_hash = collaboration_semantic_state_hash(
             session=self.session,
             topology=topology,
@@ -1010,22 +1020,13 @@ class _CollaborationStatePayload(_StrictFrozenModel):
             usage=usage,
             request_ids=tuple(sorted(request_ids)),
             contribution_depths=tuple(sorted(contribution_depths.items())),
-            completed=completed,
-        )
-        initial_cycle_projection = collaboration_cycle_projection_hash(
-            session=self.session,
-            topology=topology,
-            peer_contribution_counts=peer_counts,
-            contribution_kind_counts=contribution_kind_counts,
-            last_peer_id=last_peer_id,
-            usage=usage,
+            cycle_projection_counts=cycle_projection_counts,
             completed=completed,
         )
         if self.observed_state_hashes[0] != initial_semantic_hash:
             raise ValueError("semantic state observations must be replay-authentic")
         if self.cycle_projection_hashes[0] != initial_cycle_projection:
             raise ValueError("cycle projections must be replay-authentic")
-        cycle_projection_counts[initial_cycle_projection] += 1
 
         for position, transition in enumerate(self.transitions, start=1):
             if transition.position != position:
@@ -1105,6 +1106,16 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                     contribution_kind_counts,
                 )
 
+            cycle_projection = collaboration_cycle_projection_hash(
+                session=self.session,
+                topology=topology,
+                peer_contribution_counts=peer_counts,
+                contribution_kind_counts=contribution_kind_counts,
+                last_peer_id=last_peer_id,
+                usage=usage,
+                completed=completed,
+            )
+            cycle_projection_counts[cycle_projection] += 1
             semantic_hash = collaboration_semantic_state_hash(
                 session=self.session,
                 topology=topology,
@@ -1117,22 +1128,13 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                 usage=usage,
                 request_ids=tuple(sorted(request_ids)),
                 contribution_depths=tuple(sorted(contribution_depths.items())),
+                cycle_projection_counts=cycle_projection_counts,
                 completed=completed,
             )
             if self.observed_state_hashes[position] != semantic_hash:
                 raise ValueError("semantic state observations must be replay-authentic")
-            cycle_projection = collaboration_cycle_projection_hash(
-                session=self.session,
-                topology=topology,
-                peer_contribution_counts=peer_counts,
-                contribution_kind_counts=contribution_kind_counts,
-                last_peer_id=last_peer_id,
-                usage=usage,
-                completed=completed,
-            )
             if self.cycle_projection_hashes[position] != cycle_projection:
                 raise ValueError("cycle projections must be replay-authentic")
-            cycle_projection_counts[cycle_projection] += 1
         if topology_index != len(self.topology_events) or peer_index != len(self.requests):
             raise ValueError("transition journal must retain every checked transition")
         if topology != self.topology:
@@ -1199,12 +1201,13 @@ def collaboration_semantic_state_hash(
     usage: ResourceUsage,
     request_ids: tuple[str, ...],
     contribution_depths: tuple[tuple[str, int], ...],
+    cycle_projection_counts: Counter[str],
     completed: bool,
 ) -> str:
     """Authenticate every retained value that can affect a future transition."""
 
     payload = {
-        "semantic_schema_version": 2,
+        "semantic_schema_version": 3,
         "session_content_hash": session.content_hash,
         "topology_content_hash": topology.content_hash,
         "prior_topology_hash": prior_topology_hash,
@@ -1216,6 +1219,7 @@ def collaboration_semantic_state_hash(
         "usage": usage.model_dump(mode="json"),
         "request_ids": request_ids,
         "contribution_depths": contribution_depths,
+        "cycle_projection_counts": tuple(sorted(cycle_projection_counts.items())),
         "completed": completed,
     }
     return sha256_hex(canonical_json_bytes(payload))

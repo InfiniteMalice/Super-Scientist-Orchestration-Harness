@@ -40,6 +40,15 @@ def initial_collaboration_state(session: CollaborationSession) -> CollaborationS
         tool_calls=0,
         human_interventions=0,
     )
+    cycle_projection = collaboration_cycle_projection_hash(
+        session=session,
+        topology=topology,
+        peer_contribution_counts=Counter(),
+        contribution_kind_counts=Counter(),
+        last_peer_id=None,
+        usage=zero,
+        completed=False,
+    )
     semantic_hash = collaboration_semantic_state_hash(
         session=session,
         topology=topology,
@@ -52,15 +61,7 @@ def initial_collaboration_state(session: CollaborationSession) -> CollaborationS
         usage=zero,
         request_ids=(),
         contribution_depths=(),
-        completed=False,
-    )
-    cycle_projection = collaboration_cycle_projection_hash(
-        session=session,
-        topology=topology,
-        peer_contribution_counts=Counter(),
-        contribution_kind_counts=Counter(),
-        last_peer_id=None,
-        usage=zero,
+        cycle_projection_counts=Counter((cycle_projection,)),
         completed=False,
     )
     return CollaborationState.build(
@@ -230,6 +231,19 @@ def advance_collaboration(
         raise ValueError("peer transition exceeds the collaboration resource budget")
     contributions = (*state.contributions, contribution)
     completed = _completion_satisfied(session, contributions)
+    cycle_projection = collaboration_cycle_projection_hash(
+        session=session,
+        topology=state.topology,
+        peer_contribution_counts=Counter(item.peer_id for item in contributions),
+        contribution_kind_counts=Counter(
+            item.contribution_kind for item in contributions
+        ),
+        last_peer_id=contribution.peer_id,
+        usage=updated_usage,
+        completed=completed,
+    )
+    cycle_projection_counts = Counter(state.cycle_projection_hashes)
+    cycle_projection_counts[cycle_projection] += 1
     semantic_hash = collaboration_semantic_state_hash(
         session=session,
         topology=state.topology,
@@ -248,17 +262,7 @@ def advance_collaboration(
         usage=updated_usage,
         request_ids=tuple(sorted(item.request_id for item in (*state.requests, request))),
         contribution_depths=_contribution_depths(contributions),
-        completed=completed,
-    )
-    cycle_projection = collaboration_cycle_projection_hash(
-        session=session,
-        topology=state.topology,
-        peer_contribution_counts=Counter(item.peer_id for item in contributions),
-        contribution_kind_counts=Counter(
-            item.contribution_kind for item in contributions
-        ),
-        last_peer_id=contribution.peer_id,
-        usage=updated_usage,
+        cycle_projection_counts=cycle_projection_counts,
         completed=completed,
     )
     return CollaborationState.build(
@@ -309,6 +313,23 @@ def apply_topology_event(
     after = _apply_topology_operation(session, state.topology, event)
     if event.after_topology_hash != after.content_hash:
         raise ValueError("topology event after topology hash does not match its operation")
+    cycle_projection = collaboration_cycle_projection_hash(
+        session=session,
+        topology=after,
+        peer_contribution_counts=Counter(
+            item.peer_id for item in state.contributions
+        ),
+        contribution_kind_counts=Counter(
+            item.contribution_kind for item in state.contributions
+        ),
+        last_peer_id=(
+            state.contributions[-1].peer_id if state.contributions else None
+        ),
+        usage=state.usage,
+        completed=state.completed,
+    )
+    cycle_projection_counts = Counter(state.cycle_projection_hashes)
+    cycle_projection_counts[cycle_projection] += 1
     semantic_hash = collaboration_semantic_state_hash(
         session=session,
         topology=after,
@@ -333,21 +354,7 @@ def apply_topology_event(
         usage=state.usage,
         request_ids=tuple(sorted(item.request_id for item in state.requests)),
         contribution_depths=_contribution_depths(state.contributions),
-        completed=state.completed,
-    )
-    cycle_projection = collaboration_cycle_projection_hash(
-        session=session,
-        topology=after,
-        peer_contribution_counts=Counter(
-            item.peer_id for item in state.contributions
-        ),
-        contribution_kind_counts=Counter(
-            item.contribution_kind for item in state.contributions
-        ),
-        last_peer_id=(
-            state.contributions[-1].peer_id if state.contributions else None
-        ),
-        usage=state.usage,
+        cycle_projection_counts=cycle_projection_counts,
         completed=state.completed,
     )
     return CollaborationState.build(
