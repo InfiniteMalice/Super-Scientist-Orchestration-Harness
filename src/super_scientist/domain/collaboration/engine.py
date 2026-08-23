@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-from collections import Counter
-
 from super_scientist.domain.collaboration.models import (
     CollaborationSession,
     CollaborationState,
     CollaborationTermination,
-    CollaborationTerminationReason,
     CollaborationTransition,
     CollaborationTransitionKind,
     PeerContribution,
@@ -15,7 +12,8 @@ from super_scientist.domain.collaboration.models import (
     TopologySnapshot,
     _apply_topology_operation,
     _completion_satisfied,
-    contribution_counts,
+    collaboration_termination_reason,
+    eligible_peer_ids,
     sum_usage,
     usage_matches,
 )
@@ -61,19 +59,7 @@ def _require_matching_session(session: CollaborationSession, state: Collaboratio
 
 
 def _eligible_peer_ids(session: CollaborationSession, state: CollaborationState) -> tuple[str, ...]:
-    counts = contribution_counts(state)
-    active = set(state.topology.active_peer_ids)
-    candidates = {
-        peer.actor_id
-        for peer in session.peers
-        if peer.actor_id in active
-        and counts[peer.actor_id] < session.budget.max_contributions_per_peer
-    }
-    if state.contributions and len(active) > 1:
-        sender = state.contributions[-1].peer_id
-        targets = {target for source, target in state.topology.enabled_edges if source == sender}
-        candidates &= targets
-    return tuple(sorted(candidates))
+    return eligible_peer_ids(session, state.topology, state.contributions)
 
 
 def next_peer(session: CollaborationSession, state: CollaborationState) -> str | None:
@@ -84,40 +70,18 @@ def next_peer(session: CollaborationSession, state: CollaborationState) -> str |
     return eligible[0] if eligible else None
 
 
-def _topology_churn_count(state: CollaborationState) -> int:
-    hashes = tuple(item.content_hash for item in state.topology_history)
-    return sum(hashes[index] == hashes[index - 2] for index in range(2, len(hashes)))
-
-
 def evaluate_termination(state: CollaborationState) -> CollaborationTermination:
-    budget = state.session.budget
-    counts = contribution_counts(state)
-    reason: CollaborationTerminationReason | None = None
-    if state.completed:
-        reason = CollaborationTerminationReason.COMPLETED
-    elif state.hop_count >= budget.max_hops:
-        reason = CollaborationTerminationReason.MAX_HOPS_REACHED
-    elif len(state.contributions) >= budget.max_contributions:
-        reason = CollaborationTerminationReason.MAX_CONTRIBUTIONS_REACHED
-    elif any(count >= budget.max_contributions_per_peer for count in counts.values()):
-        reason = CollaborationTerminationReason.PER_PEER_LIMIT_REACHED
-    elif state.topology_events and len(state.topology_events) >= budget.max_topology_changes:
-        reason = CollaborationTerminationReason.TOPOLOGY_CHANGE_LIMIT_REACHED
-    elif any(
-        count > budget.max_state_repetitions
-        for count in Counter(state.observed_state_hashes).values()
-    ):
-        reason = CollaborationTerminationReason.REPEATED_STATE_LOOP
-    elif _topology_churn_count(state) >= budget.max_topology_churn:
-        reason = CollaborationTerminationReason.TOPOLOGY_CHURN
-    elif len(state.contributions) >= 2 and any(
-        count / len(state.contributions) > budget.max_peer_contribution_share
-        for count in counts.values()
-    ):
-        reason = CollaborationTerminationReason.CONTRIBUTION_MONOPOLY
-    elif not _eligible_peer_ids(state.session, state):
-        reason = CollaborationTerminationReason.NO_ELIGIBLE_PEER
-    return CollaborationTermination(reason=reason)
+    return CollaborationTermination(
+        reason=collaboration_termination_reason(
+            session=state.session,
+            topology=state.topology,
+            topology_history=state.topology_history,
+            topology_events=state.topology_events,
+            contributions=state.contributions,
+            observed_state_hashes=state.observed_state_hashes,
+            completed=state.completed,
+        )
+    )
 
 
 def _require_artifacts_and_tools(

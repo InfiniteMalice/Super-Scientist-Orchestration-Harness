@@ -7,9 +7,11 @@ from pydantic import ValidationError
 
 from super_scientist.domain.collaboration import (
     CollaborationSession,
+    CollaborationTerminationReason,
     PeerContribution,
     PeerRequest,
     advance_collaboration,
+    evaluate_termination,
     initial_collaboration_state,
     next_peer,
 )
@@ -62,6 +64,42 @@ def test_next_peer_uses_canonical_eligible_actor_order(
 ) -> None:
     session = session_factory("peer-c", "peer-a", "peer-b")
     assert next_peer(session, initial_collaboration_state(session)) == "peer-a"
+
+
+def test_single_peer_requires_declared_edge_after_initial_exchange(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory("peer-a", completion_count=8)
+    state = initial_collaboration_state(session)
+    assert next_peer(session, state) == "peer-a"
+    assert _request(session, "peer-a").sender_id is None
+
+    state = advance_collaboration(
+        session,
+        state,
+        _request(session, "peer-a"),
+        _contribution(session, "peer-a"),
+        unit_usage(),
+    )
+
+    assert next_peer(session, state) is None
+    assert (
+        evaluate_termination(state).reason
+        is CollaborationTerminationReason.NO_ELIGIBLE_PEER
+    )
+    with pytest.raises(ValueError, match=r"terminated.*NO_ELIGIBLE_PEER"):
+        advance_collaboration(
+            session,
+            state,
+            _request(
+                session,
+                "peer-a",
+                sequence=2,
+                remaining_budget=session.remaining_resources(state.usage),
+            ),
+            _contribution(session, "peer-a", sequence=2),
+            unit_usage(),
+        )
 
 
 def test_advance_accepts_exactly_one_checked_transition(

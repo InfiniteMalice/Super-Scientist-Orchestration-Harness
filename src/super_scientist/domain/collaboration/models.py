@@ -656,11 +656,26 @@ class _CollaborationStatePayload(_StrictFrozenModel):
         topology_index = 0
         peer_index = 0
         last_peer_id: str | None = None
-        counts: Counter[str] = Counter()
         topology = self.topology_history[0]
         for position, transition in enumerate(self.transitions, start=1):
             if transition.position != position:
                 raise ValueError("transition positions must be consecutive")
+            reason = collaboration_termination_reason(
+                session=self.session,
+                topology=topology,
+                topology_history=self.topology_history[: topology_index + 1],
+                topology_events=self.topology_events[:topology_index],
+                contributions=self.contributions[:peer_index],
+                observed_state_hashes=self.observed_state_hashes[: position - 1],
+                completed=_completion_satisfied(
+                    self.session, self.contributions[:peer_index]
+                ),
+            )
+            if reason is not None:
+                raise ValueError(
+                    "transition journal continues after collaboration termination: "
+                    f"{reason}"
+                )
             if transition.kind is CollaborationTransitionKind.TOPOLOGY_EVENT:
                 if topology_index >= len(self.topology_events):
                     raise ValueError("transition journal references an absent topology event")
@@ -681,25 +696,12 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                 raise ValueError("transition journal must bind the exact peer exchange")
             if request.sender_id != last_peer_id:
                 raise ValueError("request sender must match the prior contributing peer")
-            active = set(topology.active_peer_ids)
-            eligible = {
-                peer.actor_id
-                for peer in self.session.peers
-                if peer.actor_id in active
-                and counts[peer.actor_id]
-                < self.session.budget.max_contributions_per_peer
-            }
-            if last_peer_id is not None and len(active) > 1:
-                targets = {
-                    target
-                    for source, target in topology.enabled_edges
-                    if source == last_peer_id
-                }
-                eligible &= targets
-            expected_peer = min(eligible) if eligible else None
+            eligible = eligible_peer_ids(
+                self.session, topology, self.contributions[:peer_index]
+            )
+            expected_peer = eligible[0] if eligible else None
             if request.recipient_id != expected_peer:
                 raise ValueError("request recipient must be the expected peer")
-            counts[contribution.peer_id] += 1
             last_peer_id = contribution.peer_id
             peer_index += 1
         if topology_index != len(self.topology_events) or peer_index != len(self.requests):
@@ -782,8 +784,70 @@ def _apply_topology_operation(
     )
 
 
-def contribution_counts(state: CollaborationState) -> Counter[str]:
-    return Counter(item.peer_id for item in state.contributions)
+def eligible_peer_ids(
+    session: CollaborationSession,
+    topology: TopologySnapshot,
+    contributions: tuple[PeerContribution, ...],
+) -> tuple[str, ...]:
+    counts = Counter(item.peer_id for item in contributions)
+    active = set(topology.active_peer_ids)
+    candidates = {
+        peer.actor_id
+        for peer in session.peers
+        if peer.actor_id in active
+        and counts[peer.actor_id] < session.budget.max_contributions_per_peer
+    }
+    if contributions:
+        sender = contributions[-1].peer_id
+        targets = {
+            target for source, target in topology.enabled_edges if source == sender
+        }
+        candidates &= targets
+    return tuple(sorted(candidates))
+
+
+def collaboration_termination_reason(
+    *,
+    session: CollaborationSession,
+    topology: TopologySnapshot,
+    topology_history: tuple[TopologySnapshot, ...],
+    topology_events: tuple[TopologyEvent, ...],
+    contributions: tuple[PeerContribution, ...],
+    observed_state_hashes: tuple[str, ...],
+    completed: bool,
+) -> CollaborationTerminationReason | None:
+    budget = session.budget
+    counts = Counter(item.peer_id for item in contributions)
+    if completed:
+        return CollaborationTerminationReason.COMPLETED
+    if len(contributions) >= budget.max_hops:
+        return CollaborationTerminationReason.MAX_HOPS_REACHED
+    if len(contributions) >= budget.max_contributions:
+        return CollaborationTerminationReason.MAX_CONTRIBUTIONS_REACHED
+    if any(count >= budget.max_contributions_per_peer for count in counts.values()):
+        return CollaborationTerminationReason.PER_PEER_LIMIT_REACHED
+    if topology_events and len(topology_events) >= budget.max_topology_changes:
+        return CollaborationTerminationReason.TOPOLOGY_CHANGE_LIMIT_REACHED
+    if any(
+        count > budget.max_state_repetitions
+        for count in Counter(observed_state_hashes).values()
+    ):
+        return CollaborationTerminationReason.REPEATED_STATE_LOOP
+    topology_hashes = tuple(item.content_hash for item in topology_history)
+    churn_count = sum(
+        topology_hashes[index] == topology_hashes[index - 2]
+        for index in range(2, len(topology_hashes))
+    )
+    if churn_count >= budget.max_topology_churn:
+        return CollaborationTerminationReason.TOPOLOGY_CHURN
+    if len(contributions) >= 2 and any(
+        count / len(contributions) > budget.max_peer_contribution_share
+        for count in counts.values()
+    ):
+        return CollaborationTerminationReason.CONTRIBUTION_MONOPOLY
+    if not eligible_peer_ids(session, topology, contributions):
+        return CollaborationTerminationReason.NO_ELIGIBLE_PEER
+    return None
 
 
 __all__ = [
