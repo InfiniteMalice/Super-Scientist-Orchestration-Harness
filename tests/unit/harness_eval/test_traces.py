@@ -8,8 +8,10 @@ from pydantic import ValidationError
 
 import super_scientist.domain.harness_eval as harness_eval
 from super_scientist.domain.evidence.models import ArtifactRef
-from super_scientist.domain.harness_eval.guidance import GuidanceCondition
-from super_scientist.domain.harness_eval.matrix import HarnessIdentity, ModelIdentity
+from super_scientist.domain.harness_eval.guidance import (
+    GuidanceCondition,
+    GuidanceEvaluationProtocol,
+)
 from super_scientist.domain.harness_eval.traces import (
     AvailableValue,
     CaptureRewardValidityStatus,
@@ -271,8 +273,23 @@ def test_trace_freshness_is_exact_hash_identity_not_time() -> None:
 
 
 def test_freshness_compares_task_model_procedure_environment_context_validator_artifacts() -> None:
+    current = valid_trace()
+    guidance = current.expected_binding.guidance_protocol
+    assert guidance is not None
+    changed_protocol_values = guidance.model_dump(mode="python")
+    changed_protocol_values.pop("content_hash")
+    changed_protocol_values["task_input_hash"] = HASH_D
+    changed_protocol = GuidanceEvaluationProtocol.build(**changed_protocol_values)
+    stale_task = valid_trace(
+        observed_binding_updates={
+            "guidance_protocol": changed_protocol,
+            "protocol_hash": changed_protocol.content_hash,
+            "task_input_hash": HASH_D,
+        }
+    )
+    assert TraceBindingMismatch.TASK in trace_freshness(stale_task).mismatches
+
     expected = {
-        "task_input_hash": TraceBindingMismatch.TASK,
         "model_hash": TraceBindingMismatch.MODEL,
         "procedure_hash": TraceBindingMismatch.PROCEDURE,
         "environment_hash": TraceBindingMismatch.ENVIRONMENT,
@@ -364,6 +381,21 @@ def test_rehashed_trace_rejects_expected_artifact_outside_authorized_set() -> No
 
     with pytest.raises(ValidationError, match="authorized artifact identities"):
         HarnessExecutionTrace.model_validate(trace_payload)
+
+
+def test_rehashed_binding_cannot_self_authorize_without_a_task_6_protocol() -> None:
+    trace = valid_trace()
+    payload = trace.expected_binding.model_dump(mode="python") | {
+        "guidance_protocol": None,
+        "model_harness_protocol": None,
+        "guidance_condition": None,
+        "authorized_artifact_ids": ("rogue-context",),
+        "artifact_ids": ("rogue-context",),
+    }
+    payload["content_hash"] = trace_binding_hash(payload)
+
+    with pytest.raises(ValidationError, match="exactly one Task 6 protocol"):
+        TraceBinding.model_validate(payload)
 
 
 def test_trace_public_api_is_exported_from_harness_eval_package() -> None:
@@ -660,19 +692,39 @@ def binding(
     artifact_hashes: tuple[str, ...],
     artifact_ids: tuple[str, ...] = ("public-context",),
 ) -> TraceBinding:
-    return TraceBinding.build(
-        protocol_id="guidance-protocol",
-        protocol_version=1,
-        protocol_hash=HASH_A,
-        guidance_protocol=None,
-        model_harness_protocol=None,
-        guidance_condition=None,
+    protocol = guidance_protocol(
         task_id="task-1",
         task_input_hash=HASH_A,
-        partition=None,
-        model=ModelIdentity(model_id="model-1", model_version="v1"),
+        output_schema_hash=HASH_D,
+        model_id="model-1",
+        model_version="v1",
+        harness_id="harness-1",
+        harness_version="v1",
+        verifier_id="validator",
+        verifier_version="v1",
+        checker_id="checker",
+        checker_version="v1",
+        artifact_ids=artifact_ids,
+        declared_distractor_artifact_ids=(),
+    )
+    artifacts = tuple(
+        ObservableArtifactRef.build(
+            artifact_id=artifact_id,
+            sha256=artifact_hash,
+            size_bytes=0,
+            media_type="application/octet-stream",
+        )
+        for artifact_id, artifact_hash in zip(
+            artifact_ids,
+            artifact_hashes,
+            strict=True,
+        )
+    )
+    return TraceBinding.from_guidance_protocol(
+        protocol,
+        condition=GuidanceCondition.FULL_PROCEDURE_GUIDANCE,
+        artifacts=artifacts,
         model_hash=HASH_B,
-        harness=HarnessIdentity(harness_id="harness-1", harness_version="v1"),
         harness_hash=HASH_C,
         procedure_id="procedure-1",
         procedure_version="v1",
@@ -681,16 +733,8 @@ def binding(
         environment_version="v1",
         environment_hash=HASH_B,
         context_hash=context_hash,
-        validator_id="validator",
-        validator_version="v1",
         validator_hash=HASH_C,
-        checker_id="checker",
-        checker_version="v1",
         checker_hash=HASH_D,
-        authorized_artifact_ids=artifact_ids,
-        artifact_ids=artifact_ids,
-        artifact_hashes=artifact_hashes,
-        output_schema_hash=HASH_D,
     )
 
 

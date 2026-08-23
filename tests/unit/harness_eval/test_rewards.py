@@ -31,6 +31,7 @@ from super_scientist.domain.harness_eval.traces import (
 from tests.unit.harness_eval.test_traces import (
     HASH_D,
     available,
+    binding,
     reward_observation,
     valid_trace,
 )
@@ -179,20 +180,6 @@ def test_checker_identity_mismatch_is_invalid_verifier_evidence() -> None:
 
 def test_undeclared_context_artifact_identity_is_stale_and_invalid() -> None:
     base = valid_trace()
-    authorized = TraceBinding.build(
-        **(
-            {
-                key: value
-                for key, value in base.expected_binding.model_dump(mode="python").items()
-                if key != "content_hash"
-            }
-            | {
-                "authorized_artifact_ids": ("authorized-context",),
-                "artifact_ids": ("authorized-context",),
-                "artifact_hashes": ("a" * 64,),
-            }
-        )
-    )
     rogue_artifacts = (
         ObservableArtifactRef.build(
             artifact_id="rogue-context",
@@ -202,6 +189,11 @@ def test_undeclared_context_artifact_identity_is_stale_and_invalid() -> None:
         ),
     )
     rogue_context_hash = artifact_collection_hash(rogue_artifacts)
+    authorized = binding(
+        context_hash=rogue_context_hash,
+        artifact_ids=("authorized-context",),
+        artifact_hashes=("a" * 64,),
+    )
     observed = TraceBinding.build(
         **(
             {
@@ -213,16 +205,6 @@ def test_undeclared_context_artifact_identity_is_stale_and_invalid() -> None:
                 "artifact_ids": ("rogue-context",),
                 "context_hash": rogue_context_hash,
             }
-        )
-    )
-    authorized = TraceBinding.build(
-        **(
-            {
-                key: value
-                for key, value in authorized.model_dump(mode="python").items()
-                if key != "content_hash"
-            }
-            | {"context_hash": rogue_context_hash}
         )
     )
     trace_payload = {

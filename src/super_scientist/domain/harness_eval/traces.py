@@ -502,6 +502,8 @@ class _TraceBindingPayload(_StrictFrozenModel):
     def require_exact_protocol_artifact_authorization(self) -> Self:
         if len(self.artifact_ids) != len(self.artifact_hashes):
             raise ValueError("artifact identities and hashes must be exactly aligned")
+        if (self.guidance_protocol is None) == (self.model_harness_protocol is None):
+            raise ValueError("trace binding requires exactly one Task 6 protocol snapshot")
         if self.guidance_protocol is not None:
             if self.model_harness_protocol is not None or self.guidance_condition is None:
                 raise ValueError("guidance trace binding requires one exact guidance protocol")
