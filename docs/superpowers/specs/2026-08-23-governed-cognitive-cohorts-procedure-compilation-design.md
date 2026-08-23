@@ -442,6 +442,29 @@ inconclusive attempts are submitted as immutable history with their findings. Th
 not create a plan or an admitted method head. No separate mutable candidate-method
 head is introduced.
 
+An untrusted serialized compilation result crosses the transaction-proposal parser only
+inside `OpaqueProcedureCompilationEnvelope`. The envelope contains compilation metadata,
+base64-encoded canonical UTF-8 JSON bytes, and the exact byte hash. The decoded bytes are
+limited to 4 MiB and must pass the fixed iterative JSON-depth scan. The envelope validates
+JSON syntax, canonical bytes, encoding, size, depth, and hash without constructing a
+`ProcedureCompilationResult`.
+
+The `RecordProcedureCompilation` proposal contains that envelope, not a
+`ProcedureCompilationRecord`. Its handler calls
+`parse_untrusted_procedure_compilation_result()` before recomputation, authority checks,
+or typed-record construction. The handler rejects a safe-parse failure with the fixed
+invalid-procedure disposition and does not retain the exception or rejected plaintext.
+After successful recomputation, persistence and integrity reconstruction use
+`ProcedureCompilationRecord.build_from_untrusted_envelope()`; no other component may
+treat the proposal envelope as a durable typed record.
+
+Serialized proposals enter through `parse_untrusted_proposal_json()`, not a public raw
+`PROPOSAL_ADAPTER` call. That boundary checks the 8 MiB proposal limit and iterative
+depth limit before Pydantic parsing. It converts validation and resource failures to one
+fixed error with no cause, context, structured diagnostics, or rejected payload.
+Base64 is only the opaque JSON transport representation; it is not treated as encryption
+or redaction.
+
 ### 9.6 Binding to `ProgressPlan`
 
 A separate `BindCompiledProgressPlan` proposal references a committed, current,
@@ -640,6 +663,10 @@ committed inputs and compared canonically. A mismatch is rejected. This applies 
 cohort selection, diversity, topology transitions, compiler output, progress mapping,
 matrix analysis, trace freshness, and reward validity.
 
+Proposal parsing treats serialized procedure compilation results as opaque bounded
+envelopes. It must not construct a nested `ProcedureCompilationResult`. The procedure
+handler owns safe normalization and performs it before any authority decision.
+
 Rejected proposals remain in transaction and audit history under existing semantics.
 Accepted evidence records do not imply scientific or governance admission.
 
@@ -683,6 +710,11 @@ Full verification reconstructs records from accepted transaction proposals in a 
 logical projection and compares IDs, canonical payloads, content hashes, policy
 attribution, and reference closure. It must not trust current projection rows merely
 because their hashes are internally consistent.
+
+For `RecordProcedureCompilation`, reconstruction first normalizes the accepted opaque
+envelope with `ProcedureCompilationRecord.build_from_untrusted_envelope()` and repeats
+deterministic compiler equality. An accepted proposal envelope is not itself a durable
+compilation record.
 
 Bundle export includes all accepted and rejected proposal/decision history under the
 existing bundle contract, every referenced public artifact, migration/schema

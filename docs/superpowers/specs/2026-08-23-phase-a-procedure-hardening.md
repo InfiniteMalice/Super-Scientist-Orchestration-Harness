@@ -161,3 +161,57 @@ serializer-depth errors before every procedure boundary can return its fixed fai
   public boundary.
 - Run the complete procedure, Phase A, adversarial, formatting, lint, typing, dependency,
   documentation, and diff gates.
+
+## Round 5: opaque proposal transport for untrusted compilation results
+
+### Problem
+
+The Task 8 proposal sketch typed `RecordProcedureCompilation.compilation` as a
+`ProcedureCompilationRecord`. `PROPOSAL_ADAPTER.validate_json()` therefore attempted to
+construct the nested `ProcedureCompilationResult` before the Task 12 handler could call
+`parse_untrusted_procedure_compilation_result()`. A schema-invalid result could expose a
+private marker through Pydantic diagnostics, and the documented safe handler boundary
+was unreachable.
+
+### Design and expected behavior
+
+- Add `OpaqueProcedureCompilationEnvelope` as a pure domain transport contract. The
+  envelope carries compilation metadata plus base64-encoded canonical JSON bytes and
+  their SHA-256 hash. It does not contain or validate a nested
+  `ProcedureCompilationResult`.
+- Bound decoded result JSON at 4 MiB. Before JSON decoding, scan decoded bytes with the
+  existing iterative depth limit. Require valid UTF-8, exact canonical JSON bytes,
+  canonical base64, and an exact byte hash. Base64 is transport encoding, not a
+  confidentiality control.
+- Extend `parse_untrusted_procedure_compilation_result()` to unwrap the opaque envelope
+  through the same fixed safe error boundary. Add an exact
+  `ProcedureCompilationRecord.build_from_untrusted_envelope()` factory for durable
+  typed-record construction.
+- In Task 8, type `RecordProcedureCompilation.compilation` as
+  `OpaqueProcedureCompilationEnvelope`. The proposal adapter must never parse a nested
+  `ProcedureCompilationResult`.
+- In Task 8, expose `parse_untrusted_proposal_json()` as the only public serialized-
+  proposal parser. The boundary applies fixed byte/depth limits and suppresses raw
+  Pydantic diagnostics, including any rejected base64 payload.
+- In Task 12, the handler must call
+  `parse_untrusted_procedure_compilation_result(proposal.compilation)` before compiler
+  recomputation, authority decisions, or record construction. Only the handler or a
+  projection reached after that decision may use the safe record factory.
+- Integrity reconstruction must normalize accepted envelopes through the safe factory;
+  it must not treat an accepted proposal envelope as an already typed durable record.
+- Preserve the request/receipt integrity rules, unknown-as-`INCONCLUSIVE`, deterministic
+  progress recomputation, all sixteen checks, and later Task 12 ownership of repository
+  resolution.
+
+### Tests
+
+- Parse a proposal-shaped model containing a schema-invalid but syntactically canonical
+  result as an opaque envelope. Verify that proposal parsing succeeds and the public
+  result parser returns the fixed safe failure without exposing the marker.
+- Verify valid envelope-to-result and envelope-to-record normalization.
+- Reject non-canonical, over-byte-limit, over-depth, and hash-mismatched envelopes before
+  nested result parsing.
+- Add an executable-plan consistency regression that requires the Task 8 proposal to use
+  the opaque envelope and requires Task 12 safe normalization before recomputation.
+- Run plan/documentation, complete procedure, Phase A, adversarial, formatting, lint,
+  typing, dependency, raw-parser-consumer, and diff gates.

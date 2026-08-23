@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import warnings
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from test_compiler import _actor, _assessment, _rebuild_step, _replace_step, valid_request
 
 from super_scientist.domain.cognition.grounding import assess_capability
@@ -17,10 +19,13 @@ from super_scientist.domain.cognition.models import (
 from super_scientist.domain.identity import ActorKind
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.domain.procedures import (
+    MAX_PROCEDURE_RESULT_BYTES,
     AcceptedSourceReceiptRef,
     GroundedCapabilityAssessment,
+    OpaqueProcedureCompilationEnvelope,
     ProcedureAuthority,
     ProcedureBoundaryValidationError,
+    ProcedureCompilationRecord,
     ProcedureCompilationRequest,
     ProcedureEvidenceSourceKind,
     ProcedureFindingCode,
@@ -34,6 +39,14 @@ from super_scientist.domain.procedures.compiler import compile_declared_stages
 
 REQUEST_BYTE_LIMIT = 65_536
 PRIVATE_MARKER = "PRIVATE_PROCEDURE_MARKER_" + ("x" * 200)
+NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+
+
+class _RecordProcedureCompilationProposal(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    proposal_type: Literal["record_procedure_compilation"]
+    compilation: OpaqueProcedureCompilationEnvelope
 
 
 def _assert_sanitized_boundary_error(error: BaseException, expected_message: str) -> None:
@@ -54,6 +67,17 @@ def _rebuild_receipt(
     values = receipt.model_dump(mode="python", exclude={"content_hash"})
     values.update(updates)
     return AcceptedSourceReceiptRef.build(**values)
+
+
+def _opaque_envelope_payload(result_json: bytes) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "compilation_id": "compilation-opaque",
+        "result_json_base64": base64.b64encode(result_json).decode("ascii"),
+        "result_json_hash": sha256_hex(result_json),
+        "created_at": NOW.isoformat().replace("+00:00", "Z"),
+        "governing_policy_hash": "f" * 64,
+    }
 
 
 def _forged_verified_assessment_from_unknown() -> GroundedCapabilityAssessment:
@@ -290,6 +314,90 @@ def test_untrusted_result_boundary_accepts_valid_dictionary_and_json() -> None:
 
     assert parse_untrusted_procedure_compilation_result(payload) == result
     assert parse_untrusted_procedure_compilation_result(result_json) == result
+
+
+def test_proposal_parser_keeps_schema_invalid_result_opaque_until_safe_boundary() -> None:
+    result = compile_method(valid_request())
+    payload = result.model_dump(mode="json")
+    request_payload = result.parse_request().model_dump(mode="json")
+    request_payload["request_id"] = PRIVATE_MARKER
+    payload["request_json"] = canonical_json_bytes(request_payload).decode("utf-8")
+    invalid_result_json = canonical_json_bytes(payload)
+    proposal_json = canonical_json_bytes(
+        {
+            "proposal_type": "record_procedure_compilation",
+            "compilation": _opaque_envelope_payload(invalid_result_json),
+        }
+    )
+
+    proposal = TypeAdapter(_RecordProcedureCompilationProposal).validate_json(proposal_json)
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_result(proposal.compilation)
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation result failed validation",
+    )
+
+
+def test_valid_opaque_envelope_normalizes_to_result_and_record() -> None:
+    result = compile_method(valid_request())
+    envelope = OpaqueProcedureCompilationEnvelope.build(
+        compilation_id="compilation-opaque",
+        result=result,
+        created_at=NOW,
+        governing_policy_hash="f" * 64,
+    )
+
+    assert parse_untrusted_procedure_compilation_result(envelope) == result
+    record = ProcedureCompilationRecord.build_from_untrusted_envelope(envelope)
+
+    assert record.compilation_id == envelope.compilation_id
+    assert record.result == result
+    assert record.created_at == NOW
+    assert record.governing_policy_hash == "f" * 64
+
+
+def test_opaque_envelope_rejects_over_depth_json_without_exposing_plaintext() -> None:
+    result_json = (("[" * 129) + f'"{PRIVATE_MARKER}"' + ("]" * 129)).encode("utf-8")
+
+    with pytest.raises(ValidationError) as caught:
+        OpaqueProcedureCompilationEnvelope.model_validate_json(
+            canonical_json_bytes(_opaque_envelope_payload(result_json)),
+            strict=True,
+        )
+
+    assert PRIVATE_MARKER not in str(caught.value)
+    assert PRIVATE_MARKER not in repr(caught.value)
+    assert PRIVATE_MARKER not in repr(caught.value.errors())
+
+
+def test_opaque_envelope_rejects_result_over_canonical_byte_limit() -> None:
+    result_json = ('"' + ("x" * MAX_PROCEDURE_RESULT_BYTES) + '"').encode("utf-8")
+
+    with pytest.raises(ValidationError, match="canonical byte limit"):
+        OpaqueProcedureCompilationEnvelope.model_validate_json(
+            canonical_json_bytes(_opaque_envelope_payload(result_json)),
+            strict=True,
+        )
+
+
+def test_opaque_envelope_rejects_noncanonical_json_and_hash_mismatch() -> None:
+    noncanonical_json = b'{"schema_version": 1}'
+    with pytest.raises(ValidationError, match="canonical JSON"):
+        OpaqueProcedureCompilationEnvelope.model_validate_json(
+            canonical_json_bytes(_opaque_envelope_payload(noncanonical_json)),
+            strict=True,
+        )
+
+    canonical_json = b'{"schema_version":1}'
+    mismatched = _opaque_envelope_payload(canonical_json)
+    mismatched["result_json_hash"] = "0" * 64
+    with pytest.raises(ValidationError, match="hash"):
+        OpaqueProcedureCompilationEnvelope.model_validate_json(
+            canonical_json_bytes(mismatched),
+            strict=True,
+        )
 
 
 def test_untrusted_result_boundary_hides_default_structured_validation_input() -> None:

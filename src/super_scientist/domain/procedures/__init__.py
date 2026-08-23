@@ -7,6 +7,7 @@ from super_scientist.domain.procedures.compiler import (
 from super_scientist.domain.procedures.models import (
     MAX_PROCEDURE_REQUEST_BYTES,
     MAX_PROCEDURE_RESOURCE_VALUE,
+    MAX_PROCEDURE_RESULT_BYTES,
     AcceptedSourceReceiptRef,
     ArtifactCatalogEntry,
     CandidateMethod,
@@ -17,6 +18,7 @@ from super_scientist.domain.procedures.models import (
     GroundedCapabilityAssessment,
     MethodDirectionOutcome,
     MethodDirectionStatus,
+    OpaqueProcedureCompilationEnvelope,
     ProcedureAuthority,
     ProcedureBoundaryValidationError,
     ProcedureCompilationReceiptRef,
@@ -45,6 +47,7 @@ from super_scientist.domain.procedures.progress_binding import procedure_to_prog
 __all__ = [
     "MAX_PROCEDURE_REQUEST_BYTES",
     "MAX_PROCEDURE_RESOURCE_VALUE",
+    "MAX_PROCEDURE_RESULT_BYTES",
     "PROCEDURE_COMPILER_ID",
     "PROCEDURE_COMPILER_VERSION",
     "AcceptedSourceReceiptRef",
@@ -57,6 +60,7 @@ __all__ = [
     "GroundedCapabilityAssessment",
     "MethodDirectionOutcome",
     "MethodDirectionStatus",
+    "OpaqueProcedureCompilationEnvelope",
     "ProcedureAuthority",
     "ProcedureBoundaryValidationError",
     "ProcedureCompilationReceiptRef",

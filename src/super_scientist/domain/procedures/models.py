@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 from contextlib import suppress
 from decimal import Decimal
@@ -35,6 +37,9 @@ MAX_TEXT_LENGTH = 2_000
 MAX_PROCEDURE_RESOURCE_VALUE = 1_000_000_000
 # Keeps accepted requests practical to retain and deterministically recompile.
 MAX_PROCEDURE_REQUEST_BYTES = 65_536
+# Covers the retained request, derived procedure, and bounded validation findings.
+MAX_PROCEDURE_RESULT_BYTES = 4 * 1_024 * 1_024
+MAX_PROCEDURE_RESULT_BASE64_CHARACTERS = 4 * ((MAX_PROCEDURE_RESULT_BYTES + 2) // 3)
 MAX_PROCEDURE_JSON_DEPTH = 128
 
 
@@ -115,6 +120,46 @@ def procedure_request_json_is_bounded(request_json: str) -> bool:
             if depth < 0:
                 return False
     return depth == 0 and not in_string and not escaped
+
+
+def _decode_opaque_result_json(
+    result_json_base64: str,
+    expected_hash: str,
+) -> bytes:
+    if len(result_json_base64) > MAX_PROCEDURE_RESULT_BASE64_CHARACTERS:
+        raise ValueError("procedure compilation envelope exceeds canonical byte limit")
+    try:
+        encoded = result_json_base64.encode("ascii")
+        result_json = base64.b64decode(encoded, validate=True)
+    except (
+        binascii.Error,
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        UnicodeEncodeError,
+        ValueError,
+    ):
+        raise ValueError("procedure compilation envelope requires canonical base64") from None
+    if base64.b64encode(result_json) != encoded:
+        raise ValueError("procedure compilation envelope requires canonical base64")
+    if len(result_json) > MAX_PROCEDURE_RESULT_BYTES:
+        raise ValueError("procedure compilation envelope exceeds canonical byte limit")
+    if sha256_hex(result_json) != expected_hash:
+        raise ValueError("procedure compilation envelope result JSON hash must match")
+    try:
+        result_json_text = result_json.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("procedure compilation envelope requires canonical JSON") from None
+    if not procedure_request_json_is_bounded(result_json_text):
+        raise ValueError("procedure compilation envelope exceeds JSON depth limit")
+    try:
+        decoded = json.loads(result_json_text)
+        canonical_result_json = canonical_json_bytes(decoded)
+    except (MemoryError, OverflowError, RecursionError, TypeError, ValueError):
+        raise ValueError("procedure compilation envelope requires canonical JSON") from None
+    if canonical_result_json != result_json:
+        raise ValueError("procedure compilation envelope requires canonical JSON")
+    return result_json
 
 
 def _require_canonical_unique(values: tuple[str, ...], field_name: str) -> tuple[str, ...]:
@@ -876,6 +921,65 @@ class ProcedureCompilationResult(_ProcedureCompilationResultPayload):
         return self
 
 
+class OpaqueProcedureCompilationEnvelope(_StrictFrozenModel):
+    """Bounded transport that deliberately does not parse its nested result schema."""
+
+    schema_version: Literal[1] = 1
+    compilation_id: BoundedIdentifier
+    result_json_base64: str = Field(
+        strict=True,
+        min_length=4,
+        max_length=MAX_PROCEDURE_RESULT_BASE64_CHARACTERS,
+        repr=False,
+    )
+    result_json_hash: Sha256Hex
+    created_at: UtcTimestamp
+    governing_policy_hash: Sha256Hex
+
+    @field_validator("result_json_base64", mode="before")
+    @classmethod
+    def require_bounded_encoded_result(cls, value: object) -> object:
+        if isinstance(value, str) and len(value) > MAX_PROCEDURE_RESULT_BASE64_CHARACTERS:
+            raise ValueError("procedure compilation envelope exceeds canonical byte limit")
+        return value
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        compilation_id: str,
+        result: ProcedureCompilationResult,
+        created_at: UtcTimestamp,
+        governing_policy_hash: str,
+    ) -> Self:
+        result_json = canonical_json_bytes(result.model_dump(mode="json"))
+        return cls(
+            compilation_id=compilation_id,
+            result_json_base64=base64.b64encode(result_json).decode("ascii"),
+            result_json_hash=sha256_hex(result_json),
+            created_at=created_at,
+            governing_policy_hash=governing_policy_hash,
+        )
+
+    @model_validator(mode="after")
+    def require_bounded_canonical_result_json(self) -> Self:
+        _decode_opaque_result_json(self.result_json_base64, self.result_json_hash)
+        return self
+
+    def result_json_bytes(self) -> bytes:
+        result_json: bytes | None = None
+        with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
+            result_json = _decode_opaque_result_json(
+                self.result_json_base64,
+                self.result_json_hash,
+            )
+        if result_json is None:
+            raise ProcedureBoundaryValidationError(
+                "procedure compilation envelope failed validation"
+            ) from None
+        return result_json
+
+
 def parse_untrusted_procedure_compilation_result(
     value: object,
 ) -> ProcedureCompilationResult:
@@ -883,7 +987,9 @@ def parse_untrusted_procedure_compilation_result(
 
     result: ProcedureCompilationResult | None = None
     with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
-        if isinstance(value, BaseModel):
+        if isinstance(value, OpaqueProcedureCompilationEnvelope):
+            value = value.result_json_bytes()
+        elif isinstance(value, BaseModel):
             value = value.model_dump(mode="python")
         if isinstance(value, (str, bytes, bytearray)):
             result = ProcedureCompilationResult.model_validate_json(value, strict=True)
@@ -913,6 +1019,20 @@ class ProcedureCompilationRecord(_ProcedureCompilationRecordPayload):
         return cls(
             **payload.model_dump(mode="python"),
             content_hash=canonical_model_hash(payload),
+        )
+
+    @classmethod
+    def build_from_untrusted_envelope(
+        cls,
+        envelope: OpaqueProcedureCompilationEnvelope,
+    ) -> Self:
+        """Normalize an opaque proposal envelope through the safe result parser."""
+
+        return cls.build(
+            compilation_id=envelope.compilation_id,
+            result=parse_untrusted_procedure_compilation_result(envelope),
+            created_at=envelope.created_at,
+            governing_policy_hash=envelope.governing_policy_hash,
         )
 
     @model_validator(mode="after")
@@ -1035,6 +1155,7 @@ class MethodDirectionOutcome(_MethodDirectionOutcomePayload):
 __all__ = [
     "MAX_PROCEDURE_REQUEST_BYTES",
     "MAX_PROCEDURE_RESOURCE_VALUE",
+    "MAX_PROCEDURE_RESULT_BYTES",
     "AcceptedSourceReceiptRef",
     "ArtifactCatalogEntry",
     "CandidateMethod",
@@ -1045,6 +1166,7 @@ __all__ = [
     "GroundedCapabilityAssessment",
     "MethodDirectionOutcome",
     "MethodDirectionStatus",
+    "OpaqueProcedureCompilationEnvelope",
     "ProcedureAuthority",
     "ProcedureBoundaryValidationError",
     "ProcedureCompilationReceiptRef",

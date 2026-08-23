@@ -459,7 +459,7 @@ git commit -m "feat: add bounded peer collaboration"
 
 **Interfaces:**
 - Consumes: `CapabilityAssessment`, `BudgetReserves`, `ArtifactRef`, existing `ProgressPlan`, and existing `ProgressSubtask`.
-- Produces: `CandidateMethod`, `ProcedureStep`, `ExecutableProcedure`, `ProcedureCompilationRequest`, `ProcedureCompilationResult`, `ProcedureCompilationRecord`, `ProcedureValidationReport`, `ProcedureCompilationReceiptRef`, `CompiledProgressPlanBinding`, `MethodDirectionStatus`, `MethodDirectionOutcome`, `compile_method()`, and `procedure_to_progress_plan()`.
+- Produces: `CandidateMethod`, `ProcedureStep`, `ExecutableProcedure`, `ProcedureCompilationRequest`, `ProcedureCompilationResult`, `OpaqueProcedureCompilationEnvelope`, `ProcedureCompilationRecord`, `ProcedureValidationReport`, `ProcedureCompilationReceiptRef`, `CompiledProgressPlanBinding`, `MethodDirectionStatus`, `MethodDirectionOutcome`, `compile_method()`, and `procedure_to_progress_plan()`.
 
 - [ ] **Step 1: Write the static-validation matrix first**
 
@@ -781,7 +781,7 @@ git commit -m "feat: add harness traces and reward validity"
 
 **Interfaces:**
 - Consumes: all Phase A domain contracts and existing `ProposalBase`.
-- Produces: 18 additive proposal classes, their exact `proposal_type` literals, additive rejection codes, and the updated discriminated `Proposal` union.
+- Produces: 18 additive proposal classes, their exact `proposal_type` literals, additive rejection codes, the updated discriminated `Proposal` union, and `parse_untrusted_proposal_json()` as the fixed safe serialized-proposal boundary.
 
 - [ ] **Step 1: Write strict union and unknown-field failures**
 
@@ -803,8 +803,16 @@ def test_new_proposal_round_trips_through_closed_union(proposal: Proposal) -> No
 
 def test_new_proposal_rejects_unknown_field() -> None:
     payload = record_capability_profile().model_dump(mode="json") | {"authority": "peer"}
-    with pytest.raises(ValidationError):
-        PROPOSAL_ADAPTER.validate_python(payload)
+    with pytest.raises(ProposalBoundaryValidationError):
+        parse_untrusted_proposal_json(canonical_json_bytes(payload))
+
+
+def test_procedure_proposal_keeps_nested_result_opaque() -> None:
+    payload = record_procedure_compilation_with_schema_invalid_result_json()
+    parsed = parse_untrusted_proposal_json(canonical_json_bytes(payload))
+    assert isinstance(parsed.compilation, OpaqueProcedureCompilationEnvelope)
+    with pytest.raises(ProcedureBoundaryValidationError):
+        parse_untrusted_procedure_compilation_result(parsed.compilation)
 ```
 
 - [ ] **Step 2: Run parsing and replay tests**
@@ -825,7 +833,7 @@ class RecordCohortPlan(ProposalBase):
 
 class RecordProcedureCompilation(ProposalBase):
     proposal_type: Literal["record_procedure_compilation"] = "record_procedure_compilation"
-    compilation: ProcedureCompilationRecord
+    compilation: OpaqueProcedureCompilationEnvelope
 
 
 class BindCompiledProgressPlan(ProposalBase):
@@ -840,6 +848,22 @@ class RecordRewardAssessment(ProposalBase):
     observation: RewardObservation
     findings: tuple[RewardHackingFinding, ...]
     assessment: RewardValidityAssessment
+
+
+MAX_PROPOSAL_BYTES = 8 * 1_024 * 1_024
+
+
+def parse_untrusted_proposal_json(value: bytes) -> Proposal:
+    if len(value) > MAX_PROPOSAL_BYTES or not proposal_json_is_within_depth_limit(value):
+        raise ProposalBoundaryValidationError(
+            "transaction proposal failed validation"
+        ) from None
+    try:
+        return PROPOSAL_ADAPTER.validate_json(value)
+    except (MemoryError, OverflowError, RecursionError, TypeError, ValueError):
+        raise ProposalBoundaryValidationError(
+            "transaction proposal failed validation"
+        ) from None
 ```
 
 Add these exact kinds: `record_capability_profile`, `record_cohort_plan`, `record_diversity_assessment`, `record_collaboration_session`, `append_peer_request`, `append_peer_contribution`, `append_topology_event`, `record_collaboration_termination`, `record_procedure_compilation`, `record_method_direction_outcome`, `bind_compiled_progress_plan`, `record_guidance_evaluation_protocol`, `append_guidance_evaluation_cell`, `record_model_harness_protocol`, `append_model_harness_cell`, `record_model_harness_analysis`, `record_harness_execution_trace`, and `record_reward_assessment`.
@@ -847,6 +871,21 @@ Add these exact kinds: `record_capability_profile`, `record_cohort_plan`, `recor
 `RecordDiversityAssessment` carries a `CohortPlanReceiptRef`, the same ordered capability-profile receipts, explicit error-correlation records, and the claimed assessment. Handlers resolve accepted receipts and exact hashes; no cohort or diversity proposal trusts caller-supplied duplicate profile payloads.
 
 Add only these rejection codes: `DERIVATION_MISMATCH`, `STALE_REFERENCE`, `COLLABORATION_BOUND_EXCEEDED`, `INVALID_PROCEDURE`, `UNMATCHED_EVALUATION`, and `INVALID_REWARD`. Reuse existing codes where their meaning is exact.
+
+`OpaqueProcedureCompilationEnvelope` contains compilation metadata and bounded,
+base64-encoded canonical result JSON bytes. It does not parse a nested
+`ProcedureCompilationResult`. `PROPOSAL_ADAPTER` validates only the outer proposal and
+opaque envelope contract; Task 12 owns safe result normalization. Do not add a second
+opaque envelope type in `kernel.transactions`.
+
+`parse_untrusted_proposal_json()` is the only public parser for serialized untrusted
+proposal bytes. It applies an 8 MiB byte limit and the shared iterative depth limit
+before `PROPOSAL_ADAPTER.validate_json()`. It converts every Pydantic, JSON, recursion,
+overflow, and recoverable memory failure to the fixed `ProposalBoundaryValidationError`
+from `None`. Raw `PROPOSAL_ADAPTER` calls remain trusted construction and diagnostic
+operations; application entrypoints must not expose their exceptions or structured
+errors. Base64 is transport encoding, not secrecy; the fixed outer parser must discard
+any rejected encoded payload before returning control to a caller.
 
 - [ ] **Step 4: Prove old proposal bytes and hashes are unchanged**
 
@@ -1163,24 +1202,38 @@ class RecordProcedureCompilationHandler:
     def decide(self, proposal, context) -> TransactionDecision:
         try:
             supplied_result = parse_untrusted_procedure_compilation_result(
-                proposal.compilation.result
+                proposal.compilation
             )
+            supplied_request = supplied_result.parse_request()
         except ProcedureBoundaryValidationError:
             return rejected(proposal, RejectionCode.INVALID_PROCEDURE)
-        expected = compile_method(proposal.compilation.request)
+        expected = compile_method(supplied_request)
         if expected != supplied_result:
             return rejected(proposal, RejectionCode.DERIVATION_MISMATCH)
+        if (
+            proposal.compilation.governing_policy_hash
+            != context.active_policy.policy_hash
+        ):
+            return rejected(proposal, RejectionCode.STALE_REFERENCE)
         return reject_existing_or_accept(proposal, context.existing_compilation)
 
     def project(self, proposal, decision, writes) -> None:
         require_accepted(decision)
-        cast(ProcedureWriteCapability, writes).append_compilation(proposal.compilation)
+        record = ProcedureCompilationRecord.build_from_untrusted_envelope(
+            proposal.compilation
+        )
+        cast(ProcedureWriteCapability, writes).append_compilation(record)
 ```
 
 The handler catches `ProcedureBoundaryValidationError` and returns the existing invalid-
 procedure rejection without recording the error object or rejected input. Application
 code must not call `ProcedureCompilationResult.model_validate*()` for untrusted input;
 those Pydantic constructors remain internal trusted-construction and diagnostic APIs.
+The handler calls the public safe parser before compiler recomputation, policy or
+repository authority checks, and durable-record construction. The project step uses
+only `ProcedureCompilationRecord.build_from_untrusted_envelope()`, which repeats the
+same safe normalization before constructing the typed record. No handler treats the
+opaque proposal envelope as a `ProcedureCompilationRecord`.
 
 `RecordMethodDirectionOutcomeHandler` accepts `SUPPORTED`, `UNSUPPORTED`, `INCONCLUSIVE`, or `ABANDONED` only when every referenced compilation, failure, evidence, and existing budget record exists. `SUPPORTED` remains an evidence outcome and has no claim or admission projection.
 
@@ -1500,7 +1553,7 @@ def expected_cognitive_snapshot(
             if isinstance(item, RecordCollaborationTermination)
         ),
         compilations=tuple(
-            item.compilation
+            compilation_record_from_accepted_proposal(item)
             for item in accepted
             if isinstance(item, RecordProcedureCompilation)
         ),
@@ -1516,6 +1569,10 @@ def expected_cognitive_snapshot(
 ```
 
 Use explicit typed extraction functions rather than reflection in production code. Recompute cohort plans, diversity, collaboration states, compiler results, plan mappings, matrix analyses, trace freshness, and reward validity before comparing snapshots. A transaction/audit mismatch is still checked before domain reconstruction.
+`compilation_record_from_accepted_proposal()` must call
+`ProcedureCompilationRecord.build_from_untrusted_envelope()` and then repeat the Task 12
+compiler equality check. Integrity code must never insert
+`RecordProcedureCompilation.compilation` directly into a typed compilation snapshot.
 
 - [ ] **Step 4: Extend bundle expectations and replay only through the coordinator**
 
