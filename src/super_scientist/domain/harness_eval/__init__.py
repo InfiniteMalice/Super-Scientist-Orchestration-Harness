@@ -1,5 +1,7 @@
 """Strict matched-budget harness-evaluation contracts."""
 
+from super_scientist.domain.harness_eval.bounds import PhaseAResourceUsage
+from super_scientist.domain.harness_eval.budget_bounds import PhaseAEvaluationBudget
 from super_scientist.domain.harness_eval.evidence_chains import (
     HarnessCellEvidenceChain,
     HarnessEvidenceSnapshotIndex,
@@ -194,6 +196,8 @@ __all__ = [
     "ModelIdentity",
     "ObservableArtifactRef",
     "PartitionMetric",
+    "PhaseAEvaluationBudget",
+    "PhaseAResourceUsage",
     "ProtectedCheckerResult",
     "PublicTaskInput",
     "RecoveryAttemptEvent",

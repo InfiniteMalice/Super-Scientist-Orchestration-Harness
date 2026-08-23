@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from super_scientist.domain.harness_eval.guidance import (
     EvaluationConfoundCode,
     EvaluationMetricComponent,
+    EvaluationMetricDeltaVector,
     EvaluationMetricVector,
     EvaluationReferenceComponent,
     ExecutionFailureEvent,
@@ -23,6 +24,7 @@ from super_scientist.domain.harness_eval.guidance import (
     RecoveryAttemptEvent,
     RecoveryOutcome,
     ReferenceMissingness,
+    ResourceUsageDelta,
     compare_guidance_cells,
     guidance_cell_hash,
     guidance_comparison_hash,
@@ -69,6 +71,10 @@ def _usage(*, tokens: int = 20) -> ResourceUsage:
         tool_calls=1,
         human_interventions=0,
     )
+
+
+def _long_ids(prefix: str, count: int) -> tuple[str, ...]:
+    return tuple(f"{prefix}{index:03d}-" + "x" * (195 - len(prefix)) for index in range(count))
 
 
 def _metrics(*, score: str = "0.8", tokens: int = 20) -> EvaluationMetricVector:
@@ -128,6 +134,130 @@ def _protocol(**updates: object) -> GuidanceEvaluationProtocol:
     return GuidanceEvaluationProtocol.build(**values)
 
 
+def test_guidance_task_score_rejects_oversized_decimal_coefficient() -> None:
+    accepted = _metrics(score="0." + "1" * 256)
+    assert accepted.task_score == Decimal("0." + "1" * 256)
+
+    with pytest.raises(ValidationError, match="decimal coefficient exceeds bound"):
+        _metrics(score="0." + "1" * 10_000)
+
+
+def test_guidance_budget_rejects_oversized_decimal_integer_and_tool_inventory() -> None:
+    with pytest.raises(ValidationError, match="decimal coefficient exceeds bound"):
+        _protocol(evaluation_budget=_budget(cost_limit=Decimal("0." + "1" * 10_000)))
+
+    with pytest.raises(ValidationError, match="evaluation budget integers exceed bound"):
+        _protocol(evaluation_budget=_budget(token_limit=1 << 10_000))
+
+    with pytest.raises(ValidationError, match="evaluation budget tools exceed bound"):
+        _protocol(evaluation_budget=_budget(tool_ids=_long_ids("t", 1_000)))
+
+
+def test_guidance_strictly_revalidates_copied_released_budget_and_usage() -> None:
+    copied_budget = _budget().model_copy(update={"token_limit": 1 << 10_000})
+    with pytest.raises(ValidationError, match="evaluation budget integers exceed bound"):
+        _protocol(evaluation_budget=copied_budget)
+
+    copied_usage = _usage().model_copy(update={"tokens": 1 << 10_000})
+    values = _metrics().model_dump(mode="python")
+    values["resource_usage"] = copied_usage
+    with pytest.raises(ValidationError, match="resource usage integers exceed bound"):
+        EvaluationMetricVector.model_validate(values)
+
+
+def test_guidance_resource_and_event_count_deltas_reject_oversized_integers() -> None:
+    with pytest.raises(ValidationError, match="finite number"):
+        ResourceUsageDelta(
+            cost_usd=float("inf"),
+            compute_units=0.0,
+            tokens=0,
+            elapsed_seconds=0.0,
+            tool_calls=0,
+            human_interventions=0,
+        )
+
+    with pytest.raises(ValidationError, match="resource delta integers exceed bound"):
+        ResourceUsageDelta(
+            cost_usd=0.0,
+            compute_units=0.0,
+            tokens=-(1 << 10_000),
+            elapsed_seconds=0.0,
+            tool_calls=0,
+            human_interventions=0,
+        )
+
+    with pytest.raises(ValidationError, match="event count deltas exceed bound"):
+        EvaluationMetricDeltaVector(
+            task_score_delta=Decimal("0"),
+            procedure_compilation_changed=False,
+            procedure_execution_changed=False,
+            method_selection_changed=False,
+            execution_failure_event_count_delta=1 << 10_000,
+            recovery_attempt_event_count_delta=0,
+            resource_usage_delta=None,
+            final_validation_changed=False,
+            missingness_deltas=(),
+        )
+
+    with pytest.raises(ValidationError, match="decimal coefficient exceeds bound"):
+        EvaluationMetricDeltaVector(
+            task_score_delta=Decimal("0." + "1" * 10_000),
+            procedure_compilation_changed=False,
+            procedure_execution_changed=False,
+            method_selection_changed=False,
+            execution_failure_event_count_delta=0,
+            recovery_attempt_event_count_delta=0,
+            resource_usage_delta=None,
+            final_validation_changed=False,
+            missingness_deltas=(),
+        )
+
+
+def test_guidance_accepts_exact_numeric_and_tool_boundaries() -> None:
+    budget = _budget(
+        tool_ids=_long_ids("t", 256),
+        token_limit=(1 << 1_000) - 1,
+        wall_clock_seconds=Decimal("1." + "1" * 255),
+        cost_limit=Decimal("0." + "1" * 256),
+    )
+    protocol = _protocol(evaluation_budget=budget)
+
+    assert len(protocol.evaluation_budget.tool_ids) == 256
+    assert protocol.evaluation_budget.token_limit.bit_length() == 1_000
+
+    metric_values = _metrics().model_dump(mode="python")
+    metric_values["resource_usage"] = _usage(tokens=(1 << 1_000) - 1)
+    metrics = EvaluationMetricVector.model_validate(metric_values)
+    assert metrics.resource_usage is not None
+    assert metrics.resource_usage.tokens.bit_length() == 1_000
+
+    delta = ResourceUsageDelta(
+        cost_usd=0.0,
+        compute_units=0.0,
+        tokens=-((1 << 1_000) - 1),
+        elapsed_seconds=0.0,
+        tool_calls=0,
+        human_interventions=0,
+    )
+    assert abs(delta.tokens).bit_length() == 1_000
+
+
+def test_guidance_protocol_outer_bytes_bound_composed_maximum_fields() -> None:
+    with pytest.raises(ValidationError, match="guidance protocol canonical bytes exceed bound"):
+        _protocol(
+            artifact_ids=_long_ids("a", 256),
+            declared_distractor_artifact_ids=_long_ids("d", 256),
+            evaluation_budget=_budget(tool_ids=_long_ids("t", 256)),
+        )
+
+    accepted = _protocol(
+        artifact_ids=_long_ids("a", 200),
+        declared_distractor_artifact_ids=_long_ids("d", 200),
+        evaluation_budget=_budget(tool_ids=_long_ids("t", 200)),
+    )
+    assert len(accepted.artifact_ids) == 200
+
+
 def _cell(
     *,
     condition: GuidanceCondition = GuidanceCondition.FULL_PROCEDURE_GUIDANCE,
@@ -180,7 +310,8 @@ def test_metric_vector_keeps_typed_events_and_component_values_separate() -> Non
     assert metrics.method_selection_result is MethodDirectionStatus.SUPPORTED
     assert metrics.execution_failure_events[0].kind is ExecutionFailureKind.VALIDATION_FAILURE
     assert metrics.recovery_attempt_events[0].outcome is RecoveryOutcome.SUCCEEDED
-    assert metrics.resource_usage == _usage()
+    assert metrics.resource_usage is not None
+    assert metrics.resource_usage.model_dump(mode="python") == _usage().model_dump(mode="python")
     assert metrics.final_validation is AssessmentOutcome.PASSED
 
 

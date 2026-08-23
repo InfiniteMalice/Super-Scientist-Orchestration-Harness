@@ -9,6 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic_core import to_jsonable_python
 
 from super_scientist.domain.evidence.models import ArtifactRef
+from super_scientist.domain.harness_eval.bounds import (
+    PhaseAResourceUsage,
+    require_bounded_decimal,
+    require_canonical_byte_limit,
+)
 from super_scientist.domain.harness_eval.guidance import (
     MAX_EVALUATION_SCHEMA_VERSION,
     GuidanceCondition,
@@ -42,10 +47,6 @@ MAX_CATEGORICAL_REWARD_LENGTH = 200
 # Observable trace metadata is bounded independently of artifact-store capacity.
 MAX_TRACE_ARTIFACT_SIZE_BYTES = 1_073_741_824
 MAX_TOKEN_ID = 2_147_483_647
-MAX_HARNESS_RESOURCE_INTEGER = (1 << 1000) - 1
-MAX_DECIMAL_COEFFICIENT_DIGITS = 256
-MAX_DECIMAL_ABS_EXPONENT = 1024
-MAX_DECIMAL_CANONICAL_BYTES = 260
 MAX_REWARD_OBSERVATION_CANONICAL_BYTES = 2_048
 MAX_HARNESS_TRACE_CANONICAL_BYTES = 262_144
 
@@ -71,27 +72,7 @@ class _StrictFrozenModel(BaseModel):
     )
 
 
-class HarnessResourceUsage(_StrictFrozenModel):
-    """Phase A bounded view of the released improvement resource-usage DTO."""
-
-    cost_usd: float = Field(strict=True, ge=0.0, allow_inf_nan=False)
-    compute_units: float = Field(strict=True, ge=0.0, allow_inf_nan=False)
-    tokens: int = Field(strict=True, ge=0)
-    elapsed_seconds: float = Field(strict=True, ge=0.0, allow_inf_nan=False)
-    tool_calls: int = Field(strict=True, ge=0)
-    human_interventions: int = Field(strict=True, ge=0)
-
-    @field_validator("tokens", "tool_calls", "human_interventions")
-    @classmethod
-    def require_1000_bit_integer(cls, value: int) -> int:
-        if value > MAX_HARNESS_RESOURCE_INTEGER:
-            raise ValueError("harness resource usage integers must fit within 1000-bit bounds")
-        return value
-
-    @classmethod
-    def from_resource_usage(cls, usage: ResourceUsage) -> Self:
-        validated = ResourceUsage.model_validate(usage)
-        return cls.model_validate(validated.model_dump(mode="python"))
+HarnessResourceUsage = PhaseAResourceUsage
 
 
 def _canonical_record_hash(
@@ -112,31 +93,6 @@ def _canonical_identifier_tuple(values: tuple[str, ...], field_name: str) -> tup
     if len(values) != len(set(values)) or values != tuple(sorted(values)):
         raise ValueError(f"{field_name} must be unique and canonically ordered")
     return values
-
-
-def _require_bounded_decimal(value: Decimal) -> Decimal:
-    if not value.is_finite():
-        raise ValueError("decimal value must be finite")
-    decimal_tuple = value.as_tuple()
-    if len(decimal_tuple.digits) > MAX_DECIMAL_COEFFICIENT_DIGITS:
-        raise ValueError("decimal coefficient exceeds bound")
-    if isinstance(decimal_tuple.exponent, str) or (
-        abs(decimal_tuple.exponent) > MAX_DECIMAL_ABS_EXPONENT
-    ):
-        raise ValueError("decimal exponent exceeds bound")
-    if len(str(value).encode("ascii")) > MAX_DECIMAL_CANONICAL_BYTES:
-        raise ValueError("decimal canonical bytes exceed bound")
-    return value
-
-
-def _require_canonical_byte_limit(
-    record: BaseModel,
-    *,
-    maximum: int,
-    error: str,
-) -> None:
-    if len(canonical_json_bytes(record.model_dump(mode="json"))) > maximum:
-        raise ValueError(error)
 
 
 class MetadataAvailability(StrEnum):
@@ -430,7 +386,7 @@ class _GenerationMetadataPayload(_StrictFrozenModel):
                 raise ValueError("available token IDs must match the observed token count")
         if self.log_probabilities.value is not None:
             for item in self.log_probabilities.value:
-                _require_bounded_decimal(item)
+                require_bounded_decimal(item)
             if self.token_ids.value is None or len(self.log_probabilities.value) != len(
                 self.token_ids.value
             ):
@@ -484,7 +440,7 @@ class _RewardObservationPayload(_StrictFrozenModel):
         value: Decimal | str | None,
     ) -> Decimal | str | None:
         if isinstance(value, Decimal):
-            return _require_bounded_decimal(value)
+            return require_bounded_decimal(value)
         if isinstance(value, str):
             normalized = value.strip()
             if not normalized:
@@ -496,7 +452,7 @@ class _RewardObservationPayload(_StrictFrozenModel):
     def require_reward_evidence(self) -> Self:
         if (self.value is None) != (self.evidence_id is None):
             raise ValueError("reward value and evidence must be present together")
-        _require_canonical_byte_limit(
+        require_canonical_byte_limit(
             self,
             maximum=MAX_REWARD_OBSERVATION_CANONICAL_BYTES,
             error="reward observation canonical bytes exceed bound",
@@ -1203,7 +1159,7 @@ class _HarnessExecutionTracePayload(_StrictFrozenModel):
             {"evidence_ids": list(self.provenance_evidence_ids)}
         ):
             raise ValueError("provenance hash mismatch")
-        _require_canonical_byte_limit(
+        require_canonical_byte_limit(
             self,
             maximum=MAX_HARNESS_TRACE_CANONICAL_BYTES,
             error="harness trace canonical bytes exceed bound",

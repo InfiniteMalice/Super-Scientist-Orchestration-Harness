@@ -153,6 +153,38 @@ snapshots.
 - [x] Run focused harness/campaign/protected/strict parsing, the Phase A-compatible suite, Ruff,
   strict mypy, authority scan, public import probe, and `git diff --check`.
 
+## Round 6: Guidance/Matrix Composition Bounds and Exact Evidence Sets
+
+### Problem and invariant
+
+Guidance metrics, evaluation budgets, resource usage, resource deltas, and count deltas retain
+unbounded numeric or collection widths. Guidance and matrix hash-bearing records also lack outer
+canonical-byte limits. A valid field count can therefore carry impractical decimal coefficients,
+integers, tool inventories, or aggregate serialized payloads. Separately, matrix analysis bounds
+the protocol grid but not its caller-supplied `evidence_chains` tuple and does not require exact
+receipt-set equality across cells, chains, and the shared index.
+
+Phase A wrappers must strictly reconstruct released `EvaluationBudget` and `ResourceUsage` DTOs
+without modifying those released contracts. All Phase A decimals must share coefficient, exponent,
+and canonical-byte bounds. Every Phase A resource/count integer and tool inventory must be bounded.
+Every guidance/matrix hash-bearing outer record must reject an oversized canonical payload before
+hashing. Matrix validation must inspect collection lengths before validating elements and must emit
+no comparisons unless cell, chain, and index chain-receipt sets are exact.
+
+### TDD and verification
+
+- [x] Witness RED for 10,000-digit task/budget decimals, 10,001-bit budget/resource/delta integers,
+  1,000 tools, and copied released DTOs that retain bypassed values.
+- [x] Add exact accepted decimal, integer, tool-count, and aggregate-record near-boundary probes.
+- [x] Witness RED for 300 surplus ignored evidence chains and bounded duplicate/missing/surplus
+  chain-receipt set mismatches.
+- [x] Centralize numeric/resource bounds and add a Phase A `EvaluationBudget` wrapper without
+  changing released DTOs.
+- [x] Bound guidance/matrix canonical records while preserving the 256-cell and 24,512-comparison
+  valid maximum.
+- [x] Run focused harness/campaign/protected/strict parsing, Phase A, static/authority gates, and
+  near-limit maximum-shape performance.
+
 ## Global Constraints
 
 - Preserve protected-evaluation and `HarnessCampaign` behavior.

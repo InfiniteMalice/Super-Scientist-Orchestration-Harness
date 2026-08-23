@@ -7,6 +7,11 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from super_scientist.domain.harness_eval.bounds import (
+    bounded_canonical_record_hash,
+    require_canonical_byte_limit,
+)
+from super_scientist.domain.harness_eval.budget_bounds import PhaseAEvaluationBudget
 from super_scientist.domain.harness_eval.guidance import (
     MAX_EVALUATION_ITEMS,
     MAX_EVALUATION_RANDOM_SEED,
@@ -14,7 +19,6 @@ from super_scientist.domain.harness_eval.guidance import (
     BoundedIdentifier,
     EvaluationMetricDeltaVector,
     EvaluationMetricVector,
-    _canonical_record_hash,
     _StrictFrozenModel,
     metric_component_deltas,
 )
@@ -35,6 +39,11 @@ if TYPE_CHECKING:
 # The 256-cell grid reaches this maximum at 128 models x 2 harnesses x 1 partition
 # when all non-transfer comparison families are declared.
 MAX_MODEL_HARNESS_COMPARISONS = 24_512
+MAX_MODEL_BUDGET_BINDING_CANONICAL_BYTES = 65_536
+MAX_MODEL_HARNESS_PROTOCOL_CANONICAL_BYTES = 1_048_576
+MAX_MODEL_HARNESS_CELL_CANONICAL_BYTES = 393_216
+MAX_MODEL_HARNESS_COMPARISON_CANONICAL_BYTES = 32_768
+MAX_MODEL_HARNESS_ANALYSIS_CANONICAL_BYTES = 67_108_864
 
 
 class ModelHarnessComparisonKind(StrEnum):
@@ -96,18 +105,30 @@ RESOURCE_ENVELOPE_FIELDS = BUDGET_COMPARISON_FIELDS[3:]
 
 
 def evaluation_resource_envelope_hash(budget: EvaluationBudget) -> str:
-    validated = EvaluationBudget.model_validate(budget)
+    validated = PhaseAEvaluationBudget.from_evaluation_budget(budget)
     serialized = validated.model_dump(mode="json")
-    return _canonical_record_hash(
-        {field_name: serialized[field_name] for field_name in RESOURCE_ENVELOPE_FIELDS}
+    return bounded_canonical_record_hash(
+        {field_name: serialized[field_name] for field_name in RESOURCE_ENVELOPE_FIELDS},
+        maximum=MAX_MODEL_BUDGET_BINDING_CANONICAL_BYTES,
+        error="evaluation resource envelope canonical bytes exceed bound",
     )
 
 
 class _ModelBudgetBindingPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     model: ModelIdentity
-    budget: EvaluationBudget
+    budget: PhaseAEvaluationBudget
     resource_envelope_hash: Sha256Hex
+
+    @field_validator("budget", mode="before")
+    @classmethod
+    def revalidate_budget(
+        cls,
+        value: EvaluationBudget | PhaseAEvaluationBudget | Mapping[str, object],
+    ) -> PhaseAEvaluationBudget | Mapping[str, object]:
+        if isinstance(value, (EvaluationBudget, PhaseAEvaluationBudget)):
+            return PhaseAEvaluationBudget.from_evaluation_budget(value)
+        return value
 
     @model_validator(mode="after")
     def require_exact_model_and_envelope(self) -> Self:
@@ -118,6 +139,11 @@ class _ModelBudgetBindingPayload(_StrictFrozenModel):
             raise ValueError("budget must bind its exact matrix model")
         if self.resource_envelope_hash != evaluation_resource_envelope_hash(self.budget):
             raise ValueError("resource_envelope_hash must address the model-agnostic limits")
+        require_canonical_byte_limit(
+            self,
+            maximum=MAX_MODEL_BUDGET_BINDING_CANONICAL_BYTES,
+            error="model budget binding canonical bytes exceed bound",
+        )
         return self
 
 
@@ -127,7 +153,13 @@ class ModelBudgetBinding(_ModelBudgetBindingPayload):
     @classmethod
     def build(cls, **values: Any) -> Self:
         supplied = dict(values)
-        budget = EvaluationBudget.model_validate(supplied["budget"])
+        raw_budget = supplied["budget"]
+        budget = (
+            PhaseAEvaluationBudget.model_validate(raw_budget, strict=True)
+            if isinstance(raw_budget, Mapping)
+            else PhaseAEvaluationBudget.from_evaluation_budget(raw_budget)
+        )
+        supplied["budget"] = budget
         supplied.setdefault(
             "resource_envelope_hash",
             evaluation_resource_envelope_hash(budget),
@@ -295,6 +327,11 @@ class _ModelHarnessProtocolPayload(_StrictFrozenModel):
             raise ValueError(
                 "train-test transfer requires discovery and a distinct held-out partition"
             )
+        require_canonical_byte_limit(
+            self,
+            maximum=MAX_MODEL_HARNESS_PROTOCOL_CANONICAL_BYTES,
+            error="model-harness protocol canonical bytes exceed bound",
+        )
         return self
 
 
@@ -342,11 +379,21 @@ class _ModelHarnessCellPayload(_StrictFrozenModel):
         le=MAX_EVALUATION_RANDOM_SEED,
     )
     output_schema_hash: Sha256Hex
-    evaluation_budget: EvaluationBudget
+    evaluation_budget: PhaseAEvaluationBudget
     governing_policy_hash: Sha256Hex
     metrics: EvaluationMetricVector
     evidence_chain_receipt: EvidenceReceipt
     observed_at: UtcTimestamp
+
+    @field_validator("evaluation_budget", mode="before")
+    @classmethod
+    def revalidate_evaluation_budget(
+        cls,
+        value: EvaluationBudget | PhaseAEvaluationBudget | Mapping[str, object],
+    ) -> PhaseAEvaluationBudget | Mapping[str, object]:
+        if isinstance(value, (EvaluationBudget, PhaseAEvaluationBudget)):
+            return PhaseAEvaluationBudget.from_evaluation_budget(value)
+        return value
 
     @field_validator("artifact_ids")
     @classmethod
@@ -365,6 +412,11 @@ class _ModelHarnessCellPayload(_StrictFrozenModel):
             raise ValueError("model-harness cell must bind the exact protocol version")
         if self.protocol_hash != self.protocol_receipt.content_hash:
             raise ValueError("model-harness cell must bind the exact protocol hash")
+        require_canonical_byte_limit(
+            self,
+            maximum=MAX_MODEL_HARNESS_CELL_CANONICAL_BYTES,
+            error="model-harness cell canonical bytes exceed bound",
+        )
         return self
 
 
@@ -453,6 +505,11 @@ class _ModelHarnessComparisonPayload(_StrictFrozenModel):
             or self.partitions[1] is HarnessPartition.HARNESS_DISCOVERY_TASKS
         ):
             raise ValueError("transfer comparison must retain discovery and held-out partitions")
+        require_canonical_byte_limit(
+            self,
+            maximum=MAX_MODEL_HARNESS_COMPARISON_CANONICAL_BYTES,
+            error="model-harness comparison canonical bytes exceed bound",
+        )
         return self
 
 
@@ -531,6 +588,11 @@ class _ModelHarnessAnalysisPayload(_StrictFrozenModel):
         comparison_keys = tuple(_comparison_key(item) for item in self.comparisons)
         if comparison_keys != tuple(sorted(comparison_keys)):
             raise ValueError("analysis comparisons must be canonically ordered")
+        require_canonical_byte_limit(
+            self,
+            maximum=MAX_MODEL_HARNESS_ANALYSIS_CANONICAL_BYTES,
+            error="model-harness analysis canonical bytes exceed bound",
+        )
         return self
 
 
@@ -557,7 +619,12 @@ def model_harness_protocol_hash(
     *,
     exclude_fields: set[str] | None = None,
 ) -> str:
-    return _canonical_record_hash(record, exclude_fields=exclude_fields)
+    return bounded_canonical_record_hash(
+        record,
+        maximum=MAX_MODEL_HARNESS_PROTOCOL_CANONICAL_BYTES,
+        error="model-harness protocol canonical bytes exceed bound",
+        exclude_fields=exclude_fields,
+    )
 
 
 def model_budget_binding_hash(
@@ -565,7 +632,12 @@ def model_budget_binding_hash(
     *,
     exclude_fields: set[str] | None = None,
 ) -> str:
-    return _canonical_record_hash(record, exclude_fields=exclude_fields)
+    return bounded_canonical_record_hash(
+        record,
+        maximum=MAX_MODEL_BUDGET_BINDING_CANONICAL_BYTES,
+        error="model budget binding canonical bytes exceed bound",
+        exclude_fields=exclude_fields,
+    )
 
 
 def model_harness_cell_hash(
@@ -573,7 +645,12 @@ def model_harness_cell_hash(
     *,
     exclude_fields: set[str] | None = None,
 ) -> str:
-    return _canonical_record_hash(record, exclude_fields=exclude_fields)
+    return bounded_canonical_record_hash(
+        record,
+        maximum=MAX_MODEL_HARNESS_CELL_CANONICAL_BYTES,
+        error="model-harness cell canonical bytes exceed bound",
+        exclude_fields=exclude_fields,
+    )
 
 
 def model_harness_comparison_hash(
@@ -581,7 +658,12 @@ def model_harness_comparison_hash(
     *,
     exclude_fields: set[str] | None = None,
 ) -> str:
-    return _canonical_record_hash(record, exclude_fields=exclude_fields)
+    return bounded_canonical_record_hash(
+        record,
+        maximum=MAX_MODEL_HARNESS_COMPARISON_CANONICAL_BYTES,
+        error="model-harness comparison canonical bytes exceed bound",
+        exclude_fields=exclude_fields,
+    )
 
 
 def model_harness_analysis_hash(
@@ -589,7 +671,12 @@ def model_harness_analysis_hash(
     *,
     exclude_fields: set[str] | None = None,
 ) -> str:
-    return _canonical_record_hash(record, exclude_fields=exclude_fields)
+    return bounded_canonical_record_hash(
+        record,
+        maximum=MAX_MODEL_HARNESS_ANALYSIS_CANONICAL_BYTES,
+        error="model-harness analysis canonical bytes exceed bound",
+        exclude_fields=exclude_fields,
+    )
 
 
 def canonical_cells(cells: tuple[ModelHarnessCell, ...]) -> tuple[ModelHarnessCell, ...]:
@@ -668,6 +755,9 @@ def validate_complete_matched_grid(
     )
 
     validated_protocol = ModelHarnessProtocol.model_validate(protocol)
+    expected_cell_count = len(validated_protocol.expected_grid)
+    if len(evidence_chains) > expected_cell_count:
+        raise ValueError("evidence chain count exceeds expected grid")
     validated_cells = tuple(ModelHarnessCell.model_validate(item) for item in cells)
     validated_chains = tuple(
         HarnessCellEvidenceChain.model_validate(item) for item in evidence_chains
@@ -679,6 +769,14 @@ def validate_complete_matched_grid(
     chains_by_id = {item.chain_id: item for item in validated_chains}
     snapshots_by_chain_id = {item.chain_receipt.record_id: item for item in validated_index.records}
     confounds: set[ModelHarnessConfoundCode] = set()
+    cell_chain_receipts = set(item.evidence_chain_receipt for item in validated_cells)
+    validated_chain_receipts = set(
+        harness_cell_evidence_chain_receipt(item) for item in validated_chains
+    )
+    indexed_chain_receipts = set(item.chain_receipt for item in validated_index.records)
+    if not (cell_chain_receipts == validated_chain_receipts == indexed_chain_receipts):
+        confounds.add(ModelHarnessConfoundCode.TRACE_RECEIPT_MISMATCH)
+        confounds.add(ModelHarnessConfoundCode.REWARD_RECEIPT_MISMATCH)
     cell_ids = tuple(item.cell_id for item in validated_cells)
     if len(cell_ids) != len(set(cell_ids)):
         confounds.add(ModelHarnessConfoundCode.DUPLICATE_CELL)

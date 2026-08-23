@@ -1156,6 +1156,153 @@ def test_matrix_rejects_unrelated_trace_evidence_reused_for_every_cell() -> None
     assert ModelHarnessConfoundCode.TRACE_RECEIPT_MISMATCH in analysis.confounds
 
 
+def test_matrix_bounds_surplus_evidence_chains_before_element_validation() -> None:
+    from tests.unit.harness_eval.test_model_harness_matrix import _protocol
+
+    protocol = _protocol()
+    evidence = tuple(
+        _matrix_evidence_chain(protocol, coordinate, index)
+        for index, coordinate in enumerate(protocol.expected_grid)
+    )
+    cells = tuple(
+        ModelHarnessCell.from_protocol(
+            cell_id=f"bounded-chain-cell-{index:02d}",
+            protocol=protocol,
+            coordinate=coordinate,
+            metrics=_metrics(),
+            evidence_chain_receipt=harness_cell_evidence_chain_receipt(evidence[index].chain),
+            observed_at=evidence[index].trace.observed_at,
+        )
+        for index, coordinate in enumerate(protocol.expected_grid)
+    )
+
+    with pytest.raises(ValueError, match="evidence chain count exceeds expected grid"):
+        analyze_model_harness(
+            protocol,
+            cells,
+            evidence_chains=(evidence[0].chain,) * 300,
+            evidence_index=_snapshot_index(evidence),
+        )
+
+
+def test_matrix_rejects_duplicate_chain_receipts_within_collection_bound() -> None:
+    from tests.unit.harness_eval.test_model_harness_matrix import _protocol
+
+    protocol = _protocol()
+    evidence = tuple(
+        _matrix_evidence_chain(protocol, coordinate, index)
+        for index, coordinate in enumerate(protocol.expected_grid)
+    )
+    cells = tuple(
+        ModelHarnessCell.from_protocol(
+            cell_id=f"duplicate-chain-cell-{index:02d}",
+            protocol=protocol,
+            coordinate=coordinate,
+            metrics=_metrics(),
+            evidence_chain_receipt=harness_cell_evidence_chain_receipt(evidence[index].chain),
+            observed_at=evidence[index].trace.observed_at,
+        )
+        for index, coordinate in enumerate(protocol.expected_grid)
+    )
+    duplicated = (evidence[0].chain, evidence[0].chain, *(item.chain for item in evidence[2:]))
+
+    with pytest.raises(ValueError, match="unique identifiers"):
+        analyze_model_harness(
+            protocol,
+            cells,
+            evidence_chains=duplicated,
+            evidence_index=_snapshot_index(evidence),
+        )
+
+
+def test_matrix_surplus_index_receipt_suppresses_comparisons() -> None:
+    from tests.unit.harness_eval.test_model_harness_matrix import _protocol
+
+    protocol = _protocol()
+    evidence = tuple(
+        _matrix_evidence_chain(protocol, coordinate, index)
+        for index, coordinate in enumerate(protocol.expected_grid)
+    )
+    cells = tuple(
+        ModelHarnessCell.from_protocol(
+            cell_id=f"exact-chain-cell-{index:02d}",
+            protocol=protocol,
+            coordinate=coordinate,
+            metrics=_metrics(),
+            evidence_chain_receipt=harness_cell_evidence_chain_receipt(evidence[index].chain),
+            observed_at=evidence[index].trace.observed_at,
+        )
+        for index, coordinate in enumerate(protocol.expected_grid)
+    )
+    surplus = _matrix_evidence_chain(protocol, protocol.expected_grid[0], 99)
+    all_evidence = (*evidence, surplus)
+
+    analysis = analyze_model_harness(
+        protocol,
+        cells,
+        evidence_chains=tuple(item.chain for item in evidence),
+        evidence_index=_snapshot_index(all_evidence),
+    )
+
+    assert analysis.comparisons == ()
+    assert ModelHarnessConfoundCode.TRACE_RECEIPT_MISMATCH in analysis.confounds
+    assert ModelHarnessConfoundCode.REWARD_RECEIPT_MISMATCH in analysis.confounds
+
+
+def test_matrix_protocol_outer_bytes_bound_composed_budget_inventory() -> None:
+    models = tuple(
+        ModelIdentity(model_id=f"wide-model-{index:02d}", model_version="v1") for index in range(20)
+    )
+    harnesses = (
+        HarnessIdentity(harness_id="wide-harness-a", harness_version="v1"),
+        HarnessIdentity(harness_id="wide-harness-b", harness_version="v1"),
+    )
+    partition = HarnessPartition.HARNESS_DISCOVERY_TASKS
+    tools = tuple(f"tool-{index:03d}-" + "x" * 191 for index in range(256))
+    bindings = tuple(
+        ModelBudgetBinding.build(model=model, budget=_budget(model, tool_ids=tools))
+        for model in models
+    )
+    grid = tuple(
+        ModelHarnessCoordinate(model=model, harness=harness, partition=partition)
+        for model, harness in product(models, harnesses)
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="model-harness protocol canonical bytes exceed bound",
+    ):
+        ModelHarnessProtocol.build(
+            protocol_id="wide-matrix-protocol",
+            version=1,
+            models=models,
+            harnesses=harnesses,
+            partitions=(partition,),
+            task_set_id="task-set-a",
+            task_set_hash=HASH_A,
+            verifier_id="verifier-a",
+            verifier_version="v1",
+            checker_id="checker-a",
+            checker_version="v1",
+            artifact_ids=("artifact-a",),
+            random_seed=7,
+            output_schema_hash=HASH_A,
+            model_budgets=bindings,
+            matched_resource_envelope_hash=bindings[0].resource_envelope_hash,
+            expected_grid=grid,
+            comparison_kinds=(ModelHarnessComparisonKind.MODEL_HELD_CONSTANT,),
+            governing_policy_hash=HASH_A,
+        )
+
+
+def test_matrix_budget_binding_strictly_revalidates_copied_released_budget() -> None:
+    model = ModelIdentity(model_id="copied-budget-model", model_version="v1")
+    copied = _budget(model).model_copy(update={"token_limit": 1 << 10_000})
+
+    with pytest.raises(ValidationError, match="evaluation budget integers exceed bound"):
+        ModelBudgetBinding.build(model=model, budget=copied)
+
+
 @pytest.mark.parametrize("substitute", ("freshness", "assessment"))
 def test_cell_evidence_chain_rejects_freshness_or_assessment_substitution(
     substitute: str,
@@ -1397,8 +1544,18 @@ def test_maximum_shape_matrix_emits_24512_comparisons_within_runtime_bound() -> 
         ModelHarnessCoordinate(model=model, harness=harness, partition=partition)
         for model, harness in product(models, harnesses)
     )
+    near_limit_budget_updates: dict[str, object] = {
+        "tool_ids": ("tool-" + "x" * 195,),
+        "token_limit": (1 << 1_000) - 1,
+        "wall_clock_seconds": Decimal("1." + "1" * 255),
+        "cost_limit": Decimal("0." + "1" * 256),
+    }
     model_budgets = tuple(
-        ModelBudgetBinding.build(model=model, budget=_budget(model)) for model in models
+        ModelBudgetBinding.build(
+            model=model,
+            budget=_budget(model, **near_limit_budget_updates),
+        )
+        for model in models
     )
     protocol = ModelHarnessProtocol.build(
         protocol_id="matrix-maximum-shape",
@@ -1416,7 +1573,9 @@ def test_maximum_shape_matrix_emits_24512_comparisons_within_runtime_bound() -> 
         random_seed=7,
         output_schema_hash=HASH_A,
         model_budgets=model_budgets,
-        matched_resource_envelope_hash=evaluation_resource_envelope_hash(_budget(models[0])),
+        matched_resource_envelope_hash=evaluation_resource_envelope_hash(
+            _budget(models[0], **near_limit_budget_updates)
+        ),
         expected_grid=grid,
         comparison_kinds=(
             ModelHarnessComparisonKind.MODEL_HELD_CONSTANT,

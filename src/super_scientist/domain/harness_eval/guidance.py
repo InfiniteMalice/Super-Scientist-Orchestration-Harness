@@ -6,16 +6,21 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from pydantic_core import to_jsonable_python
 
+from super_scientist.domain.harness_eval.bounds import (
+    PhaseAResourceUsage,
+    bounded_canonical_record_hash,
+    require_bounded_decimal,
+    require_bounded_integer,
+    require_canonical_byte_limit,
+)
+from super_scientist.domain.harness_eval.budget_bounds import PhaseAEvaluationBudget
 from super_scientist.domain.harness_eval.models import EvaluationBudget
 from super_scientist.domain.improvement.models import AssessmentOutcome, ResourceUsage
 from super_scientist.domain.primitives import (
     Sha256Hex,
     StableIdentifier,
     UtcTimestamp,
-    canonical_json_bytes,
-    sha256_hex,
 )
 from super_scientist.domain.procedures.models import (
     MethodDirectionStatus,
@@ -26,6 +31,11 @@ MAX_EVALUATION_ITEMS = 256
 MAX_EVALUATION_IDENTIFIER_LENGTH = 200
 MAX_EVALUATION_SCHEMA_VERSION = 2_147_483_647
 MAX_EVALUATION_RANDOM_SEED = 9_223_372_036_854_775_807
+MAX_EVALUATION_METRIC_CANONICAL_BYTES = 262_144
+MAX_EVALUATION_DELTA_CANONICAL_BYTES = 32_768
+MAX_GUIDANCE_PROTOCOL_CANONICAL_BYTES = 131_072
+MAX_GUIDANCE_CELL_CANONICAL_BYTES = 393_216
+MAX_GUIDANCE_COMPARISON_CANONICAL_BYTES = 32_768
 
 BoundedIdentifier = Annotated[
     StableIdentifier,
@@ -45,15 +55,16 @@ class _StrictFrozenModel(BaseModel):
 def _canonical_record_hash(
     record: BaseModel | Mapping[str, object],
     *,
+    maximum: int,
+    error: str,
     exclude_fields: set[str] | None = None,
 ) -> str:
-    if isinstance(record, BaseModel):
-        payload = record.model_dump(mode="json")
-    else:
-        payload = to_jsonable_python(dict(record))
-    for field_name in {"content_hash", *(exclude_fields or set())}:
-        payload.pop(field_name, None)
-    return sha256_hex(canonical_json_bytes(payload))
+    return bounded_canonical_record_hash(
+        record,
+        maximum=maximum,
+        error=error,
+        exclude_fields=exclude_fields,
+    )
 
 
 def _require_canonical_unique(
@@ -210,15 +221,23 @@ class EvaluationMetricVector(_StrictFrozenModel):
     recovery_attempt_events: tuple[RecoveryAttemptEvent, ...] = Field(
         max_length=MAX_EVALUATION_ITEMS
     )
-    resource_usage: ResourceUsage | None
+    resource_usage: PhaseAResourceUsage | None
     final_validation: AssessmentOutcome | None
     missingness: tuple[MetricMissingness, ...] = Field(max_length=len(_NULLABLE_METRIC_FIELDS))
 
     @field_validator("task_score")
     @classmethod
     def require_finite_task_score(cls, value: Decimal | None) -> Decimal | None:
-        if value is not None and not value.is_finite():
-            raise ValueError("task_score must be finite")
+        return None if value is None else require_bounded_decimal(value)
+
+    @field_validator("resource_usage", mode="before")
+    @classmethod
+    def revalidate_resource_usage(
+        cls,
+        value: ResourceUsage | PhaseAResourceUsage | Mapping[str, object] | None,
+    ) -> PhaseAResourceUsage | Mapping[str, object] | None:
+        if isinstance(value, (ResourceUsage, PhaseAResourceUsage)):
+            return PhaseAResourceUsage.from_resource_usage(value)
         return value
 
     @field_validator("execution_failure_events", "recovery_attempt_events")
@@ -242,6 +261,11 @@ class EvaluationMetricVector(_StrictFrozenModel):
         actual = tuple(item.component for item in self.missingness)
         if actual != expected:
             raise ValueError("missingness must exactly describe every missing metric component")
+        require_canonical_byte_limit(
+            self,
+            maximum=MAX_EVALUATION_METRIC_CANONICAL_BYTES,
+            error="evaluation metrics canonical bytes exceed bound",
+        )
         return self
 
 
@@ -253,6 +277,11 @@ class ResourceUsageDelta(_StrictFrozenModel):
     elapsed_seconds: float = Field(strict=True, allow_inf_nan=False)
     tool_calls: int = Field(strict=True)
     human_interventions: int = Field(strict=True)
+
+    @field_validator("tokens", "tool_calls", "human_interventions")
+    @classmethod
+    def require_bounded_delta_integer(cls, value: int) -> int:
+        return require_bounded_integer(value, error="resource delta integers exceed bound")
 
 
 class EvaluationMetricDeltaVector(_StrictFrozenModel):
@@ -268,6 +297,25 @@ class EvaluationMetricDeltaVector(_StrictFrozenModel):
     missingness_deltas: tuple[MetricMissingnessDelta, ...] = Field(
         max_length=len(_NULLABLE_METRIC_FIELDS)
     )
+
+    @field_validator("task_score_delta")
+    @classmethod
+    def require_bounded_score_delta(cls, value: Decimal | None) -> Decimal | None:
+        return None if value is None else require_bounded_decimal(value)
+
+    @field_validator("execution_failure_event_count_delta", "recovery_attempt_event_count_delta")
+    @classmethod
+    def require_bounded_event_delta(cls, value: int) -> int:
+        return require_bounded_integer(value, error="event count deltas exceed bound")
+
+    @model_validator(mode="after")
+    def require_bounded_outer_record(self) -> Self:
+        require_canonical_byte_limit(
+            self,
+            maximum=MAX_EVALUATION_DELTA_CANONICAL_BYTES,
+            error="evaluation delta canonical bytes exceed bound",
+        )
+        return self
 
 
 class _GuidanceEvaluationProtocolPayload(_StrictFrozenModel):
@@ -296,7 +344,17 @@ class _GuidanceEvaluationProtocolPayload(_StrictFrozenModel):
         ge=0,
         le=MAX_EVALUATION_RANDOM_SEED,
     )
-    evaluation_budget: EvaluationBudget
+    evaluation_budget: PhaseAEvaluationBudget
+
+    @field_validator("evaluation_budget", mode="before")
+    @classmethod
+    def revalidate_evaluation_budget(
+        cls,
+        value: EvaluationBudget | PhaseAEvaluationBudget | Mapping[str, object],
+    ) -> PhaseAEvaluationBudget | Mapping[str, object]:
+        if isinstance(value, (EvaluationBudget, PhaseAEvaluationBudget)):
+            return PhaseAEvaluationBudget.from_evaluation_budget(value)
+        return value
 
     @field_validator("artifact_ids", "declared_distractor_artifact_ids")
     @classmethod
@@ -316,6 +374,11 @@ class _GuidanceEvaluationProtocolPayload(_StrictFrozenModel):
             or self.evaluation_budget.model_version != self.model_version
         ):
             raise ValueError("evaluation budget must bind the exact guidance model")
+        require_canonical_byte_limit(
+            self,
+            maximum=MAX_GUIDANCE_PROTOCOL_CANONICAL_BYTES,
+            error="guidance protocol canonical bytes exceed bound",
+        )
         return self
 
 
@@ -399,6 +462,11 @@ class _GuidanceEvaluationCellPayload(_StrictFrozenModel):
             raise ValueError(
                 "reference_missingness must exactly describe every missing cell reference"
             )
+        require_canonical_byte_limit(
+            self,
+            maximum=MAX_GUIDANCE_CELL_CANONICAL_BYTES,
+            error="guidance cell canonical bytes exceed bound",
+        )
         return self
 
 
@@ -441,6 +509,11 @@ class _GuidanceComparisonPayload(_StrictFrozenModel):
             raise ValueError("guidance comparability must exactly match confounds")
         if len(self.confounds) != len(set(self.confounds)):
             raise ValueError("guidance confounds must be unique")
+        require_canonical_byte_limit(
+            self,
+            maximum=MAX_GUIDANCE_COMPARISON_CANONICAL_BYTES,
+            error="guidance comparison canonical bytes exceed bound",
+        )
         return self
 
 
@@ -467,7 +540,12 @@ def guidance_protocol_hash(
     *,
     exclude_fields: set[str] | None = None,
 ) -> str:
-    return _canonical_record_hash(record, exclude_fields=exclude_fields)
+    return _canonical_record_hash(
+        record,
+        maximum=MAX_GUIDANCE_PROTOCOL_CANONICAL_BYTES,
+        error="guidance protocol canonical bytes exceed bound",
+        exclude_fields=exclude_fields,
+    )
 
 
 def guidance_cell_hash(
@@ -475,7 +553,12 @@ def guidance_cell_hash(
     *,
     exclude_fields: set[str] | None = None,
 ) -> str:
-    return _canonical_record_hash(record, exclude_fields=exclude_fields)
+    return _canonical_record_hash(
+        record,
+        maximum=MAX_GUIDANCE_CELL_CANONICAL_BYTES,
+        error="guidance cell canonical bytes exceed bound",
+        exclude_fields=exclude_fields,
+    )
 
 
 def guidance_comparison_hash(
@@ -483,7 +566,12 @@ def guidance_comparison_hash(
     *,
     exclude_fields: set[str] | None = None,
 ) -> str:
-    return _canonical_record_hash(record, exclude_fields=exclude_fields)
+    return _canonical_record_hash(
+        record,
+        maximum=MAX_GUIDANCE_COMPARISON_CANONICAL_BYTES,
+        error="guidance comparison canonical bytes exceed bound",
+        exclude_fields=exclude_fields,
+    )
 
 
 def guidance_identity_confounds(
@@ -595,8 +683,8 @@ def _changed(left: object | None, right: object | None) -> bool | None:
 
 
 def _resource_usage_delta(
-    left: ResourceUsage | None,
-    right: ResourceUsage | None,
+    left: PhaseAResourceUsage | None,
+    right: PhaseAResourceUsage | None,
 ) -> ResourceUsageDelta | None:
     if left is None or right is None:
         return None
