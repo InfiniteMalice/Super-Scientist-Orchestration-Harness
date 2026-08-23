@@ -9,7 +9,6 @@ import pytest
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from test_compiler import _actor, _assessment, _rebuild_step, _replace_step, valid_request
 
-from super_scientist.domain.cognition.grounding import assess_capability
 from super_scientist.domain.cognition.models import (
     CapabilityAssertion,
     CapabilityAssessment,
@@ -99,10 +98,21 @@ def _forged_verified_assessment_from_unknown() -> GroundedCapabilityAssessment:
         evidence_snapshot_hash=requirement.evidence_snapshot_hash,
     )
     forged_profile = grounded.profile.model_copy(update={"assertions": (forged_assertion,)})
+    forged_assessment = CapabilityAssessment(
+        profile_id=forged_profile.profile_id,
+        actor_id=forged_profile.actor_id,
+        requirement=requirement,
+        matched_assertion_ids=(forged_assertion.assertion_id,),
+        verified_assertion_ids=(forged_assertion.assertion_id,),
+        disposition=CapabilityDisposition.SATISFIED,
+        evidence_status=CapabilityEvidenceStatus.VERIFIED,
+        missing_dimensions=(),
+        failed_dimensions=(),
+    )
     forged = grounded.model_copy(
         update={
             "profile": forged_profile,
-            "assessment": assess_capability(forged_profile, requirement),
+            "assessment": forged_assessment,
         }
     )
     return forged.model_copy(
