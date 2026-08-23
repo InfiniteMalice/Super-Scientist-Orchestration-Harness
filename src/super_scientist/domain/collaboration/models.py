@@ -823,9 +823,11 @@ class _CollaborationStatePayload(_StrictFrozenModel):
         allowed_tools = set(session.budget.allowed_tool_ids)
         allowed_artifacts = set(session.allowed_artifacts)
         allowed_capabilities = {
-            assessment.requirement.capability_id
-            for member in session.cohort_plan.members
-            for assessment in member.assessments
+            requirement.capability_id
+            for requirement in (
+                session.cohort_plan.request_snapshot.required_capabilities
+                + session.cohort_plan.request_snapshot.preferred_capabilities
+            )
         }
         if len(self.topology_history) != len(self.topology_events) + 1:
             raise ValueError("topology history must exactly cover topology events")

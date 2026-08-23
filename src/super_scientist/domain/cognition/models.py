@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Any, ClassVar, Literal, Self
+from typing import Annotated, Any, ClassVar, Literal, NoReturn, Self
 
 from pydantic import (
     AfterValidator,
@@ -16,6 +16,8 @@ from pydantic import (
     model_validator,
 )
 from pydantic import ValidationError as PydanticValidationError
+from pydantic.config import ExtraValues
+from pydantic_core import to_jsonable_python
 
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.primitives import (
@@ -29,7 +31,15 @@ MAX_COGNITION_ITEMS = 64
 MAX_IDENTIFIER_LENGTH = 200
 MAX_TEXT_LENGTH = 2_000
 MAX_ERROR_CORRELATION_SAMPLES = 1_000_000
-MAX_COHORT_GROUNDING_INPUT_BYTES = 4 * 1024 * 1024
+MAX_COHORT_PLAN_BYTES = 8 * 1024 * 1024
+# A compact plan adds at most 4,096 fixed-size assessment hashes plus fewer than
+# 520 repetitions of already-bounded identifiers. Even at the six-byte JSON escape
+# width, their aggregate and all fixed structural metadata remain below 2 MiB.
+MAX_COHORT_COMPACT_DERIVED_BYTES = 2 * 1024 * 1024
+MAX_COHORT_GROUNDING_INPUT_BYTES = min(
+    4 * 1024 * 1024,
+    MAX_COHORT_PLAN_BYTES - MAX_COHORT_COMPACT_DERIVED_BYTES,
+)
 
 
 def _strip_text(value: object) -> object:
@@ -138,6 +148,30 @@ def _require_canonical_unique(
 def _content_hash(model: BaseModel, *, exclude: str = "content_hash") -> str:
     payload = model.model_dump(mode="json", exclude={exclude})
     return sha256_hex(canonical_json_bytes(payload))
+
+
+def _reject_cohort_plan(message: str) -> NoReturn:
+    error = PydanticValidationError.from_exception_data(
+        "CohortPlan",
+        [
+            {
+                "type": "value_error",
+                "loc": (),
+                "input": "[REDACTED]",
+                "ctx": {"error": ValueError(message)},
+            }
+        ],
+    )
+    raise error from None
+
+
+def _require_cohort_plan_byte_bound(value: object) -> None:
+    try:
+        serialized = canonical_json_bytes(to_jsonable_python(value))
+    except (TypeError, ValueError):
+        _reject_cohort_plan("cohort plan canonical serialization failed")
+    if len(serialized) > MAX_COHORT_PLAN_BYTES:
+        _reject_cohort_plan("cohort serialized plan exceeds the Phase A byte limit")
 
 
 class CapabilityEvidenceStatus(StrEnum):
@@ -605,6 +639,10 @@ class _CohortRequestPayload(_StrictFrozenModel):
         preferred_ids = {item.requirement_id for item in self.preferred_capabilities}
         if required_ids & preferred_ids:
             raise ValueError("required and preferred requirement IDs must be disjoint")
+        if len(self.required_capabilities) + len(self.preferred_capabilities) > (
+            MAX_COGNITION_ITEMS
+        ):
+            raise ValueError("cohort request permits at most 64 total requirements")
         return self
 
 
@@ -631,11 +669,12 @@ class CohortMember(_StrictFrozenModel):
     profile_content_hash: Sha256Hex
     required_satisfied: int = Field(strict=True, ge=0, le=MAX_COGNITION_ITEMS)
     preferred_satisfied: int = Field(strict=True, ge=0, le=MAX_COGNITION_ITEMS)
-    assessments: tuple[CapabilityAssessment, ...] = Field(max_length=MAX_COGNITION_ITEMS)
 
 
 class CohortRankedCandidate(CohortMember):
     """Grounded score evidence for every resolved candidate, selected or excluded."""
+
+    assessment_hashes: tuple[Sha256Hex, ...] = Field(max_length=MAX_COGNITION_ITEMS)
 
     @property
     def rank_key(self) -> tuple[int, int]:
@@ -644,13 +683,19 @@ class CohortRankedCandidate(CohortMember):
 
 class CapabilityCoverage(_StrictFrozenModel):
     schema_version: Literal[1] = 1
-    requirement: CapabilityRequirement
-    satisfying_actor_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_COGNITION_ITEMS)
+    requirement_id: BoundedIdentifier
+    satisfying_actor_indexes: tuple[
+        Annotated[int, Field(strict=True, ge=0, lt=MAX_COGNITION_ITEMS)], ...
+    ] = Field(max_length=MAX_COGNITION_ITEMS)
 
-    @field_validator("satisfying_actor_ids")
+    @field_validator("satisfying_actor_indexes")
     @classmethod
-    def require_canonical_actors(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        return _require_canonical_unique(values, field_name="satisfying_actor_ids")
+    def require_canonical_actor_indexes(cls, values: tuple[int, ...]) -> tuple[int, ...]:
+        if len(set(values)) != len(values) or values != tuple(sorted(values)):
+            raise ValueError(
+                "satisfying_actor_indexes must be unique and canonically sorted"
+            )
+        return values
 
 
 class CohortTieRank(_StrictFrozenModel):
@@ -685,7 +730,13 @@ class _CohortPlanPayload(_StrictFrozenModel):
     ranked_candidates: tuple[CohortRankedCandidate, ...] = Field(
         max_length=MAX_COGNITION_ITEMS
     )
-    tie_sets: tuple[tuple[BoundedIdentifier, ...], ...] = Field(
+    tie_sets: tuple[
+        Annotated[
+            tuple[BoundedIdentifier, ...],
+            Field(max_length=MAX_COGNITION_ITEMS),
+        ],
+        ...,
+    ] = Field(
         max_length=MAX_COGNITION_ITEMS
     )
     tie_group_ranks: tuple[CohortTieRank, ...] = Field(max_length=MAX_COGNITION_ITEMS)
@@ -726,6 +777,7 @@ class _CohortPlanPayload(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_cross_field_integrity(self) -> Self:
+        _require_cohort_plan_byte_bound(self)
         request = self.request_snapshot
         if (
             self.request_id != request.request_id
@@ -788,8 +840,14 @@ class _CohortPlanPayload(_StrictFrozenModel):
         if len({member.profile_content_hash for member in self.members}) != len(self.members):
             raise ValueError("cohort plan member profile content hashes must be unique")
 
-        coverage_ids = tuple(item.requirement.requirement_id for item in self.coverage)
+        coverage_ids = tuple(item.requirement_id for item in self.coverage)
         _require_canonical_unique(coverage_ids, field_name="cohort plan coverage")
+        if coverage_ids != tuple(
+            requirement.requirement_id for requirement in request.required_capabilities
+        ):
+            raise ValueError(
+                "cohort plan coverage must exactly match the required capability catalog"
+            )
         selected = set(member_actor_ids)
         excluded = set(self.excluded_actor_ids)
         if selected & excluded:
@@ -851,68 +909,26 @@ class _CohortPlanPayload(_StrictFrozenModel):
         if len(set(tie_rank_keys)) != len(tie_rank_keys):
             raise ValueError("cohort plan tie groups must retain one group per rank key")
 
-        coverage_by_id = {
-            item.requirement.requirement_id: item.requirement for item in self.coverage
-        }
-        def require_grounded_assessments(
-            candidate: CohortMember | CohortRankedCandidate,
-            *,
-            label: str,
-        ) -> None:
-            assessment_ids = tuple(
-                assessment.requirement.requirement_id
-                for assessment in candidate.assessments
-            )
-            if len(set(assessment_ids)) != len(assessment_ids):
-                raise ValueError(f"{label} assessments must have unique requirement IDs")
-            if assessment_ids[: len(coverage_ids)] != coverage_ids:
-                raise ValueError(
-                    f"{label} assessments must begin with canonical required coverage"
-                )
-            if assessment_ids[len(coverage_ids) :] != tuple(
-                sorted(assessment_ids[len(coverage_ids) :])
-            ):
-                raise ValueError(f"{label} preferred assessments must be canonically sorted")
-            for assessment in candidate.assessments:
-                if (
-                    assessment.profile_id != candidate.profile_id
-                    or assessment.actor_id != candidate.actor_id
-                ):
-                    raise ValueError(
-                        f"{label} profile identity must match every retained assessment"
-                    )
-                requirement_id = assessment.requirement.requirement_id
-                if (
-                    requirement_id in coverage_by_id
-                    and assessment.requirement != coverage_by_id[requirement_id]
-                ):
-                    raise ValueError(
-                        f"{label} required assessment must match retained coverage"
-                    )
-            required_count = sum(
-                assessment.disposition is CapabilityDisposition.SATISFIED
-                for assessment in candidate.assessments[: len(coverage_ids)]
-            )
-            preferred_count = sum(
-                assessment.disposition is CapabilityDisposition.SATISFIED
-                for assessment in candidate.assessments[len(coverage_ids) :]
-            )
-            if (
-                candidate.required_satisfied != required_count
-                or candidate.preferred_satisfied != preferred_count
-            ):
-                raise ValueError(f"{label} assessment counts must match dispositions")
-
-        for member in self.members:
-            require_grounded_assessments(member, label="cohort member")
-
+        requirement_count = len(request.required_capabilities) + len(
+            request.preferred_capabilities
+        )
         for candidate in self.ranked_candidates:
-            require_grounded_assessments(candidate, label="cohort ranked candidate")
+            if len(candidate.assessment_hashes) != requirement_count:
+                raise ValueError(
+                    "cohort ranked candidate assessment hashes must exactly cover the "
+                    "request requirement catalog"
+                )
 
         ranked_by_actor = {candidate.actor_id: candidate for candidate in self.ranked_candidates}
         for member in self.members:
             ranked_candidate = ranked_by_actor[member.actor_id]
-            if member.model_dump(mode="python") != ranked_candidate.model_dump(mode="python"):
+            if (
+                member.actor_id != ranked_candidate.actor_id
+                or member.profile_id != ranked_candidate.profile_id
+                or member.profile_content_hash != ranked_candidate.profile_content_hash
+                or member.required_satisfied != ranked_candidate.required_satisfied
+                or member.preferred_satisfied != ranked_candidate.preferred_satisfied
+            ):
                 raise ValueError(
                     "cohort member must exactly match its grounded ranking evidence"
                 )
@@ -942,25 +958,24 @@ class _CohortPlanPayload(_StrictFrozenModel):
             )
 
         for coverage in self.coverage:
-            if not set(coverage.satisfying_actor_ids).issubset(selected):
-                raise ValueError("cohort coverage must reference selected cohort actors")
-            expected_satisfying = tuple(
-                member.actor_id
-                for member in self.members
-                if any(
-                    assessment.requirement.requirement_id
-                    == coverage.requirement.requirement_id
-                    and assessment.disposition is CapabilityDisposition.SATISFIED
-                    for assessment in member.assessments
+            if any(
+                index >= len(request.candidate_actor_ids)
+                for index in coverage.satisfying_actor_indexes
+            ):
+                raise ValueError(
+                    "cohort coverage actor indexes must reference the candidate roster"
                 )
+            satisfying_actor_ids = tuple(
+                request.candidate_actor_ids[index]
+                for index in coverage.satisfying_actor_indexes
             )
-            if coverage.satisfying_actor_ids != tuple(sorted(expected_satisfying)):
-                raise ValueError("cohort coverage must exactly match member assessments")
+            if not set(satisfying_actor_ids).issubset(selected):
+                raise ValueError("cohort coverage must reference selected cohort actors")
 
         expected_unresolved = tuple(
-            coverage.requirement.requirement_id
+            coverage.requirement_id
             for coverage in self.coverage
-            if not coverage.satisfying_actor_ids
+            if not coverage.satisfying_actor_indexes
         )
         if self.unresolved_requirement_ids != expected_unresolved:
             raise ValueError("unresolved requirements must exactly match uncovered requirements")
@@ -1003,6 +1018,56 @@ class _CohortPlanPayload(_StrictFrozenModel):
 
 class CohortPlan(_CohortPlanPayload):
     content_hash: Sha256Hex
+
+    @classmethod
+    def model_validate(
+        cls,
+        obj: Any,
+        *,
+        strict: bool | None = None,
+        extra: ExtraValues | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        _require_cohort_plan_byte_bound(obj)
+        return super().model_validate(
+            obj,
+            strict=strict,
+            extra=extra,
+            from_attributes=from_attributes,
+            context=context,
+            by_alias=by_alias,
+            by_name=by_name,
+        )
+
+    @classmethod
+    def model_validate_json(
+        cls,
+        json_data: str | bytes | bytearray,
+        *,
+        strict: bool | None = None,
+        extra: ExtraValues | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        raw_size = (
+            len(json_data.encode("utf-8"))
+            if isinstance(json_data, str)
+            else len(json_data)
+        )
+        if raw_size > MAX_COHORT_PLAN_BYTES:
+            _reject_cohort_plan("cohort serialized plan exceeds the Phase A byte limit")
+        return super().model_validate_json(
+            json_data,
+            strict=strict,
+            extra=extra,
+            context=context,
+            by_alias=by_alias,
+            by_name=by_name,
+        )
 
     @classmethod
     def build(cls, **values: Any) -> CohortPlan:

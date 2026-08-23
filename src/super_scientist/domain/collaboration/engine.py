@@ -212,10 +212,11 @@ def advance_collaboration(
     if contribution.contribution_id in {item.contribution_id for item in state.contributions}:
         raise ValueError("peer contribution identifier must be unique")
     capability_ids = {
-        assessment.requirement.capability_id
-        for member in session.cohort_plan.members
-        if member.actor_id == request.recipient_id
-        for assessment in member.assessments
+        requirement.capability_id
+        for requirement in (
+            session.cohort_plan.request_snapshot.required_capabilities
+            + session.cohort_plan.request_snapshot.preferred_capabilities
+        )
     }
     if request.requested_capability_id not in capability_ids:
         raise ValueError("peer request capability is not declared for the expected peer")

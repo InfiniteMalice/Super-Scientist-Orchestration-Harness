@@ -16,6 +16,7 @@ from super_scientist.domain.cognition.models import (
     CohortRequest,
     CohortTieRank,
 )
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,10 @@ def assess_capability(
         and item.evidence_snapshot_hash == requirement.evidence_snapshot_hash
     )
     return CapabilityAssessment.from_matches(profile, requirement, matching, verified)
+
+
+def _assessment_hash(assessment: CapabilityAssessment) -> str:
+    return sha256_hex(canonical_json_bytes(assessment.model_dump(mode="json")))
 
 
 def _derive_cohort(
@@ -116,7 +121,7 @@ def _derive_cohort(
             profile_content_hash=profile.content_hash,
             required_satisfied=score[0],
             preferred_satisfied=score[1],
-            assessments=assessments,
+            assessment_hashes=tuple(_assessment_hash(item) for item in assessments),
         )
         for score, profile, assessments in ranked
     )
@@ -141,7 +146,6 @@ def _derive_cohort(
             profile_content_hash=profile.content_hash,
             required_satisfied=score[0],
             preferred_satisfied=score[1],
-            assessments=assessments,
         )
         for score, profile, assessments in selected
     )
@@ -154,25 +158,25 @@ def _derive_cohort(
         )
     )
 
+    candidate_index_by_actor = {
+        actor_id: index for index, actor_id in enumerate(request.candidate_actor_ids)
+    }
     coverage = tuple(
         CapabilityCoverage(
-            requirement=requirement,
-            satisfying_actor_ids=tuple(
+            requirement_id=requirement.requirement_id,
+            satisfying_actor_indexes=tuple(
                 sorted(
-                    member.actor_id
-                    for member in members
-                    if any(
-                        assessment.requirement.requirement_id == requirement.requirement_id
-                        and assessment.disposition is CapabilityDisposition.SATISFIED
-                        for assessment in member.assessments
-                    )
+                    candidate_index_by_actor[profile.actor_id]
+                    for _score, profile, assessments in selected
+                    if assessments[requirement_index].disposition
+                    is CapabilityDisposition.SATISFIED
                 )
             ),
         )
-        for requirement in request.required_capabilities
+        for requirement_index, requirement in enumerate(request.required_capabilities)
     )
     unresolved = tuple(
-        item.requirement.requirement_id for item in coverage if not item.satisfying_actor_ids
+        item.requirement_id for item in coverage if not item.satisfying_actor_indexes
     )
     return _CohortDerivation(
         resolved_candidate_profiles=candidates,
