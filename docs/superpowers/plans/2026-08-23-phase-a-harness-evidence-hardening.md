@@ -124,6 +124,35 @@ the 256-cell maximum is not operationally usable.
 - [x] Run focused harness, campaign, protected leakage, strict parsing, Phase A, Ruff, strict mypy,
   authority scan, `git diff --check`, and both performance probes.
 
+## Round 5: Strict Compact-Projection Revalidation
+
+### Problem and invariant
+
+Pydantic preserves the concrete class when `model_copy()` or `model_construct()` bypasses model
+validators. The round-4 projection methods treated an exact Python class as proof of validation,
+so a copied freshness or assessment status, or a nested copied trace mutation, could retain its old
+canonical hash and enter the compact index.
+
+At each trusted full-to-compact projection boundary, the domain must serialize every supplied full
+record to Python data and strictly parse that data back into its declared domain type. Canonical
+model validators must recompute IDs and content hashes before the projection copies any receipt or
+status. Projection failures must use fixed errors and must not include attacker-controlled values.
+Matrix analysis must continue to consume compact records and must not recursively validate full
+snapshots.
+
+### TDD and verification
+
+- [x] Witness RED for `model_copy()` changing `TraceFreshness.status` to `CURRENT` while retaining
+  the old hash.
+- [x] Witness RED for `model_construct()` changing `RewardValidityAssessment.status` to `VALID`
+  while retaining the old hash.
+- [x] Witness RED for a copied `HarnessExecutionTrace` with removed context artifacts and its old
+  content hash.
+- [x] Strictly round-trip protocol, coordinate, trace, freshness, and assessment at projection.
+- [x] Preserve fixed safe projection errors, one-time analysis joins, and both performance limits.
+- [x] Run focused harness/campaign/protected/strict parsing, the Phase A-compatible suite, Ruff,
+  strict mypy, authority scan, public import probe, and `git diff --check`.
+
 ## Global Constraints
 
 - Preserve protected-evaluation and `HarnessCampaign` behavior.

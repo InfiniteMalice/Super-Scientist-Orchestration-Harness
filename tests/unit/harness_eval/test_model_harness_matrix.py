@@ -10,7 +10,6 @@ from pydantic import ValidationError
 
 from super_scientist.domain.harness_eval.evidence_chains import (
     HarnessEvidenceSnapshotIndex,
-    HarnessEvidenceSnapshotRecord,
 )
 from super_scientist.domain.harness_eval.guidance import EvaluationMetricVector
 from super_scientist.domain.harness_eval.matrix import (
@@ -226,12 +225,7 @@ def _evidence_index(protocol: ModelHarnessProtocol) -> HarnessEvidenceSnapshotIn
         records=tuple(
             sorted(
                 (
-                    HarnessEvidenceSnapshotRecord.from_snapshots(
-                        chain=item.chain,  # type: ignore[union-attr]
-                        trace=item.trace,  # type: ignore[union-attr]
-                        freshness=item.freshness,  # type: ignore[union-attr]
-                        assessment=item.assessment,  # type: ignore[union-attr]
-                    )
+                    item.record  # type: ignore[union-attr]
                     for item in evidence
                 ),
                 key=lambda item: item.chain_receipt.record_id,

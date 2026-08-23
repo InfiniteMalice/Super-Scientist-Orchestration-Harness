@@ -32,6 +32,22 @@ class _StrictFrozenModel(BaseModel):
     )
 
 
+def _strictly_revalidate_snapshot[SnapshotT: BaseModel](
+    record: object,
+    expected_type: type[SnapshotT],
+) -> SnapshotT:
+    """Reject copied or constructed instances that bypassed canonical validators."""
+    if type(record) is not expected_type:
+        raise ValueError("projection requires canonical validated snapshots")
+    try:
+        return expected_type.model_validate(
+            record.model_dump(mode="python"),
+            strict=True,
+        )
+    except (TypeError, ValueError):
+        raise ValueError("projection requires canonical validated snapshots") from None
+
+
 class _HarnessCellEvidenceChainPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     chain_id: BoundedTraceIdentifier
@@ -96,14 +112,32 @@ class HarnessCellEvidenceChain(_HarnessCellEvidenceChainPayload):
         freshness: TraceFreshness,
         assessment: RewardValidityAssessment,
     ) -> Self:
-        if (
-            type(protocol) is not ModelHarnessProtocol
-            or type(coordinate) is not ModelHarnessCoordinate
-            or type(trace) is not HarnessExecutionTrace
-            or type(freshness) is not TraceFreshness
-            or type(assessment) is not RewardValidityAssessment
-        ):
-            raise TypeError("cell evidence snapshots require exact validated domain types")
+        validated_protocol = _strictly_revalidate_snapshot(protocol, ModelHarnessProtocol)
+        validated_coordinate = _strictly_revalidate_snapshot(coordinate, ModelHarnessCoordinate)
+        validated_trace = _strictly_revalidate_snapshot(trace, HarnessExecutionTrace)
+        validated_freshness = _strictly_revalidate_snapshot(freshness, TraceFreshness)
+        validated_assessment = _strictly_revalidate_snapshot(
+            assessment,
+            RewardValidityAssessment,
+        )
+        return cls._from_validated_snapshots(
+            protocol=validated_protocol,
+            coordinate=validated_coordinate,
+            trace=validated_trace,
+            freshness=validated_freshness,
+            assessment=validated_assessment,
+        )
+
+    @classmethod
+    def _from_validated_snapshots(
+        cls,
+        *,
+        protocol: ModelHarnessProtocol,
+        coordinate: ModelHarnessCoordinate,
+        trace: HarnessExecutionTrace,
+        freshness: TraceFreshness,
+        assessment: RewardValidityAssessment,
+    ) -> Self:
         validated_protocol = protocol
         validated_coordinate = coordinate
         validated_trace = trace
@@ -208,46 +242,66 @@ class HarnessEvidenceSnapshotRecord(_HarnessEvidenceSnapshotRecordPayload):
         freshness: TraceFreshness,
         assessment: RewardValidityAssessment,
     ) -> Self:
-        if (
-            type(chain) is not HarnessCellEvidenceChain
-            or type(trace) is not HarnessExecutionTrace
-            or type(freshness) is not TraceFreshness
-            or type(assessment) is not RewardValidityAssessment
-        ):
-            raise TypeError("snapshot projection requires exact validated domain types")
+        validated_chain = _strictly_revalidate_snapshot(chain, HarnessCellEvidenceChain)
+        validated_trace = _strictly_revalidate_snapshot(trace, HarnessExecutionTrace)
+        validated_freshness = _strictly_revalidate_snapshot(freshness, TraceFreshness)
+        validated_assessment = _strictly_revalidate_snapshot(
+            assessment,
+            RewardValidityAssessment,
+        )
+        return cls._from_validated_snapshots(
+            chain=validated_chain,
+            trace=validated_trace,
+            freshness=validated_freshness,
+            assessment=validated_assessment,
+        )
+
+    @classmethod
+    def _from_validated_snapshots(
+        cls,
+        *,
+        chain: HarnessCellEvidenceChain,
+        trace: HarnessExecutionTrace,
+        freshness: TraceFreshness,
+        assessment: RewardValidityAssessment,
+    ) -> Self:
+        validated_chain = chain
+        validated_trace = trace
+        validated_freshness = freshness
+        validated_assessment = assessment
         trace_receipt = EvidenceReceipt(
-            record_id=trace.trace_id,
-            schema_version=trace.schema_version,
-            content_hash=trace.content_hash,
+            record_id=validated_trace.trace_id,
+            schema_version=validated_trace.schema_version,
+            content_hash=validated_trace.content_hash,
         )
         freshness_receipt = EvidenceReceipt(
-            record_id=freshness.freshness_id,
-            schema_version=freshness.schema_version,
-            content_hash=freshness.content_hash,
+            record_id=validated_freshness.freshness_id,
+            schema_version=validated_freshness.schema_version,
+            content_hash=validated_freshness.content_hash,
         )
         assessment_receipt = EvidenceReceipt(
-            record_id=assessment.assessment_id,
-            schema_version=assessment.schema_version,
-            content_hash=assessment.content_hash,
+            record_id=validated_assessment.assessment_id,
+            schema_version=validated_assessment.schema_version,
+            content_hash=validated_assessment.content_hash,
         )
         if (
-            chain.trace_receipt != trace_receipt
-            or chain.freshness_receipt != freshness_receipt
-            or chain.assessment_receipt != assessment_receipt
-            or freshness.trace_id != trace.trace_id
-            or freshness.trace_hash != trace.content_hash
-            or assessment.trace_id != trace.trace_id
-            or assessment.trace_hash != trace.content_hash
-            or assessment.freshness_hash != freshness.content_hash
+            validated_chain.trace_receipt != trace_receipt
+            or validated_chain.freshness_receipt != freshness_receipt
+            or validated_chain.assessment_receipt != assessment_receipt
+            or validated_freshness.trace_id != validated_trace.trace_id
+            or validated_freshness.trace_hash != validated_trace.content_hash
+            or validated_assessment.trace_id != validated_trace.trace_id
+            or validated_assessment.trace_hash != validated_trace.content_hash
+            or validated_assessment.freshness_hash != validated_freshness.content_hash
         ):
             raise ValueError("snapshot projection must match the exact compact evidence chain")
         return cls.build(
-            chain_receipt=harness_cell_evidence_chain_receipt(chain),
+            chain_receipt=harness_cell_evidence_chain_receipt(validated_chain),
             trace_receipt=trace_receipt,
             freshness_receipt=freshness_receipt,
             assessment_receipt=assessment_receipt,
-            freshness_status=freshness.status,
-            assessment_status=assessment.status,
+            freshness_status=validated_freshness.status,
+            assessment_status=validated_assessment.status,
         )
 
     @model_validator(mode="after")
@@ -261,6 +315,39 @@ def _snapshot_record_hash(record: BaseModel | Mapping[str, object]) -> str:
     payload = record.model_dump(mode="json") if isinstance(record, BaseModel) else dict(record)
     payload.pop("content_hash", None)
     return sha256_hex(canonical_json_bytes(payload))
+
+
+def project_harness_evidence_snapshots(
+    *,
+    protocol: ModelHarnessProtocol,
+    coordinate: ModelHarnessCoordinate,
+    trace: HarnessExecutionTrace,
+    freshness: TraceFreshness,
+    assessment: RewardValidityAssessment,
+) -> tuple[HarnessCellEvidenceChain, HarnessEvidenceSnapshotRecord]:
+    """Strictly validate one full chain once, then produce both compact projections."""
+    validated_protocol = _strictly_revalidate_snapshot(protocol, ModelHarnessProtocol)
+    validated_coordinate = _strictly_revalidate_snapshot(coordinate, ModelHarnessCoordinate)
+    validated_trace = _strictly_revalidate_snapshot(trace, HarnessExecutionTrace)
+    validated_freshness = _strictly_revalidate_snapshot(freshness, TraceFreshness)
+    validated_assessment = _strictly_revalidate_snapshot(
+        assessment,
+        RewardValidityAssessment,
+    )
+    chain = HarnessCellEvidenceChain._from_validated_snapshots(
+        protocol=validated_protocol,
+        coordinate=validated_coordinate,
+        trace=validated_trace,
+        freshness=validated_freshness,
+        assessment=validated_assessment,
+    )
+    record = HarnessEvidenceSnapshotRecord._from_validated_snapshots(
+        chain=chain,
+        trace=validated_trace,
+        freshness=validated_freshness,
+        assessment=validated_assessment,
+    )
+    return chain, record
 
 
 class _HarnessEvidenceSnapshotIndexPayload(_StrictFrozenModel):
@@ -333,4 +420,5 @@ __all__ = [
     "HarnessEvidenceSnapshotRecord",
     "harness_cell_evidence_chain_hash",
     "harness_cell_evidence_chain_receipt",
+    "project_harness_evidence_snapshots",
 ]

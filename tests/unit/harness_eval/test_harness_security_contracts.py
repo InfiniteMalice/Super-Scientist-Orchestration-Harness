@@ -14,6 +14,7 @@ from super_scientist.domain.harness_eval.evidence_chains import (
     HarnessEvidenceSnapshotIndex,
     HarnessEvidenceSnapshotRecord,
     harness_cell_evidence_chain_receipt,
+    project_harness_evidence_snapshots,
 )
 from super_scientist.domain.harness_eval.guidance import (
     RecoveryAttemptEvent,
@@ -45,6 +46,7 @@ from super_scientist.domain.harness_eval.rewards import (
     RewardHackingFinding,
     RewardHackingFindingStatus,
     RewardValidityAssessment,
+    RewardValidityStatus,
     VerificationOutcomeEvidence,
     VerificationOutcomeStatus,
     assess_reward_validity,
@@ -958,6 +960,7 @@ def test_resolved_inventory_contracts_are_publicly_exported() -> None:
 @dataclass(frozen=True)
 class _MatrixEvidenceFixture:
     chain: HarnessCellEvidenceChain
+    record: HarnessEvidenceSnapshotRecord
     trace: HarnessExecutionTrace
     freshness: TraceFreshness
     assessment: RewardValidityAssessment
@@ -969,15 +972,7 @@ def _snapshot_index(
     return HarnessEvidenceSnapshotIndex.build(
         records=tuple(
             sorted(
-                (
-                    HarnessEvidenceSnapshotRecord.from_snapshots(
-                        chain=item.chain,
-                        trace=item.trace,
-                        freshness=item.freshness,
-                        assessment=item.assessment,
-                    )
-                    for item in evidence
-                ),
+                (item.record for item in evidence),
                 key=lambda item: item.chain_receipt.record_id,
             )
         ),
@@ -1072,14 +1067,16 @@ def _matrix_evidence_chain(
         diagnostic_coverage=coverage,
         inventory=inventory,
     )
+    chain, record = project_harness_evidence_snapshots(
+        protocol=protocol,
+        coordinate=coordinate,
+        trace=trace,
+        freshness=freshness,
+        assessment=assessment,
+    )
     return _MatrixEvidenceFixture(
-        chain=HarnessCellEvidenceChain.from_snapshots(
-            protocol=protocol,
-            coordinate=coordinate,
-            trace=trace,
-            freshness=freshness,
-            assessment=assessment,
-        ),
+        chain=chain,
+        record=record,
         trace=trace,
         freshness=freshness,
         assessment=assessment,
@@ -1180,6 +1177,70 @@ def test_cell_evidence_chain_rejects_freshness_or_assessment_substitution(
 
     with pytest.raises(ValueError, match="exact trace"):
         HarnessCellEvidenceChain.from_snapshots(**values)  # type: ignore[arg-type]
+
+
+def test_snapshot_projection_rejects_model_copy_freshness_status_spoof() -> None:
+    from tests.unit.harness_eval.test_model_harness_matrix import _protocol
+
+    protocol = _protocol()
+    evidence = _matrix_evidence_chain(
+        protocol,
+        protocol.expected_grid[0],
+        0,
+        stale_environment=True,
+    )
+    assert evidence.freshness.status is TraceFreshnessStatus.STALE
+    copied = evidence.freshness.model_copy(update={"status": TraceFreshnessStatus.CURRENT})
+
+    with pytest.raises(ValueError, match="canonical validated snapshots"):
+        HarnessEvidenceSnapshotRecord.from_snapshots(
+            chain=evidence.chain,
+            trace=evidence.trace,
+            freshness=copied,
+            assessment=evidence.assessment,
+        )
+
+
+def test_snapshot_projection_rejects_model_construct_assessment_status_spoof() -> None:
+    from tests.unit.harness_eval.test_model_harness_matrix import _protocol
+
+    protocol = _protocol()
+    evidence = _matrix_evidence_chain(
+        protocol,
+        protocol.expected_grid[0],
+        0,
+        stale_environment=True,
+    )
+    assert evidence.assessment.status is RewardValidityStatus.INVALID
+    constructed = RewardValidityAssessment.model_construct(
+        **(evidence.assessment.__dict__ | {"status": RewardValidityStatus.VALID})
+    )
+
+    with pytest.raises(ValueError, match="canonical validated snapshots"):
+        HarnessEvidenceSnapshotRecord.from_snapshots(
+            chain=evidence.chain,
+            trace=evidence.trace,
+            freshness=evidence.freshness,
+            assessment=constructed,
+        )
+
+
+def test_chain_projection_rejects_nested_trace_model_copy_with_retained_hash() -> None:
+    from tests.unit.harness_eval.test_model_harness_matrix import _protocol
+
+    protocol = _protocol()
+    evidence = _matrix_evidence_chain(protocol, protocol.expected_grid[0], 0)
+    copied = evidence.trace.model_copy(update={"context_artifacts": ()})
+    assert copied.content_hash == evidence.trace.content_hash
+
+    with pytest.raises(ValueError, match="canonical validated snapshots"):
+        HarnessCellEvidenceChain.from_snapshots(
+            protocol=protocol,
+            coordinate=protocol.expected_grid[0],
+            trace=copied,
+            freshness=evidence.freshness,
+            assessment=evidence.assessment,
+        )
 
 
 def test_matrix_receipt_spoof_suppresses_analysis() -> None:

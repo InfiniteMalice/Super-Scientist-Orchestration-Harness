@@ -5,6 +5,7 @@ from super_scientist.domain.harness_eval.evidence_chains import (
     HarnessEvidenceSnapshotIndex,
     HarnessEvidenceSnapshotRecord,
     harness_cell_evidence_chain_receipt,
+    project_harness_evidence_snapshots,
 )
 from super_scientist.domain.harness_eval.guidance import (
     EvaluationConfoundCode,
@@ -243,6 +244,7 @@ __all__ = [
     "model_harness_comparison_hash",
     "model_harness_protocol_hash",
     "partition_manifest_hash",
+    "project_harness_evidence_snapshots",
     "reward_hacking_diagnostic_status_snapshot_hash",
     "reward_validity_receipt",
     "trace_freshness",
