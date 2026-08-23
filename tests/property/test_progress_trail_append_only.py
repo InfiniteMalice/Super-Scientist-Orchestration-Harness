@@ -12,11 +12,11 @@ from sqlalchemy.exc import IntegrityError
 
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.providers.storage import domain_records, schema
+from super_scientist.providers.storage.append_only import AppendOnlyRecordRepository
 from super_scientist.providers.storage.database import create_database_engine, upgrade_database
 from super_scientist.providers.storage.domain_records import (
     EvidenceTrailHeadRepository,
     ProgressHeadRepository,
-    _AppendOnlyRecordRepository,
 )
 from super_scientist.providers.storage.repositories import StorageIntegrityError
 
@@ -39,7 +39,7 @@ NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
 
 
 class _ProgressPlanStorageProbe(BaseModel):
-    """Test-only probe for the private record engine; not a progress domain contract."""
+    """Test-only probe for the append-only record engine; not a progress domain contract."""
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
@@ -560,13 +560,13 @@ def _engine_for_path(database_path: Path) -> Engine:
 
 def _progress_plan_repository(
     tmp_path: Path,
-) -> tuple[_AppendOnlyRecordRepository[_ProgressPlanStorageProbe], Connection, Engine]:
+) -> tuple[AppendOnlyRecordRepository[_ProgressPlanStorageProbe], Connection, Engine]:
     engine = _engine(tmp_path, "raw-progress-plan.db")
     with engine.begin() as writer:
         _insert_research_run(writer, "run-1")
     connection = engine.connect()
     return (
-        _AppendOnlyRecordRepository(
+        AppendOnlyRecordRepository(
             connection,
             table=schema.progress_plans,
             model_type=_ProgressPlanStorageProbe,
@@ -580,7 +580,7 @@ def _progress_plan_repository(
 
 def _evidence_trail_version_repository(
     tmp_path: Path,
-) -> tuple[_AppendOnlyRecordRepository[_EvidenceTrailVersionStorageProbe], Connection, Engine]:
+) -> tuple[AppendOnlyRecordRepository[_EvidenceTrailVersionStorageProbe], Connection, Engine]:
     engine = _engine(tmp_path, "raw-evidence-trail-version.db")
     with engine.begin() as writer:
         _insert_claim_version(
@@ -591,7 +591,7 @@ def _evidence_trail_version_repository(
         )
     connection = engine.connect()
     return (
-        _AppendOnlyRecordRepository(
+        AppendOnlyRecordRepository(
             connection,
             table=schema.evidence_trail_versions,
             model_type=_EvidenceTrailVersionStorageProbe,

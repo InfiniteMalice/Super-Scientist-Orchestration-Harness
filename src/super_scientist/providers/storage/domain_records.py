@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
-from dataclasses import dataclass
-from datetime import datetime
+from collections.abc import Mapping
 from decimal import Decimal
 from enum import StrEnum
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
-from sqlalchemy import Connection, Table, insert, select
+from pydantic import Field, TypeAdapter, field_validator, model_validator
+from sqlalchemy import Connection, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from super_scientist.domain.behavioral_rules.models import (
@@ -51,8 +49,6 @@ from super_scientist.domain.primitives import (
     Sha256Hex,
     StableIdentifier,
     UtcTimestamp,
-    canonical_json_bytes,
-    sha256_hex,
 )
 from super_scientist.domain.progress.models import (
     BudgetAllocation,
@@ -64,6 +60,16 @@ from super_scientist.domain.progress.models import (
 )
 from super_scientist.domain.representations.models import TransformationKind
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
+from super_scientist.providers.storage.append_only import (
+    AppendOnlyRecordRepository,
+    OrderedReferenceBinding,
+    ReferencedAppendOnlyRecordRepository,
+    StrictFrozenStorageRecord,
+    _require_integrity,
+    _stored_integer,
+    _stored_relationship_value,
+    _stored_string,
+)
 from super_scientist.providers.storage.repositories import StorageIntegrityError
 from super_scientist.providers.storage.schema import (
     behavior_rule_link_versions,
@@ -144,11 +150,8 @@ from super_scientist.providers.storage.schema import (
     verification_results,
 )
 
-TIMESTAMP_ADAPTER: TypeAdapter[UtcTimestamp] = TypeAdapter(UtcTimestamp)
 STABLE_IDENTIFIER_ADAPTER: TypeAdapter[StableIdentifier] = TypeAdapter(StableIdentifier)
 SEMANTIC_VERSION_ADAPTER: TypeAdapter[SemanticVersion] = TypeAdapter(SemanticVersion)
-
-type _RelationshipStorageType = type[str] | type[int]
 
 
 class PrimitiveStatus(StrEnum):
@@ -233,11 +236,7 @@ class AdmissionDecisionOutcome(StrEnum):
     ABSTAIN = "ABSTAIN"
 
 
-class _StrictFrozenStorageRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-
-class MetricValueRecord(_StrictFrozenStorageRecord):
+class MetricValueRecord(StrictFrozenStorageRecord):
     metric_id: StableIdentifier
     value: Decimal
 
@@ -249,7 +248,7 @@ class MetricValueRecord(_StrictFrozenStorageRecord):
         return value
 
 
-class BehaviorRuleLinkVersionRecord(_StrictFrozenStorageRecord):
+class BehaviorRuleLinkVersionRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     link_version_id: StableIdentifier
     behavior_id: StableIdentifier
@@ -261,7 +260,7 @@ class BehaviorRuleLinkVersionRecord(_StrictFrozenStorageRecord):
     governing_policy_hash: Sha256Hex
 
 
-class HandbookVerificationRecord(_StrictFrozenStorageRecord):
+class HandbookVerificationRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     verification_id: StableIdentifier
     manifest_hash: Sha256Hex
@@ -280,7 +279,7 @@ class HandbookVerificationRecord(_StrictFrozenStorageRecord):
         return _require_unique_references(value, "source_hashes")
 
 
-class HarnessCampaignRecord(_StrictFrozenStorageRecord):
+class HarnessCampaignRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     campaign_id: StableIdentifier
     version: int = Field(ge=1)
@@ -312,7 +311,7 @@ class HarnessCampaignRecord(_StrictFrozenStorageRecord):
         return value
 
 
-class HarnessPartitionManifestRecord(_StrictFrozenStorageRecord):
+class HarnessPartitionManifestRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     partition_manifest_id: StableIdentifier
     campaign_id: StableIdentifier
@@ -330,7 +329,7 @@ class HarnessPartitionManifestRecord(_StrictFrozenStorageRecord):
         return _require_unique_references(value, "task_ids")
 
 
-class HarnessBudgetRecord(_StrictFrozenStorageRecord):
+class HarnessBudgetRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     budget_id: StableIdentifier
     campaign_id: StableIdentifier
@@ -364,7 +363,7 @@ class HarnessBudgetRecord(_StrictFrozenStorageRecord):
         return value
 
 
-class HarnessObservationRecord(_StrictFrozenStorageRecord):
+class HarnessObservationRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     observation_id: StableIdentifier
     campaign_id: StableIdentifier
@@ -383,7 +382,7 @@ class HarnessObservationRecord(_StrictFrozenStorageRecord):
     governing_policy_hash: Sha256Hex
 
 
-class HarnessMetricRecord(_StrictFrozenStorageRecord):
+class HarnessMetricRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     result_id: StableIdentifier
     campaign_id: StableIdentifier
@@ -407,7 +406,7 @@ class HarnessMetricRecord(_StrictFrozenStorageRecord):
         return value
 
 
-class HarnessConfoundRecord(_StrictFrozenStorageRecord):
+class HarnessConfoundRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     confound_id: StableIdentifier
     campaign_id: StableIdentifier
@@ -420,7 +419,7 @@ class HarnessConfoundRecord(_StrictFrozenStorageRecord):
     governing_policy_hash: Sha256Hex
 
 
-class HarnessDecisionRecord(_StrictFrozenStorageRecord):
+class HarnessDecisionRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     decision_id: StableIdentifier
     campaign_id: StableIdentifier
@@ -449,7 +448,7 @@ def _require_unique_references(value: tuple[str, ...], field_name: str) -> tuple
     return value
 
 
-class PrimitiveVersionRecord(_StrictFrozenStorageRecord):
+class PrimitiveVersionRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     primitive_version_id: StableIdentifier
     primitive_id: StableIdentifier
@@ -497,7 +496,7 @@ class PrimitiveVersionRecord(_StrictFrozenStorageRecord):
         return self
 
 
-class PrimitiveEvaluationRecord(_StrictFrozenStorageRecord):
+class PrimitiveEvaluationRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     primitive_evaluation_id: StableIdentifier
     primitive_version_id: StableIdentifier
@@ -524,7 +523,7 @@ class PrimitiveEvaluationRecord(_StrictFrozenStorageRecord):
         )
 
 
-class HypothesisVersionRecord(_StrictFrozenStorageRecord):
+class HypothesisVersionRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     hypothesis_version_id: StableIdentifier
     hypothesis_id: StableIdentifier
@@ -555,7 +554,7 @@ class HypothesisVersionRecord(_StrictFrozenStorageRecord):
         )
 
 
-class ExecutableModelSpecRecord(_StrictFrozenStorageRecord):
+class ExecutableModelSpecRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     model_spec_id: StableIdentifier
     hypothesis_version_id: StableIdentifier
@@ -595,7 +594,7 @@ class ExecutableModelSpecRecord(_StrictFrozenStorageRecord):
         return self
 
 
-class VerificationMechanismSpecRecord(_StrictFrozenStorageRecord):
+class VerificationMechanismSpecRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     mechanism_spec_id: StableIdentifier
     hypothesis_version_id: StableIdentifier
@@ -610,7 +609,7 @@ class VerificationMechanismSpecRecord(_StrictFrozenStorageRecord):
     governing_policy_hash: Sha256Hex
 
 
-class SimulationResultRecord(_StrictFrozenStorageRecord):
+class SimulationResultRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     simulation_result_id: StableIdentifier
     hypothesis_version_id: StableIdentifier
@@ -632,7 +631,7 @@ class SimulationResultRecord(_StrictFrozenStorageRecord):
         return value
 
 
-class VerificationResultRecord(_StrictFrozenStorageRecord):
+class VerificationResultRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     verification_result_id: StableIdentifier
     hypothesis_version_id: StableIdentifier
@@ -680,7 +679,7 @@ class VerificationResultRecord(_StrictFrozenStorageRecord):
         return self
 
 
-class CounterexampleRecord(_StrictFrozenStorageRecord):
+class CounterexampleRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     counterexample_id: StableIdentifier
     hypothesis_version_id: StableIdentifier
@@ -725,7 +724,7 @@ class CounterexampleRecord(_StrictFrozenStorageRecord):
         return self
 
 
-class HypothesisRevisionRecord(_StrictFrozenStorageRecord):
+class HypothesisRevisionRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     revision_id: StableIdentifier
     hypothesis_id: StableIdentifier
@@ -770,7 +769,7 @@ class HypothesisRevisionRecord(_StrictFrozenStorageRecord):
         return self
 
 
-class HypothesisAdmissionDecisionRecord(_StrictFrozenStorageRecord):
+class HypothesisAdmissionDecisionRecord(StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     admission_decision_id: StableIdentifier
     hypothesis_version_id: StableIdentifier
@@ -895,442 +894,7 @@ __all__ = [
 ]
 
 
-def _require_integrity(condition: bool, detail: str) -> None:
-    if not condition:
-        raise StorageIntegrityError(f"storage integrity error: {detail}")
-
-
-class _AppendOnlyRecordRepository[RecordT: BaseModel]:
-    """Stores one source-controlled Pydantic record type in one fixed authoritative table."""
-
-    def __init__(
-        self,
-        connection: Connection,
-        *,
-        table: Table,
-        model_type: type[RecordT],
-        identifier_field: str,
-        relationship_fields: Mapping[str, str] | None = None,
-        relationship_types: Mapping[str, _RelationshipStorageType] | None = None,
-        nullable_relationship_fields: Collection[str] | None = None,
-        hypothesis_scope_field: str | None = None,
-    ) -> None:
-        _require_integrity(
-            bool(model_type.model_config.get("frozen")),
-            "append-only repository model must be frozen",
-        )
-        _require_integrity(identifier_field in model_type.model_fields, "unknown identifier field")
-        self._connection = connection
-        self._table = table
-        self._model_type = model_type
-        self._identifier_field = identifier_field
-        self._relationship_fields = dict(relationship_fields or {})
-        self._nullable_relationship_fields = frozenset(nullable_relationship_fields or ())
-        self._hypothesis_scope_field = hypothesis_scope_field
-        requested_relationship_types = dict(relationship_types or {})
-        _require_integrity(
-            set(self._relationship_fields).issubset(table.c.keys()),
-            "unknown relationship column",
-        )
-        _require_integrity(
-            set(self._relationship_fields.values()).issubset(model_type.model_fields),
-            "unknown relationship field",
-        )
-        _require_integrity(
-            set(requested_relationship_types).issubset(self._relationship_fields),
-            "unknown typed relationship column",
-        )
-        _require_integrity(
-            self._nullable_relationship_fields.issubset(self._relationship_fields),
-            "unknown nullable relationship column",
-        )
-        _require_integrity(
-            all(
-                self._table.c[column_name].nullable
-                for column_name in self._nullable_relationship_fields
-            ),
-            "nullable relationship column must permit null",
-        )
-        _require_integrity(
-            all(
-                storage_type is str or storage_type is int
-                for storage_type in requested_relationship_types.values()
-            ),
-            "unsupported relationship storage type",
-        )
-        if hypothesis_scope_field is not None:
-            _require_integrity(
-                hypothesis_scope_field in model_type.model_fields,
-                "unknown hypothesis scope field",
-            )
-            _require_integrity("hypothesis_id" in table.c, "missing hypothesis scope column")
-        self._relationship_types: dict[str, _RelationshipStorageType] = {
-            column_name: requested_relationship_types.get(column_name, str)
-            for column_name in self._relationship_fields
-        }
-
-    def get(self, record_id: str) -> RecordT | None:
-        row = (
-            self._connection.execute(
-                select(self._table).where(self._table.c[self._identifier_field] == record_id)
-            )
-            .mappings()
-            .one_or_none()
-        )
-        return None if row is None else self._decode_row(dict(row))
-
-    def list_all(self) -> tuple[RecordT, ...]:
-        rows = self._connection.execute(
-            select(self._table).order_by(self._table.c[self._identifier_field])
-        ).mappings()
-        return tuple(self._decode_row(dict(row)) for row in rows)
-
-    def _list_by_relationship(
-        self,
-        column_name: str,
-        value: str | int,
-    ) -> tuple[RecordT, ...]:
-        _require_integrity(column_name in self._relationship_fields, "unknown relationship column")
-        rows = self._connection.execute(
-            select(self._table)
-            .where(self._table.c[column_name] == value)
-            .order_by(self._table.c[self._identifier_field])
-        ).mappings()
-        return tuple(self._decode_row(dict(row)) for row in rows)
-
-    def _get_many(self, record_ids: tuple[str, ...]) -> tuple[RecordT, ...]:
-        if not record_ids:
-            return ()
-        rows = self._connection.execute(
-            select(self._table)
-            .where(self._table.c[self._identifier_field].in_(record_ids))
-            .order_by(self._table.c[self._identifier_field])
-        ).mappings()
-        return tuple(self._decode_row(dict(row)) for row in rows)
-
-    def add(self, record_id: str, record: RecordT, created_at: UtcTimestamp) -> None:
-        _require_integrity(isinstance(record_id, str), "record identifier must be a string")
-        try:
-            validated = self._model_type.model_validate(record.model_dump(mode="python"))
-            validated_created_at = TIMESTAMP_ADAPTER.validate_python(created_at)
-        except (TypeError, ValueError) as error:
-            raise StorageIntegrityError(
-                "storage integrity error: invalid append-only record"
-            ) from error
-        _require_integrity(
-            getattr(validated, self._identifier_field) == record_id,
-            f"{self._identifier_field} does not match record",
-        )
-        record_json = canonical_json_bytes(validated.model_dump(mode="json")).decode("utf-8")
-        values: dict[str, object] = {
-            self._identifier_field: record_id,
-            "record_json": record_json,
-            "content_hash": sha256_hex(record_json.encode("utf-8")),
-            "created_at": validated_created_at.isoformat(),
-        }
-        for column_name, field_name in self._relationship_fields.items():
-            values[column_name] = _validated_relationship_value(
-                getattr(validated, field_name),
-                field_name,
-                self._relationship_types[column_name],
-                nullable=column_name in self._nullable_relationship_fields,
-            )
-        derived_values = self._derive_storage_values(validated)
-        _require_integrity(
-            set(derived_values).issubset(self._table.c.keys()),
-            "unknown derived relationship column",
-        )
-        _require_integrity(
-            not (set(derived_values) & set(values)),
-            "derived relationship column overlaps canonical storage",
-        )
-        values.update(derived_values)
-        self._connection.execute(insert(self._table).values(**values))
-
-    def _decode_row(self, row: Mapping[str, object]) -> RecordT:
-        try:
-            record_json = _stored_string(row, "record_json")
-            content_hash = _stored_string(row, "content_hash")
-            record = self._model_type.model_validate_json(record_json)
-            canonical_record_json = canonical_json_bytes(record.model_dump(mode="json")).decode(
-                "utf-8"
-            )
-        except (TypeError, ValueError) as error:
-            raise StorageIntegrityError("storage integrity error: invalid record JSON") from error
-        created_at = _stored_string(row, "created_at")
-        try:
-            TIMESTAMP_ADAPTER.validate_python(datetime.fromisoformat(created_at))
-        except (TypeError, ValueError) as error:
-            raise StorageIntegrityError(
-                "storage integrity error: invalid created_at timestamp"
-            ) from error
-        stored_identifier = _stored_string(row, self._identifier_field)
-        _require_integrity(
-            getattr(record, self._identifier_field) == stored_identifier,
-            f"{self._identifier_field} does not match record_json",
-        )
-        _require_integrity(
-            sha256_hex(record_json.encode("utf-8")) == content_hash,
-            "content_hash does not match record_json",
-        )
-        for column_name, field_name in self._relationship_fields.items():
-            storage_type = self._relationship_types[column_name]
-            record_value = _validated_relationship_value(
-                getattr(record, field_name),
-                field_name,
-                storage_type,
-                nullable=column_name in self._nullable_relationship_fields,
-            )
-            _require_integrity(
-                record_value
-                == _stored_relationship_value(
-                    row,
-                    column_name,
-                    storage_type,
-                    nullable=column_name in self._nullable_relationship_fields,
-                ),
-                f"{column_name} does not match record_json",
-            )
-        self._verify_derived_storage_values(row, record)
-        _require_integrity(record_json == canonical_record_json, "record_json must be canonical")
-        return record
-
-    def _derive_storage_values(self, record: RecordT) -> dict[str, object]:
-        if self._hypothesis_scope_field is None:
-            return {}
-        hypothesis_version_id = _validated_relationship_value(
-            getattr(record, self._hypothesis_scope_field),
-            self._hypothesis_scope_field,
-            str,
-        )
-        hypothesis_id = self._connection.execute(
-            select(hypothesis_versions.c.hypothesis_id).where(
-                hypothesis_versions.c.hypothesis_version_id == hypothesis_version_id
-            )
-        ).scalar_one_or_none()
-        _require_integrity(
-            isinstance(hypothesis_id, str),
-            "hypothesis scope version does not exist",
-        )
-        return {"hypothesis_id": hypothesis_id}
-
-    def _verify_derived_storage_values(
-        self,
-        row: Mapping[str, object],
-        record: RecordT,
-    ) -> None:
-        if self._hypothesis_scope_field is None:
-            return
-        expected = self._derive_storage_values(record)
-        _require_integrity(
-            _stored_string(row, "hypothesis_id") == expected["hypothesis_id"],
-            "hypothesis_id does not match the exact hypothesis version scope",
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class _OrderedReferenceBinding:
-    table: Table
-    owner_column: str
-    record_field: str
-    reference_column: str
-    scope_columns: tuple[str, ...] = ()
-
-
-class _ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
-    _AppendOnlyRecordRepository[RecordT]
-):
-    """Materializes ordered relationship tuples and verifies exact canonical equality."""
-
-    def __init__(
-        self,
-        connection: Connection,
-        *,
-        table: Table,
-        model_type: type[RecordT],
-        identifier_field: str,
-        reference_bindings: tuple[_OrderedReferenceBinding, ...],
-        relationship_fields: Mapping[str, str] | None = None,
-        relationship_types: Mapping[str, _RelationshipStorageType] | None = None,
-        nullable_relationship_fields: Collection[str] | None = None,
-        hypothesis_scope_field: str | None = None,
-        pre_parent_reference_fields: Collection[str] | None = None,
-    ) -> None:
-        super().__init__(
-            connection,
-            table=table,
-            model_type=model_type,
-            identifier_field=identifier_field,
-            relationship_fields=relationship_fields,
-            relationship_types=relationship_types,
-            nullable_relationship_fields=nullable_relationship_fields,
-            hypothesis_scope_field=hypothesis_scope_field,
-        )
-        _require_integrity(bool(reference_bindings), "referenced repository needs bindings")
-        for binding in reference_bindings:
-            _require_integrity(
-                binding.owner_column in binding.table.c,
-                "unknown reference owner column",
-            )
-            _require_integrity("position" in binding.table.c, "missing reference position")
-            _require_integrity(
-                binding.reference_column in binding.table.c,
-                "unknown reference column",
-            )
-            _require_integrity(
-                binding.record_field in model_type.model_fields,
-                "unknown canonical reference field",
-            )
-            _require_integrity(
-                set(binding.scope_columns).issubset(binding.table.c.keys()),
-                "unknown normalized reference scope column",
-            )
-            _require_integrity(
-                set(binding.scope_columns).issubset(table.c.keys()),
-                "normalized reference scope is absent from owner",
-            )
-        self._reference_bindings = reference_bindings
-        self._pre_parent_reference_fields = frozenset(pre_parent_reference_fields or ())
-        binding_fields = {binding.record_field for binding in reference_bindings}
-        _require_integrity(
-            self._pre_parent_reference_fields.issubset(binding_fields),
-            "unknown pre-parent reference field",
-        )
-        for binding in reference_bindings:
-            if binding.record_field in self._pre_parent_reference_fields:
-                _require_integrity(
-                    set(binding.scope_columns).issubset(model_type.model_fields),
-                    "pre-parent reference scope must be canonical",
-                )
-
-    def add(self, record_id: str, record: RecordT, created_at: UtcTimestamp) -> None:
-        try:
-            validated = self._model_type.model_validate(record.model_dump(mode="python"))
-        except (TypeError, ValueError) as error:
-            raise StorageIntegrityError(
-                "storage integrity error: invalid append-only record"
-            ) from error
-        pre_parent_bindings = tuple(
-            binding
-            for binding in self._reference_bindings
-            if binding.record_field in self._pre_parent_reference_fields
-        )
-        self._insert_reference_bindings(record_id, validated, pre_parent_bindings, None)
-        super().add(record_id, validated, created_at)
-        owner_row = (
-            self._connection.execute(
-                select(self._table).where(self._table.c[self._identifier_field] == record_id)
-            )
-            .mappings()
-            .one()
-        )
-        post_parent_bindings = tuple(
-            binding
-            for binding in self._reference_bindings
-            if binding.record_field not in self._pre_parent_reference_fields
-        )
-        self._insert_reference_bindings(
-            record_id,
-            validated,
-            post_parent_bindings,
-            dict(owner_row),
-        )
-
-    def _insert_reference_bindings(
-        self,
-        record_id: str,
-        record: RecordT,
-        bindings: tuple[_OrderedReferenceBinding, ...],
-        owner_row: Mapping[str, object] | None,
-    ) -> None:
-        for binding in bindings:
-            references = _canonical_reference_tuple(record, binding.record_field)
-            for position, reference_id in enumerate(references):
-                if owner_row is None:
-                    scope_values = {
-                        column_name: _validated_relationship_value(
-                            getattr(record, column_name),
-                            column_name,
-                            str,
-                        )
-                        for column_name in binding.scope_columns
-                    }
-                else:
-                    scope_values = {
-                        column_name: _stored_string(owner_row, column_name)
-                        for column_name in binding.scope_columns
-                    }
-                self._connection.execute(
-                    insert(binding.table).values(
-                        **{
-                            binding.owner_column: record_id,
-                            "position": position,
-                            binding.reference_column: reference_id,
-                            **scope_values,
-                        }
-                    )
-                )
-
-    def _decode_row(self, row: Mapping[str, object]) -> RecordT:
-        record = super()._decode_row(row)
-        owner_id = _validated_relationship_value(
-            getattr(record, self._identifier_field),
-            self._identifier_field,
-            str,
-        )
-        for binding in self._reference_bindings:
-            expected = _canonical_reference_tuple(record, binding.record_field)
-            expected_scope = (
-                tuple(_stored_string(row, column_name) for column_name in binding.scope_columns)
-                if expected
-                else ()
-            )
-            stored_rows = self._connection.execute(
-                select(
-                    binding.table.c.position,
-                    binding.table.c[binding.reference_column],
-                    *(binding.table.c[column_name] for column_name in binding.scope_columns),
-                )
-                .where(binding.table.c[binding.owner_column] == owner_id)
-                .order_by(binding.table.c.position)
-            ).mappings()
-            actual = tuple(
-                (
-                    _stored_integer(dict(stored_row), "position"),
-                    _stored_string(dict(stored_row), binding.reference_column),
-                    *(
-                        _stored_string(dict(stored_row), column_name)
-                        for column_name in binding.scope_columns
-                    ),
-                )
-                for stored_row in stored_rows
-            )
-            _require_integrity(
-                actual
-                == tuple(
-                    (position, reference_id, *expected_scope)
-                    for position, reference_id in enumerate(expected)
-                ),
-                f"{binding.record_field} materialization does not match exact canonical references",
-            )
-        return record
-
-
-def _canonical_reference_tuple(record: BaseModel, field_name: str) -> tuple[str, ...]:
-    value = getattr(record, field_name)
-    _require_integrity(isinstance(value, tuple), f"{field_name} must be a tuple")
-    references: list[str] = []
-    for item in value:
-        _require_integrity(isinstance(item, str), f"{field_name} must contain strings")
-        references.append(item)
-    _require_integrity(
-        len(set(references)) == len(references),
-        f"{field_name} must contain unique identifiers",
-    )
-    return tuple(references)
-
-
-class BehaviorRuleLinkVersionRepository(_AppendOnlyRecordRepository[BehaviorRuleLinkVersionRecord]):
+class BehaviorRuleLinkVersionRepository(AppendOnlyRecordRepository[BehaviorRuleLinkVersionRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1346,7 +910,7 @@ class BehaviorRuleLinkVersionRepository(_AppendOnlyRecordRepository[BehaviorRule
         )
 
 
-class HandbookVerificationRepository(_AppendOnlyRecordRepository[HandbookVerificationRecord]):
+class HandbookVerificationRepository(AppendOnlyRecordRepository[HandbookVerificationRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1360,7 +924,7 @@ class HandbookVerificationRepository(_AppendOnlyRecordRepository[HandbookVerific
         )
 
 
-class HarnessCampaignRepository(_AppendOnlyRecordRepository[HarnessCampaignRecord]):
+class HarnessCampaignRepository(AppendOnlyRecordRepository[HarnessCampaignRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1373,7 +937,7 @@ class HarnessCampaignRepository(_AppendOnlyRecordRepository[HarnessCampaignRecor
 
 
 class HarnessPartitionManifestRepository(
-    _AppendOnlyRecordRepository[HarnessPartitionManifestRecord]
+    AppendOnlyRecordRepository[HarnessPartitionManifestRecord]
 ):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
@@ -1391,7 +955,7 @@ class HarnessPartitionManifestRepository(
         )
 
 
-class HarnessBudgetRepository(_AppendOnlyRecordRepository[HarnessBudgetRecord]):
+class HarnessBudgetRepository(AppendOnlyRecordRepository[HarnessBudgetRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1405,7 +969,7 @@ class HarnessBudgetRepository(_AppendOnlyRecordRepository[HarnessBudgetRecord]):
         )
 
 
-class HarnessObservationRepository(_AppendOnlyRecordRepository[HarnessObservationRecord]):
+class HarnessObservationRepository(AppendOnlyRecordRepository[HarnessObservationRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1422,7 +986,7 @@ class HarnessObservationRepository(_AppendOnlyRecordRepository[HarnessObservatio
         )
 
 
-class HarnessMetricRepository(_AppendOnlyRecordRepository[HarnessMetricRecord]):
+class HarnessMetricRepository(AppendOnlyRecordRepository[HarnessMetricRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1441,7 +1005,7 @@ class HarnessMetricRepository(_AppendOnlyRecordRepository[HarnessMetricRecord]):
         )
 
 
-class HarnessConfoundRepository(_AppendOnlyRecordRepository[HarnessConfoundRecord]):
+class HarnessConfoundRepository(AppendOnlyRecordRepository[HarnessConfoundRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1455,7 +1019,7 @@ class HarnessConfoundRepository(_AppendOnlyRecordRepository[HarnessConfoundRecor
         )
 
 
-class HarnessDecisionRepository(_AppendOnlyRecordRepository[HarnessDecisionRecord]):
+class HarnessDecisionRepository(AppendOnlyRecordRepository[HarnessDecisionRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1469,7 +1033,7 @@ class HarnessDecisionRepository(_AppendOnlyRecordRepository[HarnessDecisionRecor
         )
 
 
-class RuleIncidentRepository(_AppendOnlyRecordRepository[RuleIncident]):
+class RuleIncidentRepository(AppendOnlyRecordRepository[RuleIncident]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1479,7 +1043,7 @@ class RuleIncidentRepository(_AppendOnlyRecordRepository[RuleIncident]):
         )
 
 
-class BehavioralRuleVersionRepository(_ReferencedAppendOnlyRecordRepository[BehavioralRuleVersion]):
+class BehavioralRuleVersionRepository(ReferencedAppendOnlyRecordRepository[BehavioralRuleVersion]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1492,13 +1056,13 @@ class BehavioralRuleVersionRepository(_ReferencedAppendOnlyRecordRepository[Beha
                 "status": "status",
             },
             reference_bindings=(
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=behavioral_rule_version_incidents,
                     owner_column="rule_version_id",
                     record_field="source_incident_ids",
                     reference_column="incident_id",
                 ),
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=behavioral_rule_version_supersessions,
                     owner_column="rule_version_id",
                     record_field="supersedes_rule_version_ids",
@@ -1508,7 +1072,7 @@ class BehavioralRuleVersionRepository(_ReferencedAppendOnlyRecordRepository[Beha
         )
 
 
-class ReviewerAssessmentRepository(_ReferencedAppendOnlyRecordRepository[ReviewerAssessment]):
+class ReviewerAssessmentRepository(ReferencedAppendOnlyRecordRepository[ReviewerAssessment]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1516,13 +1080,13 @@ class ReviewerAssessmentRepository(_ReferencedAppendOnlyRecordRepository[Reviewe
             model_type=ReviewerAssessment,
             identifier_field="assessment_id",
             reference_bindings=(
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=reviewer_assessment_rule_versions,
                     owner_column="assessment_id",
                     record_field="rule_version_ids",
                     reference_column="rule_version_id",
                 ),
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=reviewer_assessment_incidents,
                     owner_column="assessment_id",
                     record_field="incident_ids",
@@ -1533,7 +1097,7 @@ class ReviewerAssessmentRepository(_ReferencedAppendOnlyRecordRepository[Reviewe
 
 
 class RuleConsolidationDecisionRepository(
-    _ReferencedAppendOnlyRecordRepository[RuleConsolidationDecision]
+    ReferencedAppendOnlyRecordRepository[RuleConsolidationDecision]
 ):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
@@ -1546,13 +1110,13 @@ class RuleConsolidationDecisionRepository(
             },
             nullable_relationship_fields={"resulting_rule_version_id"},
             reference_bindings=(
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=rule_consolidation_assessments,
                     owner_column="consolidation_decision_id",
                     record_field="consumed_assessment_ids",
                     reference_column="assessment_id",
                 ),
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=rule_consolidation_incidents,
                     owner_column="consolidation_decision_id",
                     record_field="consumed_incident_ids",
@@ -1562,7 +1126,7 @@ class RuleConsolidationDecisionRepository(
         )
 
 
-class RuleRegressionCaseRepository(_ReferencedAppendOnlyRecordRepository[RuleRegressionCase]):
+class RuleRegressionCaseRepository(ReferencedAppendOnlyRecordRepository[RuleRegressionCase]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1571,7 +1135,7 @@ class RuleRegressionCaseRepository(_ReferencedAppendOnlyRecordRepository[RuleReg
             identifier_field="regression_case_id",
             relationship_fields={"rule_version_id": "rule_version_id"},
             reference_bindings=(
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=rule_regression_case_incidents,
                     owner_column="regression_case_id",
                     record_field="incident_ids",
@@ -1581,7 +1145,7 @@ class RuleRegressionCaseRepository(_ReferencedAppendOnlyRecordRepository[RuleReg
         )
 
 
-class PrimitiveVersionRepository(_ReferencedAppendOnlyRecordRepository[PrimitiveVersionRecord]):
+class PrimitiveVersionRepository(ReferencedAppendOnlyRecordRepository[PrimitiveVersionRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1594,19 +1158,19 @@ class PrimitiveVersionRepository(_ReferencedAppendOnlyRecordRepository[Primitive
                 "status": "status",
             },
             reference_bindings=(
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=primitive_version_predecessors,
                     owner_column="primitive_version_id",
                     record_field="predecessor_primitive_version_ids",
                     reference_column="predecessor_primitive_version_id",
                 ),
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=primitive_version_dependencies,
                     owner_column="primitive_version_id",
                     record_field="dependency_primitive_version_ids",
                     reference_column="dependency_primitive_version_id",
                 ),
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=primitive_version_measurements,
                     owner_column="primitive_version_id",
                     record_field="measurement_ids",
@@ -1617,7 +1181,7 @@ class PrimitiveVersionRepository(_ReferencedAppendOnlyRecordRepository[Primitive
 
 
 class PrimitiveEvaluationRepository(
-    _ReferencedAppendOnlyRecordRepository[PrimitiveEvaluationRecord]
+    ReferencedAppendOnlyRecordRepository[PrimitiveEvaluationRecord]
 ):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
@@ -1630,13 +1194,13 @@ class PrimitiveEvaluationRepository(
                 "frame": "frame",
             },
             reference_bindings=(
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=primitive_evaluation_verification_results,
                     owner_column="primitive_evaluation_id",
                     record_field="verification_result_ids",
                     reference_column="verification_result_id",
                 ),
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=primitive_evaluation_evidence,
                     owner_column="primitive_evaluation_id",
                     record_field="evidence_ids",
@@ -1646,7 +1210,7 @@ class PrimitiveEvaluationRepository(
         )
 
 
-class HypothesisVersionRepository(_ReferencedAppendOnlyRecordRepository[HypothesisVersionRecord]):
+class HypothesisVersionRepository(ReferencedAppendOnlyRecordRepository[HypothesisVersionRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1660,13 +1224,13 @@ class HypothesisVersionRepository(_ReferencedAppendOnlyRecordRepository[Hypothes
             },
             relationship_types={"version": int},
             reference_bindings=(
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=hypothesis_version_primitives,
                     owner_column="hypothesis_version_id",
                     record_field="primitive_version_ids",
                     reference_column="primitive_version_id",
                 ),
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=hypothesis_version_evidence,
                     owner_column="hypothesis_version_id",
                     record_field="evidence_ids",
@@ -1676,7 +1240,7 @@ class HypothesisVersionRepository(_ReferencedAppendOnlyRecordRepository[Hypothes
         )
 
 
-class ExecutableModelSpecRepository(_AppendOnlyRecordRepository[ExecutableModelSpecRecord]):
+class ExecutableModelSpecRepository(AppendOnlyRecordRepository[ExecutableModelSpecRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1703,7 +1267,7 @@ class ExecutableModelSpecRepository(_AppendOnlyRecordRepository[ExecutableModelS
 
 
 class VerificationMechanismSpecRepository(
-    _AppendOnlyRecordRepository[VerificationMechanismSpecRecord]
+    AppendOnlyRecordRepository[VerificationMechanismSpecRecord]
 ):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
@@ -1719,7 +1283,7 @@ class VerificationMechanismSpecRepository(
         )
 
 
-class SimulationResultRepository(_AppendOnlyRecordRepository[SimulationResultRecord]):
+class SimulationResultRepository(AppendOnlyRecordRepository[SimulationResultRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1735,7 +1299,7 @@ class SimulationResultRepository(_AppendOnlyRecordRepository[SimulationResultRec
         )
 
 
-class VerificationResultRepository(_ReferencedAppendOnlyRecordRepository[VerificationResultRecord]):
+class VerificationResultRepository(ReferencedAppendOnlyRecordRepository[VerificationResultRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1753,7 +1317,7 @@ class VerificationResultRepository(_ReferencedAppendOnlyRecordRepository[Verific
             nullable_relationship_fields={"model_spec_id", "model_execution_mode"},
             hypothesis_scope_field="hypothesis_version_id",
             reference_bindings=(
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=verification_result_simulations,
                     owner_column="verification_result_id",
                     record_field="simulation_result_ids",
@@ -1769,7 +1333,7 @@ class VerificationResultRepository(_ReferencedAppendOnlyRecordRepository[Verific
         )
 
 
-class CounterexampleRecordRepository(_ReferencedAppendOnlyRecordRepository[CounterexampleRecord]):
+class CounterexampleRecordRepository(ReferencedAppendOnlyRecordRepository[CounterexampleRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1784,7 +1348,7 @@ class CounterexampleRecordRepository(_ReferencedAppendOnlyRecordRepository[Count
             nullable_relationship_fields={"model_spec_id", "model_execution_mode"},
             hypothesis_scope_field="hypothesis_version_id",
             reference_bindings=(
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=counterexample_simulations,
                     owner_column="counterexample_id",
                     record_field="simulation_result_ids",
@@ -1796,7 +1360,7 @@ class CounterexampleRecordRepository(_ReferencedAppendOnlyRecordRepository[Count
                         "model_execution_mode",
                     ),
                 ),
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=counterexample_verification_results,
                     owner_column="counterexample_id",
                     record_field="verification_result_ids",
@@ -1808,7 +1372,7 @@ class CounterexampleRecordRepository(_ReferencedAppendOnlyRecordRepository[Count
                         "model_execution_mode",
                     ),
                 ),
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=counterexample_evidence,
                     owner_column="counterexample_id",
                     record_field="evidence_ids",
@@ -1818,7 +1382,7 @@ class CounterexampleRecordRepository(_ReferencedAppendOnlyRecordRepository[Count
         )
 
 
-class HypothesisRevisionRepository(_ReferencedAppendOnlyRecordRepository[HypothesisRevisionRecord]):
+class HypothesisRevisionRepository(ReferencedAppendOnlyRecordRepository[HypothesisRevisionRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1834,14 +1398,14 @@ class HypothesisRevisionRepository(_ReferencedAppendOnlyRecordRepository[Hypothe
             },
             relationship_types={"prior_version": int, "resulting_version": int},
             reference_bindings=(
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=hypothesis_revision_verification_results,
                     owner_column="revision_id",
                     record_field="triggering_verification_result_ids",
                     reference_column="verification_result_id",
                     scope_columns=("hypothesis_id",),
                 ),
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=hypothesis_revision_counterexamples,
                     owner_column="revision_id",
                     record_field="considered_counterexample_ids",
@@ -1853,7 +1417,7 @@ class HypothesisRevisionRepository(_ReferencedAppendOnlyRecordRepository[Hypothe
 
 
 class HypothesisAdmissionDecisionRepository(
-    _ReferencedAppendOnlyRecordRepository[HypothesisAdmissionDecisionRecord]
+    ReferencedAppendOnlyRecordRepository[HypothesisAdmissionDecisionRecord]
 ):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
@@ -1870,28 +1434,28 @@ class HypothesisAdmissionDecisionRepository(
             relationship_types={"version": int},
             pre_parent_reference_fields={"revision_ids"},
             reference_bindings=(
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=hypothesis_admission_models,
                     owner_column="admission_decision_id",
                     record_field="model_spec_ids",
                     reference_column="model_spec_id",
                     scope_columns=("hypothesis_id",),
                 ),
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=hypothesis_admission_verification_results,
                     owner_column="admission_decision_id",
                     record_field="verification_result_ids",
                     reference_column="verification_result_id",
                     scope_columns=("hypothesis_id",),
                 ),
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=hypothesis_admission_counterexamples,
                     owner_column="admission_decision_id",
                     record_field="counterexample_ids",
                     reference_column="counterexample_id",
                     scope_columns=("hypothesis_id",),
                 ),
-                _OrderedReferenceBinding(
+                OrderedReferenceBinding(
                     table=hypothesis_admission_revisions,
                     owner_column="admission_decision_id",
                     record_field="revision_ids",
@@ -1945,7 +1509,7 @@ class HypothesisAdmissionDecisionRepository(
         )
 
 
-class ResearchRunRepository(_AppendOnlyRecordRepository[ResearchRun]):
+class ResearchRunRepository(AppendOnlyRecordRepository[ResearchRun]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1955,7 +1519,7 @@ class ResearchRunRepository(_AppendOnlyRecordRepository[ResearchRun]):
         )
 
 
-class ResearchRunEventRepository(_AppendOnlyRecordRepository[ResearchRunEvent]):
+class ResearchRunEventRepository(AppendOnlyRecordRepository[ResearchRunEvent]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1966,7 +1530,7 @@ class ResearchRunEventRepository(_AppendOnlyRecordRepository[ResearchRunEvent]):
         )
 
 
-class ConfigurationVersionRepository(_AppendOnlyRecordRepository[ConfigurationVersion]):
+class ConfigurationVersionRepository(AppendOnlyRecordRepository[ConfigurationVersion]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1977,7 +1541,7 @@ class ConfigurationVersionRepository(_AppendOnlyRecordRepository[ConfigurationVe
 
 
 class SelfImprovementMeasurementRepository(
-    _AppendOnlyRecordRepository[SelfImprovementMeasurementRecord]
+    AppendOnlyRecordRepository[SelfImprovementMeasurementRecord]
 ):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
@@ -1992,7 +1556,7 @@ class SelfImprovementMeasurementRepository(
         )
 
 
-class EvaluatorAuditRepository(_AppendOnlyRecordRepository[EvaluatorAuditRecord]):
+class EvaluatorAuditRepository(AppendOnlyRecordRepository[EvaluatorAuditRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2002,7 +1566,7 @@ class EvaluatorAuditRepository(_AppendOnlyRecordRepository[EvaluatorAuditRecord]
         )
 
 
-class EvaluatorVersionRepository(_AppendOnlyRecordRepository[EvaluatorVersion]):
+class EvaluatorVersionRepository(AppendOnlyRecordRepository[EvaluatorVersion]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2012,7 +1576,7 @@ class EvaluatorVersionRepository(_AppendOnlyRecordRepository[EvaluatorVersion]):
         )
 
 
-class EvaluatorSuccessionRepository(_AppendOnlyRecordRepository[EvaluatorSuccessionDecision]):
+class EvaluatorSuccessionRepository(AppendOnlyRecordRepository[EvaluatorSuccessionDecision]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2027,7 +1591,7 @@ class EvaluatorSuccessionRepository(_AppendOnlyRecordRepository[EvaluatorSuccess
         )
 
 
-class EvaluatorCollapseRepository(_AppendOnlyRecordRepository[EvaluatorCollapseRecord]):
+class EvaluatorCollapseRepository(AppendOnlyRecordRepository[EvaluatorCollapseRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2038,7 +1602,7 @@ class EvaluatorCollapseRepository(_AppendOnlyRecordRepository[EvaluatorCollapseR
         )
 
 
-class ProgressPlanRepository(_AppendOnlyRecordRepository[ProgressPlan]):
+class ProgressPlanRepository(AppendOnlyRecordRepository[ProgressPlan]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2052,7 +1616,7 @@ class ProgressPlanRepository(_AppendOnlyRecordRepository[ProgressPlan]):
         return self._list_by_relationship("run_id", run_id)
 
 
-class ProgressSubtaskRepository(_AppendOnlyRecordRepository[ProgressSubtask]):
+class ProgressSubtaskRepository(AppendOnlyRecordRepository[ProgressSubtask]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2066,7 +1630,7 @@ class ProgressSubtaskRepository(_AppendOnlyRecordRepository[ProgressSubtask]):
         return self._get_many(subtask_ids)
 
 
-class ProgressEventRepository(_AppendOnlyRecordRepository[ProgressValidationEvent]):
+class ProgressEventRepository(AppendOnlyRecordRepository[ProgressValidationEvent]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2084,7 +1648,7 @@ class ProgressEventRepository(_AppendOnlyRecordRepository[ProgressValidationEven
         return self._list_by_relationship("plan_version_id", plan_version_id)
 
 
-class RunBudgetRepository(_AppendOnlyRecordRepository[BudgetAllocation]):
+class RunBudgetRepository(AppendOnlyRecordRepository[BudgetAllocation]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2101,7 +1665,7 @@ class RunBudgetRepository(_AppendOnlyRecordRepository[BudgetAllocation]):
         return self._list_by_relationship("plan_version_id", plan_version_id)
 
 
-class RunCheckpointRepository(_AppendOnlyRecordRepository[RunCheckpoint]):
+class RunCheckpointRepository(AppendOnlyRecordRepository[RunCheckpoint]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2115,7 +1679,7 @@ class RunCheckpointRepository(_AppendOnlyRecordRepository[RunCheckpoint]):
         )
 
 
-class CompletionDecisionRepository(_AppendOnlyRecordRepository[CompletionDecision]):
+class CompletionDecisionRepository(AppendOnlyRecordRepository[CompletionDecision]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2129,7 +1693,7 @@ class CompletionDecisionRepository(_AppendOnlyRecordRepository[CompletionDecisio
         )
 
 
-class EvidenceTrailVersionRepository(_AppendOnlyRecordRepository[EvidenceTrailVersion]):
+class EvidenceTrailVersionRepository(AppendOnlyRecordRepository[EvidenceTrailVersion]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2145,7 +1709,7 @@ class EvidenceTrailVersionRepository(_AppendOnlyRecordRepository[EvidenceTrailVe
         )
 
 
-class EvidenceTrailNodeRepository(_AppendOnlyRecordRepository[EvidenceTrailNode]):
+class EvidenceTrailNodeRepository(AppendOnlyRecordRepository[EvidenceTrailNode]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2159,7 +1723,7 @@ class EvidenceTrailNodeRepository(_AppendOnlyRecordRepository[EvidenceTrailNode]
         )
 
 
-class EvidenceTrailRelationRepository(_AppendOnlyRecordRepository[EvidenceTrailRelation]):
+class EvidenceTrailRelationRepository(AppendOnlyRecordRepository[EvidenceTrailRelation]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2174,7 +1738,7 @@ class EvidenceTrailRelationRepository(_AppendOnlyRecordRepository[EvidenceTrailR
         )
 
 
-class EvidenceTrailCheckRepository(_AppendOnlyRecordRepository[TrailCheckResult]):
+class EvidenceTrailCheckRepository(AppendOnlyRecordRepository[TrailCheckResult]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2185,7 +1749,7 @@ class EvidenceTrailCheckRepository(_AppendOnlyRecordRepository[TrailCheckResult]
         )
 
 
-class EvidenceTrailAssessmentRepository(_AppendOnlyRecordRepository[TrailAssessment]):
+class EvidenceTrailAssessmentRepository(AppendOnlyRecordRepository[TrailAssessment]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2196,7 +1760,7 @@ class EvidenceTrailAssessmentRepository(_AppendOnlyRecordRepository[TrailAssessm
         )
 
 
-class ReportSentenceBindingRepository(_AppendOnlyRecordRepository[ReportSentenceBinding]):
+class ReportSentenceBindingRepository(AppendOnlyRecordRepository[ReportSentenceBinding]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2933,51 +2497,3 @@ class EvidenceTrailHeadRepository:
             "evidence trail head references an incoherent version",
         )
         return trail_version_id, version
-
-
-def _stored_string(row: Mapping[str, object], column_name: str) -> str:
-    value = row[column_name]
-    if not isinstance(value, str):
-        raise StorageIntegrityError(f"storage integrity error: {column_name} must be a string")
-    return value
-
-
-def _stored_integer(row: Mapping[str, object], column_name: str) -> int:
-    value = row[column_name]
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise StorageIntegrityError(f"storage integrity error: {column_name} must be an integer")
-    return value
-
-
-def _validated_relationship_value(
-    value: object,
-    field_name: str,
-    storage_type: _RelationshipStorageType,
-    *,
-    nullable: bool = False,
-) -> str | int | None:
-    if value is None:
-        _require_integrity(nullable, f"{field_name} must not be null")
-        return None
-    if storage_type is str:
-        if not isinstance(value, str):
-            raise StorageIntegrityError(f"storage integrity error: {field_name} must be a string")
-        return value
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise StorageIntegrityError(f"storage integrity error: {field_name} must be an integer")
-    return value
-
-
-def _stored_relationship_value(
-    row: Mapping[str, object],
-    column_name: str,
-    storage_type: _RelationshipStorageType,
-    *,
-    nullable: bool = False,
-) -> str | int | None:
-    if row[column_name] is None:
-        _require_integrity(nullable, f"{column_name} must not be null")
-        return None
-    if storage_type is str:
-        return _stored_string(row, column_name)
-    return _stored_integer(row, column_name)

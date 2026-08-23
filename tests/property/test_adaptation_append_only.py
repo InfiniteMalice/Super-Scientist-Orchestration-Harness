@@ -10,10 +10,10 @@ from sqlalchemy import Connection, Engine, insert, text
 
 from super_scientist.domain.primitives import sha256_hex
 from super_scientist.providers.storage import domain_records
+from super_scientist.providers.storage.append_only import AppendOnlyRecordRepository
 from super_scientist.providers.storage.database import create_database_engine, upgrade_database
 from super_scientist.providers.storage.domain_records import (
     ResearchRunHeadRepository,
-    _AppendOnlyRecordRepository,
 )
 from super_scientist.providers.storage.repositories import StorageIntegrityError
 from super_scientist.providers.storage.schema import research_run_events, research_runs
@@ -58,7 +58,7 @@ def test_private_record_engine_round_trips_strict_datetime_and_enum_fields(tmp_p
     upgrade_database(database_url)
     engine = create_database_engine(database_url)
     connection = engine.connect()
-    repository = _AppendOnlyRecordRepository(
+    repository = AppendOnlyRecordRepository(
         connection,
         table=research_runs,
         model_type=StrictTypedRun,
@@ -171,7 +171,7 @@ def test_private_record_engine_rejects_relationship_column_mismatch(tmp_path: Pa
     upgrade_database(database_url)
     engine = create_database_engine(database_url)
     connection = engine.connect()
-    repository = _AppendOnlyRecordRepository(
+    repository = AppendOnlyRecordRepository(
         connection,
         table=research_run_events,
         model_type=StoredRunEvent,
@@ -241,13 +241,13 @@ def test_run_head_repository_rejects_an_event_from_another_run(tmp_path: Path) -
 
 def _repository(
     tmp_path: Path,
-) -> tuple[_AppendOnlyRecordRepository[StoredRun], Connection, Engine]:
+) -> tuple[AppendOnlyRecordRepository[StoredRun], Connection, Engine]:
     database_url = f"sqlite:///{(tmp_path / 'adaptation.db').as_posix()}"
     upgrade_database(database_url)
     engine = create_database_engine(database_url)
     connection = engine.connect()
     return (
-        _AppendOnlyRecordRepository(
+        AppendOnlyRecordRepository(
             connection,
             table=research_runs,
             model_type=StoredRun,
