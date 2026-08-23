@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from super_scientist.domain.collaboration import (
     CollaborationSession,
+    CollaborationState,
     CollaborationTerminationReason,
     PeerContribution,
     PeerRequest,
@@ -16,6 +17,7 @@ from super_scientist.domain.collaboration import (
     next_peer,
 )
 from super_scientist.domain.improvement.models import ResourceUsage
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 
 from .conftest import artifact, unit_usage
 
@@ -64,6 +66,19 @@ def test_next_peer_uses_canonical_eligible_actor_order(
 ) -> None:
     session = session_factory("peer-c", "peer-a", "peer-b")
     assert next_peer(session, initial_collaboration_state(session)) == "peer-a"
+
+
+def test_collaboration_session_round_trips_through_strict_json(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory("peer-a", "peer-b")
+
+    parsed = CollaborationSession.model_validate_json(
+        __import__("json").dumps(session.model_dump(mode="json")),
+        strict=True,
+    )
+
+    assert parsed == session
 
 
 def test_single_peer_requires_declared_edge_after_initial_exchange(
@@ -115,6 +130,8 @@ def test_advance_accepts_exactly_one_checked_transition(
     assert updated.scheduling_position == 1
     assert updated.usage.tokens == 10
     assert updated.state_hash != state.state_hash
+    assert len(updated.observed_state_hashes) == 2
+    assert updated.observed_state_hashes[0] != updated.observed_state_hashes[1]
 
 
 @pytest.mark.parametrize(
@@ -229,6 +246,136 @@ def test_candidate_content_is_canonical_public_json(
         _contribution(session, "peer-a", provider_reasoning={"secret": "chain"})
     with pytest.raises(ValidationError):
         _contribution(session, "peer-a", delegated_request_ids=("request-z",))
+
+
+@pytest.mark.parametrize(
+    "forbidden_key",
+    (
+        "chain_of_thought",
+        "scratchpad",
+        "provider_payload",
+        "secret",
+        "protected_answer",
+        "command",
+    ),
+)
+def test_candidate_content_rejects_private_or_executable_keys_at_any_depth(
+    session_factory: Callable[..., CollaborationSession],
+    forbidden_key: str,
+) -> None:
+    session = session_factory("peer-a")
+    content = f'{{"outer":[{{"{forbidden_key}":"not-public"}}]}}'
+
+    with pytest.raises(ValidationError, match="forbidden public candidate key"):
+        _contribution(session, "peer-a", candidate_content=content)
+
+
+def test_candidate_content_rejects_excessive_depth_and_collection_width(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory("peer-a")
+    deeply_nested = '{"a":' * 20 + "null" + "}" * 20
+    too_wide = '{"items":[' + ",".join("0" for _ in range(300)) + "]}"
+
+    with pytest.raises(ValidationError, match="candidate_content"):
+        _contribution(session, "peer-a", candidate_content=deeply_nested)
+    with pytest.raises(ValidationError, match="candidate_content"):
+        _contribution(session, "peer-a", candidate_content=too_wide)
+
+
+def test_resource_replay_rejects_tiny_numeric_drift(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory("peer-a", "peer-b", completion_count=8)
+    state = advance_collaboration(
+        session,
+        initial_collaboration_state(session),
+        _request(session, "peer-a"),
+        _contribution(session, "peer-a"),
+        unit_usage(),
+    )
+    payload = state.model_dump(mode="json")
+    payload["usage"]["cost_usd"] += 5e-13
+    unhashed = {key: value for key, value in payload.items() if key != "state_hash"}
+    payload["state_hash"] = sha256_hex(canonical_json_bytes(unhashed))
+
+    with pytest.raises(ValidationError, match="aggregate usage"):
+        CollaborationState.model_validate_json(__import__("json").dumps(payload))
+
+
+def test_candidate_content_parser_exhaustion_is_a_closed_validation_failure(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory("peer-a")
+    parser_exhaustion = '{"a":' * 1_100 + "null" + "}" * 1_100
+
+    with pytest.raises(ValidationError, match="candidate_content"):
+        _contribution(session, "peer-a", candidate_content=parser_exhaustion)
+
+
+def test_collaboration_rejects_unbounded_artifact_and_resource_scalars(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory("peer-a")
+    oversized_artifact = artifact("x" * 10_000)
+
+    with pytest.raises(ValidationError, match="artifact"):
+        _request(session, "peer-a", artifact_refs=(oversized_artifact,))
+    with pytest.raises(ValidationError, match="remaining_budget"):
+        _request(
+            session,
+            "peer-a",
+            remaining_budget=session.budget.resources.model_copy(
+                update={"tokens": 10**30}
+            ),
+        )
+
+
+def test_collaboration_rejects_coercive_nested_artifact_scalars(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory("peer-a")
+    coercive_artifact = {
+        "sha256": "a" * 64,
+        "size_bytes": "4",
+        "media_type": "text/plain",
+        "relative_path": "input.txt",
+    }
+
+    with pytest.raises(ValidationError, match="artifact reference"):
+        _request(session, "peer-a", artifact_refs=(coercive_artifact,))
+
+
+def test_collaboration_sequence_and_artifact_size_counters_are_bounded(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory("peer-a")
+    oversized_artifact = artifact().model_copy(update={"size_bytes": 10**30})
+
+    with pytest.raises(ValidationError, match="sequence"):
+        _request(session, "peer-a", sequence=257)
+    with pytest.raises(ValidationError, match="artifact reference"):
+        _request(session, "peer-a", artifact_refs=(oversized_artifact,))
+
+
+@pytest.mark.parametrize(
+    "candidate_content",
+    (
+        '{"' + "k" * 201 + '":true}',
+        '{"value":"' + "v" * 4_001 + '"}',
+        '{"value":10000000000000000000}',
+    ),
+)
+def test_candidate_content_rejects_bounded_key_and_scalar_violations(
+    session_factory: Callable[..., CollaborationSession],
+    candidate_content: str,
+) -> None:
+    with pytest.raises(ValidationError, match="candidate_content"):
+        _contribution(
+            session_factory("peer-a"),
+            "peer-a",
+            candidate_content=candidate_content,
+        )
 
 
 def test_collaboration_evidence_has_no_promotion_authority(

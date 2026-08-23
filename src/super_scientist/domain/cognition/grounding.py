@@ -38,18 +38,21 @@ def build_cohort(
     request: CohortRequest,
     profiles: tuple[CapabilityProfile, ...],
 ) -> CohortPlan:
-    actor_ids = tuple(profile.actor_id for profile in profiles)
+    candidate_ids = request.candidate_actor_ids
+    candidate_id_set = set(candidate_ids)
+    declared_profiles = tuple(
+        profile for profile in profiles if profile.actor_id in candidate_id_set
+    )
+    actor_ids = tuple(profile.actor_id for profile in declared_profiles)
     if len(set(actor_ids)) != len(actor_ids):
         raise ValueError("capability profile actor IDs must be unique")
-    if any(profile.governing_policy_hash != request.governing_policy_hash for profile in profiles):
+    if any(
+        profile.governing_policy_hash != request.governing_policy_hash
+        for profile in declared_profiles
+    ):
         raise ValueError("capability profiles and cohort request must share governing policy")
 
-    by_actor = {profile.actor_id: profile for profile in profiles}
-    candidate_ids = (
-        request.candidate_actor_ids
-        if request.candidate_actor_ids
-        else tuple(sorted(by_actor))
-    )
+    by_actor = {profile.actor_id: profile for profile in declared_profiles}
     candidates = tuple(by_actor[actor_id] for actor_id in candidate_ids if actor_id in by_actor)
     missing_candidates = tuple(actor_id for actor_id in candidate_ids if actor_id not in by_actor)
     requirements = request.required_capabilities + request.preferred_capabilities

@@ -81,7 +81,7 @@ def _advance(
         ),
         (
             {"max_share": 0.4, "completion_count": 8},
-            2,
+            1,
             CollaborationTerminationReason.CONTRIBUTION_MONOPOLY,
         ),
         ({"completion_count": 1}, 1, CollaborationTerminationReason.COMPLETED),
@@ -121,6 +121,59 @@ def test_no_eligible_peer_terminates_fail_closed(
     assert evaluate_termination(state).reason is CollaborationTerminationReason.NO_ELIGIBLE_PEER
 
 
+def test_monopoly_terminates_before_accepting_a_second_contribution(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory(
+        "peer-a",
+        "peer-b",
+        max_share=0.6,
+        completion_count=8,
+    )
+    state = _advance(session, initial_collaboration_state(session), 1)
+
+    assert (
+        evaluate_termination(state).reason
+        is CollaborationTerminationReason.CONTRIBUTION_MONOPOLY
+    )
+    request = PeerRequest.build(
+        request_id="request-2",
+        session_id=session.session_id,
+        sequence=2,
+        sender_id="peer-a",
+        recipient_id="peer-b",
+        requested_capability_id="analysis",
+        question="Assess.",
+        artifact_refs=(artifact(),),
+        parent_contribution_id="contribution-1",
+        tool_ids=("tool-a",),
+        remaining_budget=session.remaining_resources(state.usage),
+    )
+    contribution = PeerContribution.build(
+        contribution_id="contribution-2",
+        session_id=session.session_id,
+        request_id=request.request_id,
+        peer_id="peer-b",
+        parent_contribution_ids=("contribution-1",),
+        contribution_kind="analysis",
+        rationale_summary="Evidence.",
+        candidate_content='{"finding":"supported"}',
+        artifact_refs=(artifact(),),
+        tool_ids=("tool-a",),
+    )
+    with pytest.raises(ValueError, match=r"terminated.*CONTRIBUTION_MONOPOLY"):
+        advance_collaboration(session, state, request, contribution, unit_usage())
+
+
+def test_completion_precedes_monopoly_deterministically(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory("peer-a", "peer-b", max_share=0.1, completion_count=1)
+    state = _advance(session, initial_collaboration_state(session), 1)
+
+    assert evaluate_termination(state).reason is CollaborationTerminationReason.COMPLETED
+
+
 def test_topology_change_limit_is_bounded(
     session_factory: Callable[..., CollaborationSession],
 ) -> None:
@@ -148,7 +201,12 @@ def test_topology_change_limit_is_bounded(
 def test_alternating_topology_hashes_trigger_churn(
     session_factory: Callable[..., CollaborationSession],
 ) -> None:
-    session = session_factory("peer-a", "peer-b", max_topology_churn=1)
+    session = session_factory(
+        "peer-a",
+        "peer-b",
+        max_topology_churn=1,
+        max_state_repetitions=2,
+    )
     state = initial_collaboration_state(session)
     reduced = TopologySnapshot.build(
         active_peer_ids=state.topology.active_peer_ids,
@@ -205,17 +263,75 @@ def test_direct_parser_rejects_state_beyond_hop_budget(
         CollaborationState.model_validate_json(__import__("json").dumps(payload))
 
 
-def test_repeated_state_loop_is_detected_from_bounded_observations(
+def test_repeated_semantic_state_loop_is_detected_through_engine_evolution(
     session_factory: Callable[..., CollaborationSession],
 ) -> None:
-    state = initial_collaboration_state(session_factory("peer-a"))
+    session = session_factory(
+        "peer-a",
+        "peer-b",
+        max_topology_changes=4,
+        max_topology_churn=4,
+        completion_count=8,
+    )
+    state = initial_collaboration_state(session)
+    initial_semantic_hash = state.observed_state_hashes[-1]
+    reduced = TopologySnapshot.build(
+        active_peer_ids=state.topology.active_peer_ids,
+        enabled_edges=(("peer-b", "peer-a"),),
+    )
+    state = apply_topology_event(
+        session,
+        state,
+        TopologyEvent.build(
+            event_id="event-loop-1",
+            session_id=session.session_id,
+            sequence=1,
+            before_topology_hash=state.topology.content_hash,
+            operation=TopologyOperation.DISABLE_EDGE,
+            peer_id=None,
+            edge=("peer-a", "peer-b"),
+            reason_code="ROUTE_UPDATE",
+            after_topology_hash=reduced.content_hash,
+        ),
+    )
+    restored = TopologySnapshot.build(
+        active_peer_ids=state.topology.active_peer_ids,
+        enabled_edges=session.declared_edges,
+    )
+    state = apply_topology_event(
+        session,
+        state,
+        TopologyEvent.build(
+            event_id="event-loop-2",
+            session_id=session.session_id,
+            sequence=2,
+            before_topology_hash=state.topology.content_hash,
+            operation=TopologyOperation.ENABLE_EDGE,
+            peer_id=None,
+            edge=("peer-a", "peer-b"),
+            reason_code="ROUTE_UPDATE",
+            after_topology_hash=restored.content_hash,
+        ),
+    )
+
+    assert state.observed_state_hashes[-1] == initial_semantic_hash
+    assert (
+        evaluate_termination(state).reason
+        is CollaborationTerminationReason.REPEATED_STATE_LOOP
+    )
+
+
+def test_direct_parser_rejects_fabricated_semantic_state_observations(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    state = initial_collaboration_state(session_factory("peer-a", "peer-b"))
     payload = state.model_dump(mode="json")
-    payload["observed_state_hashes"] = [state.state_hash, state.state_hash]
+    payload["observed_state_hashes"] = ["0" * 64]
     unhashed = {key: value for key, value in payload.items() if key != "state_hash"}
     payload["state_hash"] = sha256_hex(canonical_json_bytes(unhashed))
-    repeated = CollaborationState.model_validate_json(__import__("json").dumps(payload))
-    reason = CollaborationTerminationReason.REPEATED_STATE_LOOP
-    assert evaluate_termination(repeated).reason is reason
+
+    with pytest.raises(ValidationError, match="semantic state observations"):
+        CollaborationState.model_validate_json(__import__("json").dumps(payload))
 
 
 def test_direct_parsing_rejects_state_hash_and_aggregate_tampering(
@@ -224,7 +340,7 @@ def test_direct_parsing_rejects_state_hash_and_aggregate_tampering(
     session = session_factory("peer-a", "peer-b", completion_count=8)
     state = _advance(session, initial_collaboration_state(session), 1)
     hash_payload = state.model_dump(mode="json")
-    hash_payload["observed_state_hashes"].append("0" * 64)
+    hash_payload["state_hash"] = "0" * 64
     with pytest.raises(ValidationError, match="state_hash"):
         CollaborationState.model_validate_json(__import__("json").dumps(hash_payload))
 
@@ -288,7 +404,10 @@ def test_direct_parser_rejects_exchange_after_completion(
     payload["completed"] = True
     _rehash_embedded_session_and_state(payload)
 
-    with pytest.raises(ValidationError, match=r"continues after.*COMPLETED"):
+    with pytest.raises(
+        ValidationError,
+        match=r"semantic state observations|continues after.*COMPLETED",
+    ):
         CollaborationState.model_validate_json(__import__("json").dumps(payload))
 
 
@@ -325,7 +444,11 @@ def test_direct_parser_rejects_exchange_after_topology_limit(
     _rehash_embedded_session_and_state(payload)
 
     with pytest.raises(
-        ValidationError, match=r"continues after.*TOPOLOGY_CHANGE_LIMIT_REACHED"
+        ValidationError,
+        match=(
+            r"semantic state observations|"
+            r"continues after.*TOPOLOGY_CHANGE_LIMIT_REACHED"
+        ),
     ):
         CollaborationState.model_validate_json(__import__("json").dumps(payload))
 
@@ -344,7 +467,8 @@ def test_direct_parser_rejects_exchange_after_repeated_state_loop(
     payload["state_hash"] = sha256_hex(canonical_json_bytes(state_unhashed))
 
     with pytest.raises(
-        ValidationError, match=r"continues after.*REPEATED_STATE_LOOP"
+        ValidationError,
+        match=r"semantic state observations|continues after.*REPEATED_STATE_LOOP",
     ):
         CollaborationState.model_validate_json(__import__("json").dumps(payload))
 

@@ -90,7 +90,7 @@ def _request(
     *,
     min_members: int = 1,
     max_members: int = 1,
-    candidates: tuple[str, ...] = (),
+    candidates: tuple[str, ...] = ("peer-a", "peer-b", "peer-c", "peer-d"),
     prohibited: tuple[tuple[str, str], ...] = (),
     required: tuple[CapabilityRequirement, ...] | None = None,
 ) -> CohortRequest:
@@ -142,6 +142,41 @@ def test_fixed_candidates_and_prohibited_combinations_are_honored_purely() -> No
     assert tuple(member.actor_id for member in plan.members) == ("peer-a", "peer-c")
     assert plan.excluded_actor_ids == ("peer-b",)
     assert plan.minimum_size_met is True
+
+
+def test_cohort_request_requires_a_nonempty_fixed_candidate_roster() -> None:
+    with pytest.raises(ValidationError, match="candidate_actor_ids"):
+        _request(candidates=())
+
+
+def test_supplied_profiles_cannot_expand_the_fixed_candidate_roster() -> None:
+    request = _request(
+        min_members=1,
+        max_members=2,
+        candidates=("peer-a", "peer-c"),
+    )
+
+    plan = build_cohort(
+        request,
+        (_profile("peer-a"), _profile("peer-b")),
+    )
+
+    assert tuple(member.actor_id for member in plan.members) == ("peer-a",)
+    assert plan.unresolved_candidate_actor_ids == ("peer-c",)
+    assert "peer-b" not in plan.excluded_actor_ids
+
+
+def test_candidate_roster_change_changes_request_and_plan_hashes() -> None:
+    left_request = _request(candidates=("peer-a",))
+    right_request = _request(candidates=("peer-a", "peer-b"))
+    profiles = (_profile("peer-a"), _profile("peer-b"))
+
+    left_plan = build_cohort(left_request, profiles)
+    right_plan = build_cohort(right_request, profiles)
+
+    assert left_request.content_hash != right_request.content_hash
+    assert left_plan.request_content_hash != right_plan.request_content_hash
+    assert left_plan.content_hash != right_plan.content_hash
 
 
 def test_empty_profiles_produce_explicit_unresolved_gaps() -> None:

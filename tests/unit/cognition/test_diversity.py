@@ -67,6 +67,9 @@ def _profile(
 
 
 def _cohort(*profiles: CapabilityProfile):
+    candidate_ids = tuple(sorted(profile.actor_id for profile in profiles)) or (
+        "peer-missing",
+    )
     request = CohortRequest.build(
         request_id="request-a",
         task_id="task-a",
@@ -74,7 +77,7 @@ def _cohort(*profiles: CapabilityProfile):
         preferred_capabilities=(),
         min_members=len(profiles),
         max_members=max(1, len(profiles)),
-        candidate_actor_ids=tuple(sorted(profile.actor_id for profile in profiles)),
+        candidate_actor_ids=candidate_ids,
         prohibited_combinations=(),
         governing_policy_hash=POLICY,
     )
@@ -213,6 +216,21 @@ def _correlation(*, policy_hash: str = POLICY) -> ErrorCorrelationRecord:
         value=0.5,
         governing_policy_hash=policy_hash,
     )
+
+
+def test_error_correlation_sample_count_has_a_finite_contract_bound() -> None:
+    with pytest.raises(ValidationError, match="sample_count"):
+        ErrorCorrelationRecord(
+            correlation_id="correlation-oversized",
+            left_actor_id="peer-a",
+            right_actor_id="peer-b",
+            evaluation_set_id="evaluation-a",
+            sample_count=10**30,
+            method="pearson",
+            status=ErrorCorrelationStatus.KNOWN,
+            value=0.5,
+            governing_policy_hash=POLICY,
+        )
 
 
 def test_diversity_function_rejects_correlation_from_another_policy() -> None:

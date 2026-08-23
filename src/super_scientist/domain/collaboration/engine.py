@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+
 from super_scientist.domain.collaboration.models import (
     CollaborationSession,
     CollaborationState,
@@ -12,6 +14,7 @@ from super_scientist.domain.collaboration.models import (
     TopologySnapshot,
     _apply_topology_operation,
     _completion_satisfied,
+    collaboration_semantic_state_hash,
     collaboration_termination_reason,
     eligible_peer_ids,
     sum_usage,
@@ -36,6 +39,15 @@ def initial_collaboration_state(session: CollaborationSession) -> CollaborationS
         tool_calls=0,
         human_interventions=0,
     )
+    semantic_hash = collaboration_semantic_state_hash(
+        session=session,
+        topology=topology,
+        peer_contribution_counts=Counter(),
+        contribution_kind_counts=Counter(),
+        last_peer_id=None,
+        usage=zero,
+        completed=False,
+    )
     return CollaborationState.build(
         session=session,
         topology=topology,
@@ -48,7 +60,7 @@ def initial_collaboration_state(session: CollaborationSession) -> CollaborationS
         hop_count=0,
         scheduling_position=0,
         transitions=(),
-        observed_state_hashes=(),
+        observed_state_hashes=(semantic_hash,),
         completed=False,
     )
 
@@ -180,6 +192,18 @@ def advance_collaboration(
     if not usage_within_budget(updated_usage, session.budget.resources):
         raise ValueError("peer transition exceeds the collaboration resource budget")
     contributions = (*state.contributions, contribution)
+    completed = _completion_satisfied(session, contributions)
+    semantic_hash = collaboration_semantic_state_hash(
+        session=session,
+        topology=state.topology,
+        peer_contribution_counts=Counter(item.peer_id for item in contributions),
+        contribution_kind_counts=Counter(
+            item.contribution_kind for item in contributions
+        ),
+        last_peer_id=contribution.peer_id,
+        usage=updated_usage,
+        completed=completed,
+    )
     return CollaborationState.build(
         session=session,
         topology=state.topology,
@@ -201,8 +225,8 @@ def advance_collaboration(
                 topology_event_id=None,
             ),
         ),
-        observed_state_hashes=(*state.observed_state_hashes, state.state_hash),
-        completed=_completion_satisfied(session, contributions),
+        observed_state_hashes=(*state.observed_state_hashes, semantic_hash),
+        completed=completed,
     )
 
 
@@ -224,6 +248,21 @@ def apply_topology_event(
     after = _apply_topology_operation(session, state.topology, event)
     if event.after_topology_hash != after.content_hash:
         raise ValueError("topology event after topology hash does not match its operation")
+    semantic_hash = collaboration_semantic_state_hash(
+        session=session,
+        topology=after,
+        peer_contribution_counts=Counter(
+            item.peer_id for item in state.contributions
+        ),
+        contribution_kind_counts=Counter(
+            item.contribution_kind for item in state.contributions
+        ),
+        last_peer_id=(
+            state.contributions[-1].peer_id if state.contributions else None
+        ),
+        usage=state.usage,
+        completed=state.completed,
+    )
     return CollaborationState.build(
         session=session,
         topology=after,
@@ -245,7 +284,7 @@ def apply_topology_event(
                 topology_event_id=event.event_id,
             ),
         ),
-        observed_state_hashes=(*state.observed_state_hashes, state.state_hash),
+        observed_state_hashes=(*state.observed_state_hashes, semantic_hash),
         completed=state.completed,
     )
 

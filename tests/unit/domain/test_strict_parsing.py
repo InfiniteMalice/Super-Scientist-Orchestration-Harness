@@ -184,7 +184,7 @@ def test_cognition_records_forbid_extras_and_coercive_schema_versions() -> None:
         preferred_capabilities=(),
         min_members=0,
         max_members=1,
-        candidate_actor_ids=(),
+        candidate_actor_ids=("model-actor",),
         prohibited_combinations=(),
         governing_policy_hash="f" * 64,
     )
@@ -196,6 +196,14 @@ def test_cognition_records_forbid_extras_and_coercive_schema_versions() -> None:
     request_payload = request.model_dump(mode="json") | {"schema_version": "1"}
     with pytest.raises(ValidationError):
         CohortRequest.model_validate_json(json.dumps(request_payload), strict=True)
+
+    assert (
+        CapabilityProfile.model_validate_json(
+            json.dumps(profile.model_dump(mode="json")),
+            strict=True,
+        )
+        == profile
+    )
 
 
 def test_cognition_json_parser_accepts_bounded_tuple_collections() -> None:
@@ -217,6 +225,92 @@ def test_cognition_json_parser_accepts_bounded_tuple_collections() -> None:
     )
 
     assert parsed == request
+
+
+def test_cognition_rejects_unbounded_nested_actor_identity() -> None:
+    actor = _actor().model_copy(update={"provider_id": "p" * 10_000})
+    fingerprint = DiversityFingerprint(
+        fingerprint_id="fingerprint-bounded-actor",
+        model_family=None,
+        model_version=None,
+        scale_class=None,
+        provider=None,
+        adapter_hash=None,
+        configuration_hash=None,
+        prompt_strategy=None,
+        methodological_prior=None,
+        tools=None,
+        evidence_partitions=None,
+        modalities=None,
+        previous_error_clusters=None,
+        prior_task_specializations=None,
+    )
+
+    with pytest.raises(ValidationError, match="actor identity"):
+        CapabilityProfile.build(
+            profile_id="profile-bounded-actor",
+            actor=actor,
+            diversity_fingerprint=fingerprint,
+            governing_policy_hash="f" * 64,
+        )
+
+
+def test_cognition_rejects_coercive_nested_actor_timestamp() -> None:
+    actor_payload = _actor().model_dump(mode="python")
+    actor_payload["created_at"] = NOW.isoformat()
+    fingerprint = DiversityFingerprint(
+        fingerprint_id="fingerprint-strict-actor",
+        model_family=None,
+        model_version=None,
+        scale_class=None,
+        provider=None,
+        adapter_hash=None,
+        configuration_hash=None,
+        prompt_strategy=None,
+        methodological_prior=None,
+        tools=None,
+        evidence_partitions=None,
+        modalities=None,
+        previous_error_clusters=None,
+        prior_task_specializations=None,
+    )
+
+    with pytest.raises(ValidationError, match="actor identity"):
+        CapabilityProfile.build(
+            profile_id="profile-strict-actor",
+            actor=actor_payload,
+            diversity_fingerprint=fingerprint,
+            governing_policy_hash="f" * 64,
+        )
+
+
+def test_cognition_rejects_coercive_nested_actor_kind() -> None:
+    actor_payload = _actor().model_dump(mode="python")
+    actor_payload["kind"] = "model"
+    fingerprint = DiversityFingerprint(
+        fingerprint_id="fingerprint-strict-actor-kind",
+        model_family=None,
+        model_version=None,
+        scale_class=None,
+        provider=None,
+        adapter_hash=None,
+        configuration_hash=None,
+        prompt_strategy=None,
+        methodological_prior=None,
+        tools=None,
+        evidence_partitions=None,
+        modalities=None,
+        previous_error_clusters=None,
+        prior_task_specializations=None,
+    )
+
+    with pytest.raises(ValidationError, match="actor identity"):
+        CapabilityProfile.build(
+            profile_id="profile-strict-actor-kind",
+            actor=actor_payload,
+            diversity_fingerprint=fingerprint,
+            governing_policy_hash="f" * 64,
+        )
 
 
 def test_strict_capability_assessment_parser_rejects_self_report_as_satisfied() -> None:

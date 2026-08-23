@@ -3,10 +3,21 @@ from __future__ import annotations
 import json
 import math
 from collections import Counter
+from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from super_scientist.domain.cognition import CohortPlan
 from super_scientist.domain.evidence.models import ArtifactRef
@@ -19,11 +30,35 @@ from super_scientist.domain.primitives import (
     sha256_hex,
 )
 
-MAX_COLLABORATION_ITEMS = 10_000
+# Immutable states retain complete transition history, so the public envelope must keep
+# both one-shot replay and repeated state evolution operationally bounded.
+MAX_COLLABORATION_ITEMS = 256
 MAX_PEERS = 64
 MAX_IDENTIFIER_LENGTH = 200
 MAX_PUBLIC_TEXT_LENGTH = 8_000
-MAX_CANDIDATE_CONTENT_LENGTH = 64_000
+MAX_CANDIDATE_CONTENT_LENGTH = 16_000
+MAX_ARTIFACT_PATH_LENGTH = 1_000
+MAX_MEDIA_TYPE_LENGTH = 255
+MAX_ARTIFACT_SIZE_BYTES = 1_000_000_000_000
+MAX_RESOURCE_SCALAR = 1_000_000_000_000
+MAX_CANDIDATE_DEPTH = 12
+MAX_CANDIDATE_NODES = 512
+MAX_CANDIDATE_MAPPING_KEYS = 64
+MAX_CANDIDATE_COLLECTION_ITEMS = 128
+MAX_CANDIDATE_KEY_LENGTH = 200
+MAX_CANDIDATE_STRING_LENGTH = 4_000
+MAX_CANDIDATE_INTEGER_ABS = 10**18
+MAX_CANDIDATE_FLOAT_ABS = 10**100
+FORBIDDEN_CANDIDATE_KEYS = frozenset(
+    {
+        "chain_of_thought",
+        "scratchpad",
+        "provider_payload",
+        "secret",
+        "protected_answer",
+        "command",
+    }
+)
 RESOURCE_FIELDS = (
     "cost_usd",
     "compute_units",
@@ -46,6 +81,122 @@ BoundedPublicText = Annotated[
     str,
     BeforeValidator(_strip_text),
     Field(strict=True, min_length=1, max_length=MAX_PUBLIC_TEXT_LENGTH),
+]
+
+
+def _require_bounded_actor_identity(actor: ActorIdentity) -> ActorIdentity:
+    values = (actor.actor_id, actor.provider_id, actor.model_id, actor.adapter_id)
+    if any(
+        value is not None and len(value) > MAX_IDENTIFIER_LENGTH for value in values
+    ):
+        raise ValueError("Phase A actor identity fields must be bounded identifiers")
+    return actor
+
+
+def _require_strict_actor_identity_input(
+    value: object,
+    info: ValidationInfo,
+) -> object:
+    if isinstance(value, ActorIdentity):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError("Phase A actor identity must be a strict object")
+    string_fields = (
+        "actor_id",
+        "provider_id",
+        "model_id",
+        "adapter_id",
+        "configuration_hash",
+    )
+    if any(
+        field_name in value
+        and value[field_name] is not None
+        and not isinstance(value[field_name], str)
+        for field_name in string_fields
+    ):
+        raise ValueError("Phase A actor identity scalars must be strict")
+    created_at = value.get("created_at")
+    kind = value.get("kind")
+    if info.mode == "python" and not isinstance(kind, ActorKind):
+        raise ValueError("Phase A actor identity kind must be a strict ActorKind")
+    if info.mode == "json" and not isinstance(kind, str):
+        raise ValueError("Phase A actor identity JSON kind must be a string")
+    if info.mode == "python" and not isinstance(created_at, datetime):
+        raise ValueError("Phase A actor identity timestamp must be a strict datetime")
+    if info.mode == "json" and not isinstance(created_at, str):
+        raise ValueError("Phase A actor identity JSON timestamp must be a string")
+    if info.mode == "json":
+        return ActorIdentity.model_validate(value)
+    return value
+
+
+def _require_bounded_artifact(artifact: ArtifactRef) -> ArtifactRef:
+    if (
+        artifact.size_bytes > MAX_ARTIFACT_SIZE_BYTES
+        or len(artifact.media_type) > MAX_MEDIA_TYPE_LENGTH
+        or len(artifact.relative_path) > MAX_ARTIFACT_PATH_LENGTH
+    ):
+        raise ValueError("Phase A artifact reference fields exceed bounded limits")
+    return artifact
+
+
+def _require_strict_artifact_input(value: object) -> object:
+    if isinstance(value, ArtifactRef):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError("Phase A artifact reference must be a strict object")
+    if type(value.get("size_bytes")) is not int or any(
+        not isinstance(value.get(field_name), str)
+        for field_name in ("sha256", "media_type", "relative_path")
+    ):
+        raise ValueError("Phase A artifact reference scalars must be strict")
+    return value
+
+
+def _require_bounded_resources(
+    resources: ResourceBudget | ResourceUsage,
+) -> ResourceBudget | ResourceUsage:
+    if any(
+        Decimal(str(getattr(resources, field_name))) > MAX_RESOURCE_SCALAR
+        for field_name in RESOURCE_FIELDS
+    ):
+        raise ValueError("Phase A resource fields exceed bounded limits")
+    return resources
+
+
+def _require_strict_resource_input(value: object) -> object:
+    if isinstance(value, (ResourceBudget, ResourceUsage)):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError("Phase A resources must be a strict object")
+    for field_name in ("cost_usd", "compute_units", "elapsed_seconds"):
+        if type(value.get(field_name)) is not float:
+            raise ValueError("Phase A floating resource scalars must be strict floats")
+    for field_name in ("tokens", "tool_calls", "human_interventions"):
+        if type(value.get(field_name)) is not int:
+            raise ValueError("Phase A integral resource scalars must be strict integers")
+    return value
+
+
+BoundedActorIdentity = Annotated[
+    ActorIdentity,
+    BeforeValidator(_require_strict_actor_identity_input),
+    AfterValidator(_require_bounded_actor_identity),
+]
+BoundedArtifactRef = Annotated[
+    ArtifactRef,
+    BeforeValidator(_require_strict_artifact_input),
+    AfterValidator(_require_bounded_artifact),
+]
+BoundedResourceBudget = Annotated[
+    ResourceBudget,
+    BeforeValidator(_require_strict_resource_input),
+    AfterValidator(_require_bounded_resources),
+]
+BoundedResourceUsage = Annotated[
+    ResourceUsage,
+    BeforeValidator(_require_strict_resource_input),
+    AfterValidator(_require_bounded_resources),
 ]
 
 
@@ -90,7 +241,15 @@ def _zero_usage() -> ResourceUsage:
 def sum_usage(usages: tuple[ResourceUsage, ...]) -> ResourceUsage:
     values: dict[str, float | int] = {}
     for field_name in RESOURCE_FIELDS:
-        values[field_name] = sum(getattr(usage, field_name) for usage in usages)
+        if field_name in {"tokens", "tool_calls", "human_interventions"}:
+            values[field_name] = sum(getattr(usage, field_name) for usage in usages)
+        else:
+            values[field_name] = float(
+                sum(
+                    (Decimal(str(getattr(usage, field_name))) for usage in usages),
+                    Decimal("0"),
+                )
+            )
     return ResourceUsage.model_validate(values)
 
 
@@ -103,12 +262,8 @@ def usage_matches(
         and left.tool_calls == right.tool_calls
         and left.human_interventions == right.human_interventions
         and all(
-            math.isclose(
-                getattr(left, field_name),
-                getattr(right, field_name),
-                rel_tol=1e-12,
-                abs_tol=1e-12,
-            )
+            Decimal(str(getattr(left, field_name)))
+            == Decimal(str(getattr(right, field_name)))
             for field_name in ("cost_usd", "compute_units", "elapsed_seconds")
         )
     )
@@ -117,9 +272,15 @@ def usage_matches(
 def remaining_resources(budget: ResourceBudget, usage: ResourceUsage) -> ResourceBudget:
     if any(getattr(usage, name) > getattr(budget, name) for name in RESOURCE_FIELDS):
         raise ValueError("usage exceeds collaboration resource budget")
-    values: dict[str, float | int] = {
-        name: getattr(budget, name) - getattr(usage, name) for name in RESOURCE_FIELDS
-    }
+    values: dict[str, float | int] = {}
+    for name in RESOURCE_FIELDS:
+        if name in {"tokens", "tool_calls", "human_interventions"}:
+            values[name] = getattr(budget, name) - getattr(usage, name)
+        else:
+            values[name] = float(
+                Decimal(str(getattr(budget, name)))
+                - Decimal(str(getattr(usage, name)))
+            )
     return ResourceBudget.model_validate(values)
 
 
@@ -196,7 +357,7 @@ class CollaborationBudget(_StrictFrozenModel):
     max_state_repetitions: int = Field(strict=True, ge=1, le=MAX_PEERS)
     max_topology_churn: int = Field(strict=True, ge=1, le=MAX_COLLABORATION_ITEMS)
     max_peer_contribution_share: float = Field(strict=True, gt=0.0, le=1.0, allow_inf_nan=False)
-    resources: ResourceBudget
+    resources: BoundedResourceBudget
     allowed_tool_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PEERS)
 
     @field_validator("allowed_tool_ids")
@@ -300,10 +461,12 @@ class _CollaborationSessionPayload(_StrictFrozenModel):
     session_id: BoundedIdentifier
     task_id: BoundedIdentifier
     cohort_plan: CohortPlan
-    peers: tuple[ActorIdentity, ...] = Field(min_length=1, max_length=MAX_PEERS)
+    peers: tuple[BoundedActorIdentity, ...] = Field(min_length=1, max_length=MAX_PEERS)
     role_assignments: tuple[PeerRoleAssignment, ...] = Field(min_length=1, max_length=MAX_PEERS)
-    tools: tuple[ActorIdentity, ...] = Field(max_length=MAX_PEERS)
-    allowed_artifacts: tuple[ArtifactRef, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
+    tools: tuple[BoundedActorIdentity, ...] = Field(max_length=MAX_PEERS)
+    allowed_artifacts: tuple[BoundedArtifactRef, ...] = Field(
+        max_length=MAX_COLLABORATION_ITEMS
+    )
     budget: CollaborationBudget
     allowed_contribution_kinds: tuple[BoundedIdentifier, ...] = Field(
         min_length=1, max_length=MAX_PEERS
@@ -391,7 +554,9 @@ class CollaborationSession(_CollaborationSessionPayload):
         return self
 
 
-def _require_canonical_artifacts(artifacts: tuple[ArtifactRef, ...]) -> tuple[ArtifactRef, ...]:
+def _require_canonical_artifacts(
+    artifacts: tuple[BoundedArtifactRef, ...],
+) -> tuple[BoundedArtifactRef, ...]:
     hashes = tuple(item.sha256 for item in artifacts)
     _canonical_unique(hashes, "artifact_refs")
     return artifacts
@@ -406,14 +571,18 @@ class _PeerRequestPayload(_StrictFrozenModel):
     recipient_id: BoundedIdentifier
     requested_capability_id: BoundedIdentifier
     question: BoundedPublicText
-    artifact_refs: tuple[ArtifactRef, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
+    artifact_refs: tuple[BoundedArtifactRef, ...] = Field(
+        max_length=MAX_COLLABORATION_ITEMS
+    )
     parent_contribution_id: BoundedIdentifier | None
     tool_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PEERS)
-    remaining_budget: ResourceBudget
+    remaining_budget: BoundedResourceBudget
 
     @field_validator("artifact_refs")
     @classmethod
-    def require_artifacts(cls, values: tuple[ArtifactRef, ...]) -> tuple[ArtifactRef, ...]:
+    def require_artifacts(
+        cls, values: tuple[BoundedArtifactRef, ...]
+    ) -> tuple[BoundedArtifactRef, ...]:
         return _require_canonical_artifacts(values)
 
     @field_validator("tool_ids")
@@ -438,18 +607,71 @@ class PeerRequest(_PeerRequestPayload):
         return self
 
 
+def _reject_json_constant(_value: str) -> object:
+    raise ValueError("non-finite JSON number is forbidden")
+
+
 def _canonical_candidate_json(value: object) -> object:
     if not isinstance(value, str) or len(value) > MAX_CANDIDATE_CONTENT_LENGTH:
         raise ValueError("candidate_content must be a bounded canonical JSON object")
     try:
-        parsed = json.loads(value)
-    except (json.JSONDecodeError, ValueError) as exc:
+        parsed = json.loads(
+            value,
+            parse_constant=_reject_json_constant,
+        )
+    except (
+        json.JSONDecodeError,
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        ValueError,
+    ) as exc:
         raise ValueError("candidate_content must be a bounded canonical JSON object") from exc
     if not isinstance(parsed, dict):
         raise ValueError("candidate_content must be a bounded canonical JSON object")
+
+    node_count = 0
+    stack: list[tuple[object, int]] = [(parsed, 1)]
+    while stack:
+        item, depth = stack.pop()
+        node_count += 1
+        if node_count > MAX_CANDIDATE_NODES or depth > MAX_CANDIDATE_DEPTH:
+            raise ValueError("candidate_content exceeds bounded depth or node limits")
+        if isinstance(item, dict):
+            if len(item) > MAX_CANDIDATE_MAPPING_KEYS:
+                raise ValueError("candidate_content exceeds bounded mapping size")
+            for key, nested in item.items():
+                if (
+                    not key
+                    or key != key.strip()
+                    or len(key) > MAX_CANDIDATE_KEY_LENGTH
+                ):
+                    raise ValueError("candidate_content contains an invalid bounded key")
+                if key.strip().casefold() in FORBIDDEN_CANDIDATE_KEYS:
+                    raise ValueError(
+                        f"candidate_content contains forbidden public candidate key: {key}"
+                    )
+                stack.append((nested, depth + 1))
+        elif isinstance(item, list):
+            if len(item) > MAX_CANDIDATE_COLLECTION_ITEMS:
+                raise ValueError("candidate_content exceeds bounded collection size")
+            stack.extend((nested, depth + 1) for nested in item)
+        elif isinstance(item, str):
+            if len(item) > MAX_CANDIDATE_STRING_LENGTH:
+                raise ValueError("candidate_content contains an oversized string")
+        elif isinstance(item, bool) or item is None:
+            continue
+        elif isinstance(item, int):
+            if abs(item) > MAX_CANDIDATE_INTEGER_ABS:
+                raise ValueError("candidate_content contains an oversized integer")
+        elif isinstance(item, float):
+            if not math.isfinite(item) or abs(item) > MAX_CANDIDATE_FLOAT_ABS:
+                raise ValueError("candidate_content contains an invalid finite number")
+        else:
+            raise ValueError("candidate_content contains an unsupported public value")
     try:
         canonical = canonical_json_bytes(parsed).decode("utf-8")
-    except (TypeError, ValueError) as exc:
+    except (MemoryError, OverflowError, RecursionError, TypeError, ValueError) as exc:
         raise ValueError("candidate_content must be a bounded canonical JSON object") from exc
     if canonical != value:
         raise ValueError("candidate_content must be a canonical JSON object")
@@ -473,7 +695,9 @@ class _PeerContributionPayload(_StrictFrozenModel):
     contribution_kind: BoundedIdentifier
     rationale_summary: BoundedPublicText
     candidate_content: CanonicalCandidateJson
-    artifact_refs: tuple[ArtifactRef, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
+    artifact_refs: tuple[BoundedArtifactRef, ...] = Field(
+        max_length=MAX_COLLABORATION_ITEMS
+    )
     tool_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PEERS)
     authority: Literal["EVIDENCE_ONLY"] = "EVIDENCE_ONLY"
 
@@ -484,7 +708,9 @@ class _PeerContributionPayload(_StrictFrozenModel):
 
     @field_validator("artifact_refs")
     @classmethod
-    def require_artifacts(cls, values: tuple[ArtifactRef, ...]) -> tuple[ArtifactRef, ...]:
+    def require_artifacts(
+        cls, values: tuple[BoundedArtifactRef, ...]
+    ) -> tuple[BoundedArtifactRef, ...]:
         return _require_canonical_artifacts(values)
 
 
@@ -514,14 +740,19 @@ class _CollaborationStatePayload(_StrictFrozenModel):
     topology_events: tuple[TopologyEvent, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
     requests: tuple[PeerRequest, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
     contributions: tuple[PeerContribution, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
-    usage_history: tuple[ResourceUsage, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
-    usage: ResourceUsage
+    usage_history: tuple[BoundedResourceUsage, ...] = Field(
+        max_length=MAX_COLLABORATION_ITEMS
+    )
+    usage: BoundedResourceUsage
     hop_count: int = Field(strict=True, ge=0, le=MAX_COLLABORATION_ITEMS)
     scheduling_position: int = Field(strict=True, ge=0, le=MAX_COLLABORATION_ITEMS * 2)
     transitions: tuple[CollaborationTransition, ...] = Field(
         max_length=MAX_COLLABORATION_ITEMS * 2
     )
-    observed_state_hashes: tuple[Sha256Hex, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
+    observed_state_hashes: tuple[Sha256Hex, ...] = Field(
+        min_length=1,
+        max_length=MAX_COLLABORATION_ITEMS * 2 + 1,
+    )
     completed: bool
 
     @model_validator(mode="after")
@@ -653,23 +884,47 @@ class _CollaborationStatePayload(_StrictFrozenModel):
         return self
 
     def _require_deterministic_transition_replay(self) -> None:
+        if len(self.observed_state_hashes) != len(self.transitions) + 1:
+            raise ValueError(
+                "semantic state observations must cover the initial state and every transition"
+            )
         topology_index = 0
         peer_index = 0
         last_peer_id: str | None = None
         topology = self.topology_history[0]
+        peer_counts: Counter[str] = Counter()
+        contribution_kind_counts: Counter[str] = Counter()
+        observed_counts: Counter[str] = Counter()
+        topology_hashes = [topology.content_hash]
+        topology_churn_count = 0
+        usage = _zero_usage()
+        completed = False
+        initial_semantic_hash = collaboration_semantic_state_hash(
+            session=self.session,
+            topology=topology,
+            peer_contribution_counts=peer_counts,
+            contribution_kind_counts=contribution_kind_counts,
+            last_peer_id=last_peer_id,
+            usage=usage,
+            completed=completed,
+        )
+        if self.observed_state_hashes[0] != initial_semantic_hash:
+            raise ValueError("semantic state observations must be replay-authentic")
+        observed_counts[initial_semantic_hash] += 1
+
         for position, transition in enumerate(self.transitions, start=1):
             if transition.position != position:
                 raise ValueError("transition positions must be consecutive")
-            reason = collaboration_termination_reason(
+            reason = _termination_reason_from_summary(
                 session=self.session,
                 topology=topology,
-                topology_history=self.topology_history[: topology_index + 1],
-                topology_events=self.topology_events[:topology_index],
-                contributions=self.contributions[:peer_index],
-                observed_state_hashes=self.observed_state_hashes[: position - 1],
-                completed=_completion_satisfied(
-                    self.session, self.contributions[:peer_index]
-                ),
+                topology_event_count=topology_index,
+                contribution_count=peer_index,
+                peer_contribution_counts=peer_counts,
+                last_peer_id=last_peer_id,
+                observed_semantic_state_counts=observed_counts,
+                topology_churn_count=topology_churn_count,
+                completed=completed,
             )
             if reason is not None:
                 raise ValueError(
@@ -684,26 +939,56 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                     raise ValueError("transition journal must bind the exact topology event")
                 topology_index += 1
                 topology = self.topology_history[topology_index]
-                continue
-            if peer_index >= len(self.requests):
-                raise ValueError("transition journal references an absent peer exchange")
-            request = self.requests[peer_index]
-            contribution = self.contributions[peer_index]
-            if (
-                transition.request_id != request.request_id
-                or transition.contribution_id != contribution.contribution_id
-            ):
-                raise ValueError("transition journal must bind the exact peer exchange")
-            if request.sender_id != last_peer_id:
-                raise ValueError("request sender must match the prior contributing peer")
-            eligible = eligible_peer_ids(
-                self.session, topology, self.contributions[:peer_index]
+                if (
+                    len(topology_hashes) >= 2
+                    and topology.content_hash == topology_hashes[-2]
+                ):
+                    topology_churn_count += 1
+                topology_hashes.append(topology.content_hash)
+            else:
+                if peer_index >= len(self.requests):
+                    raise ValueError("transition journal references an absent peer exchange")
+                request = self.requests[peer_index]
+                contribution = self.contributions[peer_index]
+                if (
+                    transition.request_id != request.request_id
+                    or transition.contribution_id != contribution.contribution_id
+                ):
+                    raise ValueError("transition journal must bind the exact peer exchange")
+                if request.sender_id != last_peer_id:
+                    raise ValueError("request sender must match the prior contributing peer")
+                eligible = _eligible_peer_ids_from_summary(
+                    self.session,
+                    topology,
+                    peer_counts,
+                    last_peer_id,
+                )
+                expected_peer = eligible[0] if eligible else None
+                if request.recipient_id != expected_peer:
+                    raise ValueError("request recipient must be the expected peer")
+                usage = sum_usage((usage, self.usage_history[peer_index]))
+                peer_counts[contribution.peer_id] += 1
+                contribution_kind_counts[contribution.contribution_kind] += 1
+                last_peer_id = contribution.peer_id
+                peer_index += 1
+                completed = _completion_satisfied_from_summary(
+                    self.session,
+                    peer_index,
+                    contribution_kind_counts,
+                )
+
+            semantic_hash = collaboration_semantic_state_hash(
+                session=self.session,
+                topology=topology,
+                peer_contribution_counts=peer_counts,
+                contribution_kind_counts=contribution_kind_counts,
+                last_peer_id=last_peer_id,
+                usage=usage,
+                completed=completed,
             )
-            expected_peer = eligible[0] if eligible else None
-            if request.recipient_id != expected_peer:
-                raise ValueError("request recipient must be the expected peer")
-            last_peer_id = contribution.peer_id
-            peer_index += 1
+            if self.observed_state_hashes[position] != semantic_hash:
+                raise ValueError("semantic state observations must be replay-authentic")
+            observed_counts[semantic_hash] += 1
         if topology_index != len(self.topology_events) or peer_index != len(self.requests):
             raise ValueError("transition journal must retain every checked transition")
         if topology != self.topology:
@@ -743,6 +1028,43 @@ def _completion_satisfied(
         return False
     required = predicate.required_contribution_kind
     return required is None or any(item.contribution_kind == required for item in contributions)
+
+
+def _completion_satisfied_from_summary(
+    session: CollaborationSession,
+    contribution_count: int,
+    contribution_kind_counts: Counter[str],
+) -> bool:
+    predicate = session.completion_predicate
+    if contribution_count < predicate.min_contributions:
+        return False
+    required = predicate.required_contribution_kind
+    return required is None or contribution_kind_counts[required] > 0
+
+
+def collaboration_semantic_state_hash(
+    *,
+    session: CollaborationSession,
+    topology: TopologySnapshot,
+    peer_contribution_counts: Counter[str],
+    contribution_kind_counts: Counter[str],
+    last_peer_id: str | None,
+    usage: ResourceUsage,
+    completed: bool,
+) -> str:
+    """Hash only state that can affect a future collaboration transition."""
+
+    payload = {
+        "semantic_schema_version": 1,
+        "session_content_hash": session.content_hash,
+        "topology_content_hash": topology.content_hash,
+        "peer_contribution_counts": tuple(sorted(peer_contribution_counts.items())),
+        "contribution_kind_counts": tuple(sorted(contribution_kind_counts.items())),
+        "last_peer_id": last_peer_id,
+        "usage": usage.model_dump(mode="json"),
+        "completed": completed,
+    }
+    return sha256_hex(canonical_json_bytes(payload))
 
 
 def _apply_topology_operation(
@@ -790,6 +1112,16 @@ def eligible_peer_ids(
     contributions: tuple[PeerContribution, ...],
 ) -> tuple[str, ...]:
     counts = Counter(item.peer_id for item in contributions)
+    last_peer_id = contributions[-1].peer_id if contributions else None
+    return _eligible_peer_ids_from_summary(session, topology, counts, last_peer_id)
+
+
+def _eligible_peer_ids_from_summary(
+    session: CollaborationSession,
+    topology: TopologySnapshot,
+    counts: Counter[str],
+    last_peer_id: str | None,
+) -> tuple[str, ...]:
     active = set(topology.active_peer_ids)
     candidates = {
         peer.actor_id
@@ -797,13 +1129,64 @@ def eligible_peer_ids(
         if peer.actor_id in active
         and counts[peer.actor_id] < session.budget.max_contributions_per_peer
     }
-    if contributions:
-        sender = contributions[-1].peer_id
+    if last_peer_id is not None:
         targets = {
-            target for source, target in topology.enabled_edges if source == sender
+            target
+            for source, target in topology.enabled_edges
+            if source == last_peer_id
         }
         candidates &= targets
     return tuple(sorted(candidates))
+
+
+def _termination_reason_from_summary(
+    *,
+    session: CollaborationSession,
+    topology: TopologySnapshot,
+    topology_event_count: int,
+    contribution_count: int,
+    peer_contribution_counts: Counter[str],
+    last_peer_id: str | None,
+    observed_semantic_state_counts: Counter[str],
+    topology_churn_count: int,
+    completed: bool,
+) -> CollaborationTerminationReason | None:
+    budget = session.budget
+    if completed:
+        return CollaborationTerminationReason.COMPLETED
+    if contribution_count >= budget.max_hops:
+        return CollaborationTerminationReason.MAX_HOPS_REACHED
+    if contribution_count >= budget.max_contributions:
+        return CollaborationTerminationReason.MAX_CONTRIBUTIONS_REACHED
+    if any(
+        count >= budget.max_contributions_per_peer
+        for count in peer_contribution_counts.values()
+    ):
+        return CollaborationTerminationReason.PER_PEER_LIMIT_REACHED
+    if topology_event_count and topology_event_count >= budget.max_topology_changes:
+        return CollaborationTerminationReason.TOPOLOGY_CHANGE_LIMIT_REACHED
+    if any(
+        count > budget.max_state_repetitions
+        for count in observed_semantic_state_counts.values()
+    ):
+        return CollaborationTerminationReason.REPEATED_STATE_LOOP
+    if topology_churn_count >= budget.max_topology_churn:
+        return CollaborationTerminationReason.TOPOLOGY_CHURN
+    total = Decimal(contribution_count)
+    share_bound = Decimal(str(budget.max_peer_contribution_share))
+    if contribution_count and any(
+        Decimal(count) / total > share_bound
+        for count in peer_contribution_counts.values()
+    ):
+        return CollaborationTerminationReason.CONTRIBUTION_MONOPOLY
+    if not _eligible_peer_ids_from_summary(
+        session,
+        topology,
+        peer_contribution_counts,
+        last_peer_id,
+    ):
+        return CollaborationTerminationReason.NO_ELIGIBLE_PEER
+    return None
 
 
 def collaboration_termination_reason(
@@ -816,38 +1199,23 @@ def collaboration_termination_reason(
     observed_state_hashes: tuple[str, ...],
     completed: bool,
 ) -> CollaborationTerminationReason | None:
-    budget = session.budget
     counts = Counter(item.peer_id for item in contributions)
-    if completed:
-        return CollaborationTerminationReason.COMPLETED
-    if len(contributions) >= budget.max_hops:
-        return CollaborationTerminationReason.MAX_HOPS_REACHED
-    if len(contributions) >= budget.max_contributions:
-        return CollaborationTerminationReason.MAX_CONTRIBUTIONS_REACHED
-    if any(count >= budget.max_contributions_per_peer for count in counts.values()):
-        return CollaborationTerminationReason.PER_PEER_LIMIT_REACHED
-    if topology_events and len(topology_events) >= budget.max_topology_changes:
-        return CollaborationTerminationReason.TOPOLOGY_CHANGE_LIMIT_REACHED
-    if any(
-        count > budget.max_state_repetitions
-        for count in Counter(observed_state_hashes).values()
-    ):
-        return CollaborationTerminationReason.REPEATED_STATE_LOOP
     topology_hashes = tuple(item.content_hash for item in topology_history)
     churn_count = sum(
         topology_hashes[index] == topology_hashes[index - 2]
         for index in range(2, len(topology_hashes))
     )
-    if churn_count >= budget.max_topology_churn:
-        return CollaborationTerminationReason.TOPOLOGY_CHURN
-    if len(contributions) >= 2 and any(
-        count / len(contributions) > budget.max_peer_contribution_share
-        for count in counts.values()
-    ):
-        return CollaborationTerminationReason.CONTRIBUTION_MONOPOLY
-    if not eligible_peer_ids(session, topology, contributions):
-        return CollaborationTerminationReason.NO_ELIGIBLE_PEER
-    return None
+    return _termination_reason_from_summary(
+        session=session,
+        topology=topology,
+        topology_event_count=len(topology_events),
+        contribution_count=len(contributions),
+        peer_contribution_counts=counts,
+        last_peer_id=contributions[-1].peer_id if contributions else None,
+        observed_semantic_state_counts=Counter(observed_state_hashes),
+        topology_churn_count=churn_count,
+        completed=completed,
+    )
 
 
 __all__ = [

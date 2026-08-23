@@ -117,6 +117,7 @@ def session_factory() -> Callable[..., CollaborationSession]:
         max_topology_changes: int = 4,
         max_topology_churn: int = 3,
         max_parent_depth: int = 3,
+        max_state_repetitions: int = 1,
         max_share: float = 1.0,
         completion_count: int = 8,
     ) -> CollaborationSession:
@@ -153,7 +154,7 @@ def session_factory() -> Callable[..., CollaborationSession]:
             max_contributions_per_peer=max_per_peer,
             max_topology_changes=max_topology_changes,
             max_parent_depth=max_parent_depth,
-            max_state_repetitions=1,
+            max_state_repetitions=max_state_repetitions,
             max_topology_churn=max_topology_churn,
             max_peer_contribution_share=max_share,
             resources=ResourceBudget(

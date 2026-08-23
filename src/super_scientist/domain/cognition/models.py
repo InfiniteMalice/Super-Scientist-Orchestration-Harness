@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, ClassVar, Literal, Self
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     ConfigDict,
     Field,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -24,6 +27,7 @@ from super_scientist.domain.primitives import (
 MAX_COGNITION_ITEMS = 64
 MAX_IDENTIFIER_LENGTH = 200
 MAX_TEXT_LENGTH = 2_000
+MAX_ERROR_CORRELATION_SAMPLES = 1_000_000
 
 
 def _strip_text(value: object) -> object:
@@ -38,6 +42,65 @@ BoundedText = Annotated[
     str,
     BeforeValidator(_strip_text),
     Field(strict=True, min_length=1, max_length=MAX_TEXT_LENGTH),
+]
+
+
+def _require_bounded_actor_identity(actor: ActorIdentity) -> ActorIdentity:
+    identity_fields = (
+        actor.actor_id,
+        actor.provider_id,
+        actor.model_id,
+        actor.adapter_id,
+    )
+    if any(
+        value is not None and len(value) > MAX_IDENTIFIER_LENGTH
+        for value in identity_fields
+    ):
+        raise ValueError("Phase A actor identity fields must be bounded identifiers")
+    return actor
+
+
+def _require_strict_actor_identity_input(
+    value: object,
+    info: ValidationInfo,
+) -> object:
+    if isinstance(value, ActorIdentity):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError("Phase A actor identity must be a strict object")
+    string_fields = (
+        "actor_id",
+        "provider_id",
+        "model_id",
+        "adapter_id",
+        "configuration_hash",
+    )
+    if any(
+        field_name in value
+        and value[field_name] is not None
+        and not isinstance(value[field_name], str)
+        for field_name in string_fields
+    ):
+        raise ValueError("Phase A actor identity scalars must be strict")
+    created_at = value.get("created_at")
+    kind = value.get("kind")
+    if info.mode == "python" and not isinstance(kind, ActorKind):
+        raise ValueError("Phase A actor identity kind must be a strict ActorKind")
+    if info.mode == "json" and not isinstance(kind, str):
+        raise ValueError("Phase A actor identity JSON kind must be a string")
+    if info.mode == "python" and not isinstance(created_at, datetime):
+        raise ValueError("Phase A actor identity timestamp must be a strict datetime")
+    if info.mode == "json" and not isinstance(created_at, str):
+        raise ValueError("Phase A actor identity JSON timestamp must be a string")
+    if info.mode == "json":
+        return ActorIdentity.model_validate(value)
+    return value
+
+
+BoundedActorIdentity = Annotated[
+    ActorIdentity,
+    BeforeValidator(_require_strict_actor_identity_input),
+    AfterValidator(_require_bounded_actor_identity),
 ]
 
 
@@ -165,7 +228,7 @@ class DiversityFingerprint(_StrictFrozenModel):
 class _CapabilityProfilePayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     profile_id: BoundedIdentifier
-    actor: ActorIdentity
+    actor: BoundedActorIdentity
     diversity_fingerprint: DiversityFingerprint
     allowed_tools: tuple[BoundedIdentifier, ...] = Field(
         default=(), max_length=MAX_COGNITION_ITEMS
@@ -481,7 +544,10 @@ class _CohortRequestPayload(_StrictFrozenModel):
     )
     min_members: int = Field(strict=True, ge=0, le=MAX_COGNITION_ITEMS)
     max_members: int = Field(strict=True, ge=1, le=MAX_COGNITION_ITEMS)
-    candidate_actor_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_COGNITION_ITEMS)
+    candidate_actor_ids: tuple[BoundedIdentifier, ...] = Field(
+        min_length=1,
+        max_length=MAX_COGNITION_ITEMS,
+    )
     prohibited_combinations: tuple[
         tuple[BoundedIdentifier, BoundedIdentifier], ...
     ] = Field(max_length=MAX_COGNITION_ITEMS)
@@ -804,7 +870,11 @@ class ErrorCorrelationRecord(_StrictFrozenModel):
     left_actor_id: BoundedIdentifier
     right_actor_id: BoundedIdentifier
     evaluation_set_id: BoundedIdentifier
-    sample_count: int = Field(strict=True, ge=0)
+    sample_count: int = Field(
+        strict=True,
+        ge=0,
+        le=MAX_ERROR_CORRELATION_SAMPLES,
+    )
     method: BoundedIdentifier
     status: ErrorCorrelationStatus
     value: float | None = Field(default=None, ge=-1.0, le=1.0, allow_inf_nan=False)
