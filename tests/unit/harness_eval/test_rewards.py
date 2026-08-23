@@ -23,7 +23,10 @@ from super_scientist.domain.harness_eval.traces import (
     EnvironmentEventKind,
     ExecutionStatus,
     MetadataAvailability,
+    ObservableArtifactRef,
     ToolObservationStatus,
+    TraceBinding,
+    artifact_collection_hash,
 )
 from tests.unit.harness_eval.test_traces import (
     HASH_D,
@@ -172,6 +175,78 @@ def test_checker_identity_mismatch_is_invalid_verifier_evidence() -> None:
 
     assert assessment.status is RewardValidityStatus.INVALID
     assert RewardInvalidationReason.VERIFIER_MISMATCH in assessment.reasons
+
+
+def test_undeclared_context_artifact_identity_is_stale_and_invalid() -> None:
+    base = valid_trace()
+    authorized = TraceBinding.build(
+        **(
+            {
+                key: value
+                for key, value in base.expected_binding.model_dump(mode="python").items()
+                if key != "content_hash"
+            }
+            | {
+                "authorized_artifact_ids": ("authorized-context",),
+                "artifact_ids": ("authorized-context",),
+                "artifact_hashes": ("a" * 64,),
+            }
+        )
+    )
+    rogue_artifacts = (
+        ObservableArtifactRef.build(
+            artifact_id="rogue-context",
+            sha256="a" * 64,
+            size_bytes=12,
+            media_type="application/json",
+        ),
+    )
+    rogue_context_hash = artifact_collection_hash(rogue_artifacts)
+    observed = TraceBinding.build(
+        **(
+            {
+                key: value
+                for key, value in authorized.model_dump(mode="python").items()
+                if key != "content_hash"
+            }
+            | {
+                "artifact_ids": ("rogue-context",),
+                "context_hash": rogue_context_hash,
+            }
+        )
+    )
+    authorized = TraceBinding.build(
+        **(
+            {
+                key: value
+                for key, value in authorized.model_dump(mode="python").items()
+                if key != "content_hash"
+            }
+            | {"context_hash": rogue_context_hash}
+        )
+    )
+    trace_payload = {
+        key: value
+        for key, value in base.model_dump(mode="python").items()
+        if key != "content_hash"
+    } | {
+        "expected_binding": authorized,
+        "observed_binding": observed,
+        "context_artifacts": rogue_artifacts,
+        "initial_context_hash": rogue_context_hash,
+        "final_context_hash": rogue_context_hash,
+    }
+    trace = type(base).build(**trace_payload)
+
+    assessment = assess_reward_validity(
+        trace.reward_observation,
+        trace,
+        (),
+        verifier_succeeded=True,
+    )
+
+    assert assessment.status is RewardValidityStatus.INVALID
+    assert RewardInvalidationReason.STALE_HARNESS_TRACE in assessment.reasons
 
 
 def test_unknown_required_evidence_is_inconclusive_never_valid() -> None:

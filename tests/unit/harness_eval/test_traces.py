@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 import super_scientist.domain.harness_eval as harness_eval
 from super_scientist.domain.evidence.models import ArtifactRef
+from super_scientist.domain.harness_eval.guidance import GuidanceCondition
 from super_scientist.domain.harness_eval.matrix import HarnessIdentity, ModelIdentity
 from super_scientist.domain.harness_eval.traces import (
     AvailableValue,
@@ -30,6 +31,7 @@ from super_scientist.domain.harness_eval.traces import (
     TraceFreshnessStatus,
     artifact_collection_hash,
     context_transformation_hash,
+    generation_metadata_hash,
     trace_binding_hash,
     trace_freshness,
     trace_hash,
@@ -323,6 +325,47 @@ def test_trace_can_truthfully_record_an_unavailable_reward_observation() -> None
     assert trace.reward_observation_hash.evidence_id is None
 
 
+def test_absent_reward_rejects_rehashed_not_applicable_observation_hash() -> None:
+    trace = valid_trace(include_reward=False)
+    payload = trace.model_dump(mode="python") | {
+        "reward_observation_hash": not_applicable(),
+    }
+    payload["content_hash"] = trace_hash(payload)
+
+    with pytest.raises(ValidationError, match="UNAVAILABLE"):
+        HarnessExecutionTrace.model_validate(payload)
+
+
+def test_available_generation_token_count_is_strict_nonnegative_without_token_ids() -> None:
+    metadata = generation_metadata()
+    payload = metadata.model_dump(mode="python") | {
+        "token_count": available(-1, "usage-meter"),
+    }
+    payload["content_hash"] = generation_metadata_hash(payload)
+
+    with pytest.raises(ValidationError, match="non-negative"):
+        GenerationMetadata.model_validate(payload)
+
+
+def test_rehashed_trace_rejects_expected_artifact_outside_authorized_set() -> None:
+    trace = valid_trace()
+    expected_payload = {
+        key: value
+        for key, value in trace.expected_binding.model_dump(mode="python").items()
+        if key != "content_hash"
+    } | {"artifact_ids": ("rogue-context",)}
+    rogue_expected = TraceBinding.build(**expected_payload)
+    trace_payload = {
+        key: value
+        for key, value in trace.model_dump(mode="python").items()
+        if key != "content_hash"
+    } | {"expected_binding": rogue_expected}
+    trace_payload["content_hash"] = trace_hash(trace_payload)
+
+    with pytest.raises(ValidationError, match="authorized artifact identities"):
+        HarnessExecutionTrace.model_validate(trace_payload)
+
+
 def test_trace_public_api_is_exported_from_harness_eval_package() -> None:
     assert harness_eval.HarnessExecutionTrace is HarnessExecutionTrace
     assert harness_eval.AvailableValue is AvailableValue
@@ -331,8 +374,16 @@ def test_trace_public_api_is_exported_from_harness_eval_package() -> None:
 
 def test_trace_binding_consumes_exact_guidance_and_matrix_protocol_contracts() -> None:
     guidance = guidance_protocol()
+    guidance_artifact = ObservableArtifactRef.build(
+        artifact_id="artifact-a",
+        sha256=HASH_A,
+        size_bytes=1,
+        media_type="application/json",
+    )
     guidance_binding = TraceBinding.from_guidance_protocol(
         guidance,
+        condition=GuidanceCondition.FULL_PROCEDURE_GUIDANCE,
+        artifacts=(guidance_artifact,),
         model_hash=HASH_B,
         harness_hash=HASH_C,
         procedure_id="procedure-1",
@@ -344,17 +395,30 @@ def test_trace_binding_consumes_exact_guidance_and_matrix_protocol_contracts() -
         context_hash=HASH_C,
         validator_hash=HASH_C,
         checker_hash=HASH_D,
-        artifact_hashes=(HASH_A,),
     )
     assert guidance_binding.protocol_hash == guidance.content_hash
     assert guidance_binding.task_id == guidance.task_id
     assert guidance_binding.checker_id == guidance.checker_id
+    assert guidance_binding.guidance_condition is GuidanceCondition.FULL_PROCEDURE_GUIDANCE
+    assert guidance_binding.artifact_ids == guidance.artifact_ids
+    assert guidance_binding.artifact_hashes == (HASH_A,)
+    rehashed = guidance_binding.model_dump(mode="python") | {
+        "authorized_artifact_ids": ("rogue-artifact",),
+    }
+    rehashed["content_hash"] = trace_binding_hash(rehashed)
+    with pytest.raises(ValidationError, match="authorized guidance artifacts"):
+        TraceBinding.model_validate(rehashed)
 
-    matrix = matrix_protocol()
-    coordinate = matrix.expected_grid[0]
-    matrix_binding = TraceBinding.from_model_harness_protocol(
-        matrix,
-        coordinate,
+    distractor = ObservableArtifactRef.build(
+        artifact_id="distractor-a",
+        sha256=HASH_B,
+        size_bytes=1,
+        media_type="application/json",
+    )
+    distractor_binding = TraceBinding.from_guidance_protocol(
+        guidance,
+        condition=GuidanceCondition.OBJECTIVE_DATA_WITH_DISTRACTORS,
+        artifacts=(guidance_artifact, distractor),
         model_hash=HASH_B,
         harness_hash=HASH_C,
         procedure_id="procedure-1",
@@ -366,12 +430,87 @@ def test_trace_binding_consumes_exact_guidance_and_matrix_protocol_contracts() -
         context_hash=HASH_C,
         validator_hash=HASH_C,
         checker_hash=HASH_D,
-        artifact_hashes=(HASH_A,),
+    )
+    assert distractor_binding.artifact_ids == ("artifact-a", "distractor-a")
+
+    rogue = ObservableArtifactRef.build(
+        artifact_id="rogue-artifact",
+        sha256=HASH_A,
+        size_bytes=1,
+        media_type="application/json",
+    )
+    with pytest.raises(ValueError, match="authorized guidance artifacts"):
+        TraceBinding.from_guidance_protocol(
+            guidance,
+            condition=GuidanceCondition.FULL_PROCEDURE_GUIDANCE,
+            artifacts=(rogue,),
+            model_hash=HASH_B,
+            harness_hash=HASH_C,
+            procedure_id="procedure-1",
+            procedure_version="v1",
+            procedure_hash=HASH_A,
+            environment_id="environment",
+            environment_version="v1",
+            environment_hash=HASH_B,
+            context_hash=HASH_C,
+            validator_hash=HASH_C,
+            checker_hash=HASH_D,
+        )
+
+    matrix = matrix_protocol()
+    coordinate = matrix.expected_grid[0]
+    matrix_artifact = ObservableArtifactRef.build(
+        artifact_id="artifact-a",
+        sha256=HASH_A,
+        size_bytes=1,
+        media_type="application/json",
+    )
+    matrix_binding = TraceBinding.from_model_harness_protocol(
+        matrix,
+        coordinate,
+        artifacts=(matrix_artifact,),
+        model_hash=HASH_B,
+        harness_hash=HASH_C,
+        procedure_id="procedure-1",
+        procedure_version="v1",
+        procedure_hash=HASH_A,
+        environment_id="environment",
+        environment_version="v1",
+        environment_hash=HASH_B,
+        context_hash=HASH_C,
+        validator_hash=HASH_C,
+        checker_hash=HASH_D,
     )
     assert matrix_binding.protocol_hash == matrix.content_hash
     assert matrix_binding.task_id == matrix.task_set_id
     assert matrix_binding.model == coordinate.model
     assert matrix_binding.partition == coordinate.partition
+    assert matrix_binding.artifact_ids == matrix.artifact_ids
+
+    with pytest.raises(ValueError, match="authorized matrix artifacts"):
+        TraceBinding.from_model_harness_protocol(
+            matrix,
+            coordinate,
+            artifacts=(
+                ObservableArtifactRef.build(
+                    artifact_id="rogue-artifact",
+                    sha256=HASH_A,
+                    size_bytes=1,
+                    media_type="application/json",
+                ),
+            ),
+            model_hash=HASH_B,
+            harness_hash=HASH_C,
+            procedure_id="procedure-1",
+            procedure_version="v1",
+            procedure_hash=HASH_A,
+            environment_id="environment",
+            environment_version="v1",
+            environment_hash=HASH_B,
+            context_hash=HASH_C,
+            validator_hash=HASH_C,
+            checker_hash=HASH_D,
+        )
 
 
 def valid_trace(
@@ -519,11 +658,15 @@ def binding(
     *,
     context_hash: str,
     artifact_hashes: tuple[str, ...],
+    artifact_ids: tuple[str, ...] = ("public-context",),
 ) -> TraceBinding:
     return TraceBinding.build(
         protocol_id="guidance-protocol",
         protocol_version=1,
         protocol_hash=HASH_A,
+        guidance_protocol=None,
+        model_harness_protocol=None,
+        guidance_condition=None,
         task_id="task-1",
         task_input_hash=HASH_A,
         partition=None,
@@ -544,6 +687,8 @@ def binding(
         checker_id="checker",
         checker_version="v1",
         checker_hash=HASH_D,
+        authorized_artifact_ids=artifact_ids,
+        artifact_ids=artifact_ids,
         artifact_hashes=artifact_hashes,
         output_schema_hash=HASH_D,
     )

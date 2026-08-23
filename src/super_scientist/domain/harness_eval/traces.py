@@ -9,7 +9,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic_core import to_jsonable_python
 
 from super_scientist.domain.evidence.models import ArtifactRef
-from super_scientist.domain.harness_eval.guidance import GuidanceEvaluationProtocol
+from super_scientist.domain.harness_eval.guidance import (
+    GuidanceCondition,
+    GuidanceEvaluationProtocol,
+)
 from super_scientist.domain.harness_eval.matrix import (
     HarnessIdentity,
     ModelHarnessCoordinate,
@@ -347,6 +350,8 @@ class _GenerationMetadataPayload(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_consistent_generation_evidence(self) -> Self:
+        if self.token_count.value is not None and self.token_count.value < 0:
+            raise ValueError("token count must be a non-negative integer")
         if self.token_ids.value is not None:
             if len(self.token_ids.value) > MAX_TRACE_ITEMS or any(
                 not isinstance(item, int) or isinstance(item, bool) or item < 0
@@ -454,6 +459,9 @@ class _TraceBindingPayload(_StrictFrozenModel):
     protocol_id: BoundedTraceIdentifier
     protocol_version: int = Field(strict=True, ge=1)
     protocol_hash: Sha256Hex
+    guidance_protocol: GuidanceEvaluationProtocol | None
+    model_harness_protocol: ModelHarnessProtocol | None
+    guidance_condition: GuidanceCondition | None
     task_id: BoundedTraceIdentifier
     task_input_hash: Sha256Hex
     partition: HarnessPartition | None
@@ -474,13 +482,95 @@ class _TraceBindingPayload(_StrictFrozenModel):
     checker_id: BoundedTraceIdentifier
     checker_version: BoundedTraceIdentifier
     checker_hash: Sha256Hex
+    authorized_artifact_ids: tuple[BoundedTraceIdentifier, ...] = Field(
+        max_length=MAX_TRACE_ITEMS
+    )
+    artifact_ids: tuple[BoundedTraceIdentifier, ...] = Field(max_length=MAX_TRACE_ITEMS)
     artifact_hashes: tuple[Sha256Hex, ...] = Field(max_length=MAX_TRACE_ITEMS)
     output_schema_hash: Sha256Hex
 
-    @field_validator("artifact_hashes")
+    @field_validator("authorized_artifact_ids", "artifact_ids")
     @classmethod
-    def require_canonical_artifact_hashes(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        return _canonical_identifier_tuple(values, "artifact_hashes")
+    def require_canonical_artifact_ids(
+        cls,
+        values: tuple[str, ...],
+        info: Any,
+    ) -> tuple[str, ...]:
+        return _canonical_identifier_tuple(values, info.field_name)
+
+    @model_validator(mode="after")
+    def require_exact_protocol_artifact_authorization(self) -> Self:
+        if len(self.artifact_ids) != len(self.artifact_hashes):
+            raise ValueError("artifact identities and hashes must be exactly aligned")
+        if self.guidance_protocol is not None:
+            if self.model_harness_protocol is not None or self.guidance_condition is None:
+                raise ValueError("guidance trace binding requires one exact guidance protocol")
+            guidance_protocol = self.guidance_protocol
+            authorized = guidance_protocol.artifact_ids
+            if self.guidance_condition is GuidanceCondition.OBJECTIVE_DATA_WITH_DISTRACTORS:
+                authorized = tuple(
+                    sorted(
+                        (*authorized, *guidance_protocol.declared_distractor_artifact_ids)
+                    )
+                )
+            if self.authorized_artifact_ids != authorized:
+                raise ValueError("trace binding must declare exact authorized guidance artifacts")
+            guidance_fields_match = (
+                self.protocol_id == guidance_protocol.protocol_id,
+                self.protocol_version == guidance_protocol.version,
+                self.protocol_hash == guidance_protocol.content_hash,
+                self.task_id == guidance_protocol.task_id,
+                self.task_input_hash == guidance_protocol.task_input_hash,
+                self.partition is None,
+                self.model
+                == ModelIdentity(
+                    model_id=guidance_protocol.model_id,
+                    model_version=guidance_protocol.model_version,
+                ),
+                self.harness
+                == HarnessIdentity(
+                    harness_id=guidance_protocol.harness_id,
+                    harness_version=guidance_protocol.harness_version,
+                ),
+                self.validator_id == guidance_protocol.verifier_id,
+                self.validator_version == guidance_protocol.verifier_version,
+                self.checker_id == guidance_protocol.checker_id,
+                self.checker_version == guidance_protocol.checker_version,
+                self.output_schema_hash == guidance_protocol.output_schema_hash,
+            )
+            if not all(guidance_fields_match):
+                raise ValueError("trace binding must derive exact guidance protocol fields")
+        elif self.model_harness_protocol is not None:
+            if self.guidance_condition is not None:
+                raise ValueError("matrix trace binding cannot declare a guidance condition")
+            matrix_protocol = self.model_harness_protocol
+            if self.authorized_artifact_ids != matrix_protocol.artifact_ids:
+                raise ValueError("trace binding must declare exact authorized matrix artifacts")
+            if self.partition is None:
+                raise ValueError("matrix trace binding requires an exact partition")
+            coordinate = ModelHarnessCoordinate(
+                model=self.model,
+                harness=self.harness,
+                partition=self.partition,
+            )
+            matrix_fields_match = (
+                coordinate in matrix_protocol.expected_grid,
+                self.protocol_id == matrix_protocol.protocol_id,
+                self.protocol_version == matrix_protocol.version,
+                self.protocol_hash == matrix_protocol.content_hash,
+                self.task_id == matrix_protocol.task_set_id,
+                self.task_input_hash == matrix_protocol.task_set_hash,
+                self.validator_id == matrix_protocol.verifier_id,
+                self.validator_version == matrix_protocol.verifier_version,
+                self.checker_id == matrix_protocol.checker_id,
+                self.checker_version == matrix_protocol.checker_version,
+                self.output_schema_hash == matrix_protocol.output_schema_hash,
+            )
+            if not all(matrix_fields_match):
+                raise ValueError("trace binding must derive exact matrix protocol fields")
+        elif self.guidance_condition is not None:
+            raise ValueError("guidance condition requires an exact guidance protocol")
+        return self
 
 
 class TraceBinding(_TraceBindingPayload):
@@ -498,14 +588,37 @@ class TraceBinding(_TraceBindingPayload):
     def from_guidance_protocol(
         cls,
         protocol: GuidanceEvaluationProtocol,
+        *,
+        condition: GuidanceCondition,
+        artifacts: tuple[ObservableArtifactRef, ...],
         **values: Any,
     ) -> Self:
         validated = GuidanceEvaluationProtocol.model_validate(protocol)
+        validated_condition = GuidanceCondition(condition)
+        validated_artifacts = tuple(
+            ObservableArtifactRef.model_validate(item) for item in artifacts
+        )
+        artifact_ids = tuple(item.artifact_id for item in validated_artifacts)
+        authorized_artifact_ids = validated.artifact_ids
+        if validated_condition is GuidanceCondition.OBJECTIVE_DATA_WITH_DISTRACTORS:
+            authorized_artifact_ids = tuple(
+                sorted(
+                    (
+                        *authorized_artifact_ids,
+                        *validated.declared_distractor_artifact_ids,
+                    )
+                )
+            )
+        if artifact_ids != authorized_artifact_ids:
+            raise ValueError("artifacts must match the exact authorized guidance artifacts")
         supplied = dict(values)
         derived_fields: dict[str, object] = {
             "protocol_id": validated.protocol_id,
             "protocol_version": validated.version,
             "protocol_hash": validated.content_hash,
+            "guidance_protocol": validated,
+            "model_harness_protocol": None,
+            "guidance_condition": validated_condition,
             "task_id": validated.task_id,
             "task_input_hash": validated.task_input_hash,
             "partition": None,
@@ -521,6 +634,9 @@ class TraceBinding(_TraceBindingPayload):
             "validator_version": validated.verifier_version,
             "checker_id": validated.checker_id,
             "checker_version": validated.checker_version,
+            "authorized_artifact_ids": authorized_artifact_ids,
+            "artifact_ids": artifact_ids,
+            "artifact_hashes": tuple(item.sha256 for item in validated_artifacts),
             "output_schema_hash": validated.output_schema_hash,
         }
         if set(supplied) & set(derived_fields):
@@ -532,17 +648,28 @@ class TraceBinding(_TraceBindingPayload):
         cls,
         protocol: ModelHarnessProtocol,
         coordinate: ModelHarnessCoordinate,
+        *,
+        artifacts: tuple[ObservableArtifactRef, ...],
         **values: Any,
     ) -> Self:
         validated = ModelHarnessProtocol.model_validate(protocol)
         selected = ModelHarnessCoordinate.model_validate(coordinate)
         if selected not in validated.expected_grid:
             raise ValueError("matrix trace coordinate must belong to the exact protocol grid")
+        validated_artifacts = tuple(
+            ObservableArtifactRef.model_validate(item) for item in artifacts
+        )
+        artifact_ids = tuple(item.artifact_id for item in validated_artifacts)
+        if artifact_ids != validated.artifact_ids:
+            raise ValueError("artifacts must match the exact authorized matrix artifacts")
         supplied = dict(values)
         derived_fields: dict[str, object] = {
             "protocol_id": validated.protocol_id,
             "protocol_version": validated.version,
             "protocol_hash": validated.content_hash,
+            "guidance_protocol": None,
+            "model_harness_protocol": validated,
+            "guidance_condition": None,
             "task_id": validated.task_set_id,
             "task_input_hash": validated.task_set_hash,
             "partition": selected.partition,
@@ -552,6 +679,9 @@ class TraceBinding(_TraceBindingPayload):
             "validator_version": validated.verifier_version,
             "checker_id": validated.checker_id,
             "checker_version": validated.checker_version,
+            "authorized_artifact_ids": validated.artifact_ids,
+            "artifact_ids": artifact_ids,
+            "artifact_hashes": tuple(item.sha256 for item in validated_artifacts),
             "output_schema_hash": validated.output_schema_hash,
         }
         if set(supplied) & set(derived_fields):
@@ -684,6 +814,13 @@ class _HarnessExecutionTracePayload(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_exact_observable_state(self) -> Self:
+        if (
+            self.expected_binding.artifact_ids
+            != self.expected_binding.authorized_artifact_ids
+        ):
+            raise ValueError(
+                "expected binding must use exact authorized artifact identities"
+            )
         if self.initial_context_hash != artifact_collection_hash(self.context_artifacts):
             raise ValueError("initial context hash must address declared context artifacts")
         expected_sequence = tuple(range(len(self.context_transformations)))
@@ -698,9 +835,15 @@ class _HarnessExecutionTracePayload(_StrictFrozenModel):
             raise ValueError("final context hash must match the transformation chain")
         if self.observed_binding.context_hash != self.final_context_hash:
             raise ValueError("observed binding must use the exact final context hash")
-        context_hashes = tuple(sorted(item.sha256 for item in self.context_artifacts))
-        if self.observed_binding.artifact_hashes != context_hashes:
-            raise ValueError("observed binding must use exact context artifact hashes")
+        context_ids = tuple(item.artifact_id for item in self.context_artifacts)
+        context_hashes = tuple(item.sha256 for item in self.context_artifacts)
+        if (
+            self.observed_binding.artifact_ids,
+            self.observed_binding.artifact_hashes,
+        ) != (context_ids, context_hashes):
+            raise ValueError(
+                "observed binding must use exact context artifact identities and hashes"
+            )
         if self.context_transformations_hash != _canonical_record_hash(
             {"transformations": [item.content_hash for item in self.context_transformations]}
         ):
@@ -783,12 +926,12 @@ class _HarnessExecutionTracePayload(_StrictFrozenModel):
             raise ValueError("output hash must address the exact observable output artifacts")
         if self.reward_observation is None:
             if (
-                self.reward_observation_hash.status is MetadataAvailability.AVAILABLE
+                self.reward_observation_hash.status is not MetadataAvailability.UNAVAILABLE
                 or self.capture_reward_validity.status
                 is not MetadataAvailability.NOT_APPLICABLE
             ):
                 raise ValueError(
-                    "absent reward requires unavailable hash and inapplicable validity"
+                    "absent reward requires UNAVAILABLE hash and inapplicable validity"
                 )
         else:
             if (
@@ -891,8 +1034,24 @@ def trace_freshness(trace: HarnessExecutionTrace) -> TraceFreshness:
     observed = validated.observed_binding
     comparisons: tuple[tuple[object, object, TraceBindingMismatch], ...] = (
         (
-            (expected.protocol_id, expected.protocol_version, expected.protocol_hash),
-            (observed.protocol_id, observed.protocol_version, observed.protocol_hash),
+            (
+                expected.protocol_id,
+                expected.protocol_version,
+                expected.protocol_hash,
+                expected.guidance_protocol,
+                expected.model_harness_protocol,
+                expected.guidance_condition,
+                expected.authorized_artifact_ids,
+            ),
+            (
+                observed.protocol_id,
+                observed.protocol_version,
+                observed.protocol_hash,
+                observed.guidance_protocol,
+                observed.model_harness_protocol,
+                observed.guidance_condition,
+                observed.authorized_artifact_ids,
+            ),
             TraceBindingMismatch.PROTOCOL,
         ),
         (
@@ -948,7 +1107,11 @@ def trace_freshness(trace: HarnessExecutionTrace) -> TraceFreshness:
             ),
             TraceBindingMismatch.VALIDATOR,
         ),
-        (expected.artifact_hashes, observed.artifact_hashes, TraceBindingMismatch.ARTIFACTS),
+        (
+            (expected.artifact_ids, expected.artifact_hashes),
+            (observed.artifact_ids, observed.artifact_hashes),
+            TraceBindingMismatch.ARTIFACTS,
+        ),
         (
             expected.output_schema_hash,
             observed.output_schema_hash,
