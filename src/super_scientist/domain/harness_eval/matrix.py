@@ -253,9 +253,9 @@ class _ModelHarnessProtocolPayload(_StrictFrozenModel):
         harnesses = values.get("harnesses")
         partitions = values.get("partitions")
         if not (
-            isinstance(models, tuple)
-            and isinstance(harnesses, tuple)
-            and isinstance(partitions, tuple)
+            isinstance(models, (tuple, list))
+            and isinstance(harnesses, (tuple, list))
+            and isinstance(partitions, (tuple, list))
         ):
             return values
         declared_grid_cells = len(models) * len(harnesses) * len(partitions)

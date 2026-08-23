@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from decimal import Decimal
 from itertools import product
 from time import perf_counter
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 import super_scientist.domain.harness_eval as harness_eval
 import super_scientist.domain.harness_eval.matrix as matrix_module
@@ -1633,6 +1634,7 @@ def test_oversized_matrix_rejects_before_constructing_cartesian_coordinates(
         partition=HarnessPartition.HARNESS_DISCOVERY_TASKS,
     )
     values: dict[str, object] = {
+        "content_hash": HASH_A,
         "protocol_id": "oversized-matrix",
         "version": 1,
         "models": tuple(model.model_dump(mode="python") for model in models),
@@ -1653,6 +1655,12 @@ def test_oversized_matrix_rejects_before_constructing_cartesian_coordinates(
         "comparison_kinds": (ModelHarnessComparisonKind.MODEL_HELD_CONSTANT,),
         "governing_policy_hash": HASH_A,
     }
+    non_strict_values = {
+        **values,
+        "models": list(values["models"]),
+        "harnesses": list(values["harnesses"]),
+        "partitions": list(values["partitions"]),
+    }
 
     def unexpected_coordinate_construction(*args: object, **kwargs: object) -> None:
         raise AssertionError("oversized grid must reject before coordinate construction")
@@ -1666,6 +1674,15 @@ def test_oversized_matrix_rejects_before_constructing_cartesian_coordinates(
     for construct in (
         lambda: ModelHarnessProtocol.build(**values),
         lambda: ModelHarnessProtocol.model_validate(values),
+        lambda: ModelHarnessProtocol.model_validate(non_strict_values, strict=False),
+        lambda: ModelHarnessProtocol.model_validate_json(
+            json.dumps(non_strict_values, default=str),
+            strict=False,
+        ),
+        lambda: TypeAdapter(ModelHarnessProtocol).validate_python(
+            non_strict_values,
+            strict=False,
+        ),
     ):
         with pytest.raises(
             ValidationError,

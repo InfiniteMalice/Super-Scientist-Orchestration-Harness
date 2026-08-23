@@ -204,6 +204,8 @@ valid 256-cell boundary and the complete 24,512-comparison maximum must remain u
 - [x] Witness RED for both public construction paths with 256 models, 256 harnesses, five
   partitions, and a four-coordinate supplied grid.
 - [x] Add an O(1) before-validator that does not iterate axes or construct coordinates.
+- [x] Extend the same guard to strict-false list and JSON payloads before their coercive parsing
+  path can materialize coordinates.
 - [x] Preserve valid maximum-shape analysis and run focused, Phase A, static, and authority gates.
 
 ## Global Constraints
