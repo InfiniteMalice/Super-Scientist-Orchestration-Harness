@@ -10,6 +10,7 @@ from test_compiler import (
     _artifact,
     _assessment,
     _rebuild_step,
+    _replace_catalog,
     _replace_step,
     valid_request,
 )
@@ -20,10 +21,12 @@ from super_scientist.domain.cognition.models import (
 )
 from super_scientist.domain.identity import ActorKind
 from super_scientist.domain.procedures import (
+    MAX_PROCEDURE_RESOURCE_VALUE,
     ArtifactCatalogEntry,
     CandidateMethod,
     CatalogFactStatus,
     ExecutableProcedure,
+    ProcedureAuthority,
     ProcedureCompilationRequest,
     ProcedureCompilationResult,
     ProcedureFindingCode,
@@ -105,7 +108,7 @@ def test_check_5_rejects_ambiguous_artifact_producers() -> None:
     request = valid_request()
     second = _rebuild_step(
         request.candidate.stages[1],
-        outputs=(_artifact("prepared"), _artifact("final")),
+        outputs=(_artifact("final"), _artifact("prepared")),
     )
 
     assert ProcedureFindingCode.AMBIGUOUS_ARTIFACT_PRODUCER in _codes(
@@ -164,7 +167,7 @@ def test_check_10_treats_unknown_validator_catalog_fact_as_inconclusive() -> Non
         validator_version="validator-v1",
         registration=CatalogFactStatus.UNKNOWN,
     )
-    result = compile_method(request.model_copy(update={"validator_catalog": (catalog_entry,)}))
+    result = compile_method(_replace_catalog(request, "VALIDATOR_CATALOG", (catalog_entry,), True))
 
     assert result.report.status is ProcedureValidationStatus.INCONCLUSIVE
     assert _finding_codes(result) == (
@@ -174,13 +177,11 @@ def test_check_10_treats_unknown_validator_catalog_fact_as_inconclusive() -> Non
 
 
 def test_checks_6_and_10_do_not_synthesize_missing_incomplete_catalog_facts() -> None:
-    request = valid_request().model_copy(
-        update={
-            "tool_catalog": (),
-            "tool_catalog_complete": False,
-            "validator_catalog": (),
-            "validator_catalog_complete": False,
-        }
+    request = _replace_catalog(
+        _replace_catalog(valid_request(), "TOOL_CATALOG", (), False),
+        "VALIDATOR_CATALOG",
+        (),
+        False,
     )
     result = compile_method(request)
 
@@ -208,11 +209,11 @@ def test_downstream_unknown_external_artifact_remains_inconclusive(
             ),
             *catalog,
         )
-    request = _replace_step(request, 1, second).model_copy(
-        update={
-            "artifact_catalog": catalog,
-            "artifact_catalog_complete": explicit_unknown,
-        }
+    request = _replace_catalog(
+        _replace_step(request, 1, second),
+        "ARTIFACT_CATALOG",
+        catalog,
+        explicit_unknown,
     )
 
     result = compile_method(request)
@@ -374,13 +375,63 @@ def test_check_15_schema_rejects_forbidden_execution_fields_at_parse_boundary() 
         ProcedureCompilationRequest.model_validate(payload)
 
 
+def test_check_15_scans_a_caller_supplied_procedure_not_only_the_request() -> None:
+    request = valid_request()
+    procedure = compile_method(request).procedure.model_copy()
+    object.__setattr__(procedure, "command", "forged executable surface")
+
+    findings = validate_procedure(request, procedure)
+
+    assert ProcedureFindingCode.FORBIDDEN_FIELD in tuple(item.code for item in findings)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "values"),
+    (
+        ("required_authorities", (ProcedureAuthority.DERIVE_PUBLIC_DATA,) * 2),
+        ("failure_signals", ("validator-rejected", "validator-rejected")),
+        ("completion_criteria", ("z criterion", "a criterion")),
+        ("evidence_requirements", ("retained-output", "retained-output")),
+    ),
+)
+def test_procedure_step_rejects_duplicate_or_noncanonical_set_fields(
+    field_name: str,
+    values: tuple[object, ...],
+) -> None:
+    payload = (
+        valid_request().candidate.stages[0].model_dump(mode="python", exclude={"content_hash"})
+    )
+    payload[field_name] = values
+
+    with pytest.raises(ValidationError, match=r"unique|canonical"):
+        ProcedureStep.build(**payload)
+
+
+def test_candidate_rejects_duplicate_or_noncanonical_identifier_sets() -> None:
+    candidate = valid_request().candidate
+    payload = candidate.model_dump(mode="python", exclude={"content_hash"})
+    payload["expected_output_ids"] = ("z-output", "a-output")
+
+    with pytest.raises(ValidationError, match="canonical"):
+        CandidateMethod.build(**payload)
+
+
+def test_procedure_resource_values_have_a_finite_upper_bound() -> None:
+    step = valid_request().candidate.stages[0]
+    payload = step.model_dump(mode="python", exclude={"content_hash"})
+    payload["resource_budget"] = step.resource_budget.model_copy(
+        update={"tokens": MAX_PROCEDURE_RESOURCE_VALUE + 1}
+    )
+
+    with pytest.raises(ValidationError, match="bounded"):
+        ProcedureStep.build(**payload)
+
+
 def test_check_16_reuses_progress_validation_for_invalid_weights() -> None:
     request = valid_request()
     first = _rebuild_step(request.candidate.stages[0], progress_weight=Decimal("0.40"))
 
-    assert ProcedureFindingCode.INVALID_PROGRESS_MAPPING in _codes(
-        _replace_step(request, 0, first)
-    )
+    assert ProcedureFindingCode.INVALID_PROGRESS_MAPPING in _codes(_replace_step(request, 0, first))
 
 
 @pytest.mark.parametrize("model_name", ("candidate", "step", "procedure", "result"))

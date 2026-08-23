@@ -103,7 +103,7 @@ def test_calculation_rejects_weights_that_do_not_reconcile_to_one() -> None:
 
 
 @pytest.mark.property
-def test_generated_progress_plan_reuses_dependency_cycle_validation() -> None:
+def test_forged_progress_result_cannot_bypass_compiler_revalidation() -> None:
     validator = ActorIdentity(actor_id="validator", kind=ActorKind.HUMAN, created_at=NOW)
 
     def compiled_step(step_id: str, dependency_id: str, order: int) -> ProcedureStep:
@@ -131,7 +131,7 @@ def test_generated_progress_plan_reuses_dependency_cycle_validation() -> None:
         ),
     )
 
-    with pytest.raises(ValueError, match="cycle"):
+    with pytest.raises(ValueError, match="deterministic compiler revalidation"):
         procedure_to_progress_plan(
             result,
             run_id="run-1",

@@ -46,9 +46,7 @@ def _build_progress_plan(
         plan_version_id=plan_version_id,
         run_id=run_id,
         version=version,
-        subtasks=tuple(
-            _progress_subtask(step, str(plan_version_id)) for step in procedure.steps
-        ),
+        subtasks=tuple(_progress_subtask(step, str(plan_version_id)) for step in procedure.steps),
         created_at=created_at,
         governing_policy_hash=governing_policy_hash,
     )
@@ -77,6 +75,14 @@ def procedure_to_progress_plan(
 ) -> ProgressPlan:
     if result.report.status is not ProcedureValidationStatus.VALID:
         raise ValueError("only a valid procedure can produce a progress plan")
+    from super_scientist.domain.procedures.compiler import compile_method
+
+    try:
+        request = result.parse_request()
+    except (AttributeError, ValueError) as error:
+        raise ValueError("compilation result failed deterministic compiler revalidation") from error
+    if compile_method(request) != result:
+        raise ValueError("compilation result failed deterministic compiler revalidation")
     plan = _build_progress_plan(
         result.procedure,
         run_id=run_id,

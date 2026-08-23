@@ -7,22 +7,28 @@ from typing import Any
 
 import pytest
 
+from super_scientist.domain.cognition.grounding import assess_capability
 from super_scientist.domain.cognition.models import (
-    CapabilityAssessment,
+    CapabilityAssertion,
     CapabilityDisposition,
     CapabilityEvidenceStatus,
+    CapabilityProfile,
     CapabilityRequirement,
+    DiversityFingerprint,
 )
 from super_scientist.domain.evidence.models import ArtifactRef
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.improvement.models import ResourceBudget
 from super_scientist.domain.procedures import (
+    AcceptedSourceReceiptRef,
     ArtifactCatalogEntry,
     CandidateMethod,
     CatalogFactStatus,
     DeclaredProcedureArtifact,
+    GroundedCapabilityAssessment,
     ProcedureAuthority,
     ProcedureCompilationRequest,
+    ProcedureEvidenceSourceKind,
     ProcedureFindingCode,
     ProcedureOperation,
     ProcedureStep,
@@ -32,6 +38,7 @@ from super_scientist.domain.procedures import (
     RecoveryDirective,
     RegisteredTool,
     RegisteredValidator,
+    catalog_snapshot_content_hash,
     compile_method,
 )
 from super_scientist.domain.progress.models import BudgetReserves
@@ -97,8 +104,7 @@ def _step(
         validator=_actor("validator", ActorKind.HUMAN),
         validator_version=validator_version,
         failure_signals=("validator-rejected",),
-        recovery=recovery
-        or RecoveryDirective(terminal_outcome=ProcedureTerminalOutcome.ABANDONED),
+        recovery=recovery or RecoveryDirective(terminal_outcome=ProcedureTerminalOutcome.ABANDONED),
         capability_requirement_ids=("requirement-1",),
         progress_budget_category=category,
         resource_budget=budget or _budget(1),
@@ -137,28 +143,88 @@ def _assessment(
     evidence_status: CapabilityEvidenceStatus = CapabilityEvidenceStatus.VERIFIED,
     *,
     requirement_id: str = "requirement-1",
-) -> CapabilityAssessment:
-    verified = ("assertion-1",) if evidence_status is CapabilityEvidenceStatus.VERIFIED else ()
-    matched = () if evidence_status is CapabilityEvidenceStatus.UNKNOWN else ("assertion-1",)
-    return CapabilityAssessment(
-        profile_id="profile-1",
-        actor_id="worker-1",
-        requirement=CapabilityRequirement(
-            requirement_id=requirement_id,
-            capability_id="capability-1",
-            task_family_id="task-family-1",
-            evidence_snapshot_hash="c" * 64,
+) -> GroundedCapabilityAssessment:
+    requirement = CapabilityRequirement(
+        requirement_id=requirement_id,
+        capability_id="capability-1",
+        task_family_id="task-family-1",
+        evidence_snapshot_hash="c" * 64,
+    )
+    assertions = ()
+    if evidence_status is not CapabilityEvidenceStatus.UNKNOWN:
+        verified = evidence_status is CapabilityEvidenceStatus.VERIFIED
+        assertions = (
+            CapabilityAssertion(
+                assertion_id="assertion-1",
+                capability_id="capability-1",
+                task_family_id="task-family-1",
+                status=evidence_status,
+                evidence_ids=("evidence-1",),
+                validator_id=("validator" if verified else None),
+                validator_version=("validator-v1" if verified else None),
+                evidence_snapshot_hash="c" * 64,
+            ),
+        )
+    profile = CapabilityProfile.build(
+        profile_id=f"profile-{requirement_id}",
+        actor=_actor(f"worker-{requirement_id}", ActorKind.HUMAN),
+        diversity_fingerprint=DiversityFingerprint(
+            fingerprint_id=f"fingerprint-{requirement_id}",
+            model_family=None,
+            model_version=None,
+            scale_class=None,
+            provider=None,
+            adapter_hash=None,
+            configuration_hash=None,
+            prompt_strategy=None,
+            methodological_prior=None,
+            tools=None,
+            evidence_partitions=None,
+            modalities=None,
+            previous_error_clusters=None,
+            prior_task_specializations=None,
         ),
-        matched_assertion_ids=matched,
-        verified_assertion_ids=verified,
-        disposition=disposition,
-        evidence_status=evidence_status,
-        missing_dimensions=("capability_evidence",)
-        if disposition is CapabilityDisposition.UNKNOWN
-        else (),
-        failed_dimensions=("capability_support",)
-        if disposition is CapabilityDisposition.UNSATISFIED
-        else (),
+        assertions=assertions,
+        governing_policy_hash=POLICY_HASH,
+    )
+    assessment = assess_capability(profile, requirement)
+    assert assessment.disposition is disposition
+    receipt = _receipt(
+        receipt_id=f"receipt-{profile.profile_id}",
+        source_kind=ProcedureEvidenceSourceKind.CAPABILITY_PROFILE,
+        source_record_id=profile.profile_id,
+        source_content_hash=profile.content_hash,
+        source_snapshot_id=f"evidence-snapshot-{requirement_id}",
+        source_snapshot_hash=requirement.evidence_snapshot_hash,
+    )
+    return GroundedCapabilityAssessment.build(
+        profile=profile,
+        assessment=assessment,
+        profile_receipt=receipt,
+    )
+
+
+def _receipt(
+    *,
+    receipt_id: str,
+    source_kind: ProcedureEvidenceSourceKind,
+    source_record_id: str,
+    source_content_hash: str,
+    source_snapshot_id: str,
+    source_snapshot_hash: str,
+) -> AcceptedSourceReceiptRef:
+    return AcceptedSourceReceiptRef.build(
+        receipt_id=receipt_id,
+        source_kind=source_kind,
+        source_record_id=source_record_id,
+        source_schema_version=1,
+        source_content_hash=source_content_hash,
+        source_snapshot_id=source_snapshot_id,
+        source_snapshot_hash=source_snapshot_hash,
+        proposal_id=f"proposal-{receipt_id}",
+        proposal_hash="1" * 64,
+        audit_event_id=f"audit-{receipt_id}",
+        audit_event_hash="2" * 64,
     )
 
 
@@ -183,41 +249,74 @@ def valid_request() -> ProcedureCompilationRequest:
         authority=(ProcedureAuthority.RUN_REGISTERED_TOOL,),
         category=ProgressBudgetCategory.VERIFICATION,
     )
+    artifact_catalog = (
+        ArtifactCatalogEntry(
+            artifact_id="source",
+            artifact=ArtifactRef(
+                sha256="d" * 64,
+                size_bytes=10,
+                media_type="application/json",
+                relative_path=f"sha256/dd/{'d' * 64}",
+            ),
+            availability=CatalogFactStatus.PRESENT,
+        ),
+    )
+    tool_catalog = (
+        RegisteredTool(
+            tool=_actor("fixture-tool", ActorKind.TOOL),
+            availability=CatalogFactStatus.PRESENT,
+            authorization=CatalogFactStatus.PRESENT,
+        ),
+    )
+    validator_catalog = (
+        RegisteredValidator(
+            validator=_actor("validator", ActorKind.HUMAN),
+            validator_version="validator-v1",
+            registration=CatalogFactStatus.PRESENT,
+        ),
+    )
+    snapshot_id = "procedure-session-snapshot-1"
+    snapshot_hash = "b" * 64
     return ProcedureCompilationRequest(
         request_id="compile-request-1",
         compiler_id="procedure-compiler",
         compiler_version="1.0.0",
         candidate=_candidate(first, second),
         capability_assessments=(_assessment(),),
-        artifact_catalog=(
-            ArtifactCatalogEntry(
-                artifact_id="source",
-                artifact=ArtifactRef(
-                    sha256="d" * 64,
-                    size_bytes=10,
-                    media_type="application/json",
-                    relative_path=f"sha256/dd/{'d' * 64}",
-                ),
-                availability=CatalogFactStatus.PRESENT,
-            ),
-        ),
+        artifact_catalog=artifact_catalog,
         artifact_catalog_complete=True,
-        tool_catalog=(
-            RegisteredTool(
-                tool=_actor("fixture-tool", ActorKind.TOOL),
-                availability=CatalogFactStatus.PRESENT,
-                authorization=CatalogFactStatus.PRESENT,
+        artifact_catalog_receipt=_receipt(
+            receipt_id="receipt-artifact-catalog",
+            source_kind=ProcedureEvidenceSourceKind.ARTIFACT_CATALOG,
+            source_record_id="artifact-catalog-1",
+            source_content_hash=catalog_snapshot_content_hash(
+                "ARTIFACT_CATALOG", artifact_catalog, True
             ),
+            source_snapshot_id=snapshot_id,
+            source_snapshot_hash=snapshot_hash,
         ),
+        tool_catalog=tool_catalog,
         tool_catalog_complete=True,
-        validator_catalog=(
-            RegisteredValidator(
-                validator=_actor("validator", ActorKind.HUMAN),
-                validator_version="validator-v1",
-                registration=CatalogFactStatus.PRESENT,
-            ),
+        tool_catalog_receipt=_receipt(
+            receipt_id="receipt-tool-catalog",
+            source_kind=ProcedureEvidenceSourceKind.TOOL_CATALOG,
+            source_record_id="tool-catalog-1",
+            source_content_hash=catalog_snapshot_content_hash("TOOL_CATALOG", tool_catalog, True),
+            source_snapshot_id=snapshot_id,
+            source_snapshot_hash=snapshot_hash,
         ),
+        validator_catalog=validator_catalog,
         validator_catalog_complete=True,
+        validator_catalog_receipt=_receipt(
+            receipt_id="receipt-validator-catalog",
+            source_kind=ProcedureEvidenceSourceKind.VALIDATOR_CATALOG,
+            source_record_id="validator-catalog-1",
+            source_content_hash=catalog_snapshot_content_hash(
+                "VALIDATOR_CATALOG", validator_catalog, True
+            ),
+            source_snapshot_id=snapshot_id,
+            source_snapshot_hash=snapshot_hash,
+        ),
         budget_envelope=BudgetReserves(
             exploration=_budget(),
             implementation=_budget(),
@@ -238,6 +337,29 @@ def _replace_step(
     candidate_values = request.candidate.model_dump(mode="python", exclude={"content_hash"})
     candidate_values["stages"] = tuple(stages)
     return request.model_copy(update={"candidate": CandidateMethod.build(**candidate_values)})
+
+
+def _replace_catalog(
+    request: ProcedureCompilationRequest,
+    catalog_kind: str,
+    entries: tuple[Any, ...],
+    complete: bool,
+) -> ProcedureCompilationRequest:
+    field_prefix = catalog_kind.lower().removesuffix("_catalog") + "_catalog"
+    receipt = getattr(request, f"{field_prefix}_receipt")
+    receipt_values = receipt.model_dump(mode="python", exclude={"content_hash"})
+    receipt_values["source_content_hash"] = catalog_snapshot_content_hash(
+        catalog_kind,
+        entries,
+        complete,
+    )
+    return request.model_copy(
+        update={
+            field_prefix: entries,
+            f"{field_prefix}_complete": complete,
+            f"{field_prefix}_receipt": AcceptedSourceReceiptRef.build(**receipt_values),
+        }
+    )
 
 
 def _rebuild_step(step: ProcedureStep, **updates: Any) -> ProcedureStep:
@@ -268,13 +390,13 @@ def request_with_undefined_output() -> ProcedureCompilationRequest:
 def request_with_unavailable_tool() -> ProcedureCompilationRequest:
     request = valid_request()
     tool = request.tool_catalog[0].model_copy(update={"availability": CatalogFactStatus.ABSENT})
-    return request.model_copy(update={"tool_catalog": (tool,)})
+    return _replace_catalog(request, "TOOL_CATALOG", (tool,), True)
 
 
 def request_with_unauthorized_tool() -> ProcedureCompilationRequest:
     request = valid_request()
     tool = request.tool_catalog[0].model_copy(update={"authorization": CatalogFactStatus.ABSENT})
-    return request.model_copy(update={"tool_catalog": (tool,)})
+    return _replace_catalog(request, "TOOL_CATALOG", (tool,), True)
 
 
 def request_without_completion_criteria() -> ProcedureCompilationRequest:
@@ -346,9 +468,7 @@ def test_valid_method_compiles_deterministically_and_retains_source_hash() -> No
 
 
 def test_self_declared_arbitrary_compiler_version_cannot_become_valid() -> None:
-    request = valid_request().model_copy(
-        update={"compiler_version": "attacker-version"}
-    )
+    request = valid_request().model_copy(update={"compiler_version": "attacker-version"})
 
     result = compile_method(request)
 
@@ -392,8 +512,11 @@ def test_compiled_metadata_retains_nonancestor_producer_input_as_external() -> N
         ),
         availability=CatalogFactStatus.PRESENT,
     )
-    request = _replace_step(request, 1, second).model_copy(
-        update={"artifact_catalog": (prepared, *request.artifact_catalog)}
+    request = _replace_catalog(
+        _replace_step(request, 1, second),
+        "ARTIFACT_CATALOG",
+        (prepared, *request.artifact_catalog),
+        True,
     )
 
     result = compile_method(request)

@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
-from test_compiler import NOW, POLICY_HASH, valid_request
+from test_compiler import NOW, POLICY_HASH, _replace_catalog, valid_request
 
 from super_scientist.domain.evidence.models import ArtifactRef
 from super_scientist.domain.improvement.models import AssessmentOutcome
@@ -12,8 +12,10 @@ from super_scientist.domain.procedures import (
     CompiledProgressPlanBinding,
     MethodDirectionOutcome,
     MethodDirectionStatus,
+    ProcedureAuthority,
     ProcedureCompilationReceiptRef,
     ProcedureCompilationRecord,
+    ProcedureValidationReport,
     ProcedureValidationStatus,
     canonical_model_hash,
     compile_method,
@@ -51,15 +53,39 @@ def test_only_valid_compilations_can_create_progress_plans(status_kind: str) -> 
     if status_kind == "invalid":
         request = request.model_copy(update={"compiler_version": "unsupported"})
     else:
-        request = request.model_copy(
-            update={"tool_catalog": (), "tool_catalog_complete": False}
-        )
+        request = _replace_catalog(request, "TOOL_CATALOG", (), False)
     result = compile_method(request)
     assert result.report.status is not ProcedureValidationStatus.VALID
     assert result.procedure is not None
 
     with pytest.raises(ValueError, match="only a valid procedure can produce a progress plan"):
         _plan(result)
+
+
+def test_rehashed_valid_report_cannot_map_an_impossible_governance_procedure() -> None:
+    from test_compiler import _rebuild_step, _replace_step
+
+    request = valid_request()
+    first = _rebuild_step(
+        request.candidate.stages[0],
+        required_authorities=(ProcedureAuthority.GOVERNANCE_WRITE,),
+    )
+    invalid = compile_method(_replace_step(request, 0, first))
+    forged = invalid.model_copy(
+        update={
+            "report": ProcedureValidationReport(
+                status=ProcedureValidationStatus.VALID,
+                findings=(),
+                checks_run=tuple(range(1, 17)),
+            )
+        }
+    )
+    payload = forged.model_dump(mode="python", exclude={"result_hash"})
+    payload["result_hash"] = canonical_model_hash(forged, exclude_fields={"result_hash"})
+    parsed = type(invalid).model_validate(payload)
+
+    with pytest.raises(ValueError, match="deterministic compiler revalidation"):
+        _plan(parsed)
 
 
 def test_progress_mapping_preserves_existing_false_finish_semantics() -> None:

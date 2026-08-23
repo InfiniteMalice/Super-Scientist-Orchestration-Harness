@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
@@ -13,7 +14,7 @@ from pydantic import (
     model_validator,
 )
 
-from super_scientist.domain.cognition.models import CapabilityAssessment
+from super_scientist.domain.cognition.models import CapabilityAssessment, CapabilityProfile
 from super_scientist.domain.evidence.models import ArtifactRef
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.improvement.models import ResourceBudget
@@ -30,6 +31,9 @@ MAX_PROCEDURE_ITEMS = 64
 MAX_PROCEDURE_FINDINGS = 1_024
 MAX_IDENTIFIER_LENGTH = 200
 MAX_TEXT_LENGTH = 2_000
+MAX_PROCEDURE_RESOURCE_VALUE = 1_000_000_000
+# Covers the declared nested 64-item text/profile limits while bounding retained requests.
+MAX_PROCEDURE_CANONICAL_JSON_LENGTH = 64_000_000
 
 
 def _strip_text(value: object) -> object:
@@ -60,12 +64,60 @@ def canonical_model_hash(
     return sha256_hex(canonical_json_bytes(payload))
 
 
+def catalog_snapshot_content_hash(
+    catalog_kind: str,
+    entries: tuple[BaseModel, ...],
+    complete: bool,
+) -> str:
+    return sha256_hex(
+        canonical_json_bytes(
+            {
+                "catalog_kind": catalog_kind,
+                "entries": tuple(item.model_dump(mode="json") for item in entries),
+                "complete": complete,
+            }
+        )
+    )
+
+
 def _require_canonical_unique(values: tuple[str, ...], field_name: str) -> tuple[str, ...]:
     if len(set(values)) != len(values):
         raise ValueError(f"{field_name} must contain unique values")
     if values != tuple(sorted(values)):
         raise ValueError(f"{field_name} must be sorted in canonical order")
     return values
+
+
+def _require_canonical_unique_enum(
+    values: tuple[StrEnum, ...],
+    field_name: str,
+) -> tuple[StrEnum, ...]:
+    raw_values = tuple(item.value for item in values)
+    _require_canonical_unique(raw_values, field_name)
+    return values
+
+
+def _require_canonical_unique_artifacts(
+    values: tuple[DeclaredProcedureArtifact, ...],
+    field_name: str,
+) -> tuple[DeclaredProcedureArtifact, ...]:
+    artifact_ids = tuple(item.artifact_id for item in values)
+    _require_canonical_unique(artifact_ids, field_name)
+    return values
+
+
+def _require_bounded_resource_budget(value: ResourceBudget, field_name: str) -> ResourceBudget:
+    values = (
+        value.cost_usd,
+        value.compute_units,
+        value.tokens,
+        value.elapsed_seconds,
+        value.tool_calls,
+        value.human_interventions,
+    )
+    if any(item > MAX_PROCEDURE_RESOURCE_VALUE for item in values):
+        raise ValueError(f"{field_name} values must be finitely bounded")
+    return value
 
 
 class ProcedureOperation(StrEnum):
@@ -107,6 +159,13 @@ class CatalogFactStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class ProcedureEvidenceSourceKind(StrEnum):
+    CAPABILITY_PROFILE = "CAPABILITY_PROFILE"
+    ARTIFACT_CATALOG = "ARTIFACT_CATALOG"
+    TOOL_CATALOG = "TOOL_CATALOG"
+    VALIDATOR_CATALOG = "VALIDATOR_CATALOG"
+
+
 class ProcedureValidationStatus(StrEnum):
     VALID = "VALID"
     INVALID = "INVALID"
@@ -138,6 +197,7 @@ class ProcedureFindingCode(StrEnum):
     CAPABILITY_UNKNOWN = "CAPABILITY_UNKNOWN"
     INVALID_VALIDATOR_BINDING = "INVALID_VALIDATOR_BINDING"
     VALIDATOR_REGISTRATION_UNKNOWN = "VALIDATOR_REGISTRATION_UNKNOWN"
+    SPOOFED_EVIDENCE_BINDING = "SPOOFED_EVIDENCE_BINDING"
     MISSING_COMPLETION_CRITERIA = "MISSING_COMPLETION_CRITERIA"
     MISSING_EVIDENCE_REQUIREMENT = "MISSING_EVIDENCE_REQUIREMENT"
     BUDGET_CATEGORY_UNKNOWN = "BUDGET_CATEGORY_UNKNOWN"
@@ -205,9 +265,7 @@ class _ProcedureStepPayload(_StrictFrozenModel):
     outputs: tuple[DeclaredProcedureArtifact, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
     dependency_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
     allowed_tool_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
-    required_authorities: tuple[ProcedureAuthority, ...] = Field(
-        max_length=MAX_PROCEDURE_ITEMS
-    )
+    required_authorities: tuple[ProcedureAuthority, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
     preconditions: tuple[BoundedText, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
     completion_criteria: tuple[BoundedText, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
     evidence_requirements: tuple[BoundedText, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
@@ -220,7 +278,62 @@ class _ProcedureStepPayload(_StrictFrozenModel):
     )
     progress_budget_category: ProgressBudgetCategory
     resource_budget: ResourceBudget
-    progress_weight: Decimal = Field(strict=True, gt=Decimal("0"), le=Decimal("1"))
+    progress_weight: Decimal = Field(
+        strict=True,
+        gt=Decimal("0"),
+        le=Decimal("1"),
+        allow_inf_nan=False,
+    )
+
+    @field_validator(
+        "input_artifact_ids",
+        "dependency_ids",
+        "allowed_tool_ids",
+        "failure_signals",
+        "capability_requirement_ids",
+    )
+    @classmethod
+    def require_canonical_identifier_sets(
+        cls,
+        values: tuple[str, ...],
+        info: Any,
+    ) -> tuple[str, ...]:
+        return _require_canonical_unique(values, info.field_name)
+
+    @field_validator(
+        "preconditions",
+        "completion_criteria",
+        "evidence_requirements",
+    )
+    @classmethod
+    def require_canonical_text_sets(
+        cls,
+        values: tuple[str, ...],
+        info: Any,
+    ) -> tuple[str, ...]:
+        return _require_canonical_unique(values, info.field_name)
+
+    @field_validator("required_authorities")
+    @classmethod
+    def require_canonical_authorities(
+        cls,
+        values: tuple[ProcedureAuthority, ...],
+    ) -> tuple[ProcedureAuthority, ...]:
+        _require_canonical_unique_enum(values, "required_authorities")
+        return values
+
+    @field_validator("outputs")
+    @classmethod
+    def require_canonical_outputs(
+        cls,
+        values: tuple[DeclaredProcedureArtifact, ...],
+    ) -> tuple[DeclaredProcedureArtifact, ...]:
+        return _require_canonical_unique_artifacts(values, "outputs")
+
+    @field_validator("resource_budget")
+    @classmethod
+    def require_bounded_resource_budget(cls, value: ResourceBudget) -> ResourceBudget:
+        return _require_bounded_resource_budget(value, "resource_budget")
 
 
 class ProcedureStep(_ProcedureStepPayload):
@@ -252,9 +365,7 @@ class _CandidateMethodPayload(_StrictFrozenModel):
         max_length=MAX_PROCEDURE_ITEMS
     )
     expected_output_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
-    verifier_requirement_ids: tuple[BoundedIdentifier, ...] = Field(
-        max_length=MAX_PROCEDURE_ITEMS
-    )
+    verifier_requirement_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
     resource_estimate: ResourceBudget
     termination_conditions: tuple[BoundedText, ...] = Field(
         min_length=1, max_length=MAX_PROCEDURE_ITEMS
@@ -262,6 +373,25 @@ class _CandidateMethodPayload(_StrictFrozenModel):
     provenance_contribution_ids: tuple[BoundedIdentifier, ...] = Field(
         max_length=MAX_PROCEDURE_ITEMS
     )
+
+    @field_validator(
+        "claimed_capability_requirement_ids",
+        "expected_output_ids",
+        "verifier_requirement_ids",
+        "provenance_contribution_ids",
+    )
+    @classmethod
+    def require_canonical_identifier_sets(
+        cls,
+        values: tuple[str, ...],
+        info: Any,
+    ) -> tuple[str, ...]:
+        return _require_canonical_unique(values, info.field_name)
+
+    @field_validator("resource_estimate")
+    @classmethod
+    def require_bounded_resource_estimate(cls, value: ResourceBudget) -> ResourceBudget:
+        return _require_bounded_resource_budget(value, "resource_estimate")
 
 
 class CandidateMethod(_CandidateMethodPayload):
@@ -279,6 +409,88 @@ class CandidateMethod(_CandidateMethodPayload):
     def require_canonical_content_hash(self) -> Self:
         if self.content_hash != canonical_model_hash(self, exclude_fields={"content_hash"}):
             raise ValueError("content_hash must canonically address the candidate method")
+        return self
+
+
+class _AcceptedSourceReceiptPayload(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    receipt_id: BoundedIdentifier
+    source_kind: ProcedureEvidenceSourceKind
+    source_record_id: BoundedIdentifier
+    source_schema_version: int = Field(strict=True, ge=1, le=MAX_PROCEDURE_ITEMS)
+    source_content_hash: Sha256Hex
+    source_snapshot_id: BoundedIdentifier
+    source_snapshot_hash: Sha256Hex
+    proposal_id: BoundedIdentifier
+    proposal_hash: Sha256Hex
+    audit_event_id: BoundedIdentifier
+    audit_event_hash: Sha256Hex
+
+
+class AcceptedSourceReceiptRef(_AcceptedSourceReceiptPayload):
+    content_hash: Sha256Hex
+
+    @classmethod
+    def build(cls, **values: Any) -> Self:
+        payload = _AcceptedSourceReceiptPayload(**values)
+        return cls(
+            **payload.model_dump(mode="python"),
+            content_hash=canonical_model_hash(payload),
+        )
+
+    @model_validator(mode="after")
+    def require_canonical_content_hash(self) -> Self:
+        if self.content_hash != canonical_model_hash(self, exclude_fields={"content_hash"}):
+            raise ValueError("content_hash must canonically address the accepted source receipt")
+        return self
+
+
+class _GroundedCapabilityAssessmentPayload(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    profile: CapabilityProfile
+    assessment: CapabilityAssessment
+    profile_receipt: AcceptedSourceReceiptRef
+
+    @model_validator(mode="after")
+    def require_exact_profile_and_receipt_binding(self) -> Self:
+        receipt = self.profile_receipt
+        if (
+            receipt.source_kind is not ProcedureEvidenceSourceKind.CAPABILITY_PROFILE
+            or receipt.source_record_id != self.profile.profile_id
+            or receipt.source_schema_version != self.profile.schema_version
+            or receipt.source_content_hash != self.profile.content_hash
+            or receipt.source_snapshot_hash != self.assessment.requirement.evidence_snapshot_hash
+        ):
+            raise ValueError(
+                "capability evidence receipt must bind the retained profile and evidence snapshot"
+            )
+        from super_scientist.domain.cognition.grounding import assess_capability
+
+        if self.assessment != assess_capability(
+            self.profile,
+            self.assessment.requirement,
+        ):
+            raise ValueError("capability assessment must be recomputed from the retained profile")
+        return self
+
+
+class GroundedCapabilityAssessment(_GroundedCapabilityAssessmentPayload):
+    content_hash: Sha256Hex
+
+    @classmethod
+    def build(cls, **values: Any) -> Self:
+        payload = _GroundedCapabilityAssessmentPayload(**values)
+        return cls(
+            **payload.model_dump(mode="python"),
+            content_hash=canonical_model_hash(payload),
+        )
+
+    @model_validator(mode="after")
+    def require_canonical_content_hash(self) -> Self:
+        if self.content_hash != canonical_model_hash(self, exclude_fields={"content_hash"}):
+            raise ValueError(
+                "content_hash must canonically address the grounded capability assessment"
+            )
         return self
 
 
@@ -327,28 +539,27 @@ class ProcedureCompilationRequest(_StrictFrozenModel):
     compiler_id: BoundedIdentifier
     compiler_version: BoundedIdentifier
     candidate: CandidateMethod
-    capability_assessments: tuple[CapabilityAssessment, ...] = Field(
+    capability_assessments: tuple[GroundedCapabilityAssessment, ...] = Field(
         max_length=MAX_PROCEDURE_ITEMS
     )
-    artifact_catalog: tuple[ArtifactCatalogEntry, ...] = Field(
-        max_length=MAX_PROCEDURE_ITEMS
-    )
+    artifact_catalog: tuple[ArtifactCatalogEntry, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
     artifact_catalog_complete: bool
+    artifact_catalog_receipt: AcceptedSourceReceiptRef
     tool_catalog: tuple[RegisteredTool, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
     tool_catalog_complete: bool
-    validator_catalog: tuple[RegisteredValidator, ...] = Field(
-        max_length=MAX_PROCEDURE_ITEMS
-    )
+    tool_catalog_receipt: AcceptedSourceReceiptRef
+    validator_catalog: tuple[RegisteredValidator, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
     validator_catalog_complete: bool
+    validator_catalog_receipt: AcceptedSourceReceiptRef
     budget_envelope: BudgetReserves
 
     @field_validator("capability_assessments")
     @classmethod
     def require_canonical_capability_snapshot(
         cls,
-        values: tuple[CapabilityAssessment, ...],
-    ) -> tuple[CapabilityAssessment, ...]:
-        keys = tuple(item.requirement.requirement_id for item in values)
+        values: tuple[GroundedCapabilityAssessment, ...],
+    ) -> tuple[GroundedCapabilityAssessment, ...]:
+        keys = tuple(item.assessment.requirement.requirement_id for item in values)
         cls._require_canonical_snapshot_keys(keys, "capability_assessments")
         return values
 
@@ -378,9 +589,7 @@ class ProcedureCompilationRequest(_StrictFrozenModel):
         cls,
         values: tuple[RegisteredValidator, ...],
     ) -> tuple[RegisteredValidator, ...]:
-        keys = tuple(
-            (item.validator.actor_id, item.validator_version) for item in values
-        )
+        keys = tuple((item.validator.actor_id, item.validator_version) for item in values)
         cls._require_canonical_snapshot_keys(keys, "validator_catalog")
         return values
 
@@ -394,6 +603,60 @@ class ProcedureCompilationRequest(_StrictFrozenModel):
         if keys != tuple(sorted(keys)):
             raise ValueError(f"{field_name} must use canonical order")
 
+    @field_validator("budget_envelope")
+    @classmethod
+    def require_bounded_budget_envelope(cls, value: BudgetReserves) -> BudgetReserves:
+        for field_name in ProgressBudgetCategory:
+            _require_bounded_resource_budget(
+                getattr(value, field_name.value),
+                f"budget_envelope.{field_name.value}",
+            )
+        return value
+
+    @model_validator(mode="after")
+    def require_exact_fixed_catalog_snapshot_bindings(self) -> Self:
+        bindings = (
+            (
+                ProcedureEvidenceSourceKind.ARTIFACT_CATALOG,
+                self.artifact_catalog,
+                self.artifact_catalog_complete,
+                self.artifact_catalog_receipt,
+            ),
+            (
+                ProcedureEvidenceSourceKind.TOOL_CATALOG,
+                self.tool_catalog,
+                self.tool_catalog_complete,
+                self.tool_catalog_receipt,
+            ),
+            (
+                ProcedureEvidenceSourceKind.VALIDATOR_CATALOG,
+                self.validator_catalog,
+                self.validator_catalog_complete,
+                self.validator_catalog_receipt,
+            ),
+        )
+        for source_kind, entries, complete, receipt in bindings:
+            if (
+                receipt.source_kind is not source_kind
+                or receipt.source_schema_version != 1
+                or receipt.source_content_hash
+                != catalog_snapshot_content_hash(
+                    source_kind.value,
+                    entries,
+                    complete,
+                )
+            ):
+                raise ValueError(
+                    f"{source_kind.value.lower()} receipt must bind exact catalog contents"
+                )
+        snapshots = {
+            (receipt.source_snapshot_id, receipt.source_snapshot_hash)
+            for _kind, _entries, _complete, receipt in bindings
+        }
+        if len(snapshots) != 1:
+            raise ValueError("catalog receipts must share one fixed source snapshot")
+        return self
+
 
 class _ExecutableProcedurePayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
@@ -401,18 +664,31 @@ class _ExecutableProcedurePayload(_StrictFrozenModel):
     compiler_id: BoundedIdentifier
     compiler_version: BoundedIdentifier
     steps: tuple[ProcedureStep, ...] = Field(min_length=1, max_length=MAX_PROCEDURE_ITEMS)
-    required_capability_ids: tuple[BoundedIdentifier, ...] = Field(
-        max_length=MAX_PROCEDURE_ITEMS
-    )
+    required_capability_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
     required_artifact_input_ids: tuple[BoundedIdentifier, ...] = Field(
         max_length=MAX_PROCEDURE_ITEMS
     )
-    declared_outputs: tuple[DeclaredProcedureArtifact, ...] = Field(
-        max_length=MAX_PROCEDURE_ITEMS
-    )
+    declared_outputs: tuple[DeclaredProcedureArtifact, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
     source_candidate: CandidateMethod
     source_candidate_hash: Sha256Hex
     compilation_request_hash: Sha256Hex
+
+    @field_validator("required_capability_ids", "required_artifact_input_ids")
+    @classmethod
+    def require_canonical_identifier_sets(
+        cls,
+        values: tuple[str, ...],
+        info: Any,
+    ) -> tuple[str, ...]:
+        return _require_canonical_unique(values, info.field_name)
+
+    @field_validator("declared_outputs")
+    @classmethod
+    def require_canonical_declared_outputs(
+        cls,
+        values: tuple[DeclaredProcedureArtifact, ...],
+    ) -> tuple[DeclaredProcedureArtifact, ...]:
+        return _require_canonical_unique_artifacts(values, "declared_outputs")
 
     @model_validator(mode="after")
     def require_source_candidate_hash(self) -> Self:
@@ -482,11 +758,25 @@ class _ProcedureCompilationResultPayload(_StrictFrozenModel):
     compiler_id: BoundedIdentifier
     compiler_version: BoundedIdentifier
     request_hash: Sha256Hex
+    request_json: str = Field(
+        strict=True,
+        min_length=2,
+        max_length=MAX_PROCEDURE_CANONICAL_JSON_LENGTH,
+    )
     procedure: ExecutableProcedure
     report: ProcedureValidationReport
 
     @model_validator(mode="after")
     def require_procedure_identity_alignment(self) -> Self:
+        try:
+            request_payload = json.loads(self.request_json)
+        except (TypeError, ValueError) as error:
+            raise ValueError("compilation result must retain canonical request JSON") from error
+        canonical_request = canonical_json_bytes(request_payload)
+        if self.request_json.encode("utf-8") != canonical_request:
+            raise ValueError("compilation result must retain canonical request JSON")
+        if self.request_hash != sha256_hex(canonical_request):
+            raise ValueError("compilation result request hash must match the retained request")
         if self.request_hash != self.procedure.compilation_request_hash:
             raise ValueError("compilation result request hash must match the procedure")
         if (
@@ -495,6 +785,12 @@ class _ProcedureCompilationResultPayload(_StrictFrozenModel):
         ):
             raise ValueError("compilation result compiler identity must match the procedure")
         return self
+
+    def parse_request(self) -> ProcedureCompilationRequest:
+        return ProcedureCompilationRequest.model_validate_json(
+            self.request_json,
+            strict=True,
+        )
 
 
 class ProcedureCompilationResult(_ProcedureCompilationResultPayload):
@@ -603,12 +899,8 @@ class _MethodDirectionOutcomePayload(_StrictFrozenModel):
     status: MethodDirectionStatus
     evidence_refs: tuple[ArtifactRef, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
     failed_method_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
-    rejected_procedure_ids: tuple[BoundedIdentifier, ...] = Field(
-        max_length=MAX_PROCEDURE_ITEMS
-    )
-    budget_reference_ids: tuple[BoundedIdentifier, ...] = Field(
-        max_length=MAX_PROCEDURE_ITEMS
-    )
+    rejected_procedure_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
+    budget_reference_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PROCEDURE_ITEMS)
     terminal_rule: BoundedText
     created_at: UtcTimestamp
     governing_policy_hash: Sha256Hex
@@ -656,12 +948,15 @@ class MethodDirectionOutcome(_MethodDirectionOutcomePayload):
 
 
 __all__ = [
+    "MAX_PROCEDURE_RESOURCE_VALUE",
+    "AcceptedSourceReceiptRef",
     "ArtifactCatalogEntry",
     "CandidateMethod",
     "CatalogFactStatus",
     "CompiledProgressPlanBinding",
     "DeclaredProcedureArtifact",
     "ExecutableProcedure",
+    "GroundedCapabilityAssessment",
     "MethodDirectionOutcome",
     "MethodDirectionStatus",
     "ProcedureAuthority",
@@ -669,6 +964,7 @@ __all__ = [
     "ProcedureCompilationRecord",
     "ProcedureCompilationRequest",
     "ProcedureCompilationResult",
+    "ProcedureEvidenceSourceKind",
     "ProcedureFinding",
     "ProcedureFindingCode",
     "ProcedureFindingSeverity",
@@ -682,4 +978,5 @@ __all__ = [
     "RegisteredTool",
     "RegisteredValidator",
     "canonical_model_hash",
+    "catalog_snapshot_content_hash",
 ]

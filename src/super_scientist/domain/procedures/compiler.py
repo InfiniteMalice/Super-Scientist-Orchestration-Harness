@@ -6,17 +6,22 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from super_scientist.domain.cognition.grounding import assess_capability
 from super_scientist.domain.cognition.models import (
     CapabilityDisposition,
     CapabilityEvidenceStatus,
 )
 from super_scientist.domain.improvement.models import ResourceBudget
+from super_scientist.domain.primitives import canonical_json_bytes
 from super_scientist.domain.procedures.models import (
+    AcceptedSourceReceiptRef,
     CatalogFactStatus,
     ExecutableProcedure,
+    GroundedCapabilityAssessment,
     ProcedureAuthority,
     ProcedureCompilationRequest,
     ProcedureCompilationResult,
+    ProcedureEvidenceSourceKind,
     ProcedureFinding,
     ProcedureFindingCode,
     ProcedureFindingSeverity,
@@ -26,14 +31,13 @@ from super_scientist.domain.procedures.models import (
     ProcedureValidationStatus,
     ProgressBudgetCategory,
     canonical_model_hash,
+    catalog_snapshot_content_hash,
 )
 from super_scientist.domain.procedures.progress_binding import validate_progress_mapping
 
 PROCEDURE_COMPILER_ID = "procedure-compiler"
 PROCEDURE_COMPILER_VERSION = "1.0.0"
-_SUPPORTED_COMPILER_IDENTITIES = frozenset(
-    {(PROCEDURE_COMPILER_ID, PROCEDURE_COMPILER_VERSION)}
-)
+_SUPPORTED_COMPILER_IDENTITIES = frozenset({(PROCEDURE_COMPILER_ID, PROCEDURE_COMPILER_VERSION)})
 _IMPOSSIBLE_AUTHORITIES = frozenset(
     {
         ProcedureAuthority.GOVERNANCE_WRITE,
@@ -60,6 +64,65 @@ _FORBIDDEN_FIELD_NAMES = frozenset(
         "training_request",
     }
 )
+
+
+def _accepted_receipt_is_canonical(receipt: AcceptedSourceReceiptRef) -> bool:
+    return receipt.content_hash == canonical_model_hash(
+        receipt,
+        exclude_fields={"content_hash"},
+    )
+
+
+def _fixed_catalog_snapshot(request: ProcedureCompilationRequest) -> tuple[str, str] | None:
+    receipts = (
+        getattr(request, "artifact_catalog_receipt", None),
+        getattr(request, "tool_catalog_receipt", None),
+        getattr(request, "validator_catalog_receipt", None),
+    )
+    if not all(isinstance(item, AcceptedSourceReceiptRef) for item in receipts):
+        return None
+    snapshots = {
+        (item.source_snapshot_id, item.source_snapshot_hash)
+        for item in receipts
+        if isinstance(item, AcceptedSourceReceiptRef)
+    }
+    return next(iter(snapshots)) if len(snapshots) == 1 else None
+
+
+def _catalog_binding_state(
+    request: ProcedureCompilationRequest,
+    *,
+    catalog_kind: ProcedureEvidenceSourceKind,
+    entries: tuple[BaseModel, ...],
+    complete: bool,
+    receipt: object,
+) -> str:
+    if not isinstance(receipt, AcceptedSourceReceiptRef):
+        return "unknown"
+    if (
+        not _accepted_receipt_is_canonical(receipt)
+        or receipt.source_kind is not catalog_kind
+        or receipt.source_schema_version != 1
+        or receipt.source_content_hash
+        != catalog_snapshot_content_hash(catalog_kind.value, entries, complete)
+        or _fixed_catalog_snapshot(request) is None
+    ):
+        return "spoofed"
+    return "valid"
+
+
+def _grounded_assessment_is_valid(value: GroundedCapabilityAssessment) -> bool:
+    receipt = value.profile_receipt
+    return (
+        value.content_hash == canonical_model_hash(value, exclude_fields={"content_hash"})
+        and _accepted_receipt_is_canonical(receipt)
+        and receipt.source_kind is ProcedureEvidenceSourceKind.CAPABILITY_PROFILE
+        and receipt.source_record_id == value.profile.profile_id
+        and receipt.source_schema_version == value.profile.schema_version
+        and receipt.source_content_hash == value.profile.content_hash
+        and receipt.source_snapshot_hash == value.assessment.requirement.evidence_snapshot_hash
+        and value.assessment == assess_capability(value.profile, value.assessment.requirement)
+    )
 
 
 def _finding(
@@ -247,6 +310,30 @@ def _check_4_artifact_inputs(
     request: ProcedureCompilationRequest,
     procedure: ExecutableProcedure,
 ) -> tuple[ProcedureFinding, ...]:
+    binding_state = _catalog_binding_state(
+        request,
+        catalog_kind=ProcedureEvidenceSourceKind.ARTIFACT_CATALOG,
+        entries=request.artifact_catalog,
+        complete=request.artifact_catalog_complete,
+        receipt=getattr(request, "artifact_catalog_receipt", None),
+    )
+    if binding_state != "valid":
+        return (
+            _finding(
+                4,
+                (
+                    ProcedureFindingCode.ARTIFACT_CATALOG_UNKNOWN
+                    if binding_state == "unknown"
+                    else ProcedureFindingCode.SPOOFED_EVIDENCE_BINDING
+                ),
+                (
+                    ProcedureFindingSeverity.UNKNOWN
+                    if binding_state == "unknown"
+                    else ProcedureFindingSeverity.ERROR
+                ),
+                "artifact catalog lacks an exact accepted fixed-snapshot binding",
+            ),
+        )
     entries = {entry.artifact_id: entry for entry in request.artifact_catalog}
     producers = _producer_map(procedure.steps)
     steps_by_id = _step_map(procedure.steps)
@@ -315,6 +402,30 @@ def _check_6_tools(
     request: ProcedureCompilationRequest,
     procedure: ExecutableProcedure,
 ) -> tuple[ProcedureFinding, ...]:
+    binding_state = _catalog_binding_state(
+        request,
+        catalog_kind=ProcedureEvidenceSourceKind.TOOL_CATALOG,
+        entries=request.tool_catalog,
+        complete=request.tool_catalog_complete,
+        receipt=getattr(request, "tool_catalog_receipt", None),
+    )
+    if binding_state != "valid":
+        return (
+            _finding(
+                6,
+                (
+                    ProcedureFindingCode.TOOL_CATALOG_UNKNOWN
+                    if binding_state == "unknown"
+                    else ProcedureFindingCode.SPOOFED_EVIDENCE_BINDING
+                ),
+                (
+                    ProcedureFindingSeverity.UNKNOWN
+                    if binding_state == "unknown"
+                    else ProcedureFindingSeverity.ERROR
+                ),
+                "tool catalog lacks an exact accepted fixed-snapshot binding",
+            ),
+        )
     catalog = {entry.tool.actor_id: entry for entry in request.tool_catalog}
     findings: list[ProcedureFinding] = []
     for step in procedure.steps:
@@ -450,9 +561,9 @@ def _check_9_capabilities(
     request: ProcedureCompilationRequest,
     procedure: ExecutableProcedure,
 ) -> tuple[ProcedureFinding, ...]:
-    assessments = {
-        assessment.requirement.requirement_id: assessment
-        for assessment in request.capability_assessments
+    grounded_assessments = {
+        grounded.assessment.requirement.requirement_id: grounded
+        for grounded in request.capability_assessments
     }
     requirement_ids = set(procedure.required_capability_ids)
     requirement_ids.update(
@@ -462,7 +573,19 @@ def _check_9_capabilities(
     )
     findings: list[ProcedureFinding] = []
     for requirement_id in sorted(requirement_ids):
-        assessment = assessments.get(requirement_id)
+        grounded = grounded_assessments.get(requirement_id)
+        if grounded is not None and not _grounded_assessment_is_valid(grounded):
+            findings.append(
+                _finding(
+                    9,
+                    ProcedureFindingCode.SPOOFED_EVIDENCE_BINDING,
+                    ProcedureFindingSeverity.ERROR,
+                    "capability assessment lacks an exact accepted profile binding",
+                    requirement_id,
+                )
+            )
+            continue
+        assessment = None if grounded is None else grounded.assessment
         if assessment is None or assessment.disposition is CapabilityDisposition.UNKNOWN:
             findings.append(
                 _finding(
@@ -494,6 +617,30 @@ def _check_10_validators(
     request: ProcedureCompilationRequest,
     procedure: ExecutableProcedure,
 ) -> tuple[ProcedureFinding, ...]:
+    binding_state = _catalog_binding_state(
+        request,
+        catalog_kind=ProcedureEvidenceSourceKind.VALIDATOR_CATALOG,
+        entries=request.validator_catalog,
+        complete=request.validator_catalog_complete,
+        receipt=getattr(request, "validator_catalog_receipt", None),
+    )
+    if binding_state != "valid":
+        return (
+            _finding(
+                10,
+                (
+                    ProcedureFindingCode.VALIDATOR_REGISTRATION_UNKNOWN
+                    if binding_state == "unknown"
+                    else ProcedureFindingCode.SPOOFED_EVIDENCE_BINDING
+                ),
+                (
+                    ProcedureFindingSeverity.UNKNOWN
+                    if binding_state == "unknown"
+                    else ProcedureFindingSeverity.ERROR
+                ),
+                "validator catalog lacks an exact accepted fixed-snapshot binding",
+            ),
+        )
     catalog = {
         (entry.validator.actor_id, entry.validator_version): entry
         for entry in request.validator_catalog
@@ -713,7 +860,7 @@ def _check_14_operations(
 def _forbidden_keys(value: Any) -> tuple[str, ...]:
     found: set[str] = set()
     if isinstance(value, BaseModel):
-        return _forbidden_keys(value.model_dump(mode="python"))
+        return _forbidden_keys(vars(value))
     if isinstance(value, Mapping):
         for key, item in value.items():
             if isinstance(key, str) and key.lower() in _FORBIDDEN_FIELD_NAMES:
@@ -727,7 +874,7 @@ def _forbidden_keys(value: Any) -> tuple[str, ...]:
 
 def _check_15_forbidden_fields(
     request: ProcedureCompilationRequest,
-    _procedure: ExecutableProcedure,
+    procedure: ExecutableProcedure,
 ) -> tuple[ProcedureFinding, ...]:
     return tuple(
         _finding(
@@ -737,7 +884,9 @@ def _check_15_forbidden_fields(
             "procedure input contains a forbidden execution or protected-data field",
             field_name,
         )
-        for field_name in _forbidden_keys(request)
+        for field_name in tuple(
+            sorted(set(_forbidden_keys(request)) | set(_forbidden_keys(procedure)))
+        )
     )
 
 
@@ -799,14 +948,15 @@ def compile_declared_stages(request: ProcedureCompilationRequest) -> ExecutableP
             }
         )
     )
-    required_capability_ids = set(
-        request.candidate.claimed_capability_requirement_ids
-    )
+    required_capability_ids = set(request.candidate.claimed_capability_requirement_ids)
     required_capability_ids.update(
         requirement_id
         for step in request.candidate.stages
         for requirement_id in step.capability_requirement_ids
     )
+    declared_outputs = {
+        output.artifact_id: output for step in request.candidate.stages for output in step.outputs
+    }
     return ExecutableProcedure.build(
         procedure_id=f"procedure-{request_hash}",
         compiler_id=request.compiler_id,
@@ -815,7 +965,7 @@ def compile_declared_stages(request: ProcedureCompilationRequest) -> ExecutableP
         required_capability_ids=tuple(sorted(required_capability_ids)),
         required_artifact_input_ids=required_inputs,
         declared_outputs=tuple(
-            output for step in request.candidate.stages for output in step.outputs
+            declared_outputs[artifact_id] for artifact_id in sorted(declared_outputs)
         ),
         source_candidate=request.candidate,
         source_candidate_hash=request.candidate.content_hash,
@@ -827,9 +977,7 @@ def validate_procedure(
     request: ProcedureCompilationRequest,
     procedure: ExecutableProcedure,
 ) -> tuple[ProcedureFinding, ...]:
-    return _ordered(
-        finding for check in _CHECKS for finding in check(request, procedure)
-    )
+    return _ordered(finding for check in _CHECKS for finding in check(request, procedure))
 
 
 def compile_method(request: ProcedureCompilationRequest) -> ProcedureCompilationResult:
@@ -850,6 +998,7 @@ def compile_method(request: ProcedureCompilationRequest) -> ProcedureCompilation
         compiler_id=request.compiler_id,
         compiler_version=request.compiler_version,
         request_hash=canonical_model_hash(request),
+        request_json=canonical_json_bytes(request.model_dump(mode="json")).decode("utf-8"),
         procedure=procedure,
         report=report,
     )
