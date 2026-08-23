@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 import super_scientist.domain.harness_eval as harness_eval
+from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
 from super_scientist.domain.harness_eval.rewards import (
     RewardHackingFamily,
     RewardHackingFinding,
@@ -13,9 +14,13 @@ from super_scientist.domain.harness_eval.rewards import (
     RewardInvalidationReason,
     RewardValidityAssessment,
     RewardValidityStatus,
-    assess_reward_validity,
+    VerificationOutcomeEvidence,
+    VerificationOutcomeStatus,
     reward_assessment_hash,
     valid_reward_evidence,
+)
+from super_scientist.domain.harness_eval.rewards import (
+    assess_reward_validity as assess_reward_validity_contract,
 )
 from super_scientist.domain.harness_eval.traces import (
     AvailableValue,
@@ -33,8 +38,82 @@ from tests.unit.harness_eval.test_traces import (
     available,
     binding,
     reward_observation,
+    trace_expectation,
     valid_trace,
 )
+
+
+def _verification_evidence(
+    trace: object,
+    succeeded: bool | None,
+) -> VerificationOutcomeEvidence:
+    status = (
+        VerificationOutcomeStatus.UNKNOWN
+        if succeeded is None
+        else VerificationOutcomeStatus.SUCCEEDED
+        if succeeded
+        else VerificationOutcomeStatus.FAILED
+    )
+    observed = trace.observed_binding  # type: ignore[union-attr]
+    return VerificationOutcomeEvidence.build(
+        outcome_id="verification-outcome-1",
+        verifier=EvidenceReceipt(
+            record_id=observed.validator_id,
+            schema_version=1,
+            content_hash=observed.validator_hash,
+        ),
+        verifier_result=EvidenceReceipt(
+            record_id=trace.verifier_result_id,  # type: ignore[union-attr]
+            schema_version=1,
+            content_hash=trace.verifier_result_hash,  # type: ignore[union-attr]
+        ),
+        verifier_status=status,
+        checker=EvidenceReceipt(
+            record_id=observed.checker_id,
+            schema_version=1,
+            content_hash=observed.checker_hash,
+        ),
+        checker_result=EvidenceReceipt(
+            record_id=trace.checker_result_id,  # type: ignore[union-attr]
+            schema_version=1,
+            content_hash=trace.checker_result_hash,  # type: ignore[union-attr]
+        ),
+        checker_status=status,
+        evidence_ids=("checker-evidence", "verifier-evidence"),
+    )
+
+
+def _complete_diagnostics(
+    trace: object,
+    findings: tuple[RewardHackingFinding, ...],
+) -> tuple[RewardHackingFinding, ...]:
+    by_family = {item.family: item for item in findings}
+    return tuple(
+        by_family.get(family)
+        or reward_hacking_finding(
+            trace,
+            finding_id=f"diagnostic-{index:02d}",
+            family=family,
+            status=RewardHackingFindingStatus.CLEARED,
+        )
+        for index, family in enumerate(RewardHackingFamily)
+    )
+
+
+def assess_reward_validity(
+    observation: object,
+    trace: object,
+    findings: tuple[RewardHackingFinding, ...],
+    *,
+    verifier_succeeded: bool | None,
+) -> RewardValidityAssessment:
+    return assess_reward_validity_contract(
+        observation,  # type: ignore[arg-type]
+        trace,  # type: ignore[arg-type]
+        _complete_diagnostics(trace, findings),
+        expectation=trace_expectation(),
+        verification=_verification_evidence(trace, verifier_succeeded),
+    )
 
 
 def test_valid_reward_requires_current_complete_observable_evidence() -> None:
@@ -208,11 +287,8 @@ def test_undeclared_context_artifact_identity_is_stale_and_invalid() -> None:
         )
     )
     trace_payload = {
-        key: value
-        for key, value in base.model_dump(mode="python").items()
-        if key != "content_hash"
+        key: value for key, value in base.model_dump(mode="python").items() if key != "content_hash"
     } | {
-        "expected_binding": authorized,
         "observed_binding": observed,
         "context_artifacts": rogue_artifacts,
         "initial_context_hash": rogue_context_hash,
@@ -338,7 +414,8 @@ def test_reason_order_is_canonical_and_independent_of_finding_input_order() -> N
         RewardInvalidationReason.STALE_HARNESS_TRACE,
         RewardInvalidationReason.TASK_RUNTIME_MISMATCH,
     )
-    assert assessment.finding_ids == ("finding-a", "finding-b")
+    assert "finding-a" in assessment.finding_ids
+    assert "finding-b" in assessment.finding_ids
 
 
 def test_findings_must_bind_exact_trace_reward_and_observable_evidence() -> None:
@@ -434,7 +511,7 @@ def test_valid_reward_filter_revalidates_nonvalidating_model_copies() -> None:
 
 def test_reward_public_api_is_exported_from_harness_eval_package() -> None:
     assert harness_eval.RewardValidityAssessment is RewardValidityAssessment
-    assert harness_eval.assess_reward_validity is assess_reward_validity
+    assert harness_eval.assess_reward_validity is assess_reward_validity_contract
     assert harness_eval.valid_reward_evidence is valid_reward_evidence
 
 

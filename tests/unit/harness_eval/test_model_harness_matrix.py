@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import lru_cache
 from itertools import product
 
 import pytest
@@ -19,17 +20,20 @@ from super_scientist.domain.harness_eval.matrix import (
     ModelHarnessCoordinate,
     ModelHarnessProtocol,
     ModelIdentity,
-    analyze_model_harness,
     evaluation_resource_envelope_hash,
     model_harness_analysis_hash,
     model_harness_cell_hash,
     model_harness_protocol_hash,
+)
+from super_scientist.domain.harness_eval.matrix import (
+    analyze_model_harness as analyze_model_harness_contract,
 )
 from super_scientist.domain.harness_eval.models import (
     EvaluationBudget,
     FeedbackMode,
     HarnessPartition,
 )
+from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
 from super_scientist.domain.improvement.models import AssessmentOutcome, ResourceUsage
 from super_scientist.domain.procedures.models import (
     MethodDirectionStatus,
@@ -139,9 +143,7 @@ def _protocol(**updates: object) -> ModelHarnessProtocol:
         "random_seed": 7,
         "output_schema_hash": HASH_A,
         "model_budgets": _model_budgets(),
-        "matched_resource_envelope_hash": evaluation_resource_envelope_hash(
-            _budget(MODELS[0])
-        ),
+        "matched_resource_envelope_hash": evaluation_resource_envelope_hash(_budget(MODELS[0])),
         "expected_grid": _grid(),
         "comparison_kinds": tuple(ModelHarnessComparisonKind),
         "governing_policy_hash": HASH_A,
@@ -158,6 +160,24 @@ def _cell(
     trace_current: bool = True,
     reward_valid: bool = True,
 ) -> ModelHarnessCell:
+    freshness, assessment = _validated_evidence()
+    from super_scientist.domain.harness_eval.rewards import reward_validity_receipt
+    from super_scientist.domain.harness_eval.traces import trace_freshness_receipt
+
+    trace_receipt = trace_freshness_receipt(freshness)
+    reward_receipt = reward_validity_receipt(assessment)
+    if not trace_current:
+        trace_receipt = EvidenceReceipt(
+            record_id=trace_receipt.record_id,
+            schema_version=trace_receipt.schema_version,
+            content_hash=HASH_B,
+        )
+    if not reward_valid:
+        reward_receipt = EvidenceReceipt(
+            record_id=reward_receipt.record_id,
+            schema_version=reward_receipt.schema_version,
+            content_hash=HASH_B,
+        )
     return ModelHarnessCell.from_protocol(
         cell_id=(
             f"cell-{coordinate.model.model_id}-{coordinate.harness.harness_id}"
@@ -166,16 +186,36 @@ def _cell(
         protocol=protocol,
         coordinate=coordinate,
         metrics=_metrics(score),
-        trace_id="trace-a",
-        trace_current=trace_current,
-        reward_assessment_id="reward-a",
-        reward_valid=reward_valid,
+        trace_freshness_receipt=trace_receipt,
+        reward_validity_receipt=reward_receipt,
         observed_at=NOW,
     )
 
 
 def _cells(protocol: ModelHarnessProtocol) -> tuple[ModelHarnessCell, ...]:
     return tuple(_cell(protocol, coordinate) for coordinate in protocol.expected_grid)
+
+
+@lru_cache(maxsize=1)
+def _validated_evidence() -> tuple[object, object]:
+    from tests.unit.harness_eval.test_harness_security_contracts import (
+        _valid_evaluation_snapshots,
+    )
+
+    return _valid_evaluation_snapshots()
+
+
+def analyze_model_harness(
+    protocol: ModelHarnessProtocol,
+    cells: tuple[ModelHarnessCell, ...],
+) -> ModelHarnessAnalysis:
+    freshness, assessment = _validated_evidence()
+    return analyze_model_harness_contract(
+        protocol,
+        cells,
+        trace_freshness=(freshness,),  # type: ignore[arg-type]
+        reward_assessments=(assessment,),  # type: ignore[arg-type]
+    )
 
 
 def test_protocol_requires_a_complete_model_by_harness_partition_grid() -> None:
@@ -266,9 +306,7 @@ def test_duplicate_cell_ids_with_different_hashes_have_stable_analysis_order() -
 
 
 def test_declared_comparison_kinds_are_the_only_outputs() -> None:
-    protocol = _protocol(
-        comparison_kinds=(ModelHarnessComparisonKind.MODEL_HELD_CONSTANT,)
-    )
+    protocol = _protocol(comparison_kinds=(ModelHarnessComparisonKind.MODEL_HELD_CONSTANT,))
     analysis = analyze_model_harness(protocol, _cells(protocol))
     assert {item.kind for item in analysis.comparisons} == {
         ModelHarnessComparisonKind.MODEL_HELD_CONSTANT
@@ -276,9 +314,7 @@ def test_declared_comparison_kinds_are_the_only_outputs() -> None:
 
 
 def test_discovery_and_transfer_are_retained_as_separate_transfer_coordinates() -> None:
-    protocol = _protocol(
-        comparison_kinds=(ModelHarnessComparisonKind.TRAIN_TEST_TRANSFER,)
-    )
+    protocol = _protocol(comparison_kinds=(ModelHarnessComparisonKind.TRAIN_TEST_TRANSFER,))
     analysis = analyze_model_harness(protocol, _cells(protocol))
 
     assert analysis.comparisons
@@ -371,8 +407,8 @@ def test_stale_trace_and_invalid_reward_block_descriptive_analysis() -> None:
     cells[0] = _cell(protocol, protocol.expected_grid[0], trace_current=False)
     cells[1] = _cell(protocol, protocol.expected_grid[1], reward_valid=False)
     analysis = analyze_model_harness(protocol, tuple(cells))
-    assert ModelHarnessConfoundCode.STALE_TRACE in analysis.confounds
-    assert ModelHarnessConfoundCode.INVALID_REWARD in analysis.confounds
+    assert ModelHarnessConfoundCode.TRACE_RECEIPT_MISMATCH in analysis.confounds
+    assert ModelHarnessConfoundCode.REWARD_RECEIPT_MISMATCH in analysis.confounds
     assert analysis.comparisons == ()
 
 
@@ -427,13 +463,9 @@ def test_rehashed_analysis_cannot_conceal_a_contradictory_protocol_identity() ->
 
 
 def test_rehashed_analysis_rejects_an_undeclared_comparison_kind() -> None:
-    protocol = _protocol(
-        comparison_kinds=(ModelHarnessComparisonKind.MODEL_HELD_CONSTANT,)
-    )
+    protocol = _protocol(comparison_kinds=(ModelHarnessComparisonKind.MODEL_HELD_CONSTANT,))
     analysis = analyze_model_harness(protocol, _cells(protocol))
-    comparison_values = analysis.comparisons[0].model_dump(
-        mode="python", exclude={"content_hash"}
-    )
+    comparison_values = analysis.comparisons[0].model_dump(mode="python", exclude={"content_hash"})
     comparison_values["kind"] = ModelHarnessComparisonKind.HARNESS_HELD_CONSTANT
     replacement = ModelHarnessComparison.build(**comparison_values)
     values = analysis.model_dump(mode="python")
@@ -450,9 +482,7 @@ def test_rehashed_analysis_rejects_comparison_cells_outside_its_inventory(
 ) -> None:
     protocol = _protocol()
     analysis = analyze_model_harness(protocol, _cells(protocol))
-    comparison_values = analysis.comparisons[0].model_dump(
-        mode="python", exclude={"content_hash"}
-    )
+    comparison_values = analysis.comparisons[0].model_dump(mode="python", exclude={"content_hash"})
     if tamper == "outsider_id":
         comparison_values["cell_ids"] = (
             "outsider-cell",
@@ -476,7 +506,7 @@ def test_model_harness_public_api_is_exported_from_harness_eval_package() -> Non
     from super_scientist.domain import harness_eval
 
     assert harness_eval.ModelHarnessProtocol is ModelHarnessProtocol
-    assert harness_eval.analyze_model_harness is analyze_model_harness
+    assert harness_eval.analyze_model_harness is analyze_model_harness_contract
     assert not hasattr(harness_eval, "build_declared_comparisons")
 
     protocol = _protocol()

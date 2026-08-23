@@ -75,6 +75,7 @@ from super_scientist.domain.harness_eval.models import (
     harness_campaign_hash,
     partition_manifest_hash,
 )
+from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
 from super_scientist.domain.harness_eval.rewards import (
     RewardHackingFamily,
     RewardHackingFinding,
@@ -82,7 +83,10 @@ from super_scientist.domain.harness_eval.rewards import (
     RewardInvalidationReason,
     RewardValidityAssessment,
     RewardValidityStatus,
+    VerificationOutcomeEvidence,
+    VerificationOutcomeStatus,
     assess_reward_validity,
+    reward_validity_receipt,
     valid_reward_evidence,
 )
 from super_scientist.domain.harness_eval.traces import (
@@ -103,9 +107,11 @@ from super_scientist.domain.harness_eval.traces import (
     ToolObservationStatus,
     TraceBinding,
     TraceBindingMismatch,
+    TraceExpectation,
     TraceFreshness,
     TraceFreshnessStatus,
     trace_freshness,
+    trace_freshness_receipt,
 )
 
 __all__ = [
@@ -124,6 +130,7 @@ __all__ = [
     "EvaluationMetricDeltaVector",
     "EvaluationMetricVector",
     "EvaluationReferenceComponent",
+    "EvidenceReceipt",
     "ExecutionFailureEvent",
     "ExecutionFailureKind",
     "ExecutionStatus",
@@ -181,9 +188,12 @@ __all__ = [
     "ToolObservationStatus",
     "TraceBinding",
     "TraceBindingMismatch",
+    "TraceExpectation",
     "TraceFreshness",
     "TraceFreshnessStatus",
     "VariantEvaluationBudget",
+    "VerificationOutcomeEvidence",
+    "VerificationOutcomeStatus",
     "analyze_model_harness",
     "assess_reward_validity",
     "canonical_cells",
@@ -203,7 +213,9 @@ __all__ = [
     "model_harness_comparison_hash",
     "model_harness_protocol_hash",
     "partition_manifest_hash",
+    "reward_validity_receipt",
     "trace_freshness",
+    "trace_freshness_receipt",
     "valid_reward_evidence",
     "validate_complete_matched_grid",
 ]

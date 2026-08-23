@@ -120,9 +120,7 @@ def _protocol(**updates: object) -> GuidanceEvaluationProtocol:
         "evaluation_budget": _budget(),
     }
     values.update(updates)
-    if "evaluation_budget" not in updates and (
-        "model_id" in updates or "model_version" in updates
-    ):
+    if "evaluation_budget" not in updates and ("model_id" in updates or "model_version" in updates):
         values["evaluation_budget"] = _budget(
             model_id=values["model_id"],
             model_version=values["model_version"],
@@ -332,9 +330,9 @@ def test_non_distractor_and_distractor_conditions_reject_wrong_artifact_sets() -
     with pytest.raises(ValidationError, match="only the distractor condition"):
         GuidanceEvaluationCell.build(**base)
 
-    distractor = _cell(
-        condition=GuidanceCondition.OBJECTIVE_DATA_WITH_DISTRACTORS
-    ).model_dump(mode="python", exclude={"content_hash"})
+    distractor = _cell(condition=GuidanceCondition.OBJECTIVE_DATA_WITH_DISTRACTORS).model_dump(
+        mode="python", exclude={"content_hash"}
+    )
     distractor["distractor_artifact_ids"] = ("undeclared",)
     with pytest.raises(ValidationError, match="exactly the declared distractor"):
         GuidanceEvaluationCell.build(**distractor)

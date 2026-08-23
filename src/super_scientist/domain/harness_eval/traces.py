@@ -10,6 +10,7 @@ from pydantic_core import to_jsonable_python
 
 from super_scientist.domain.evidence.models import ArtifactRef
 from super_scientist.domain.harness_eval.guidance import (
+    MAX_EVALUATION_SCHEMA_VERSION,
     GuidanceCondition,
     GuidanceEvaluationProtocol,
 )
@@ -20,6 +21,7 @@ from super_scientist.domain.harness_eval.matrix import (
     ModelIdentity,
 )
 from super_scientist.domain.harness_eval.models import HarnessPartition
+from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
 from super_scientist.domain.improvement.models import ResourceUsage
 from super_scientist.domain.primitives import (
     Sha256Hex,
@@ -32,6 +34,9 @@ from super_scientist.domain.primitives import (
 MAX_TRACE_ITEMS = 256
 MAX_TRACE_IDENTIFIER_LENGTH = 200
 MAX_CATEGORICAL_REWARD_LENGTH = 200
+# Observable trace metadata is bounded independently of artifact-store capacity.
+MAX_TRACE_ARTIFACT_SIZE_BYTES = 1_073_741_824
+MAX_TOKEN_ID = 2_147_483_647
 
 BoundedTraceIdentifier = Annotated[
     StableIdentifier,
@@ -44,6 +49,7 @@ BoundedCategoricalReward = Annotated[
     str,
     Field(strict=True, min_length=1, max_length=MAX_CATEGORICAL_REWARD_LENGTH),
 ]
+
 
 class _StrictFrozenModel(BaseModel):
     model_config = ConfigDict(
@@ -163,7 +169,7 @@ class _ObservableArtifactRefPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     artifact_id: BoundedTraceIdentifier
     sha256: Sha256Hex
-    size_bytes: int = Field(strict=True, ge=0)
+    size_bytes: int = Field(strict=True, ge=0, le=MAX_TRACE_ARTIFACT_SIZE_BYTES)
     media_type: Annotated[str, Field(strict=True, min_length=1, max_length=200)]
 
     @field_validator("media_type")
@@ -227,7 +233,7 @@ def artifact_collection_hash(artifacts: tuple[ObservableArtifactRef, ...]) -> st
 
 class _ContextTransformationPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
-    sequence: int = Field(strict=True, ge=0)
+    sequence: int = Field(strict=True, ge=0, lt=MAX_TRACE_ITEMS)
     kind: ContextTransformationKind
     input_context_hash: Sha256Hex
     output_context_hash: Sha256Hex
@@ -258,7 +264,7 @@ def context_transformation_hash(record: BaseModel | Mapping[str, object]) -> str
 
 class _ToolObservationPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
-    sequence: int = Field(strict=True, ge=0)
+    sequence: int = Field(strict=True, ge=0, lt=MAX_TRACE_ITEMS)
     tool_id: BoundedTraceIdentifier
     tool_version: BoundedTraceIdentifier
     request_hash: Sha256Hex
@@ -310,7 +316,7 @@ def tool_observation_hash(record: BaseModel | Mapping[str, object]) -> str:
 
 class _EnvironmentEventPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
-    sequence: int = Field(strict=True, ge=0)
+    sequence: int = Field(strict=True, ge=0, lt=MAX_TRACE_ITEMS)
     environment_id: BoundedTraceIdentifier
     environment_version: BoundedTraceIdentifier
     kind: EnvironmentEventKind
@@ -350,11 +356,13 @@ class _GenerationMetadataPayload(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_consistent_generation_evidence(self) -> Self:
-        if self.token_count.value is not None and self.token_count.value < 0:
-            raise ValueError("token count must be a non-negative integer")
+        if self.token_count.value is not None and not (
+            0 <= self.token_count.value <= MAX_TRACE_ITEMS
+        ):
+            raise ValueError("token count must be a bounded non-negative integer")
         if self.token_ids.value is not None:
             if len(self.token_ids.value) > MAX_TRACE_ITEMS or any(
-                not isinstance(item, int) or isinstance(item, bool) or item < 0
+                not isinstance(item, int) or isinstance(item, bool) or not 0 <= item <= MAX_TOKEN_ID
                 for item in self.token_ids.value
             ):
                 raise ValueError("token IDs must be bounded non-negative integers")
@@ -363,9 +371,8 @@ class _GenerationMetadataPayload(_StrictFrozenModel):
         if self.log_probabilities.value is not None:
             if any(not item.is_finite() for item in self.log_probabilities.value):
                 raise ValueError("log probabilities must be finite")
-            if (
-                self.token_ids.value is None
-                or len(self.log_probabilities.value) != len(self.token_ids.value)
+            if self.token_ids.value is None or len(self.log_probabilities.value) != len(
+                self.token_ids.value
             ):
                 raise ValueError("log probabilities require aligned observed token IDs")
         return self
@@ -457,7 +464,11 @@ def reward_observation_hash(record: BaseModel | Mapping[str, object]) -> str:
 class _TraceBindingPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     protocol_id: BoundedTraceIdentifier
-    protocol_version: int = Field(strict=True, ge=1)
+    protocol_version: int = Field(
+        strict=True,
+        ge=1,
+        le=MAX_EVALUATION_SCHEMA_VERSION,
+    )
     protocol_hash: Sha256Hex
     guidance_protocol: GuidanceEvaluationProtocol | None
     model_harness_protocol: ModelHarnessProtocol | None
@@ -475,6 +486,7 @@ class _TraceBindingPayload(_StrictFrozenModel):
     environment_id: BoundedTraceIdentifier
     environment_version: BoundedTraceIdentifier
     environment_hash: Sha256Hex
+    context_id: BoundedTraceIdentifier
     context_hash: Sha256Hex
     validator_id: BoundedTraceIdentifier
     validator_version: BoundedTraceIdentifier
@@ -482,11 +494,10 @@ class _TraceBindingPayload(_StrictFrozenModel):
     checker_id: BoundedTraceIdentifier
     checker_version: BoundedTraceIdentifier
     checker_hash: Sha256Hex
-    authorized_artifact_ids: tuple[BoundedTraceIdentifier, ...] = Field(
-        max_length=MAX_TRACE_ITEMS
-    )
+    authorized_artifact_ids: tuple[BoundedTraceIdentifier, ...] = Field(max_length=MAX_TRACE_ITEMS)
     artifact_ids: tuple[BoundedTraceIdentifier, ...] = Field(max_length=MAX_TRACE_ITEMS)
     artifact_hashes: tuple[Sha256Hex, ...] = Field(max_length=MAX_TRACE_ITEMS)
+    output_schema_id: BoundedTraceIdentifier
     output_schema_hash: Sha256Hex
 
     @field_validator("authorized_artifact_ids", "artifact_ids")
@@ -511,9 +522,7 @@ class _TraceBindingPayload(_StrictFrozenModel):
             authorized = guidance_protocol.artifact_ids
             if self.guidance_condition is GuidanceCondition.OBJECTIVE_DATA_WITH_DISTRACTORS:
                 authorized = tuple(
-                    sorted(
-                        (*authorized, *guidance_protocol.declared_distractor_artifact_ids)
-                    )
+                    sorted((*authorized, *guidance_protocol.declared_distractor_artifact_ids))
                 )
             if self.authorized_artifact_ids != authorized:
                 raise ValueError("trace binding must declare exact authorized guidance artifacts")
@@ -701,11 +710,62 @@ def trace_binding_hash(record: BaseModel | Mapping[str, object]) -> str:
     return _canonical_record_hash(record)
 
 
+class _TraceExpectationPayload(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    protocol: EvidenceReceipt
+    task: EvidenceReceipt
+    model: EvidenceReceipt
+    harness: EvidenceReceipt
+    procedure: EvidenceReceipt
+    environment: EvidenceReceipt
+    context: EvidenceReceipt
+    validator: EvidenceReceipt
+    checker: EvidenceReceipt
+    artifacts: tuple[EvidenceReceipt, ...] = Field(max_length=MAX_TRACE_ITEMS)
+    output_schema: EvidenceReceipt
+
+    @field_validator("artifacts")
+    @classmethod
+    def require_canonical_artifact_receipts(
+        cls,
+        values: tuple[EvidenceReceipt, ...],
+    ) -> tuple[EvidenceReceipt, ...]:
+        keys = tuple((item.record_id, item.schema_version, item.content_hash) for item in values)
+        if len(keys) != len(set(keys)) or keys != tuple(sorted(keys)):
+            raise ValueError("expected artifact receipts must be unique and canonical")
+        return values
+
+
+class TraceExpectation(_TraceExpectationPayload):
+    """Expected receipts resolved independently from the observable trace."""
+
+    content_hash: Sha256Hex
+
+    @classmethod
+    def build(cls, **values: Any) -> Self:
+        payload = _TraceExpectationPayload(**values)
+        return cls(
+            **payload.model_dump(mode="python"),
+            content_hash=trace_expectation_hash(payload),
+        )
+
+    @model_validator(mode="after")
+    def require_canonical_content_hash(self) -> Self:
+        if self.content_hash != trace_expectation_hash(self):
+            raise ValueError("content_hash must canonically address the trace expectation")
+        return self
+
+
+def trace_expectation_hash(record: BaseModel | Mapping[str, object]) -> str:
+    return _canonical_record_hash(record)
+
+
 class _TraceFreshnessPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
+    freshness_id: BoundedTraceIdentifier
     trace_id: BoundedTraceIdentifier
     trace_hash: Sha256Hex
-    expected_binding_hash: Sha256Hex
+    expectation_hash: Sha256Hex
     observed_binding_hash: Sha256Hex
     status: TraceFreshnessStatus
     mismatches: tuple[TraceBindingMismatch, ...] = Field(max_length=len(TraceBindingMismatch))
@@ -754,13 +814,10 @@ def trace_freshness_hash(record: BaseModel | Mapping[str, object]) -> str:
 class _HarnessExecutionTracePayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     trace_id: BoundedTraceIdentifier
-    expected_binding: TraceBinding
     observed_binding: TraceBinding
     context_artifacts: tuple[ObservableArtifactRef, ...] = Field(max_length=MAX_TRACE_ITEMS)
     initial_context_hash: Sha256Hex
-    context_transformations: tuple[ContextTransformation, ...] = Field(
-        max_length=MAX_TRACE_ITEMS
-    )
+    context_transformations: tuple[ContextTransformation, ...] = Field(max_length=MAX_TRACE_ITEMS)
     context_transformations_hash: Sha256Hex
     final_context_hash: Sha256Hex
     tool_observations: tuple[ToolObservation, ...] = Field(max_length=MAX_TRACE_ITEMS)
@@ -776,6 +833,8 @@ class _HarnessExecutionTracePayload(_StrictFrozenModel):
     )
     output_artifacts_hash: Sha256Hex
     output_hash: Sha256Hex
+    verifier_result_id: BoundedTraceIdentifier
+    verifier_result_hash: Sha256Hex
     checker_result_id: BoundedTraceIdentifier
     checker_result_hash: Sha256Hex
     reward_observation: RewardObservation | None
@@ -816,13 +875,6 @@ class _HarnessExecutionTracePayload(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_exact_observable_state(self) -> Self:
-        if (
-            self.expected_binding.artifact_ids
-            != self.expected_binding.authorized_artifact_ids
-        ):
-            raise ValueError(
-                "expected binding must use exact authorized artifact identities"
-            )
         if self.initial_context_hash != artifact_collection_hash(self.context_artifacts):
             raise ValueError("initial context hash must address declared context artifacts")
         expected_sequence = tuple(range(len(self.context_transformations)))
@@ -886,13 +938,11 @@ class _HarnessExecutionTracePayload(_StrictFrozenModel):
         if terminal_count != expected_terminal_count:
             raise ValueError("environment history requires exactly one terminal event")
         if self.execution_status is ExecutionStatus.COMPLETED and (
-            kinds[-1] is not EnvironmentEventKind.COMPLETED
-            or EnvironmentEventKind.CRASHED in kinds
+            kinds[-1] is not EnvironmentEventKind.COMPLETED or EnvironmentEventKind.CRASHED in kinds
         ):
             raise ValueError("completed execution cannot contain a crash event")
         if self.execution_status is ExecutionStatus.CRASHED and (
-            kinds[-1] is not EnvironmentEventKind.CRASHED
-            or EnvironmentEventKind.COMPLETED in kinds
+            kinds[-1] is not EnvironmentEventKind.CRASHED or EnvironmentEventKind.COMPLETED in kinds
         ):
             raise ValueError("crashed execution requires a terminal crash event")
         if self.execution_status is ExecutionStatus.INCOMPLETE and (
@@ -929,8 +979,7 @@ class _HarnessExecutionTracePayload(_StrictFrozenModel):
         if self.reward_observation is None:
             if (
                 self.reward_observation_hash.status is not MetadataAvailability.UNAVAILABLE
-                or self.capture_reward_validity.status
-                is not MetadataAvailability.NOT_APPLICABLE
+                or self.capture_reward_validity.status is not MetadataAvailability.NOT_APPLICABLE
             ):
                 raise ValueError(
                     "absent reward requires UNAVAILABLE hash and inapplicable validity"
@@ -945,8 +994,7 @@ class _HarnessExecutionTracePayload(_StrictFrozenModel):
                 raise ValueError("reward observation hash must bind the embedded observation")
             if (
                 self.reward_observation.task_id != self.observed_binding.task_id
-                or self.reward_observation.task_input_hash
-                != self.observed_binding.task_input_hash
+                or self.reward_observation.task_input_hash != self.observed_binding.task_input_hash
                 or self.reward_observation.checker_result_id != self.checker_result_id
                 or self.reward_observation.checker_result_hash != self.checker_result_hash
             ):
@@ -1009,9 +1057,7 @@ class HarnessExecutionTrace(_HarnessExecutionTracePayload):
         )
         supplied.setdefault(
             "provenance_hash",
-            _canonical_record_hash(
-                {"evidence_ids": list(supplied["provenance_evidence_ids"])}
-            ),
+            _canonical_record_hash({"evidence_ids": list(supplied["provenance_evidence_ids"])}),
         )
         payload = _HarnessExecutionTracePayload(**supplied)
         return cls(
@@ -1030,108 +1076,166 @@ def trace_hash(record: BaseModel | Mapping[str, object]) -> str:
     return _canonical_record_hash(record)
 
 
-def trace_freshness(trace: HarnessExecutionTrace) -> TraceFreshness:
+def _observed_receipts(binding: TraceBinding) -> TraceExpectation:
+    protocol_schema_version = (
+        binding.guidance_protocol.schema_version
+        if binding.guidance_protocol is not None
+        else binding.model_harness_protocol.schema_version
+        if binding.model_harness_protocol is not None
+        else 1
+    )
+    return TraceExpectation.build(
+        protocol=EvidenceReceipt(
+            record_id=binding.protocol_id,
+            schema_version=protocol_schema_version,
+            content_hash=binding.protocol_hash,
+        ),
+        task=EvidenceReceipt(
+            record_id=binding.task_id,
+            schema_version=1,
+            content_hash=binding.task_input_hash,
+        ),
+        model=EvidenceReceipt(
+            record_id=binding.model.model_id,
+            schema_version=binding.model.schema_version,
+            content_hash=binding.model_hash,
+        ),
+        harness=EvidenceReceipt(
+            record_id=binding.harness.harness_id,
+            schema_version=binding.harness.schema_version,
+            content_hash=binding.harness_hash,
+        ),
+        procedure=EvidenceReceipt(
+            record_id=binding.procedure_id,
+            schema_version=1,
+            content_hash=binding.procedure_hash,
+        ),
+        environment=EvidenceReceipt(
+            record_id=binding.environment_id,
+            schema_version=1,
+            content_hash=binding.environment_hash,
+        ),
+        context=EvidenceReceipt(
+            record_id=binding.context_id,
+            schema_version=1,
+            content_hash=binding.context_hash,
+        ),
+        validator=EvidenceReceipt(
+            record_id=binding.validator_id,
+            schema_version=1,
+            content_hash=binding.validator_hash,
+        ),
+        checker=EvidenceReceipt(
+            record_id=binding.checker_id,
+            schema_version=1,
+            content_hash=binding.checker_hash,
+        ),
+        artifacts=tuple(
+            EvidenceReceipt(
+                record_id=artifact_id,
+                schema_version=1,
+                content_hash=artifact_hash,
+            )
+            for artifact_id, artifact_hash in zip(
+                binding.artifact_ids,
+                binding.artifact_hashes,
+                strict=True,
+            )
+        ),
+        output_schema=EvidenceReceipt(
+            record_id=binding.output_schema_id,
+            schema_version=1,
+            content_hash=binding.output_schema_hash,
+        ),
+    )
+
+
+def trace_freshness(
+    expectation: TraceExpectation,
+    trace: HarnessExecutionTrace,
+) -> TraceFreshness:
+    validated_expectation = TraceExpectation.model_validate(expectation)
     validated = HarnessExecutionTrace.model_validate(trace)
-    expected = validated.expected_binding
     observed = validated.observed_binding
+    observed_receipts = _observed_receipts(observed)
     comparisons: tuple[tuple[object, object, TraceBindingMismatch], ...] = (
         (
-            (
-                expected.protocol_id,
-                expected.protocol_version,
-                expected.protocol_hash,
-                expected.guidance_protocol,
-                expected.model_harness_protocol,
-                expected.guidance_condition,
-                expected.authorized_artifact_ids,
-            ),
-            (
-                observed.protocol_id,
-                observed.protocol_version,
-                observed.protocol_hash,
-                observed.guidance_protocol,
-                observed.model_harness_protocol,
-                observed.guidance_condition,
-                observed.authorized_artifact_ids,
-            ),
+            validated_expectation.protocol,
+            observed_receipts.protocol,
             TraceBindingMismatch.PROTOCOL,
         ),
         (
-            (expected.task_id, expected.task_input_hash, expected.partition),
-            (observed.task_id, observed.task_input_hash, observed.partition),
+            validated_expectation.task,
+            observed_receipts.task,
             TraceBindingMismatch.TASK,
         ),
         (
-            (expected.model, expected.model_hash),
-            (observed.model, observed.model_hash),
+            validated_expectation.model,
+            observed_receipts.model,
             TraceBindingMismatch.MODEL,
         ),
         (
-            (expected.harness, expected.harness_hash),
-            (observed.harness, observed.harness_hash),
+            validated_expectation.harness,
+            observed_receipts.harness,
             TraceBindingMismatch.HARNESS,
         ),
         (
-            (expected.procedure_id, expected.procedure_version, expected.procedure_hash),
-            (observed.procedure_id, observed.procedure_version, observed.procedure_hash),
+            validated_expectation.procedure,
+            observed_receipts.procedure,
             TraceBindingMismatch.PROCEDURE,
         ),
         (
-            (
-                expected.environment_id,
-                expected.environment_version,
-                expected.environment_hash,
-            ),
-            (
-                observed.environment_id,
-                observed.environment_version,
-                observed.environment_hash,
-            ),
+            validated_expectation.environment,
+            observed_receipts.environment,
             TraceBindingMismatch.ENVIRONMENT,
         ),
-        (expected.context_hash, observed.context_hash, TraceBindingMismatch.CONTEXT),
         (
-            (
-                expected.validator_id,
-                expected.validator_version,
-                expected.validator_hash,
-                expected.checker_id,
-                expected.checker_version,
-                expected.checker_hash,
-            ),
-            (
-                observed.validator_id,
-                observed.validator_version,
-                observed.validator_hash,
-                observed.checker_id,
-                observed.checker_version,
-                observed.checker_hash,
-            ),
+            validated_expectation.context,
+            observed_receipts.context,
+            TraceBindingMismatch.CONTEXT,
+        ),
+        (
+            (validated_expectation.validator, validated_expectation.checker),
+            (observed_receipts.validator, observed_receipts.checker),
             TraceBindingMismatch.VALIDATOR,
         ),
         (
-            (expected.artifact_ids, expected.artifact_hashes),
-            (observed.artifact_ids, observed.artifact_hashes),
+            validated_expectation.artifacts,
+            observed_receipts.artifacts,
             TraceBindingMismatch.ARTIFACTS,
         ),
         (
-            expected.output_schema_hash,
-            observed.output_schema_hash,
+            validated_expectation.output_schema,
+            observed_receipts.output_schema,
             TraceBindingMismatch.OUTPUT_SCHEMA,
         ),
     )
     mismatches = tuple(item for left, right, item in comparisons if left != right)
+    freshness_id = "trace-freshness-" + sha256_hex(
+        canonical_json_bytes(
+            {
+                "expectation_hash": validated_expectation.content_hash,
+                "trace_hash": validated.content_hash,
+            }
+        )
+    )
     return TraceFreshness.build(
+        freshness_id=freshness_id,
         trace_id=validated.trace_id,
         trace_hash=validated.content_hash,
-        expected_binding_hash=expected.content_hash,
+        expectation_hash=validated_expectation.content_hash,
         observed_binding_hash=observed.content_hash,
-        status=(
-            TraceFreshnessStatus.CURRENT
-            if not mismatches
-            else TraceFreshnessStatus.STALE
-        ),
+        status=(TraceFreshnessStatus.CURRENT if not mismatches else TraceFreshnessStatus.STALE),
         mismatches=mismatches,
+    )
+
+
+def trace_freshness_receipt(freshness: TraceFreshness) -> EvidenceReceipt:
+    validated = TraceFreshness.model_validate(freshness)
+    return EvidenceReceipt(
+        record_id=validated.freshness_id,
+        schema_version=validated.schema_version,
+        content_hash=validated.content_hash,
     )
 
 
@@ -1153,6 +1257,7 @@ __all__ = [
     "ToolObservationStatus",
     "TraceBinding",
     "TraceBindingMismatch",
+    "TraceExpectation",
     "TraceFreshness",
     "TraceFreshnessStatus",
     "artifact_collection_hash",
@@ -1163,7 +1268,9 @@ __all__ = [
     "reward_observation_hash",
     "tool_observation_hash",
     "trace_binding_hash",
+    "trace_expectation_hash",
     "trace_freshness",
     "trace_freshness_hash",
+    "trace_freshness_receipt",
     "trace_hash",
 ]

@@ -6,6 +6,7 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
 from super_scientist.domain.harness_eval.traces import (
     BoundedTraceIdentifier,
     EnvironmentEventKind,
@@ -15,13 +16,13 @@ from super_scientist.domain.harness_eval.traces import (
     RewardObservation,
     ToolObservationStatus,
     TraceBindingMismatch,
+    TraceExpectation,
     TraceFreshness,
     _canonical_record_hash,
     trace_freshness,
 )
 from super_scientist.domain.primitives import Sha256Hex, sha256_hex
 
-MAX_REWARD_FINDINGS = 256
 MAX_REWARD_EVIDENCE = 256
 
 BoundedAssessmentIdentifier = Annotated[
@@ -78,19 +79,71 @@ class RewardHackingFindingStatus(StrEnum):
     CLEARED = "CLEARED"
 
 
+class VerificationOutcomeStatus(StrEnum):
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"
+
+
 _REASON_ORDER = {item: index for index, item in enumerate(RewardInvalidationReason)}
 
 
 def _assessment_evidence_ids(
     observation_evidence_id: str | None,
     findings: tuple[RewardHackingFinding, ...],
+    verification: VerificationOutcomeEvidence,
 ) -> tuple[str, ...]:
-    evidence_ids = {
-        item for finding in findings for item in finding.evidence_ids
-    }
+    evidence_ids = {item for finding in findings for item in finding.evidence_ids}
     if observation_evidence_id is not None:
         evidence_ids.add(observation_evidence_id)
+    evidence_ids.update(verification.evidence_ids)
     return tuple(sorted(evidence_ids))
+
+
+class _VerificationOutcomeEvidencePayload(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    outcome_id: BoundedTraceIdentifier
+    verifier: EvidenceReceipt
+    verifier_result: EvidenceReceipt
+    verifier_status: VerificationOutcomeStatus
+    checker: EvidenceReceipt
+    checker_result: EvidenceReceipt
+    checker_status: VerificationOutcomeStatus
+    evidence_ids: tuple[BoundedTraceIdentifier, ...] = Field(
+        min_length=1,
+        max_length=MAX_REWARD_EVIDENCE,
+    )
+
+    @field_validator("evidence_ids")
+    @classmethod
+    def require_canonical_evidence(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if len(values) != len(set(values)) or values != tuple(sorted(values)):
+            raise ValueError("verification evidence IDs must be unique and canonical")
+        return values
+
+
+class VerificationOutcomeEvidence(_VerificationOutcomeEvidencePayload):
+    """Receipt-bound observable outcomes for both verifier and checker execution."""
+
+    content_hash: Sha256Hex
+
+    @classmethod
+    def build(cls, **values: Any) -> Self:
+        payload = _VerificationOutcomeEvidencePayload(**values)
+        return cls(
+            **payload.model_dump(mode="python"),
+            content_hash=verification_outcome_hash(payload),
+        )
+
+    @model_validator(mode="after")
+    def require_canonical_content_hash(self) -> Self:
+        if self.content_hash != verification_outcome_hash(self):
+            raise ValueError("content_hash must canonically address verification outcomes")
+        return self
+
+
+def verification_outcome_hash(record: BaseModel | Mapping[str, object]) -> str:
+    return _canonical_record_hash(record)
 
 
 class _RewardHackingFindingPayload(_StrictFrozenModel):
@@ -139,6 +192,19 @@ def reward_hacking_finding_hash(record: BaseModel | Mapping[str, object]) -> str
     return _canonical_record_hash(record)
 
 
+def _require_complete_diagnostic_coverage(
+    findings: tuple[RewardHackingFinding, ...],
+) -> tuple[RewardHackingFinding, ...]:
+    expected_families = tuple(RewardHackingFamily)
+    actual_families = tuple(item.family for item in findings)
+    finding_ids = tuple(item.finding_id for item in findings)
+    if actual_families != expected_families or len(finding_ids) != len(set(finding_ids)):
+        raise ValueError(
+            "reward validity requires exactly one diagnostic for every reward-hacking family"
+        )
+    return findings
+
+
 class _RewardValidityAssessmentPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     assessment_id: BoundedAssessmentIdentifier
@@ -146,17 +212,22 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
     trace: HarnessExecutionTrace
     trace_id: BoundedTraceIdentifier
     trace_hash: Sha256Hex
-    findings: tuple[RewardHackingFinding, ...] = Field(max_length=MAX_REWARD_FINDINGS)
-    finding_ids: tuple[BoundedTraceIdentifier, ...] = Field(max_length=MAX_REWARD_FINDINGS)
+    findings: tuple[RewardHackingFinding, ...] = Field(
+        min_length=len(RewardHackingFamily),
+        max_length=len(RewardHackingFamily),
+    )
+    finding_ids: tuple[BoundedTraceIdentifier, ...] = Field(
+        min_length=len(RewardHackingFamily),
+        max_length=len(RewardHackingFamily),
+    )
     evidence_ids: tuple[BoundedTraceIdentifier, ...] = Field(max_length=MAX_REWARD_EVIDENCE)
-    verifier_succeeded: bool | None
+    expectation: TraceExpectation
+    verification: VerificationOutcomeEvidence
     freshness: TraceFreshness
     assessor_id: BoundedTraceIdentifier
     assessor_version: BoundedTraceIdentifier
     status: RewardValidityStatus
-    reasons: tuple[RewardInvalidationReason, ...] = Field(
-        max_length=len(RewardInvalidationReason)
-    )
+    reasons: tuple[RewardInvalidationReason, ...] = Field(max_length=len(RewardInvalidationReason))
     freshness_hash: Sha256Hex
 
     @field_validator("reasons")
@@ -181,16 +252,13 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
             or self.trace.reward_observation_hash.value != self.observation.content_hash
         ):
             raise ValueError("assessment must bind the trace's exact reward observation")
-        expected_findings = tuple(sorted(self.findings, key=lambda item: item.finding_id))
-        if self.findings != expected_findings or len(self.findings) != len(
-            {item.finding_id for item in self.findings}
-        ):
-            raise ValueError("assessment findings must be unique and canonically ordered")
+        _require_complete_diagnostic_coverage(self.findings)
         if self.finding_ids != tuple(item.finding_id for item in self.findings):
             raise ValueError("finding_ids must exactly identify the embedded findings")
         expected_evidence = _assessment_evidence_ids(
             self.observation.evidence_id,
             self.findings,
+            self.verification,
         )
         if self.evidence_ids != expected_evidence:
             raise ValueError("assessment evidence IDs must exactly bind observable evidence")
@@ -202,8 +270,11 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
                 or finding.observation_hash != self.observation.content_hash
             ):
                 raise ValueError("reward-hacking finding must bind exact trace and reward identity")
-        expected_freshness = trace_freshness(self.trace)
-        if self.freshness != expected_freshness or self.freshness_hash != self.trace.content_hash:
+        expected_freshness = trace_freshness(self.expectation, self.trace)
+        if (
+            self.freshness != expected_freshness
+            or self.freshness_hash != expected_freshness.content_hash
+        ):
             raise ValueError("assessment freshness must be recomputed from exact trace hashes")
         if (
             self.assessor_id != self.observation.evaluator_id
@@ -214,7 +285,8 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
             self.observation,
             self.trace,
             self.findings,
-            self.verifier_succeeded,
+            self.expectation,
+            self.verification,
         )
         expected_status = reward_status(expected_reasons)
         if self.reasons != expected_reasons or self.status is not expected_status:
@@ -223,7 +295,8 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
             self.observation,
             self.trace,
             self.findings,
-            self.verifier_succeeded,
+            self.expectation,
+            self.verification,
         ):
             raise ValueError("assessment_id must address the exact validity inputs")
         return self
@@ -251,11 +324,21 @@ def reward_assessment_hash(record: BaseModel | Mapping[str, object]) -> str:
     return _canonical_record_hash(record)
 
 
+def reward_validity_receipt(assessment: RewardValidityAssessment) -> EvidenceReceipt:
+    validated = RewardValidityAssessment.model_validate(assessment)
+    return EvidenceReceipt(
+        record_id=validated.assessment_id,
+        schema_version=validated.schema_version,
+        content_hash=validated.content_hash,
+    )
+
+
 def reward_assessment_id(
     observation: RewardObservation,
     trace: HarnessExecutionTrace,
     findings: tuple[RewardHackingFinding, ...],
-    verifier_succeeded: bool | None,
+    expectation: TraceExpectation,
+    verification: VerificationOutcomeEvidence,
 ) -> str:
     payload_hash = sha256_hex(
         _canonical_record_hash(
@@ -263,7 +346,8 @@ def reward_assessment_id(
                 "observation_hash": observation.content_hash,
                 "trace_hash": trace.content_hash,
                 "finding_hashes": [item.content_hash for item in findings],
-                "verifier_succeeded": verifier_succeeded,
+                "expectation_hash": expectation.content_hash,
+                "verification_hash": verification.content_hash,
             }
         ).encode("ascii")
     )
@@ -274,7 +358,8 @@ def ordered_invalidation_reasons(
     observation: RewardObservation,
     trace: HarnessExecutionTrace,
     findings: tuple[RewardHackingFinding, ...],
-    verifier_succeeded: bool | None,
+    expectation: TraceExpectation,
+    verification: VerificationOutcomeEvidence,
 ) -> tuple[RewardInvalidationReason, ...]:
     reasons: set[RewardInvalidationReason] = set()
     event_kinds = {item.kind for item in trace.environment_events}
@@ -287,26 +372,51 @@ def ordered_invalidation_reasons(
         item.status is not ToolObservationStatus.SUCCEEDED for item in trace.tool_observations
     ):
         reasons.add(RewardInvalidationReason.INCOMPLETE_EXECUTION)
+    expected_verifier = EvidenceReceipt(
+        record_id=trace.observed_binding.validator_id,
+        schema_version=1,
+        content_hash=trace.observed_binding.validator_hash,
+    )
+    expected_checker = EvidenceReceipt(
+        record_id=trace.observed_binding.checker_id,
+        schema_version=1,
+        content_hash=trace.observed_binding.checker_hash,
+    )
+    expected_verifier_result = EvidenceReceipt(
+        record_id=trace.verifier_result_id,
+        schema_version=1,
+        content_hash=trace.verifier_result_hash,
+    )
+    expected_checker_result = EvidenceReceipt(
+        record_id=trace.checker_result_id,
+        schema_version=1,
+        content_hash=trace.checker_result_hash,
+    )
     if (
         observation.verifier_id != trace.observed_binding.validator_id
         or observation.verifier_version != trace.observed_binding.validator_version
         or observation.checker_id != trace.observed_binding.checker_id
         or observation.checker_version != trace.observed_binding.checker_version
+        or verification.verifier != expected_verifier
+        or verification.checker != expected_checker
+        or verification.verifier_result != expected_verifier_result
+        or verification.checker_result != expected_checker_result
     ):
         reasons.add(RewardInvalidationReason.VERIFIER_MISMATCH)
-    if verifier_succeeded is False:
+    if (
+        verification.verifier_status is VerificationOutcomeStatus.FAILED
+        or verification.checker_status is VerificationOutcomeStatus.FAILED
+    ):
         reasons.add(RewardInvalidationReason.VERIFIER_FAILURE)
     if trace.artifact_integrity.value is False:
         reasons.add(RewardInvalidationReason.CORRUPTED_ARTIFACT)
     if trace.protected_boundary_crossed.value is True:
         reasons.add(RewardInvalidationReason.PROTECTED_ANSWER_LEAKAGE)
-    if any(
-        item.status is RewardHackingFindingStatus.INVALIDATING for item in findings
-    ):
+    if any(item.status is RewardHackingFindingStatus.INVALIDATING for item in findings):
         reasons.add(RewardInvalidationReason.REWARD_HACKING_FINDING)
     if trace.evaluator_succeeded.value is False:
         reasons.add(RewardInvalidationReason.EVALUATOR_FAILURE)
-    freshness = trace_freshness(trace)
+    freshness = trace_freshness(expectation, trace)
     runtime_mismatches = {
         TraceBindingMismatch.TASK,
         TraceBindingMismatch.ENVIRONMENT,
@@ -322,7 +432,8 @@ def ordered_invalidation_reasons(
     )
     if (
         observation.value is None
-        or verifier_succeeded is None
+        or verification.verifier_status is VerificationOutcomeStatus.UNKNOWN
+        or verification.checker_status is VerificationOutcomeStatus.UNKNOWN
         or any(item.status is not MetadataAvailability.AVAILABLE for item in required_metadata)
         or any(item.status is RewardHackingFindingStatus.INCONCLUSIVE for item in findings)
     ):
@@ -345,20 +456,17 @@ def assess_reward_validity(
     trace: HarnessExecutionTrace,
     findings: tuple[RewardHackingFinding, ...],
     *,
-    verifier_succeeded: bool | None,
+    expectation: TraceExpectation,
+    verification: VerificationOutcomeEvidence,
 ) -> RewardValidityAssessment:
     validated_observation = RewardObservation.model_validate(observation)
     validated_trace = HarnessExecutionTrace.model_validate(trace)
+    validated_expectation = TraceExpectation.model_validate(expectation)
+    validated_verification = VerificationOutcomeEvidence.model_validate(verification)
     if validated_trace.reward_observation != validated_observation:
         raise ValueError("reward observation must be the exact observation embedded in the trace")
-    validated_findings = tuple(
-        sorted(
-            (RewardHackingFinding.model_validate(item) for item in findings),
-            key=lambda item: item.finding_id,
-        )
-    )
-    if len(validated_findings) != len({item.finding_id for item in validated_findings}):
-        raise ValueError("reward-hacking findings must have unique identifiers")
+    validated_findings = tuple(RewardHackingFinding.model_validate(item) for item in findings)
+    _require_complete_diagnostic_coverage(validated_findings)
     for finding in validated_findings:
         if (
             finding.trace_id != validated_trace.trace_id
@@ -371,19 +479,22 @@ def assess_reward_validity(
         validated_observation,
         validated_trace,
         validated_findings,
-        verifier_succeeded,
+        validated_expectation,
+        validated_verification,
     )
-    freshness = trace_freshness(validated_trace)
+    freshness = trace_freshness(validated_expectation, validated_trace)
     evidence_ids = _assessment_evidence_ids(
         validated_observation.evidence_id,
         validated_findings,
+        validated_verification,
     )
     return RewardValidityAssessment.build(
         assessment_id=reward_assessment_id(
             validated_observation,
             validated_trace,
             validated_findings,
-            verifier_succeeded,
+            validated_expectation,
+            validated_verification,
         ),
         observation=validated_observation,
         trace=validated_trace,
@@ -392,13 +503,14 @@ def assess_reward_validity(
         findings=validated_findings,
         finding_ids=tuple(item.finding_id for item in validated_findings),
         evidence_ids=evidence_ids,
-        verifier_succeeded=verifier_succeeded,
+        expectation=validated_expectation,
+        verification=validated_verification,
         freshness=freshness,
         assessor_id=validated_observation.evaluator_id,
         assessor_version=validated_observation.evaluator_version,
         status=reward_status(reasons),
         reasons=reasons,
-        freshness_hash=validated_trace.content_hash,
+        freshness_hash=freshness.content_hash,
     )
 
 
@@ -427,9 +539,13 @@ __all__ = [
     "RewardInvalidationReason",
     "RewardValidityAssessment",
     "RewardValidityStatus",
+    "VerificationOutcomeEvidence",
+    "VerificationOutcomeStatus",
     "assess_reward_validity",
     "ordered_invalidation_reasons",
     "reward_assessment_hash",
     "reward_hacking_finding_hash",
+    "reward_validity_receipt",
     "valid_reward_evidence",
+    "verification_outcome_hash",
 ]

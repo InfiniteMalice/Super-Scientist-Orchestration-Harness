@@ -24,6 +24,8 @@ from super_scientist.domain.procedures.models import (
 
 MAX_EVALUATION_ITEMS = 256
 MAX_EVALUATION_IDENTIFIER_LENGTH = 200
+MAX_EVALUATION_SCHEMA_VERSION = 2_147_483_647
+MAX_EVALUATION_RANDOM_SEED = 9_223_372_036_854_775_807
 
 BoundedIdentifier = Annotated[
     StableIdentifier,
@@ -181,7 +183,7 @@ class ExecutionFailureEvent(_StrictFrozenModel):
 class RecoveryAttemptEvent(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     event_id: BoundedIdentifier
-    attempt: int = Field(strict=True, ge=1)
+    attempt: int = Field(strict=True, ge=1, le=MAX_EVALUATION_ITEMS)
     target_step_id: BoundedIdentifier
     outcome: RecoveryOutcome
 
@@ -271,7 +273,7 @@ class EvaluationMetricDeltaVector(_StrictFrozenModel):
 class _GuidanceEvaluationProtocolPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     protocol_id: BoundedIdentifier
-    version: int = Field(strict=True, ge=1)
+    version: int = Field(strict=True, ge=1, le=MAX_EVALUATION_SCHEMA_VERSION)
     objective_hash: Sha256Hex
     task_id: BoundedIdentifier
     task_input_hash: Sha256Hex
@@ -288,7 +290,12 @@ class _GuidanceEvaluationProtocolPayload(_StrictFrozenModel):
     declared_distractor_artifact_ids: tuple[BoundedIdentifier, ...] = Field(
         max_length=MAX_EVALUATION_ITEMS
     )
-    random_seed: int | None = Field(default=None, strict=True, ge=0)
+    random_seed: int | None = Field(
+        default=None,
+        strict=True,
+        ge=0,
+        le=MAX_EVALUATION_RANDOM_SEED,
+    )
     evaluation_budget: EvaluationBudget
 
     @field_validator("artifact_ids", "declared_distractor_artifact_ids")
@@ -335,12 +342,14 @@ class _GuidanceEvaluationCellPayload(_StrictFrozenModel):
     cell_id: BoundedIdentifier
     protocol: GuidanceEvaluationProtocol
     protocol_id: BoundedIdentifier
-    protocol_version: int = Field(strict=True, ge=1)
+    protocol_version: int = Field(
+        strict=True,
+        ge=1,
+        le=MAX_EVALUATION_SCHEMA_VERSION,
+    )
     protocol_hash: Sha256Hex
     condition: GuidanceCondition
-    distractor_artifact_ids: tuple[BoundedIdentifier, ...] = Field(
-        max_length=MAX_EVALUATION_ITEMS
-    )
+    distractor_artifact_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_EVALUATION_ITEMS)
     metrics: EvaluationMetricVector
     output_artifact_id: BoundedIdentifier | None
     trace_id: BoundedIdentifier | None
@@ -368,8 +377,7 @@ class _GuidanceEvaluationCellPayload(_StrictFrozenModel):
         if self.condition is GuidanceCondition.OBJECTIVE_DATA_WITH_DISTRACTORS:
             if (
                 not self.distractor_artifact_ids
-                or self.distractor_artifact_ids
-                != self.protocol.declared_distractor_artifact_ids
+                or self.distractor_artifact_ids != self.protocol.declared_distractor_artifact_ids
             ):
                 raise ValueError(
                     "distractor condition must add exactly the declared distractor artifacts"
@@ -425,9 +433,7 @@ class _GuidanceComparisonPayload(_StrictFrozenModel):
     right_cell_id: BoundedIdentifier
     right_cell_hash: Sha256Hex
     component_deltas: EvaluationMetricDeltaVector
-    confounds: tuple[EvaluationConfoundCode, ...] = Field(
-        max_length=len(EvaluationConfoundCode)
-    )
+    confounds: tuple[EvaluationConfoundCode, ...] = Field(max_length=len(EvaluationConfoundCode))
 
     @model_validator(mode="after")
     def require_exact_comparability_state(self) -> Self:
@@ -647,12 +653,10 @@ def metric_component_deltas(
             right_metrics.method_selection_result,
         ),
         execution_failure_event_count_delta=(
-            len(right_metrics.execution_failure_events)
-            - len(left_metrics.execution_failure_events)
+            len(right_metrics.execution_failure_events) - len(left_metrics.execution_failure_events)
         ),
         recovery_attempt_event_count_delta=(
-            len(right_metrics.recovery_attempt_events)
-            - len(left_metrics.recovery_attempt_events)
+            len(right_metrics.recovery_attempt_events) - len(left_metrics.recovery_attempt_events)
         ),
         resource_usage_delta=_resource_usage_delta(
             left_metrics.resource_usage,
