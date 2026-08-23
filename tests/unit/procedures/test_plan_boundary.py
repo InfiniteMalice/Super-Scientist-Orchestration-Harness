@@ -35,7 +35,14 @@ def _planned_function(task: str, function_name: str) -> Any:
             None,
         )
         if function is not None:
-            module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+            future_annotations = ast.ImportFrom(
+                module="__future__",
+                names=[ast.alias(name="annotations")],
+                level=0,
+            )
+            module = ast.fix_missing_locations(
+                ast.Module(body=[future_annotations, function], type_ignores=[])
+            )
             namespace: dict[str, Any] = {}
             # Execute only the isolated function AST from this version-controlled plan.
             exec(compile(module, str(PLAN_PATH), "exec"), namespace)
