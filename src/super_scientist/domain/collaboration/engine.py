@@ -14,6 +14,7 @@ from super_scientist.domain.collaboration.models import (
     TopologySnapshot,
     _apply_topology_operation,
     _completion_satisfied,
+    collaboration_cycle_projection_hash,
     collaboration_semantic_state_hash,
     collaboration_termination_reason,
     eligible_peer_ids,
@@ -42,6 +43,20 @@ def initial_collaboration_state(session: CollaborationSession) -> CollaborationS
     semantic_hash = collaboration_semantic_state_hash(
         session=session,
         topology=topology,
+        prior_topology_hash=None,
+        topology_event_count=0,
+        topology_churn_count=0,
+        peer_contribution_counts=Counter(),
+        contribution_kind_counts=Counter(),
+        last_peer_id=None,
+        usage=zero,
+        request_ids=(),
+        contribution_depths=(),
+        completed=False,
+    )
+    cycle_projection = collaboration_cycle_projection_hash(
+        session=session,
+        topology=topology,
         peer_contribution_counts=Counter(),
         contribution_kind_counts=Counter(),
         last_peer_id=None,
@@ -61,6 +76,7 @@ def initial_collaboration_state(session: CollaborationSession) -> CollaborationS
         scheduling_position=0,
         transitions=(),
         observed_state_hashes=(semantic_hash,),
+        cycle_projection_hashes=(cycle_projection,),
         completed=False,
     )
 
@@ -90,7 +106,7 @@ def evaluate_termination(state: CollaborationState) -> CollaborationTermination:
             topology_history=state.topology_history,
             topology_events=state.topology_events,
             contributions=state.contributions,
-            observed_state_hashes=state.observed_state_hashes,
+            cycle_projection_hashes=state.cycle_projection_hashes,
             completed=state.completed,
         )
     )
@@ -118,7 +134,7 @@ def _require_parents(
     state: CollaborationState,
     request: PeerRequest,
     contribution: PeerContribution,
-) -> None:
+) -> int:
     known = {item.contribution_id: item for item in state.contributions}
     if request.parent_contribution_id is not None and request.parent_contribution_id not in known:
         raise ValueError("peer request parent must be a declared prior contribution")
@@ -143,6 +159,27 @@ def _require_parents(
     )
     if depth > session.budget.max_parent_depth:
         raise ValueError("peer contribution parent depth exceeds collaboration budget")
+    return depth
+
+
+def _topology_churn_count(history: tuple[TopologySnapshot, ...]) -> int:
+    return sum(
+        history[index].content_hash == history[index - 2].content_hash
+        for index in range(2, len(history))
+    )
+
+
+def _contribution_depths(
+    contributions: tuple[PeerContribution, ...],
+) -> tuple[tuple[str, int], ...]:
+    depths: dict[str, int] = {}
+    for contribution in contributions:
+        depths[contribution.contribution_id] = (
+            0
+            if not contribution.parent_contribution_ids
+            else 1 + max(depths[parent] for parent in contribution.parent_contribution_ids)
+        )
+    return tuple(sorted(depths.items()))
 
 
 def advance_collaboration(
@@ -196,6 +233,26 @@ def advance_collaboration(
     semantic_hash = collaboration_semantic_state_hash(
         session=session,
         topology=state.topology,
+        prior_topology_hash=(
+            state.topology_history[-2].content_hash
+            if len(state.topology_history) >= 2
+            else None
+        ),
+        topology_event_count=len(state.topology_events),
+        topology_churn_count=_topology_churn_count(state.topology_history),
+        peer_contribution_counts=Counter(item.peer_id for item in contributions),
+        contribution_kind_counts=Counter(
+            item.contribution_kind for item in contributions
+        ),
+        last_peer_id=contribution.peer_id,
+        usage=updated_usage,
+        request_ids=tuple(sorted(item.request_id for item in (*state.requests, request))),
+        contribution_depths=_contribution_depths(contributions),
+        completed=completed,
+    )
+    cycle_projection = collaboration_cycle_projection_hash(
+        session=session,
+        topology=state.topology,
         peer_contribution_counts=Counter(item.peer_id for item in contributions),
         contribution_kind_counts=Counter(
             item.contribution_kind for item in contributions
@@ -226,6 +283,10 @@ def advance_collaboration(
             ),
         ),
         observed_state_hashes=(*state.observed_state_hashes, semantic_hash),
+        cycle_projection_hashes=(
+            *state.cycle_projection_hashes,
+            cycle_projection,
+        ),
         completed=completed,
     )
 
@@ -249,6 +310,32 @@ def apply_topology_event(
     if event.after_topology_hash != after.content_hash:
         raise ValueError("topology event after topology hash does not match its operation")
     semantic_hash = collaboration_semantic_state_hash(
+        session=session,
+        topology=after,
+        prior_topology_hash=state.topology.content_hash,
+        topology_event_count=len(state.topology_events) + 1,
+        topology_churn_count=(
+            _topology_churn_count(state.topology_history)
+            + int(
+                len(state.topology_history) >= 2
+                and after.content_hash == state.topology_history[-2].content_hash
+            )
+        ),
+        peer_contribution_counts=Counter(
+            item.peer_id for item in state.contributions
+        ),
+        contribution_kind_counts=Counter(
+            item.contribution_kind for item in state.contributions
+        ),
+        last_peer_id=(
+            state.contributions[-1].peer_id if state.contributions else None
+        ),
+        usage=state.usage,
+        request_ids=tuple(sorted(item.request_id for item in state.requests)),
+        contribution_depths=_contribution_depths(state.contributions),
+        completed=state.completed,
+    )
+    cycle_projection = collaboration_cycle_projection_hash(
         session=session,
         topology=after,
         peer_contribution_counts=Counter(
@@ -285,6 +372,10 @@ def apply_topology_event(
             ),
         ),
         observed_state_hashes=(*state.observed_state_hashes, semantic_hash),
+        cycle_projection_hashes=(
+            *state.cycle_projection_hashes,
+            cycle_projection,
+        ),
         completed=state.completed,
     )
 

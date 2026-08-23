@@ -263,7 +263,7 @@ def test_direct_parser_rejects_state_beyond_hop_budget(
         CollaborationState.model_validate_json(__import__("json").dumps(payload))
 
 
-def test_repeated_semantic_state_loop_is_detected_through_engine_evolution(
+def test_one_topology_cycle_does_not_conflate_distinct_remaining_budgets(
     session_factory: Callable[..., CollaborationSession],
 ) -> None:
     session = session_factory(
@@ -314,7 +314,56 @@ def test_repeated_semantic_state_loop_is_detected_through_engine_evolution(
         ),
     )
 
-    assert state.observed_state_hashes[-1] == initial_semantic_hash
+    assert state.observed_state_hashes[-1] != initial_semantic_hash
+    assert state.cycle_projection_hashes[-1] == state.cycle_projection_hashes[0]
+    assert evaluate_termination(state).reason is None
+
+
+def test_repeated_operational_cycle_is_detected_through_engine_evolution(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory(
+        "peer-a",
+        "peer-b",
+        max_topology_changes=6,
+        max_topology_churn=6,
+        max_state_repetitions=1,
+        completion_count=8,
+    )
+    state = initial_collaboration_state(session)
+    for sequence in range(1, 5):
+        disabling = sequence % 2 == 1
+        after = TopologySnapshot.build(
+            active_peer_ids=state.topology.active_peer_ids,
+            enabled_edges=(
+                (("peer-b", "peer-a"),)
+                if disabling
+                else session.declared_edges
+            ),
+        )
+        state = apply_topology_event(
+            session,
+            state,
+            TopologyEvent.build(
+                event_id=f"event-loop-{sequence}",
+                session_id=session.session_id,
+                sequence=sequence,
+                before_topology_hash=state.topology.content_hash,
+                operation=(
+                    TopologyOperation.DISABLE_EDGE
+                    if disabling
+                    else TopologyOperation.ENABLE_EDGE
+                ),
+                peer_id=None,
+                edge=("peer-a", "peer-b"),
+                reason_code="ROUTE_UPDATE",
+                after_topology_hash=after.content_hash,
+            ),
+        )
+
+    assert len(set(state.observed_state_hashes)) == 5
+    assert state.cycle_projection_hashes[0] == state.cycle_projection_hashes[2]
+    assert state.cycle_projection_hashes[2] == state.cycle_projection_hashes[4]
     assert (
         evaluate_termination(state).reason
         is CollaborationTerminationReason.REPEATED_STATE_LOOP
@@ -331,6 +380,19 @@ def test_direct_parser_rejects_fabricated_semantic_state_observations(
     payload["state_hash"] = sha256_hex(canonical_json_bytes(unhashed))
 
     with pytest.raises(ValidationError, match="semantic state observations"):
+        CollaborationState.model_validate_json(__import__("json").dumps(payload))
+
+
+def test_direct_parser_rejects_fabricated_cycle_projections(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    state = initial_collaboration_state(session_factory("peer-a", "peer-b"))
+    payload = state.model_dump(mode="json")
+    payload["cycle_projection_hashes"] = ["0" * 64]
+    unhashed = {key: value for key, value in payload.items() if key != "state_hash"}
+    payload["state_hash"] = sha256_hex(canonical_json_bytes(unhashed))
+
+    with pytest.raises(ValidationError, match="cycle projections"):
         CollaborationState.model_validate_json(__import__("json").dumps(payload))
 
 
@@ -527,6 +589,7 @@ def test_direct_replay_rejects_single_peer_without_declared_edge(
         ).model_dump(mode="json")
     )
     payload["observed_state_hashes"].append(state.state_hash)
+    payload["cycle_projection_hashes"].append(state.state_hash)
     state_unhashed = {key: value for key, value in payload.items() if key != "state_hash"}
     payload["state_hash"] = sha256_hex(canonical_json_bytes(state_unhashed))
 

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import math
+import unicodedata
 from collections import Counter
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal, NoReturn, Self
 
 from pydantic import (
     AfterValidator,
@@ -17,6 +18,9 @@ from pydantic import (
     ValidationInfo,
     field_validator,
     model_validator,
+)
+from pydantic import (
+    ValidationError as PydanticValidationError,
 )
 
 from super_scientist.domain.cognition import CohortPlan
@@ -33,7 +37,10 @@ from super_scientist.domain.primitives import (
 # Immutable states retain complete transition history, so the public envelope must keep
 # both one-shot replay and repeated state evolution operationally bounded.
 MAX_COLLABORATION_ITEMS = 256
-MAX_PEERS = 64
+MAX_PEERS = 16
+MAX_TOPOLOGY_EDGES = 64
+MAX_TOPOLOGY_CHANGES = 64
+MAX_COLLABORATION_TRANSITIONS = MAX_COLLABORATION_ITEMS + MAX_TOPOLOGY_CHANGES
 MAX_IDENTIFIER_LENGTH = 200
 MAX_PUBLIC_TEXT_LENGTH = 8_000
 MAX_CANDIDATE_CONTENT_LENGTH = 16_000
@@ -51,11 +58,11 @@ MAX_CANDIDATE_INTEGER_ABS = 10**18
 MAX_CANDIDATE_FLOAT_ABS = 10**100
 FORBIDDEN_CANDIDATE_KEYS = frozenset(
     {
-        "chain_of_thought",
+        "chainofthought",
         "scratchpad",
-        "provider_payload",
+        "providerpayload",
         "secret",
-        "protected_answer",
+        "protectedanswer",
         "command",
     }
 )
@@ -97,9 +104,12 @@ def _require_strict_actor_identity_input(
     value: object,
     info: ValidationInfo,
 ) -> object:
-    if isinstance(value, ActorIdentity):
-        return value
-    if not isinstance(value, dict):
+    raw = (
+        value.model_dump(mode="python", warnings=False)
+        if isinstance(value, ActorIdentity)
+        else value
+    )
+    if not isinstance(raw, dict):
         raise ValueError("Phase A actor identity must be a strict object")
     string_fields = (
         "actor_id",
@@ -109,14 +119,14 @@ def _require_strict_actor_identity_input(
         "configuration_hash",
     )
     if any(
-        field_name in value
-        and value[field_name] is not None
-        and not isinstance(value[field_name], str)
+        field_name in raw
+        and raw[field_name] is not None
+        and not isinstance(raw[field_name], str)
         for field_name in string_fields
     ):
         raise ValueError("Phase A actor identity scalars must be strict")
-    created_at = value.get("created_at")
-    kind = value.get("kind")
+    created_at = raw.get("created_at")
+    kind = raw.get("kind")
     if info.mode == "python" and not isinstance(kind, ActorKind):
         raise ValueError("Phase A actor identity kind must be a strict ActorKind")
     if info.mode == "json" and not isinstance(kind, str):
@@ -125,9 +135,14 @@ def _require_strict_actor_identity_input(
         raise ValueError("Phase A actor identity timestamp must be a strict datetime")
     if info.mode == "json" and not isinstance(created_at, str):
         raise ValueError("Phase A actor identity JSON timestamp must be a string")
-    if info.mode == "json":
-        return ActorIdentity.model_validate(value)
-    return value
+    try:
+        if info.mode == "json":
+            parsed = ActorIdentity.model_validate(raw)
+        else:
+            parsed = ActorIdentity.model_validate(raw, strict=True)
+    except (PydanticValidationError, TypeError, ValueError):
+        raise ValueError("Phase A actor identity is invalid") from None
+    return parsed
 
 
 def _require_bounded_artifact(artifact: ArtifactRef) -> ArtifactRef:
@@ -141,16 +156,22 @@ def _require_bounded_artifact(artifact: ArtifactRef) -> ArtifactRef:
 
 
 def _require_strict_artifact_input(value: object) -> object:
-    if isinstance(value, ArtifactRef):
-        return value
-    if not isinstance(value, dict):
+    raw = (
+        value.model_dump(mode="python", warnings=False)
+        if isinstance(value, ArtifactRef)
+        else value
+    )
+    if not isinstance(raw, dict):
         raise ValueError("Phase A artifact reference must be a strict object")
-    if type(value.get("size_bytes")) is not int or any(
-        not isinstance(value.get(field_name), str)
+    if type(raw.get("size_bytes")) is not int or any(
+        not isinstance(raw.get(field_name), str)
         for field_name in ("sha256", "media_type", "relative_path")
     ):
         raise ValueError("Phase A artifact reference scalars must be strict")
-    return value
+    try:
+        return ArtifactRef.model_validate(raw, strict=True)
+    except (PydanticValidationError, TypeError, ValueError):
+        raise ValueError("Phase A artifact reference is invalid") from None
 
 
 def _require_bounded_resources(
@@ -164,18 +185,35 @@ def _require_bounded_resources(
     return resources
 
 
-def _require_strict_resource_input(value: object) -> object:
-    if isinstance(value, (ResourceBudget, ResourceUsage)):
-        return value
-    if not isinstance(value, dict):
+def _require_strict_resource_input(
+    value: object,
+    resource_type: type[ResourceBudget] | type[ResourceUsage],
+) -> object:
+    raw = (
+        value.model_dump(mode="python", warnings=False)
+        if isinstance(value, (ResourceBudget, ResourceUsage))
+        else value
+    )
+    if not isinstance(raw, dict):
         raise ValueError("Phase A resources must be a strict object")
     for field_name in ("cost_usd", "compute_units", "elapsed_seconds"):
-        if type(value.get(field_name)) is not float:
-            raise ValueError("Phase A floating resource scalars must be strict floats")
+        if type(raw.get(field_name)) is not float:
+            raise ValueError("Phase A resources require strict floating scalars")
     for field_name in ("tokens", "tool_calls", "human_interventions"):
-        if type(value.get(field_name)) is not int:
-            raise ValueError("Phase A integral resource scalars must be strict integers")
-    return value
+        if type(raw.get(field_name)) is not int:
+            raise ValueError("Phase A resources require strict integral scalars")
+    try:
+        return resource_type.model_validate(raw, strict=True)
+    except (PydanticValidationError, TypeError, ValueError):
+        raise ValueError("Phase A resources are invalid") from None
+
+
+def _require_strict_resource_budget_input(value: object) -> object:
+    return _require_strict_resource_input(value, ResourceBudget)
+
+
+def _require_strict_resource_usage_input(value: object) -> object:
+    return _require_strict_resource_input(value, ResourceUsage)
 
 
 BoundedActorIdentity = Annotated[
@@ -190,18 +228,23 @@ BoundedArtifactRef = Annotated[
 ]
 BoundedResourceBudget = Annotated[
     ResourceBudget,
-    BeforeValidator(_require_strict_resource_input),
+    BeforeValidator(_require_strict_resource_budget_input),
     AfterValidator(_require_bounded_resources),
 ]
 BoundedResourceUsage = Annotated[
     ResourceUsage,
-    BeforeValidator(_require_strict_resource_input),
+    BeforeValidator(_require_strict_resource_usage_input),
     AfterValidator(_require_bounded_resources),
 ]
 
 
 class _StrictFrozenModel(BaseModel):
-    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    model_config = ConfigDict(
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        hide_input_in_errors=True,
+    )
 
 
 def _canonical_unique(values: tuple[str, ...], field_name: str) -> tuple[str, ...]:
@@ -238,19 +281,39 @@ def _zero_usage() -> ResourceUsage:
     )
 
 
+class _UsageAccumulator:
+    def __init__(self) -> None:
+        self.cost_usd = Decimal("0")
+        self.compute_units = Decimal("0")
+        self.tokens = 0
+        self.elapsed_seconds = Decimal("0")
+        self.tool_calls = 0
+        self.human_interventions = 0
+
+    def add(self, usage: ResourceUsage) -> None:
+        self.cost_usd += Decimal(str(usage.cost_usd))
+        self.compute_units += Decimal(str(usage.compute_units))
+        self.tokens += usage.tokens
+        self.elapsed_seconds += Decimal(str(usage.elapsed_seconds))
+        self.tool_calls += usage.tool_calls
+        self.human_interventions += usage.human_interventions
+
+    def to_usage(self) -> ResourceUsage:
+        return ResourceUsage(
+            cost_usd=float(self.cost_usd),
+            compute_units=float(self.compute_units),
+            tokens=self.tokens,
+            elapsed_seconds=float(self.elapsed_seconds),
+            tool_calls=self.tool_calls,
+            human_interventions=self.human_interventions,
+        )
+
+
 def sum_usage(usages: tuple[ResourceUsage, ...]) -> ResourceUsage:
-    values: dict[str, float | int] = {}
-    for field_name in RESOURCE_FIELDS:
-        if field_name in {"tokens", "tool_calls", "human_interventions"}:
-            values[field_name] = sum(getattr(usage, field_name) for usage in usages)
-        else:
-            values[field_name] = float(
-                sum(
-                    (Decimal(str(getattr(usage, field_name))) for usage in usages),
-                    Decimal("0"),
-                )
-            )
-    return ResourceUsage.model_validate(values)
+    accumulator = _UsageAccumulator()
+    for usage in usages:
+        accumulator.add(usage)
+    return accumulator.to_usage()
 
 
 def usage_matches(
@@ -352,7 +415,7 @@ class CollaborationBudget(_StrictFrozenModel):
     max_hops: int = Field(strict=True, ge=1, le=MAX_COLLABORATION_ITEMS)
     max_contributions: int = Field(strict=True, ge=1, le=MAX_COLLABORATION_ITEMS)
     max_contributions_per_peer: int = Field(strict=True, ge=1, le=MAX_COLLABORATION_ITEMS)
-    max_topology_changes: int = Field(strict=True, ge=0, le=MAX_COLLABORATION_ITEMS)
+    max_topology_changes: int = Field(strict=True, ge=0, le=MAX_TOPOLOGY_CHANGES)
     max_parent_depth: int = Field(strict=True, ge=0, le=MAX_PEERS)
     max_state_repetitions: int = Field(strict=True, ge=1, le=MAX_PEERS)
     max_topology_churn: int = Field(strict=True, ge=1, le=MAX_COLLABORATION_ITEMS)
@@ -370,7 +433,7 @@ class _TopologySnapshotPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     active_peer_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PEERS)
     enabled_edges: tuple[tuple[BoundedIdentifier, BoundedIdentifier], ...] = Field(
-        max_length=MAX_PEERS * MAX_PEERS
+        max_length=MAX_TOPOLOGY_EDGES
     )
 
     @field_validator("active_peer_ids")
@@ -415,7 +478,7 @@ class _TopologyEventPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     event_id: BoundedIdentifier
     session_id: BoundedIdentifier
-    sequence: int = Field(strict=True, ge=1, le=MAX_COLLABORATION_ITEMS)
+    sequence: int = Field(strict=True, ge=1, le=MAX_TOPOLOGY_CHANGES)
     before_topology_hash: Sha256Hex
     operation: TopologyOperation
     peer_id: BoundedIdentifier | None
@@ -472,7 +535,7 @@ class _CollaborationSessionPayload(_StrictFrozenModel):
         min_length=1, max_length=MAX_PEERS
     )
     declared_edges: tuple[tuple[BoundedIdentifier, BoundedIdentifier], ...] = Field(
-        max_length=MAX_PEERS * MAX_PEERS
+        max_length=MAX_TOPOLOGY_EDGES
     )
     initial_active_peer_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PEERS)
     scheduling_policy_version: BoundedIdentifier
@@ -611,9 +674,24 @@ def _reject_json_constant(_value: str) -> object:
     raise ValueError("non-finite JSON number is forbidden")
 
 
+def _reject_candidate_content(message: str) -> NoReturn:
+    error = PydanticValidationError.from_exception_data(
+        "CanonicalCandidateJson",
+        [
+            {
+                "type": "value_error",
+                "loc": (),
+                "input": "[REDACTED]",
+                "ctx": {"error": ValueError(message)},
+            }
+        ],
+    )
+    raise error from None
+
+
 def _canonical_candidate_json(value: object) -> object:
     if not isinstance(value, str) or len(value) > MAX_CANDIDATE_CONTENT_LENGTH:
-        raise ValueError("candidate_content must be a bounded canonical JSON object")
+        _reject_candidate_content("candidate_content must be a bounded canonical JSON object")
     try:
         parsed = json.loads(
             value,
@@ -625,10 +703,10 @@ def _canonical_candidate_json(value: object) -> object:
         OverflowError,
         RecursionError,
         ValueError,
-    ) as exc:
-        raise ValueError("candidate_content must be a bounded canonical JSON object") from exc
+    ):
+        _reject_candidate_content("candidate_content must be a bounded canonical JSON object")
     if not isinstance(parsed, dict):
-        raise ValueError("candidate_content must be a bounded canonical JSON object")
+        _reject_candidate_content("candidate_content must be a bounded canonical JSON object")
 
     node_count = 0
     stack: list[tuple[object, int]] = [(parsed, 1)]
@@ -636,45 +714,50 @@ def _canonical_candidate_json(value: object) -> object:
         item, depth = stack.pop()
         node_count += 1
         if node_count > MAX_CANDIDATE_NODES or depth > MAX_CANDIDATE_DEPTH:
-            raise ValueError("candidate_content exceeds bounded depth or node limits")
+            _reject_candidate_content("candidate_content exceeds bounded depth or node limits")
         if isinstance(item, dict):
             if len(item) > MAX_CANDIDATE_MAPPING_KEYS:
-                raise ValueError("candidate_content exceeds bounded mapping size")
+                _reject_candidate_content("candidate_content exceeds bounded mapping size")
             for key, nested in item.items():
                 if (
                     not key
                     or key != key.strip()
                     or len(key) > MAX_CANDIDATE_KEY_LENGTH
                 ):
-                    raise ValueError("candidate_content contains an invalid bounded key")
-                if key.strip().casefold() in FORBIDDEN_CANDIDATE_KEYS:
-                    raise ValueError(
-                        f"candidate_content contains forbidden public candidate key: {key}"
+                    _reject_candidate_content("candidate_content contains an invalid bounded key")
+                normalized_key = "".join(
+                    character.casefold()
+                    for character in unicodedata.normalize("NFKC", key)
+                    if character.isalnum()
+                )
+                if normalized_key in FORBIDDEN_CANDIDATE_KEYS:
+                    _reject_candidate_content(
+                        "candidate_content contains forbidden public candidate key"
                     )
                 stack.append((nested, depth + 1))
         elif isinstance(item, list):
             if len(item) > MAX_CANDIDATE_COLLECTION_ITEMS:
-                raise ValueError("candidate_content exceeds bounded collection size")
+                _reject_candidate_content("candidate_content exceeds bounded collection size")
             stack.extend((nested, depth + 1) for nested in item)
         elif isinstance(item, str):
             if len(item) > MAX_CANDIDATE_STRING_LENGTH:
-                raise ValueError("candidate_content contains an oversized string")
+                _reject_candidate_content("candidate_content contains an oversized string")
         elif isinstance(item, bool) or item is None:
             continue
         elif isinstance(item, int):
             if abs(item) > MAX_CANDIDATE_INTEGER_ABS:
-                raise ValueError("candidate_content contains an oversized integer")
+                _reject_candidate_content("candidate_content contains an oversized integer")
         elif isinstance(item, float):
             if not math.isfinite(item) or abs(item) > MAX_CANDIDATE_FLOAT_ABS:
-                raise ValueError("candidate_content contains an invalid finite number")
+                _reject_candidate_content("candidate_content contains an invalid finite number")
         else:
-            raise ValueError("candidate_content contains an unsupported public value")
+            _reject_candidate_content("candidate_content contains an unsupported public value")
     try:
         canonical = canonical_json_bytes(parsed).decode("utf-8")
-    except (MemoryError, OverflowError, RecursionError, TypeError, ValueError) as exc:
-        raise ValueError("candidate_content must be a bounded canonical JSON object") from exc
+    except (MemoryError, OverflowError, RecursionError, TypeError, ValueError):
+        _reject_candidate_content("candidate_content must be a bounded canonical JSON object")
     if canonical != value:
-        raise ValueError("candidate_content must be a canonical JSON object")
+        _reject_candidate_content("candidate_content must be a canonical JSON object")
     return value
 
 
@@ -735,9 +818,9 @@ class _CollaborationStatePayload(_StrictFrozenModel):
     session: CollaborationSession
     topology: TopologySnapshot
     topology_history: tuple[TopologySnapshot, ...] = Field(
-        min_length=1, max_length=MAX_COLLABORATION_ITEMS + 1
+        min_length=1, max_length=MAX_TOPOLOGY_CHANGES + 1
     )
-    topology_events: tuple[TopologyEvent, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
+    topology_events: tuple[TopologyEvent, ...] = Field(max_length=MAX_TOPOLOGY_CHANGES)
     requests: tuple[PeerRequest, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
     contributions: tuple[PeerContribution, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
     usage_history: tuple[BoundedResourceUsage, ...] = Field(
@@ -745,13 +828,17 @@ class _CollaborationStatePayload(_StrictFrozenModel):
     )
     usage: BoundedResourceUsage
     hop_count: int = Field(strict=True, ge=0, le=MAX_COLLABORATION_ITEMS)
-    scheduling_position: int = Field(strict=True, ge=0, le=MAX_COLLABORATION_ITEMS * 2)
+    scheduling_position: int = Field(strict=True, ge=0, le=MAX_COLLABORATION_TRANSITIONS)
     transitions: tuple[CollaborationTransition, ...] = Field(
-        max_length=MAX_COLLABORATION_ITEMS * 2
+        max_length=MAX_COLLABORATION_TRANSITIONS
     )
     observed_state_hashes: tuple[Sha256Hex, ...] = Field(
         min_length=1,
-        max_length=MAX_COLLABORATION_ITEMS * 2 + 1,
+        max_length=MAX_COLLABORATION_TRANSITIONS + 1,
+    )
+    cycle_projection_hashes: tuple[Sha256Hex, ...] = Field(
+        min_length=1,
+        max_length=MAX_COLLABORATION_TRANSITIONS + 1,
     )
     completed: bool
 
@@ -814,7 +901,7 @@ class _CollaborationStatePayload(_StrictFrozenModel):
             raise ValueError("collaboration state exceeds its per-peer contribution budget")
         if not usage_matches(self.usage, sum_usage(self.usage_history)):
             raise ValueError("aggregate usage must equal usage history")
-        remaining = session.budget.resources
+        validation_usage_accumulator = _UsageAccumulator()
         known_depths: dict[str, int] = {}
         known_ids: set[str] = set()
         request_ids: set[str] = set()
@@ -871,12 +958,16 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                 raise ValueError("contribution parent depth exceeds collaboration budget")
             if contribution.contribution_id in known_ids:
                 raise ValueError("contribution IDs must be unique")
-            if not usage_matches(request.remaining_budget, remaining):
+            expected_remaining = remaining_resources(
+                session.budget.resources,
+                validation_usage_accumulator.to_usage(),
+            )
+            if not usage_matches(request.remaining_budget, expected_remaining):
                 raise ValueError("request remaining budget must match state usage")
             known_ids.add(contribution.contribution_id)
             request_ids.add(request.request_id)
             known_depths[contribution.contribution_id] = parent_depth
-            remaining = remaining_resources(remaining, transition_usage)
+            validation_usage_accumulator.add(transition_usage)
         completed = _completion_satisfied(session, self.contributions)
         if self.completed != completed:
             raise ValueError("completed flag must exactly match the session completion predicate")
@@ -884,9 +975,13 @@ class _CollaborationStatePayload(_StrictFrozenModel):
         return self
 
     def _require_deterministic_transition_replay(self) -> None:
-        if len(self.observed_state_hashes) != len(self.transitions) + 1:
+        expected_observation_count = len(self.transitions) + 1
+        if (
+            len(self.observed_state_hashes) != expected_observation_count
+            or len(self.cycle_projection_hashes) != expected_observation_count
+        ):
             raise ValueError(
-                "semantic state observations must cover the initial state and every transition"
+                "state observations must cover the initial state and every transition"
             )
         topology_index = 0
         peer_index = 0
@@ -894,12 +989,30 @@ class _CollaborationStatePayload(_StrictFrozenModel):
         topology = self.topology_history[0]
         peer_counts: Counter[str] = Counter()
         contribution_kind_counts: Counter[str] = Counter()
-        observed_counts: Counter[str] = Counter()
+        cycle_projection_counts: Counter[str] = Counter()
         topology_hashes = [topology.content_hash]
         topology_churn_count = 0
-        usage = _zero_usage()
+        prior_topology_hash: str | None = None
+        usage_accumulator = _UsageAccumulator()
+        usage = usage_accumulator.to_usage()
+        request_ids: set[str] = set()
+        contribution_depths: dict[str, int] = {}
         completed = False
         initial_semantic_hash = collaboration_semantic_state_hash(
+            session=self.session,
+            topology=topology,
+            prior_topology_hash=prior_topology_hash,
+            topology_event_count=topology_index,
+            topology_churn_count=topology_churn_count,
+            peer_contribution_counts=peer_counts,
+            contribution_kind_counts=contribution_kind_counts,
+            last_peer_id=last_peer_id,
+            usage=usage,
+            request_ids=tuple(sorted(request_ids)),
+            contribution_depths=tuple(sorted(contribution_depths.items())),
+            completed=completed,
+        )
+        initial_cycle_projection = collaboration_cycle_projection_hash(
             session=self.session,
             topology=topology,
             peer_contribution_counts=peer_counts,
@@ -910,7 +1023,9 @@ class _CollaborationStatePayload(_StrictFrozenModel):
         )
         if self.observed_state_hashes[0] != initial_semantic_hash:
             raise ValueError("semantic state observations must be replay-authentic")
-        observed_counts[initial_semantic_hash] += 1
+        if self.cycle_projection_hashes[0] != initial_cycle_projection:
+            raise ValueError("cycle projections must be replay-authentic")
+        cycle_projection_counts[initial_cycle_projection] += 1
 
         for position, transition in enumerate(self.transitions, start=1):
             if transition.position != position:
@@ -922,7 +1037,7 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                 contribution_count=peer_index,
                 peer_contribution_counts=peer_counts,
                 last_peer_id=last_peer_id,
-                observed_semantic_state_counts=observed_counts,
+                observed_cycle_projection_counts=cycle_projection_counts,
                 topology_churn_count=topology_churn_count,
                 completed=completed,
             )
@@ -938,6 +1053,7 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                 if transition.topology_event_id != event.event_id:
                     raise ValueError("transition journal must bind the exact topology event")
                 topology_index += 1
+                prior_topology_hash = topology.content_hash
                 topology = self.topology_history[topology_index]
                 if (
                     len(topology_hashes) >= 2
@@ -966,10 +1082,22 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                 expected_peer = eligible[0] if eligible else None
                 if request.recipient_id != expected_peer:
                     raise ValueError("request recipient must be the expected peer")
-                usage = sum_usage((usage, self.usage_history[peer_index]))
+                usage_accumulator.add(self.usage_history[peer_index])
+                usage = usage_accumulator.to_usage()
                 peer_counts[contribution.peer_id] += 1
                 contribution_kind_counts[contribution.contribution_kind] += 1
                 last_peer_id = contribution.peer_id
+                request_ids.add(request.request_id)
+                parent_depth = (
+                    0
+                    if not contribution.parent_contribution_ids
+                    else 1
+                    + max(
+                        contribution_depths[parent]
+                        for parent in contribution.parent_contribution_ids
+                    )
+                )
+                contribution_depths[contribution.contribution_id] = parent_depth
                 peer_index += 1
                 completed = _completion_satisfied_from_summary(
                     self.session,
@@ -980,15 +1108,31 @@ class _CollaborationStatePayload(_StrictFrozenModel):
             semantic_hash = collaboration_semantic_state_hash(
                 session=self.session,
                 topology=topology,
+                prior_topology_hash=prior_topology_hash,
+                topology_event_count=topology_index,
+                topology_churn_count=topology_churn_count,
+                peer_contribution_counts=peer_counts,
+                contribution_kind_counts=contribution_kind_counts,
+                last_peer_id=last_peer_id,
+                usage=usage,
+                request_ids=tuple(sorted(request_ids)),
+                contribution_depths=tuple(sorted(contribution_depths.items())),
+                completed=completed,
+            )
+            if self.observed_state_hashes[position] != semantic_hash:
+                raise ValueError("semantic state observations must be replay-authentic")
+            cycle_projection = collaboration_cycle_projection_hash(
+                session=self.session,
+                topology=topology,
                 peer_contribution_counts=peer_counts,
                 contribution_kind_counts=contribution_kind_counts,
                 last_peer_id=last_peer_id,
                 usage=usage,
                 completed=completed,
             )
-            if self.observed_state_hashes[position] != semantic_hash:
-                raise ValueError("semantic state observations must be replay-authentic")
-            observed_counts[semantic_hash] += 1
+            if self.cycle_projection_hashes[position] != cycle_projection:
+                raise ValueError("cycle projections must be replay-authentic")
+            cycle_projection_counts[cycle_projection] += 1
         if topology_index != len(self.topology_events) or peer_index != len(self.requests):
             raise ValueError("transition journal must retain every checked transition")
         if topology != self.topology:
@@ -1046,16 +1190,51 @@ def collaboration_semantic_state_hash(
     *,
     session: CollaborationSession,
     topology: TopologySnapshot,
+    prior_topology_hash: str | None,
+    topology_event_count: int,
+    topology_churn_count: int,
+    peer_contribution_counts: Counter[str],
+    contribution_kind_counts: Counter[str],
+    last_peer_id: str | None,
+    usage: ResourceUsage,
+    request_ids: tuple[str, ...],
+    contribution_depths: tuple[tuple[str, int], ...],
+    completed: bool,
+) -> str:
+    """Authenticate every retained value that can affect a future transition."""
+
+    payload = {
+        "semantic_schema_version": 2,
+        "session_content_hash": session.content_hash,
+        "topology_content_hash": topology.content_hash,
+        "prior_topology_hash": prior_topology_hash,
+        "topology_event_count": topology_event_count,
+        "topology_churn_count": topology_churn_count,
+        "peer_contribution_counts": tuple(sorted(peer_contribution_counts.items())),
+        "contribution_kind_counts": tuple(sorted(contribution_kind_counts.items())),
+        "last_peer_id": last_peer_id,
+        "usage": usage.model_dump(mode="json"),
+        "request_ids": request_ids,
+        "contribution_depths": contribution_depths,
+        "completed": completed,
+    }
+    return sha256_hex(canonical_json_bytes(payload))
+
+
+def collaboration_cycle_projection_hash(
+    *,
+    session: CollaborationSession,
+    topology: TopologySnapshot,
     peer_contribution_counts: Counter[str],
     contribution_kind_counts: Counter[str],
     last_peer_id: str | None,
     usage: ResourceUsage,
     completed: bool,
 ) -> str:
-    """Hash only state that can affect a future collaboration transition."""
+    """Project operational state for cycle counting, excluding monotonic audit progress."""
 
     payload = {
-        "semantic_schema_version": 1,
+        "cycle_projection_schema_version": 1,
         "session_content_hash": session.content_hash,
         "topology_content_hash": topology.content_hash,
         "peer_contribution_counts": tuple(sorted(peer_contribution_counts.items())),
@@ -1147,7 +1326,7 @@ def _termination_reason_from_summary(
     contribution_count: int,
     peer_contribution_counts: Counter[str],
     last_peer_id: str | None,
-    observed_semantic_state_counts: Counter[str],
+    observed_cycle_projection_counts: Counter[str],
     topology_churn_count: int,
     completed: bool,
 ) -> CollaborationTerminationReason | None:
@@ -1166,8 +1345,8 @@ def _termination_reason_from_summary(
     if topology_event_count and topology_event_count >= budget.max_topology_changes:
         return CollaborationTerminationReason.TOPOLOGY_CHANGE_LIMIT_REACHED
     if any(
-        count > budget.max_state_repetitions
-        for count in observed_semantic_state_counts.values()
+        count - 1 > budget.max_state_repetitions
+        for count in observed_cycle_projection_counts.values()
     ):
         return CollaborationTerminationReason.REPEATED_STATE_LOOP
     if topology_churn_count >= budget.max_topology_churn:
@@ -1196,7 +1375,7 @@ def collaboration_termination_reason(
     topology_history: tuple[TopologySnapshot, ...],
     topology_events: tuple[TopologyEvent, ...],
     contributions: tuple[PeerContribution, ...],
-    observed_state_hashes: tuple[str, ...],
+    cycle_projection_hashes: tuple[str, ...],
     completed: bool,
 ) -> CollaborationTerminationReason | None:
     counts = Counter(item.peer_id for item in contributions)
@@ -1212,7 +1391,7 @@ def collaboration_termination_reason(
         contribution_count=len(contributions),
         peer_contribution_counts=counts,
         last_peer_id=contributions[-1].peer_id if contributions else None,
-        observed_semantic_state_counts=Counter(observed_state_hashes),
+        observed_cycle_projection_counts=Counter(cycle_projection_hashes),
         topology_churn_count=churn_count,
         completed=completed,
     )

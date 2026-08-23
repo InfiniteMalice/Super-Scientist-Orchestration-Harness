@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from super_scientist.domain.collaboration import (
+    CollaborationBudget,
     CollaborationSession,
     TopologyEvent,
     TopologyOperation,
@@ -13,6 +14,7 @@ from super_scientist.domain.collaboration import (
     apply_topology_event,
     initial_collaboration_state,
 )
+from super_scientist.domain.improvement.models import ResourceBudget
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 
 
@@ -133,3 +135,61 @@ def test_rehashed_semantically_false_topology_event_is_rejected(
     with pytest.raises(ValueError, match="already enabled"):
         parsed = TopologyEvent.model_validate_json(__import__("json").dumps(payload))
         apply_topology_event(session, state, parsed)
+
+
+def test_topology_envelope_rejects_impractical_edge_and_history_limits() -> None:
+    peers = tuple(f"peer-{index:02d}" for index in range(16))
+    too_many_edges = tuple(
+        (source, target)
+        for source in peers
+        for target in peers
+        if source != target
+    )[:65]
+
+    with pytest.raises(ValidationError, match="enabled_edges"):
+        TopologySnapshot.build(active_peer_ids=peers, enabled_edges=too_many_edges)
+    with pytest.raises(ValidationError, match="max_topology_changes"):
+        CollaborationBudget(
+            max_peers=16,
+            max_hops=256,
+            max_contributions=256,
+            max_contributions_per_peer=256,
+            max_topology_changes=65,
+            max_parent_depth=16,
+            max_state_repetitions=16,
+            max_topology_churn=64,
+            max_peer_contribution_share=1.0,
+            resources=ResourceBudget(
+                cost_usd=1.0,
+                compute_units=1.0,
+                tokens=1,
+                elapsed_seconds=1.0,
+                tool_calls=1,
+                human_interventions=1,
+            ),
+            allowed_tool_ids=(),
+        )
+
+
+def test_collaboration_envelope_rejects_more_than_sixteen_peers() -> None:
+    with pytest.raises(ValidationError, match="max_peers"):
+        CollaborationBudget(
+            max_peers=17,
+            max_hops=1,
+            max_contributions=1,
+            max_contributions_per_peer=1,
+            max_topology_changes=0,
+            max_parent_depth=0,
+            max_state_repetitions=1,
+            max_topology_churn=1,
+            max_peer_contribution_share=1.0,
+            resources=ResourceBudget(
+                cost_usd=1.0,
+                compute_units=1.0,
+                tokens=1,
+                elapsed_seconds=1.0,
+                tool_calls=1,
+                human_interventions=1,
+            ),
+            allowed_tool_ids=(),
+        )
