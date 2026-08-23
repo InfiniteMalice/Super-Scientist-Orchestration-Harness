@@ -27,6 +27,7 @@ from super_scientist.domain.procedures import (
     CatalogFactStatus,
     ExecutableProcedure,
     ProcedureAuthority,
+    ProcedureBoundaryValidationError,
     ProcedureCompilationRequest,
     ProcedureCompilationResult,
     ProcedureFindingCode,
@@ -38,6 +39,7 @@ from super_scientist.domain.procedures import (
     RegisteredValidator,
     canonical_model_hash,
     compile_method,
+    parse_untrusted_procedure_compilation_result,
     validate_procedure,
 )
 
@@ -435,7 +437,7 @@ def test_check_16_reuses_progress_validation_for_invalid_weights() -> None:
 
 
 @pytest.mark.parametrize("model_name", ("candidate", "step", "procedure", "result"))
-def test_direct_parsing_rejects_contradictory_rehashed_results(model_name: str) -> None:
+def test_parsing_rejects_contradictory_rehashed_results(model_name: str) -> None:
     result = compile_method(valid_request())
     models = {
         "candidate": result.procedure.source_candidate,
@@ -448,11 +450,18 @@ def test_direct_parsing_rejects_contradictory_rehashed_results(model_name: str) 
     hash_field = "result_hash" if isinstance(model, ProcedureCompilationResult) else "content_hash"
     payload[hash_field] = "f" * 64
 
-    with pytest.raises(ValidationError, match="canonically address"):
-        type(model).model_validate(payload)
+    if isinstance(model, ProcedureCompilationResult):
+        with pytest.raises(
+            ProcedureBoundaryValidationError,
+            match="compilation result failed validation",
+        ):
+            parse_untrusted_procedure_compilation_result(payload)
+    else:
+        with pytest.raises(ValidationError, match="canonically address"):
+            type(model).model_validate(payload)
 
 
-def test_direct_parsing_rejects_a_rehashed_result_with_a_contradictory_request_hash() -> None:
+def test_safe_result_parsing_rejects_a_contradictory_request_hash() -> None:
     result = compile_method(valid_request())
     contradictory = result.model_copy(update={"request_hash": "9" * 64})
     payload = contradictory.model_dump(mode="python")
@@ -461,8 +470,11 @@ def test_direct_parsing_rejects_a_rehashed_result_with_a_contradictory_request_h
         exclude_fields={"result_hash"},
     )
 
-    with pytest.raises(ValidationError, match="request hash"):
-        ProcedureCompilationResult.model_validate(payload)
+    with pytest.raises(
+        ProcedureBoundaryValidationError,
+        match="compilation result failed validation",
+    ):
+        parse_untrusted_procedure_compilation_result(payload)
 
 
 def test_closed_operation_vocabulary_rejects_arbitrary_commands_imports_and_uris() -> None:

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import UTC, datetime
 
 from super_scientist.domain.primitives import Sha256Hex, StableIdentifier, UtcTimestamp
 from super_scientist.domain.procedures.models import (
     ExecutableProcedure,
+    ProcedureBoundaryValidationError,
     ProcedureCompilationResult,
     ProcedureStep,
     ProcedureValidationStatus,
+    parse_untrusted_procedure_compilation_result,
 )
 from super_scientist.domain.progress.calculations import calculate_progress
 from super_scientist.domain.progress.models import ProgressPlan, ProgressSubtask
@@ -73,6 +76,14 @@ def procedure_to_progress_plan(
     created_at: UtcTimestamp,
     governing_policy_hash: Sha256Hex,
 ) -> ProgressPlan:
+    validated_result: ProcedureCompilationResult | None = None
+    with suppress(ProcedureBoundaryValidationError):
+        validated_result = parse_untrusted_procedure_compilation_result(result)
+    if validated_result is None:
+        raise ProcedureBoundaryValidationError(
+            "compilation result failed deterministic compiler revalidation"
+        ) from None
+    result = validated_result
     if result.report.status is not ProcedureValidationStatus.VALID:
         raise ValueError("only a valid procedure can produce a progress plan")
     from super_scientist.domain.procedures.compiler import compile_method
@@ -84,7 +95,9 @@ def procedure_to_progress_plan(
     except (AttributeError, TypeError, ValueError):
         pass
     if recompiled_result != result:
-        raise ValueError("compilation result failed deterministic compiler revalidation") from None
+        raise ProcedureBoundaryValidationError(
+            "compilation result failed deterministic compiler revalidation"
+        ) from None
     plan = _build_progress_plan(
         result.procedure,
         run_id=run_id,

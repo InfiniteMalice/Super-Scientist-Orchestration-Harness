@@ -1128,7 +1128,7 @@ git commit -m "feat: govern cognitive collaboration records"
 - Modify: `tests/integration/application/test_progress_integrity.py`
 
 **Interfaces:**
-- Consumes: `compile_method()`, `procedure_to_progress_plan()`, `RecordProgressPlanHandler`, compilation receipts, procedure repositories, and progress capabilities.
+- Consumes: `parse_untrusted_procedure_compilation_result()`, `compile_method()`, `procedure_to_progress_plan()`, `RecordProgressPlanHandler`, compilation receipts, procedure repositories, and progress capabilities.
 - Produces: `fixed_procedure_handlers()`, `procedure_capabilities()`, accepted invalid-compilation history, method terminal outcomes, and atomic compiled-plan binding.
 
 - [ ] **Step 1: Write invalid-history and no-plan tests**
@@ -1161,8 +1161,14 @@ class RecordProcedureCompilationHandler:
     proposal_type = "record_procedure_compilation"
 
     def decide(self, proposal, context) -> TransactionDecision:
+        try:
+            supplied_result = parse_untrusted_procedure_compilation_result(
+                proposal.compilation.result
+            )
+        except ProcedureBoundaryValidationError:
+            return rejected(proposal, RejectionCode.INVALID_PROCEDURE)
         expected = compile_method(proposal.compilation.request)
-        if expected != proposal.compilation.result:
+        if expected != supplied_result:
             return rejected(proposal, RejectionCode.DERIVATION_MISMATCH)
         return reject_existing_or_accept(proposal, context.existing_compilation)
 
@@ -1170,6 +1176,11 @@ class RecordProcedureCompilationHandler:
         require_accepted(decision)
         cast(ProcedureWriteCapability, writes).append_compilation(proposal.compilation)
 ```
+
+The handler catches `ProcedureBoundaryValidationError` and returns the existing invalid-
+procedure rejection without recording the error object or rejected input. Application
+code must not call `ProcedureCompilationResult.model_validate*()` for untrusted input;
+those Pydantic constructors remain internal trusted-construction and diagnostic APIs.
 
 `RecordMethodDirectionOutcomeHandler` accepts `SUPPORTED`, `UNSUPPORTED`, `INCONCLUSIVE`, or `ABANDONED` only when every referenced compilation, failure, evidence, and existing budget record exists. `SUPPORTED` remains an evidence outcome and has no claim or admission projection.
 

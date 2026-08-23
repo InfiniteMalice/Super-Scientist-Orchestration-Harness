@@ -14,12 +14,14 @@ from super_scientist.domain.procedures import (
     MethodDirectionOutcome,
     MethodDirectionStatus,
     ProcedureAuthority,
+    ProcedureBoundaryValidationError,
     ProcedureCompilationReceiptRef,
     ProcedureCompilationRecord,
     ProcedureValidationReport,
     ProcedureValidationStatus,
     canonical_model_hash,
     compile_method,
+    parse_untrusted_procedure_compilation_result,
     procedure_to_progress_plan,
 )
 from super_scientist.domain.progress.calculations import calculate_progress, detect_false_finish
@@ -85,7 +87,7 @@ def test_rehashed_valid_report_cannot_map_an_impossible_governance_procedure() -
     )
     payload = forged.model_dump(mode="python", exclude={"result_hash"})
     payload["result_hash"] = canonical_model_hash(forged, exclude_fields={"result_hash"})
-    parsed = type(invalid).model_validate(payload)
+    parsed = parse_untrusted_procedure_compilation_result(payload)
 
     with pytest.raises(ValueError, match="deterministic compiler revalidation"):
         _plan(parsed)
@@ -113,6 +115,23 @@ def test_progress_revalidation_failure_does_not_retain_private_input() -> None:
     structured_errors = getattr(error, "errors", None)
     if callable(structured_errors):
         assert PRIVATE_MARKER not in repr(structured_errors())
+
+
+def test_progress_mapping_rejects_deep_request_json_safely() -> None:
+    result = compile_method(valid_request())
+    deep_request_json = "[" * 10_000 + f'"{PRIVATE_MARKER}"' + "]" * 10_000
+    forged = result.model_copy(update={"request_json": deep_request_json})
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        _plan(forged)
+
+    error = caught.value
+    assert str(error) == "compilation result failed deterministic compiler revalidation"
+    assert PRIVATE_MARKER not in str(error)
+    assert PRIVATE_MARKER not in repr(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert not hasattr(error, "errors")
 
 
 def test_progress_mapping_preserves_existing_false_finish_semantics() -> None:

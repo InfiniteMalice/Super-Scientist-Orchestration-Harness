@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import pytest
@@ -19,12 +20,14 @@ from super_scientist.domain.procedures import (
     AcceptedSourceReceiptRef,
     GroundedCapabilityAssessment,
     ProcedureAuthority,
+    ProcedureBoundaryValidationError,
     ProcedureCompilationRequest,
     ProcedureEvidenceSourceKind,
     ProcedureFindingCode,
     ProcedureValidationStatus,
     canonical_model_hash,
     compile_method,
+    parse_untrusted_procedure_compilation_result,
     validate_procedure,
 )
 from super_scientist.domain.procedures.compiler import compile_declared_stages
@@ -268,17 +271,82 @@ def test_result_json_syntax_validation_sanitizes_decoder_failure() -> None:
     payload = result.model_dump(mode="python")
     payload["request_json"] = f'{{"{PRIVATE_MARKER}":'
 
-    with pytest.raises(ValidationError) as caught:
-        type(result).model_validate(payload)
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_result(payload)
 
     error = caught.value
+    assert str(error) == "procedure compilation result failed validation"
     assert PRIVATE_MARKER not in str(error)
     assert PRIVATE_MARKER not in repr(error)
-    structured_errors = error.errors(include_input=False)
-    assert PRIVATE_MARKER not in repr(structured_errors)
-    validator_error = structured_errors[0]["ctx"]["error"]
-    assert validator_error.__cause__ is None
-    assert validator_error.__context__ is None
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert not hasattr(error, "errors")
+
+
+def test_untrusted_result_boundary_accepts_valid_dictionary_and_json() -> None:
+    result = compile_method(valid_request())
+    payload = result.model_dump(mode="python")
+    result_json = canonical_json_bytes(result.model_dump(mode="json"))
+
+    assert parse_untrusted_procedure_compilation_result(payload) == result
+    assert parse_untrusted_procedure_compilation_result(result_json) == result
+
+
+def test_untrusted_result_boundary_hides_default_structured_validation_input() -> None:
+    result = compile_method(valid_request())
+    request_payload = result.parse_request().model_dump(mode="json")
+    request_payload["request_id"] = PRIVATE_MARKER
+    payload = result.model_dump(mode="python")
+    payload["request_json"] = canonical_json_bytes(request_payload).decode("utf-8")
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_result(payload)
+
+    error = caught.value
+    assert str(error) == "procedure compilation result failed validation"
+    assert PRIVATE_MARKER not in str(error)
+    assert PRIVATE_MARKER not in repr(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert not hasattr(error, "errors")
+
+
+def test_deep_request_json_fails_safely_at_result_and_request_boundaries() -> None:
+    result = compile_method(valid_request())
+    deep_request_json = "[" * 10_000 + f'"{PRIVATE_MARKER}"' + "]" * 10_000
+    payload = result.model_dump(mode="python")
+    payload["request_json"] = deep_request_json
+
+    with pytest.raises(ProcedureBoundaryValidationError) as result_caught:
+        parse_untrusted_procedure_compilation_result(payload)
+    _assert_sanitized_boundary_error(
+        result_caught.value,
+        "procedure compilation result failed validation",
+    )
+
+    forged = result.model_copy(update={"request_json": deep_request_json})
+    with pytest.raises(ProcedureBoundaryValidationError) as request_caught:
+        forged.parse_request()
+    _assert_sanitized_boundary_error(
+        request_caught.value,
+        "compilation result request failed validation",
+    )
+
+
+def test_compiler_deep_model_copy_fails_with_fixed_safe_error() -> None:
+    nested_request_id: object = PRIVATE_MARKER
+    for _ in range(10_000):
+        nested_request_id = [nested_request_id]
+    request = valid_request().model_copy(update={"request_id": nested_request_id})
+
+    with warnings.catch_warnings(), pytest.raises(ProcedureBoundaryValidationError) as caught:
+        warnings.simplefilter("ignore")
+        compile_method(request)
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation request failed canonical validation",
+    )
 
 
 def test_request_accepts_multibyte_payload_at_canonical_byte_boundary() -> None:

@@ -21,6 +21,7 @@ from super_scientist.domain.procedures.models import (
     ExecutableProcedure,
     GroundedCapabilityAssessment,
     ProcedureAuthority,
+    ProcedureBoundaryValidationError,
     ProcedureCompilationRequest,
     ProcedureCompilationResult,
     ProcedureEvidenceSourceKind,
@@ -34,6 +35,7 @@ from super_scientist.domain.procedures.models import (
     ProgressBudgetCategory,
     canonical_model_hash,
     catalog_snapshot_content_hash,
+    procedure_request_json_is_bounded,
 )
 from super_scientist.domain.procedures.progress_binding import validate_progress_mapping
 
@@ -988,16 +990,29 @@ def _strict_canonical_request(
     request: ProcedureCompilationRequest,
     request_bytes: bytes,
 ) -> ProcedureCompilationRequest:
+    request_json = request_bytes.decode("utf-8")
+    if not procedure_request_json_is_bounded(request_json):
+        raise ProcedureBoundaryValidationError(
+            "procedure compilation request failed canonical validation"
+        ) from None
     parsed: ProcedureCompilationRequest | None = None
-    with suppress(ValidationError):
+    with suppress(MemoryError, OverflowError, RecursionError, ValidationError):
         parsed = ProcedureCompilationRequest.model_validate_json(request_bytes, strict=True)
     if parsed is None or parsed != request:
-        raise ValueError("procedure compilation request failed canonical validation") from None
+        raise ProcedureBoundaryValidationError(
+            "procedure compilation request failed canonical validation"
+        ) from None
     return parsed
 
 
 def compile_method(request: ProcedureCompilationRequest) -> ProcedureCompilationResult:
-    request_bytes = canonical_json_bytes(request.model_dump(mode="json"))
+    request_bytes: bytes | None = None
+    with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
+        request_bytes = canonical_json_bytes(request.model_dump(mode="json"))
+    if request_bytes is None:
+        raise ProcedureBoundaryValidationError(
+            "procedure compilation request failed canonical validation"
+        ) from None
     if len(request_bytes) > MAX_PROCEDURE_REQUEST_BYTES:
         raise ValueError("procedure compilation request exceeds canonical byte limit")
     procedure = compile_declared_stages(request)

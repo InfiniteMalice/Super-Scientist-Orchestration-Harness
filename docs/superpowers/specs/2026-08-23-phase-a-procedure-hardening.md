@@ -122,3 +122,42 @@ therefore survive behind the fixed public error.
   errors when the exception type exposes them.
 - Run the complete procedure, Phase A, adversarial, formatting, lint, typing, dependency,
   documentation, and diff gates.
+
+## Round 4: safe untrusted result parsing and JSON complexity limits
+
+### Problem
+
+Pydantic's native `ValidationError.errors()` retains rejected input by default even when
+`hide_input_in_errors=True` hides that input in formatted messages. Direct callers of
+`ProcedureCompilationResult.model_validate*()` can therefore recover private
+`request_json`. A request with 10,000 nested JSON arrays also raises raw recursion or
+serializer-depth errors before every procedure boundary can return its fixed failure.
+
+### Design and expected behavior
+
+- Export `parse_untrusted_procedure_compilation_result()` as the only public parser for
+  untrusted compilation-result dictionaries, JSON, or model instances. The parser
+  raises `ProcedureBoundaryValidationError` with one fixed message and no cause,
+  context, Pydantic `errors()` method, or rejected input.
+- Keep Pydantic constructors as internal trusted-construction and diagnostic contracts.
+  Do not claim that Pydantic's default structured errors are redacted.
+- Require progress mapping and the planned Task 12 handler to pass supplied compilation
+  results through the safe parser before using them.
+- Scan retained request JSON iteratively before Python or Pydantic decoding. Reject JSON
+  above the fixed depth limit without recursively materializing the value.
+- Convert `RecursionError`, `OverflowError`, `MemoryError`, and local serialization or
+  validation failures to fixed domain errors after leaving the caught-exception scope.
+- Preserve valid compilation, request/receipt integrity, deterministic recomputation,
+  unknown-as-`INCONCLUSIVE`, and all sixteen checks.
+
+### Tests
+
+- Probe default `errors()` on the public boundary error and require that the error is not
+  a Pydantic error and exposes no marker.
+- Send 10,000 nested arrays containing a private marker through untrusted result parsing,
+  retained-request parsing, progress mapping, and compiler canonicalization. Every path
+  must return its fixed safe failure with no cause, context, or marker.
+- Parse a valid compiled result from both a dictionary and canonical JSON through the
+  public boundary.
+- Run the complete procedure, Phase A, adversarial, formatting, lint, typing, dependency,
+  documentation, and diff gates.

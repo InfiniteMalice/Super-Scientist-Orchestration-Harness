@@ -35,6 +35,11 @@ MAX_TEXT_LENGTH = 2_000
 MAX_PROCEDURE_RESOURCE_VALUE = 1_000_000_000
 # Keeps accepted requests practical to retain and deterministically recompile.
 MAX_PROCEDURE_REQUEST_BYTES = 65_536
+MAX_PROCEDURE_JSON_DEPTH = 128
+
+
+class ProcedureBoundaryValidationError(ValueError):
+    """Fixed safe failure for untrusted procedure parsing and validation."""
 
 
 def _strip_text(value: object) -> object:
@@ -84,6 +89,32 @@ def catalog_snapshot_content_hash(
             }
         )
     )
+
+
+def procedure_request_json_is_bounded(request_json: str) -> bool:
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in request_json:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > MAX_PROCEDURE_JSON_DEPTH:
+                return False
+        elif character in "]}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0 and not in_string and not escaped
 
 
 def _require_canonical_unique(values: tuple[str, ...], field_name: str) -> tuple[str, ...]:
@@ -784,13 +815,14 @@ class _ProcedureCompilationResultPayload(_StrictFrozenModel):
         request_bytes = self.request_json.encode("utf-8")
         if len(request_bytes) > MAX_PROCEDURE_REQUEST_BYTES:
             raise ValueError("compilation result request exceeds canonical byte limit")
-        request_json_is_valid = True
+        request_json_is_valid = procedure_request_json_is_bounded(self.request_json)
         canonical_request = b""
-        try:
-            request_payload = json.loads(self.request_json)
-            canonical_request = canonical_json_bytes(request_payload)
-        except (TypeError, ValueError):
-            request_json_is_valid = False
+        if request_json_is_valid:
+            try:
+                request_payload = json.loads(self.request_json)
+                canonical_request = canonical_json_bytes(request_payload)
+            except (MemoryError, OverflowError, RecursionError, TypeError, ValueError):
+                request_json_is_valid = False
         if not request_json_is_valid:
             raise ValueError("compilation result must retain canonical request JSON") from None
         if request_bytes != canonical_request:
@@ -807,18 +839,26 @@ class _ProcedureCompilationResultPayload(_StrictFrozenModel):
         return self
 
     def parse_request(self) -> ProcedureCompilationRequest:
+        if not procedure_request_json_is_bounded(self.request_json):
+            raise ProcedureBoundaryValidationError(
+                "compilation result request failed validation"
+            ) from None
         request: ProcedureCompilationRequest | None = None
-        with suppress(TypeError, ValueError):
+        with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
             request = ProcedureCompilationRequest.model_validate_json(
                 self.request_json,
                 strict=True,
             )
         if request is None:
-            raise ValueError("compilation result request failed validation") from None
+            raise ProcedureBoundaryValidationError(
+                "compilation result request failed validation"
+            ) from None
         return request
 
 
 class ProcedureCompilationResult(_ProcedureCompilationResultPayload):
+    """Trusted internal result model; use the safe parser for untrusted input."""
+
     result_hash: Sha256Hex
 
     @classmethod
@@ -834,6 +874,26 @@ class ProcedureCompilationResult(_ProcedureCompilationResultPayload):
         if self.result_hash != canonical_model_hash(self, exclude_fields={"result_hash"}):
             raise ValueError("result_hash must canonically address the compilation result")
         return self
+
+
+def parse_untrusted_procedure_compilation_result(
+    value: object,
+) -> ProcedureCompilationResult:
+    """Parse an untrusted result without exposing Pydantic input diagnostics."""
+
+    result: ProcedureCompilationResult | None = None
+    with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
+        if isinstance(value, BaseModel):
+            value = value.model_dump(mode="python")
+        if isinstance(value, (str, bytes, bytearray)):
+            result = ProcedureCompilationResult.model_validate_json(value, strict=True)
+        else:
+            result = ProcedureCompilationResult.model_validate(value)
+    if result is None:
+        raise ProcedureBoundaryValidationError(
+            "procedure compilation result failed validation"
+        ) from None
+    return result
 
 
 class _ProcedureCompilationRecordPayload(_StrictFrozenModel):
@@ -986,6 +1046,7 @@ __all__ = [
     "MethodDirectionOutcome",
     "MethodDirectionStatus",
     "ProcedureAuthority",
+    "ProcedureBoundaryValidationError",
     "ProcedureCompilationReceiptRef",
     "ProcedureCompilationRecord",
     "ProcedureCompilationRequest",
@@ -1005,4 +1066,5 @@ __all__ = [
     "RegisteredValidator",
     "canonical_model_hash",
     "catalog_snapshot_content_hash",
+    "parse_untrusted_procedure_compilation_result",
 ]
