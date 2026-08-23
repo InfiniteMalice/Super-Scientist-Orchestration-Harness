@@ -646,8 +646,11 @@ class _CohortPlanPayload(_StrictFrozenModel):
         if selected & excluded:
             raise ValueError("cohort plan selected and excluded actors must be disjoint")
         known_actors = selected | excluded
-        if set(self.unresolved_candidate_actor_ids) & selected:
+        unresolved_candidates = set(self.unresolved_candidate_actor_ids)
+        if unresolved_candidates & selected:
             raise ValueError("unresolved candidate actor cannot be a selected cohort member")
+        if unresolved_candidates & excluded:
+            raise ValueError("cohort plan excluded and unresolved actors must be disjoint")
 
         tied_actors = {actor_id for tie_set in self.tie_sets for actor_id in tie_set}
         if not tied_actors.issubset(known_actors):

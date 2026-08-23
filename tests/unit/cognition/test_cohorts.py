@@ -248,6 +248,25 @@ def test_cohort_plan_parser_rejects_selected_actor_as_excluded() -> None:
         CohortPlan.model_validate(_rehash_plan_payload(payload))
 
 
+def test_cohort_plan_parser_rejects_excluded_actor_as_unresolved() -> None:
+    request = _request(
+        min_members=2,
+        max_members=2,
+        candidates=("peer-a", "peer-b", "peer-c", "peer-d"),
+    )
+    plan = build_cohort(
+        request,
+        (_profile("peer-c"), _profile("peer-b"), _profile("peer-a")),
+    )
+    assert plan.excluded_actor_ids == ("peer-c",)
+    assert plan.unresolved_candidate_actor_ids == ("peer-d",)
+    payload = plan.model_dump(mode="python")
+    payload["unresolved_candidate_actor_ids"] = ("peer-c",)
+
+    with pytest.raises(ValidationError, match="excluded and unresolved"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
 def test_cohort_plan_parser_rejects_member_assessment_count_drift() -> None:
     payload = _two_member_plan().model_dump(mode="python")
     members = list(payload["members"])
