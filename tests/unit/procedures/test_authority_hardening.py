@@ -30,6 +30,18 @@ from super_scientist.domain.procedures import (
 from super_scientist.domain.procedures.compiler import compile_declared_stages
 
 REQUEST_BYTE_LIMIT = 65_536
+PRIVATE_MARKER = "PRIVATE_PROCEDURE_MARKER_" + ("x" * 200)
+
+
+def _assert_sanitized_boundary_error(error: BaseException, expected_message: str) -> None:
+    assert str(error) == expected_message
+    assert PRIVATE_MARKER not in str(error)
+    assert PRIVATE_MARKER not in repr(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    structured_errors = getattr(error, "errors", None)
+    if callable(structured_errors):
+        assert PRIVATE_MARKER not in repr(structured_errors())
 
 
 def _rebuild_receipt(
@@ -215,6 +227,58 @@ def test_compiler_requires_strict_canonical_round_trip_before_valid_status() -> 
 
     with pytest.raises(ValueError, match="failed canonical validation"):
         compile_method(request)
+
+
+def test_compiler_canonical_failure_does_not_retain_private_input() -> None:
+    request = valid_request().model_copy(update={"request_id": PRIVATE_MARKER})
+
+    with pytest.raises(ValueError) as caught:
+        compile_method(request)
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation request failed canonical validation",
+    )
+
+
+@pytest.mark.parametrize("failure_kind", ("schema", "syntax"))
+def test_result_request_parse_failure_does_not_retain_private_input(
+    failure_kind: str,
+) -> None:
+    result = compile_method(valid_request())
+    if failure_kind == "schema":
+        request_payload = result.parse_request().model_dump(mode="json")
+        request_payload["request_id"] = PRIVATE_MARKER
+        request_json = canonical_json_bytes(request_payload).decode("utf-8")
+    else:
+        request_json = f'{{"{PRIVATE_MARKER}":'
+    forged = result.model_copy(update={"request_json": request_json})
+
+    with pytest.raises(ValueError) as caught:
+        forged.parse_request()
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "compilation result request failed validation",
+    )
+
+
+def test_result_json_syntax_validation_sanitizes_decoder_failure() -> None:
+    result = compile_method(valid_request())
+    payload = result.model_dump(mode="python")
+    payload["request_json"] = f'{{"{PRIVATE_MARKER}":'
+
+    with pytest.raises(ValidationError) as caught:
+        type(result).model_validate(payload)
+
+    error = caught.value
+    assert PRIVATE_MARKER not in str(error)
+    assert PRIVATE_MARKER not in repr(error)
+    structured_errors = error.errors(include_input=False)
+    assert PRIVATE_MARKER not in repr(structured_errors)
+    validator_error = structured_errors[0]["ctx"]["error"]
+    assert validator_error.__cause__ is None
+    assert validator_error.__context__ is None
 
 
 def test_request_accepts_multibyte_payload_at_canonical_byte_boundary() -> None:

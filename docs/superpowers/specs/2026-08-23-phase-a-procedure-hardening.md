@@ -89,3 +89,36 @@ compilation work and then fail during result construction.
 - Reject an oversized request that bypasses model validation before compilation work.
 - Preserve valid compilation, unknown-as-`INCONCLUSIVE`, sixteen checks, deterministic
   progress recomputation, and the Phase A repository-authority boundary.
+
+## Round 3: sanitized procedure boundary failures
+
+### Problem
+
+Procedure request reparsing can fail with a Pydantic `ValidationError` that retains the
+rejected input in `errors()`. Raising a fixed `ValueError` inside the corresponding
+`except` block does not discard that object: explicit chaining stores it in `__cause__`,
+and `raise ... from None` still stores it in `__context__`. A forged private marker can
+therefore survive behind the fixed public error.
+
+### Design and expected behavior
+
+- `ProcedureCompilationResult.parse_request()`, compiler canonical revalidation, and
+  progress deterministic revalidation convert parsing or validation failures to fixed
+  `ValueError` messages only after leaving the `except` block.
+- Boundary errors have no exception cause or context. Their string, representation, and
+  any available structured-error surface do not contain rejected request data.
+- Result JSON syntax validation raises its fixed validation message outside the JSON
+  decoder's `except` block. Procedure models hide input values in formatted Pydantic
+  validation errors where Pydantic supports that behavior.
+- Valid requests, receipt integrity, deterministic recompilation, progress mapping,
+  unknown-as-`INCONCLUSIVE`, and the sixteen procedure checks do not change.
+
+### Tests
+
+- Inject a private marker into schema-invalid and syntactically invalid retained request
+  JSON, then inspect the direct request-parse error.
+- Inject a private marker into compiler canonical revalidation and progress deterministic
+  revalidation, then inspect `str()`, `repr()`, `__cause__`, `__context__`, and structured
+  errors when the exception type exposes them.
+- Run the complete procedure, Phase A, adversarial, formatting, lint, typing, dependency,
+  documentation, and diff gates.

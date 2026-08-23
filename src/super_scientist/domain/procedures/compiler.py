@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import suppress
 from decimal import Decimal
 from typing import Any
 
@@ -987,12 +988,11 @@ def _strict_canonical_request(
     request: ProcedureCompilationRequest,
     request_bytes: bytes,
 ) -> ProcedureCompilationRequest:
-    try:
+    parsed: ProcedureCompilationRequest | None = None
+    with suppress(ValidationError):
         parsed = ProcedureCompilationRequest.model_validate_json(request_bytes, strict=True)
-    except ValidationError:
+    if parsed is None or parsed != request:
         raise ValueError("procedure compilation request failed canonical validation") from None
-    if parsed != request:
-        raise ValueError("procedure compilation request failed canonical validation")
     return parsed
 
 

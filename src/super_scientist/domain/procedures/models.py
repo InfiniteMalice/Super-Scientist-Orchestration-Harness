@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
@@ -52,7 +53,12 @@ BoundedText = Annotated[
 
 
 class _StrictFrozenModel(BaseModel):
-    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    model_config = ConfigDict(
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        hide_input_in_errors=True,
+    )
 
 
 def canonical_model_hash(
@@ -778,11 +784,15 @@ class _ProcedureCompilationResultPayload(_StrictFrozenModel):
         request_bytes = self.request_json.encode("utf-8")
         if len(request_bytes) > MAX_PROCEDURE_REQUEST_BYTES:
             raise ValueError("compilation result request exceeds canonical byte limit")
+        request_json_is_valid = True
+        canonical_request = b""
         try:
             request_payload = json.loads(self.request_json)
-        except (TypeError, ValueError) as error:
-            raise ValueError("compilation result must retain canonical request JSON") from error
-        canonical_request = canonical_json_bytes(request_payload)
+            canonical_request = canonical_json_bytes(request_payload)
+        except (TypeError, ValueError):
+            request_json_is_valid = False
+        if not request_json_is_valid:
+            raise ValueError("compilation result must retain canonical request JSON") from None
         if request_bytes != canonical_request:
             raise ValueError("compilation result must retain canonical request JSON")
         if self.request_hash != sha256_hex(canonical_request):
@@ -797,10 +807,15 @@ class _ProcedureCompilationResultPayload(_StrictFrozenModel):
         return self
 
     def parse_request(self) -> ProcedureCompilationRequest:
-        return ProcedureCompilationRequest.model_validate_json(
-            self.request_json,
-            strict=True,
-        )
+        request: ProcedureCompilationRequest | None = None
+        with suppress(TypeError, ValueError):
+            request = ProcedureCompilationRequest.model_validate_json(
+                self.request_json,
+                strict=True,
+            )
+        if request is None:
+            raise ValueError("compilation result request failed validation") from None
+        return request
 
 
 class ProcedureCompilationResult(_ProcedureCompilationResultPayload):

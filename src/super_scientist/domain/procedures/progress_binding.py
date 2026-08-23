@@ -77,12 +77,14 @@ def procedure_to_progress_plan(
         raise ValueError("only a valid procedure can produce a progress plan")
     from super_scientist.domain.procedures.compiler import compile_method
 
+    recompiled_result: ProcedureCompilationResult | None = None
     try:
         request = result.parse_request()
-    except (AttributeError, ValueError) as error:
-        raise ValueError("compilation result failed deterministic compiler revalidation") from error
-    if compile_method(request) != result:
-        raise ValueError("compilation result failed deterministic compiler revalidation")
+        recompiled_result = compile_method(request)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    if recompiled_result != result:
+        raise ValueError("compilation result failed deterministic compiler revalidation") from None
     plan = _build_progress_plan(
         result.procedure,
         run_id=run_id,

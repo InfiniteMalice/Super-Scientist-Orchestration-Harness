@@ -8,6 +8,7 @@ from test_compiler import NOW, POLICY_HASH, _replace_catalog, valid_request
 
 from super_scientist.domain.evidence.models import ArtifactRef
 from super_scientist.domain.improvement.models import AssessmentOutcome
+from super_scientist.domain.primitives import canonical_json_bytes
 from super_scientist.domain.procedures import (
     CompiledProgressPlanBinding,
     MethodDirectionOutcome,
@@ -23,6 +24,8 @@ from super_scientist.domain.procedures import (
 )
 from super_scientist.domain.progress.calculations import calculate_progress, detect_false_finish
 from super_scientist.domain.progress.models import FalseFinishResult
+
+PRIVATE_MARKER = "PRIVATE_PROCEDURE_MARKER_" + ("x" * 200)
 
 
 def _plan(result=None):  # type: ignore[no-untyped-def]
@@ -86,6 +89,30 @@ def test_rehashed_valid_report_cannot_map_an_impossible_governance_procedure() -
 
     with pytest.raises(ValueError, match="deterministic compiler revalidation"):
         _plan(parsed)
+
+
+def test_progress_revalidation_failure_does_not_retain_private_input() -> None:
+    result = compile_method(valid_request())
+    request_payload = result.parse_request().model_dump(mode="json")
+    request_payload["request_id"] = PRIVATE_MARKER
+    forged = result.model_copy(
+        update={
+            "request_json": canonical_json_bytes(request_payload).decode("utf-8"),
+        }
+    )
+
+    with pytest.raises(ValueError) as caught:
+        _plan(forged)
+
+    error = caught.value
+    assert str(error) == "compilation result failed deterministic compiler revalidation"
+    assert PRIVATE_MARKER not in str(error)
+    assert PRIVATE_MARKER not in repr(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    structured_errors = getattr(error, "errors", None)
+    if callable(structured_errors):
+        assert PRIVATE_MARKER not in repr(structured_errors())
 
 
 def test_progress_mapping_preserves_existing_false_finish_semantics() -> None:
