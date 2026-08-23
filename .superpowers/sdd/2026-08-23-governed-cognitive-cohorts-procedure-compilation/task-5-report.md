@@ -67,7 +67,9 @@ All commands used the required prefix:
 1. Schema/compiler support: unsupported request schema and compiler-version findings.
 2. Unique IDs/order: duplicate step IDs, noncanonical step order, and noncanonical references.
 3. Dependencies: unknown dependency and dependency-cycle findings.
-4. Inputs: ancestor-produced, present-catalog, absent-catalog, and unknown-catalog behavior.
+4. Inputs: ancestor-produced, present-catalog, and absent-catalog behavior; explicit UNKNOWN and
+   incomplete-catalog external inputs remain `INCONCLUSIVE`, including on downstream steps, and
+   check 8 does not reclassify those unknown facts as missing-output errors.
 5. Producers: ambiguous artifact producer finding.
 6. Tools: unavailable, unauthorized, and incomplete/unknown catalog findings.
 7. Authority: governance/transaction/protected authority rejection.
@@ -97,3 +99,69 @@ All commands used the required prefix:
 
 None. Durable transaction handling and current-compilation freshness enforcement remain the later
 §9.6 handler's responsibility and were not added to this pure domain compiler task.
+
+## Fix Round 1
+
+### Changes
+
+- Check 8 now defers unknown external-artifact availability to check 4. Explicit UNKNOWN entries
+  and missing entries in incomplete catalogs remain `INCONCLUSIVE` on dependent steps.
+- Compiler support is module-owned through `PROCEDURE_COMPILER_ID` and
+  `PROCEDURE_COMPILER_VERSION`. `ProcedureCompilationRequest` no longer accepts a caller-supplied
+  `supported_compiler_versions` policy field.
+- Compiled required-capability metadata is the canonical union of candidate and per-step
+  requirements. Required-artifact metadata is derived per consumer from transitive ancestors, so
+  an artifact produced only by a non-ancestor remains an external input.
+- Direct request parsing rejects duplicate logical keys and noncanonical ordering for capability,
+  artifact, tool, and validator snapshots. Both contradictory tuple orders are rejected before
+  compilation, so tuple position cannot select a fact.
+
+### Files
+
+- `src/super_scientist/domain/procedures/__init__.py`
+- `src/super_scientist/domain/procedures/compiler.py`
+- `src/super_scientist/domain/procedures/models.py`
+- `tests/unit/procedures/test_compiler.py`
+- `tests/unit/procedures/test_validation.py`
+- `.superpowers/sdd/2026-08-23-governed-cognitive-cohorts-procedure-compilation/task-5-report.md`
+
+### RED, GREEN, and Final Evidence
+
+All Python commands used the required prefix:
+`uv run --isolated --python C:\Users\evanh\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe --extra dev`.
+
+1. Cluster RED:
+   `python -m pytest tests/unit/procedures/test_compiler.py tests/unit/procedures/test_validation.py -k "self_declared or compiled_metadata or downstream_unknown or duplicate_snapshot or noncanonical_snapshot" -v`
+   selected 13 regressions and failed all 13 for the intended old behavior.
+2. Cluster GREEN: the same command passed: `13 passed, 32 deselected`.
+3. Caller-policy boundary RED:
+   `python -m pytest tests/unit/procedures/test_validation.py::test_request_cannot_supply_compiler_support_policy -v`
+   failed with `DID NOT RAISE ValidationError`.
+4. Caller-policy boundary GREEN:
+   `python -m pytest tests/unit/procedures/test_validation.py::test_request_cannot_supply_compiler_support_policy tests/unit/procedures/test_compiler.py::test_self_declared_arbitrary_compiler_version_cannot_become_valid -v`
+   passed: `2 passed`.
+5. Procedure GREEN: `python -m pytest tests/unit/procedures -v` passed: `52 passed`.
+6. Final suite:
+   `python -m pytest tests/unit/procedures tests/unit/progress tests/property/test_progress_dependencies.py -v`
+   passed: `68 passed`.
+7. Ruff: `python -m ruff check src/super_scientist/domain/procedures tests/unit/procedures`
+   passed: `All checks passed!`.
+8. Strict mypy: `python -m mypy src` passed:
+   `Success: no issues found in 111 source files`.
+9. No repository-owned procedure dependency scanner was present. An explicit `rg` import scan of
+   `src/super_scientist/domain/procedures` for application, provider, kernel, CLI, quality,
+   execution, reflection, filesystem, and network dependency roots reported:
+   `No forbidden procedure dependencies found.`
+10. `git diff --check` passed with no whitespace errors. Git emitted only LF-to-CRLF working-copy
+    warnings for modified files.
+
+### Self-Review, Commit, and Concerns
+
+- All four review findings have focused real-code regressions. The duplicate-fact tests exercise
+  both tuple positions and every snapshot family.
+- The changes add no execution, I/O, network, storage, transaction, provider, or governance
+  authority. Static-check numbering and deterministic finding ordering remain unchanged.
+- Documentation precision gate: `PASS`; the corrected §9.5 check-4 statement is observable and
+  independently covered by the two downstream regressions. No documentation `BLOCK` remains.
+- Commit subject: `fix: harden procedure compiler snapshots`.
+- Concerns: none. The deferred check-15 request-plus-procedure scan remains out of this fix round.

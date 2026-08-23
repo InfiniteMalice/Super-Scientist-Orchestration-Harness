@@ -1,4 +1,9 @@
-from super_scientist.domain.procedures.compiler import compile_method, validate_procedure
+from super_scientist.domain.procedures.compiler import (
+    PROCEDURE_COMPILER_ID,
+    PROCEDURE_COMPILER_VERSION,
+    compile_method,
+    validate_procedure,
+)
 from super_scientist.domain.procedures.models import (
     ArtifactCatalogEntry,
     CandidateMethod,
@@ -30,6 +35,8 @@ from super_scientist.domain.procedures.models import (
 from super_scientist.domain.procedures.progress_binding import procedure_to_progress_plan
 
 __all__ = [
+    "PROCEDURE_COMPILER_ID",
+    "PROCEDURE_COMPILER_VERSION",
     "ArtifactCatalogEntry",
     "CandidateMethod",
     "CatalogFactStatus",

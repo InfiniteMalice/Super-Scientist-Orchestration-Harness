@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 from test_compiler import (
+    _actor,
     _artifact,
     _assessment,
     _rebuild_step,
@@ -17,7 +18,9 @@ from super_scientist.domain.cognition.models import (
     CapabilityDisposition,
     CapabilityEvidenceStatus,
 )
+from super_scientist.domain.identity import ActorKind
 from super_scientist.domain.procedures import (
+    ArtifactCatalogEntry,
     CandidateMethod,
     CatalogFactStatus,
     ExecutableProcedure,
@@ -28,6 +31,7 @@ from super_scientist.domain.procedures import (
     ProcedureStep,
     ProcedureValidationStatus,
     RecoveryDirective,
+    RegisteredTool,
     RegisteredValidator,
     canonical_model_hash,
     compile_method,
@@ -70,6 +74,14 @@ def test_check_1_rejects_unsupported_schema_and_compiler_version() -> None:
 
     assert ProcedureFindingCode.UNSUPPORTED_COMPILER_VERSION in _codes(request)
     assert ProcedureFindingCode.UNSUPPORTED_SCHEMA_VERSION in _codes(unsupported_schema)
+
+
+def test_request_cannot_supply_compiler_support_policy() -> None:
+    payload = valid_request().model_dump(mode="python")
+    payload["supported_compiler_versions"] = ("attacker-version",)
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        ProcedureCompilationRequest.model_validate(payload)
 
 
 def test_check_2_rejects_duplicate_ids_and_noncanonical_ordering() -> None:
@@ -175,6 +187,133 @@ def test_checks_6_and_10_do_not_synthesize_missing_incomplete_catalog_facts() ->
     assert result.report.status is ProcedureValidationStatus.INCONCLUSIVE
     assert ProcedureFindingCode.TOOL_CATALOG_UNKNOWN in _finding_codes(result)
     assert ProcedureFindingCode.VALIDATOR_REGISTRATION_UNKNOWN in _finding_codes(result)
+
+
+@pytest.mark.parametrize("explicit_unknown", (False, True))
+def test_downstream_unknown_external_artifact_remains_inconclusive(
+    explicit_unknown: bool,
+) -> None:
+    request = valid_request()
+    second = _rebuild_step(
+        request.candidate.stages[1],
+        input_artifact_ids=("external-unknown", "prepared"),
+    )
+    catalog = request.artifact_catalog
+    if explicit_unknown:
+        catalog = (
+            ArtifactCatalogEntry(
+                artifact_id="external-unknown",
+                artifact=None,
+                availability=CatalogFactStatus.UNKNOWN,
+            ),
+            *catalog,
+        )
+    request = _replace_step(request, 1, second).model_copy(
+        update={
+            "artifact_catalog": catalog,
+            "artifact_catalog_complete": explicit_unknown,
+        }
+    )
+
+    result = compile_method(request)
+
+    assert result.report.status is ProcedureValidationStatus.INCONCLUSIVE
+    assert ProcedureFindingCode.ARTIFACT_CATALOG_UNKNOWN in _finding_codes(result)
+    assert ProcedureFindingCode.MISSING_REFERENCED_OUTPUT not in _finding_codes(result)
+
+
+def _snapshot_payload() -> dict[str, Any]:
+    return valid_request().model_dump(mode="python")
+
+
+def _contradictory_snapshot_entries(field_name: str) -> tuple[object, object]:
+    request = valid_request()
+    if field_name == "capability_assessments":
+        return request.capability_assessments[0], _assessment(
+            CapabilityDisposition.UNKNOWN,
+            CapabilityEvidenceStatus.UNKNOWN,
+        )
+    if field_name == "artifact_catalog":
+        return request.artifact_catalog[0], ArtifactCatalogEntry(
+            artifact_id="source",
+            artifact=None,
+            availability=CatalogFactStatus.UNKNOWN,
+        )
+    if field_name == "tool_catalog":
+        return request.tool_catalog[0], RegisteredTool(
+            tool=request.tool_catalog[0].tool,
+            availability=CatalogFactStatus.UNKNOWN,
+            authorization=CatalogFactStatus.UNKNOWN,
+        )
+    return request.validator_catalog[0], RegisteredValidator(
+        validator=request.validator_catalog[0].validator,
+        validator_version=request.validator_catalog[0].validator_version,
+        registration=CatalogFactStatus.UNKNOWN,
+    )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "capability_assessments",
+        "artifact_catalog",
+        "tool_catalog",
+        "validator_catalog",
+    ),
+)
+def test_direct_parsing_rejects_duplicate_snapshot_keys_in_either_position(
+    field_name: str,
+) -> None:
+    left, right = _contradictory_snapshot_entries(field_name)
+    for values in ((left, right), (right, left)):
+        payload = _snapshot_payload()
+        payload[field_name] = values
+        with pytest.raises(ValidationError, match="unique logical keys"):
+            ProcedureCompilationRequest.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "second_entry"),
+    (
+        (
+            "capability_assessments",
+            _assessment(requirement_id="requirement-2"),
+        ),
+        (
+            "artifact_catalog",
+            ArtifactCatalogEntry(
+                artifact_id="z-source",
+                artifact=None,
+                availability=CatalogFactStatus.UNKNOWN,
+            ),
+        ),
+        (
+            "tool_catalog",
+            RegisteredTool(
+                tool=_actor("z-tool", ActorKind.TOOL),
+                availability=CatalogFactStatus.UNKNOWN,
+                authorization=CatalogFactStatus.UNKNOWN,
+            ),
+        ),
+        (
+            "validator_catalog",
+            RegisteredValidator(
+                validator=_actor("z-validator", ActorKind.HUMAN),
+                validator_version="validator-v1",
+                registration=CatalogFactStatus.UNKNOWN,
+            ),
+        ),
+    ),
+)
+def test_direct_parsing_rejects_noncanonical_snapshot_order(
+    field_name: str,
+    second_entry: object,
+) -> None:
+    payload = _snapshot_payload()
+    payload[field_name] = (second_entry, payload[field_name][0])
+
+    with pytest.raises(ValidationError, match="canonical order"):
+        ProcedureCompilationRequest.model_validate(payload)
 
 
 def test_check_11_requires_evidence_requirements() -> None:

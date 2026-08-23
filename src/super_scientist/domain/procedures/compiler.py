@@ -29,6 +29,11 @@ from super_scientist.domain.procedures.models import (
 )
 from super_scientist.domain.procedures.progress_binding import validate_progress_mapping
 
+PROCEDURE_COMPILER_ID = "procedure-compiler"
+PROCEDURE_COMPILER_VERSION = "1.0.0"
+_SUPPORTED_COMPILER_IDENTITIES = frozenset(
+    {(PROCEDURE_COMPILER_ID, PROCEDURE_COMPILER_VERSION)}
+)
 _IMPOSSIBLE_AUTHORITIES = frozenset(
     {
         ProcedureAuthority.GOVERNANCE_WRITE,
@@ -148,7 +153,7 @@ def _check_1_versions(
                 "procedure compilation schema version is unsupported",
             )
         )
-    if request.compiler_version not in request.supported_compiler_versions:
+    if (request.compiler_id, request.compiler_version) not in _SUPPORTED_COMPILER_IDENTITIES:
         findings.append(
             _finding(
                 1,
@@ -399,6 +404,7 @@ def _check_8_outputs(
     procedure: ExecutableProcedure,
 ) -> tuple[ProcedureFinding, ...]:
     produced_ids = set(_producer_map(procedure.steps))
+    catalog = {entry.artifact_id: entry for entry in request.artifact_catalog}
     catalog_ids = {
         entry.artifact_id
         for entry in request.artifact_catalog
@@ -416,19 +422,27 @@ def _check_8_outputs(
         if output_id not in produced_ids
     ]
     for step in procedure.steps:
-        findings.extend(
-            _finding(
-                8,
-                ProcedureFindingCode.MISSING_REFERENCED_OUTPUT,
-                ProcedureFindingSeverity.ERROR,
-                "procedure step references an artifact that is neither cataloged nor produced",
-                artifact_id,
-            )
-            for artifact_id in step.input_artifact_ids
-            if step.dependency_ids
-            and artifact_id not in produced_ids
-            and artifact_id not in catalog_ids
-        )
+        for artifact_id in step.input_artifact_ids:
+            entry = catalog.get(artifact_id)
+            fact_is_unknown = (
+                entry is not None and entry.availability is CatalogFactStatus.UNKNOWN
+            ) or (entry is None and not request.artifact_catalog_complete)
+            if (
+                step.dependency_ids
+                and artifact_id not in produced_ids
+                and artifact_id not in catalog_ids
+                and not fact_is_unknown
+            ):
+                findings.append(
+                    _finding(
+                        8,
+                        ProcedureFindingCode.MISSING_REFERENCED_OUTPUT,
+                        ProcedureFindingSeverity.ERROR,
+                        "procedure step references an artifact that is neither cataloged "
+                        "nor produced",
+                        artifact_id,
+                    )
+                )
     return tuple(findings)
 
 
@@ -771,24 +785,34 @@ _CHECKS: tuple[
 def compile_declared_stages(request: ProcedureCompilationRequest) -> ExecutableProcedure:
     request_hash = canonical_model_hash(request)
     producers = _producer_map(request.candidate.stages)
+    steps_by_id = _step_map(request.candidate.stages)
     required_inputs = tuple(
         sorted(
             {
                 artifact_id
                 for step in request.candidate.stages
                 for artifact_id in step.input_artifact_ids
-                if artifact_id not in producers
+                if not any(
+                    producer_id in _ancestor_ids(step.step_id, steps_by_id)
+                    for producer_id in producers.get(artifact_id, ())
+                )
             }
         )
+    )
+    required_capability_ids = set(
+        request.candidate.claimed_capability_requirement_ids
+    )
+    required_capability_ids.update(
+        requirement_id
+        for step in request.candidate.stages
+        for requirement_id in step.capability_requirement_ids
     )
     return ExecutableProcedure.build(
         procedure_id=f"procedure-{request_hash}",
         compiler_id=request.compiler_id,
         compiler_version=request.compiler_version,
         steps=request.candidate.stages,
-        required_capability_ids=tuple(
-            sorted(set(request.candidate.claimed_capability_requirement_ids))
-        ),
+        required_capability_ids=tuple(sorted(required_capability_ids)),
         required_artifact_input_ids=required_inputs,
         declared_outputs=tuple(
             output for step in request.candidate.stages for output in step.outputs
@@ -831,4 +855,10 @@ def compile_method(request: ProcedureCompilationRequest) -> ProcedureCompilation
     )
 
 
-__all__ = ["compile_declared_stages", "compile_method", "validate_procedure"]
+__all__ = [
+    "PROCEDURE_COMPILER_ID",
+    "PROCEDURE_COMPILER_VERSION",
+    "compile_declared_stages",
+    "compile_method",
+    "validate_procedure",
+]

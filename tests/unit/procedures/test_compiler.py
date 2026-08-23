@@ -135,6 +135,8 @@ def _candidate(
 def _assessment(
     disposition: CapabilityDisposition = CapabilityDisposition.SATISFIED,
     evidence_status: CapabilityEvidenceStatus = CapabilityEvidenceStatus.VERIFIED,
+    *,
+    requirement_id: str = "requirement-1",
 ) -> CapabilityAssessment:
     verified = ("assertion-1",) if evidence_status is CapabilityEvidenceStatus.VERIFIED else ()
     matched = () if evidence_status is CapabilityEvidenceStatus.UNKNOWN else ("assertion-1",)
@@ -142,7 +144,7 @@ def _assessment(
         profile_id="profile-1",
         actor_id="worker-1",
         requirement=CapabilityRequirement(
-            requirement_id="requirement-1",
+            requirement_id=requirement_id,
             capability_id="capability-1",
             task_family_id="task-family-1",
             evidence_snapshot_hash="c" * 64,
@@ -185,7 +187,6 @@ def valid_request() -> ProcedureCompilationRequest:
         request_id="compile-request-1",
         compiler_id="procedure-compiler",
         compiler_version="1.0.0",
-        supported_compiler_versions=("1.0.0",),
         candidate=_candidate(first, second),
         capability_assessments=(_assessment(),),
         artifact_catalog=(
@@ -342,3 +343,60 @@ def test_valid_method_compiles_deterministically_and_retains_source_hash() -> No
     assert first.report.findings == ()
     assert first.procedure.source_candidate_hash == request.candidate.content_hash
     assert tuple(step.step_id for step in first.procedure.steps) == ("prepare", "validate")
+
+
+def test_self_declared_arbitrary_compiler_version_cannot_become_valid() -> None:
+    request = valid_request().model_copy(
+        update={"compiler_version": "attacker-version"}
+    )
+
+    result = compile_method(request)
+
+    assert result.report.status is ProcedureValidationStatus.INVALID
+    assert ProcedureFindingCode.UNSUPPORTED_COMPILER_VERSION in tuple(
+        finding.code for finding in result.report.findings
+    )
+
+
+def test_compiled_metadata_unions_candidate_and_step_capability_requirements() -> None:
+    request = valid_request()
+    second = _rebuild_step(
+        request.candidate.stages[1],
+        capability_requirement_ids=("requirement-1", "requirement-2"),
+    )
+    request = _replace_step(request, 1, second).model_copy(
+        update={
+            "capability_assessments": (
+                request.capability_assessments[0],
+                _assessment(requirement_id="requirement-2"),
+            )
+        }
+    )
+
+    result = compile_method(request)
+
+    assert result.report.status is ProcedureValidationStatus.VALID
+    assert result.procedure.required_capability_ids == ("requirement-1", "requirement-2")
+
+
+def test_compiled_metadata_retains_nonancestor_producer_input_as_external() -> None:
+    request = valid_request()
+    second = _rebuild_step(request.candidate.stages[1], dependency_ids=())
+    prepared = ArtifactCatalogEntry(
+        artifact_id="prepared",
+        artifact=ArtifactRef(
+            sha256="4" * 64,
+            size_bytes=8,
+            media_type="application/json",
+            relative_path=f"sha256/44/{'4' * 64}",
+        ),
+        availability=CatalogFactStatus.PRESENT,
+    )
+    request = _replace_step(request, 1, second).model_copy(
+        update={"artifact_catalog": (prepared, *request.artifact_catalog)}
+    )
+
+    result = compile_method(request)
+
+    assert result.report.status is ProcedureValidationStatus.VALID
+    assert result.procedure.required_artifact_input_ids == ("prepared", "source")

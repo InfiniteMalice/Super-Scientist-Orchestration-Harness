@@ -326,9 +326,6 @@ class ProcedureCompilationRequest(_StrictFrozenModel):
     request_id: BoundedIdentifier
     compiler_id: BoundedIdentifier
     compiler_version: BoundedIdentifier
-    supported_compiler_versions: tuple[BoundedIdentifier, ...] = Field(
-        min_length=1, max_length=MAX_PROCEDURE_ITEMS
-    )
     candidate: CandidateMethod
     capability_assessments: tuple[CapabilityAssessment, ...] = Field(
         max_length=MAX_PROCEDURE_ITEMS
@@ -344,6 +341,58 @@ class ProcedureCompilationRequest(_StrictFrozenModel):
     )
     validator_catalog_complete: bool
     budget_envelope: BudgetReserves
+
+    @field_validator("capability_assessments")
+    @classmethod
+    def require_canonical_capability_snapshot(
+        cls,
+        values: tuple[CapabilityAssessment, ...],
+    ) -> tuple[CapabilityAssessment, ...]:
+        keys = tuple(item.requirement.requirement_id for item in values)
+        cls._require_canonical_snapshot_keys(keys, "capability_assessments")
+        return values
+
+    @field_validator("artifact_catalog")
+    @classmethod
+    def require_canonical_artifact_snapshot(
+        cls,
+        values: tuple[ArtifactCatalogEntry, ...],
+    ) -> tuple[ArtifactCatalogEntry, ...]:
+        keys = tuple(item.artifact_id for item in values)
+        cls._require_canonical_snapshot_keys(keys, "artifact_catalog")
+        return values
+
+    @field_validator("tool_catalog")
+    @classmethod
+    def require_canonical_tool_snapshot(
+        cls,
+        values: tuple[RegisteredTool, ...],
+    ) -> tuple[RegisteredTool, ...]:
+        keys = tuple(item.tool.actor_id for item in values)
+        cls._require_canonical_snapshot_keys(keys, "tool_catalog")
+        return values
+
+    @field_validator("validator_catalog")
+    @classmethod
+    def require_canonical_validator_snapshot(
+        cls,
+        values: tuple[RegisteredValidator, ...],
+    ) -> tuple[RegisteredValidator, ...]:
+        keys = tuple(
+            (item.validator.actor_id, item.validator_version) for item in values
+        )
+        cls._require_canonical_snapshot_keys(keys, "validator_catalog")
+        return values
+
+    @staticmethod
+    def _require_canonical_snapshot_keys(
+        keys: tuple[str, ...] | tuple[tuple[str, str], ...],
+        field_name: str,
+    ) -> None:
+        if len(set(keys)) != len(keys):
+            raise ValueError(f"{field_name} must contain unique logical keys")
+        if keys != tuple(sorted(keys)):
+            raise ValueError(f"{field_name} must use canonical order")
 
 
 class _ExecutableProcedurePayload(_StrictFrozenModel):
