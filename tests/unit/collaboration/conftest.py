@@ -120,6 +120,7 @@ def session_factory() -> Callable[..., CollaborationSession]:
         max_state_repetitions: int = 1,
         max_share: float = 1.0,
         completion_count: int = 8,
+        resource_cost_usd: float = 100.0,
     ) -> CollaborationSession:
         canonical_ids = tuple(sorted(peer_ids or ("peer-a", "peer-b")))
         requirement = CapabilityRequirement(
@@ -158,7 +159,7 @@ def session_factory() -> Callable[..., CollaborationSession]:
             max_topology_churn=max_topology_churn,
             max_peer_contribution_share=max_share,
             resources=ResourceBudget(
-                cost_usd=100.0,
+                cost_usd=resource_cost_usd,
                 compute_units=100.0,
                 tokens=1000,
                 elapsed_seconds=100.0,

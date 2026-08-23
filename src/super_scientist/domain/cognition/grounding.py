@@ -4,6 +4,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from super_scientist.domain.cognition.models import (
+    MAX_COGNITION_ITEMS,
+    MAX_COHORT_GROUNDING_INPUT_BYTES,
     CapabilityAssessment,
     CapabilityCoverage,
     CapabilityDisposition,
@@ -15,6 +17,7 @@ from super_scientist.domain.cognition.models import (
     CohortRankedCandidate,
     CohortRequest,
     CohortTieRank,
+    _strict_revalidate_cognition_model,
 )
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 
@@ -35,7 +38,7 @@ class _CohortDerivation:
     minimum_size_met: bool
 
 
-def assess_capability(
+def _assess_capability_validated(
     profile: CapabilityProfile,
     requirement: CapabilityRequirement,
 ) -> CapabilityAssessment:
@@ -54,11 +57,73 @@ def assess_capability(
     return CapabilityAssessment.from_matches(profile, requirement, matching, verified)
 
 
+def assess_capability(
+    profile: CapabilityProfile,
+    requirement: CapabilityRequirement,
+) -> CapabilityAssessment:
+    validated_profile = _strict_revalidate_cognition_model(
+        profile,
+        CapabilityProfile,
+        label="capability profile",
+    )
+    validated_requirement = _strict_revalidate_cognition_model(
+        requirement,
+        CapabilityRequirement,
+        label="capability requirement",
+    )
+    return _assess_capability_validated(validated_profile, validated_requirement)
+
+
 def _assessment_hash(assessment: CapabilityAssessment) -> str:
     return sha256_hex(canonical_json_bytes(assessment.model_dump(mode="json")))
 
 
-def _derive_cohort(
+def _prepare_cohort_inputs(
+    request: CohortRequest,
+    profiles: tuple[CapabilityProfile, ...],
+) -> tuple[CohortRequest, tuple[CapabilityProfile, ...]]:
+    if type(profiles) is not tuple:
+        raise TypeError("cohort profiles must be supplied as an exact tuple")
+    if len(profiles) > MAX_COGNITION_ITEMS:
+        raise ValueError("cohort accepts at most 64 supplied profiles")
+    if type(request) is not CohortRequest:
+        raise TypeError("cohort request must be an exact CohortRequest")
+    if any(type(profile) is not CapabilityProfile for profile in profiles):
+        raise TypeError("cohort profiles must contain exact CapabilityProfile values")
+    try:
+        supplied_input_bytes = canonical_json_bytes(
+            {
+                "request_snapshot": request.model_dump(mode="json", warnings=False),
+                "supplied_candidate_profiles": tuple(
+                    profile.model_dump(mode="json", warnings=False)
+                    for profile in profiles
+                ),
+            }
+        )
+    except (TypeError, ValueError):
+        raise ValueError("cohort supplied profile inputs are invalid") from None
+    if len(supplied_input_bytes) > MAX_COHORT_GROUNDING_INPUT_BYTES:
+        raise ValueError("cohort supplied profile inputs exceed the Phase A byte limit")
+    validated_request = _strict_revalidate_cognition_model(
+        request,
+        CohortRequest,
+        label="cohort request",
+    )
+    validated_profiles = tuple(
+        _strict_revalidate_cognition_model(
+            profile,
+            CapabilityProfile,
+            label="capability profile",
+        )
+        for profile in profiles
+    )
+    actor_ids = tuple(profile.actor_id for profile in validated_profiles)
+    if len(set(actor_ids)) != len(actor_ids):
+        raise ValueError("capability profile actor IDs must be unique")
+    return validated_request, validated_profiles
+
+
+def _derive_cohort_validated(
     request: CohortRequest,
     profiles: tuple[CapabilityProfile, ...],
 ) -> _CohortDerivation:
@@ -67,9 +132,6 @@ def _derive_cohort(
     declared_profiles = tuple(
         profile for profile in profiles if profile.actor_id in candidate_id_set
     )
-    actor_ids = tuple(profile.actor_id for profile in declared_profiles)
-    if len(set(actor_ids)) != len(actor_ids):
-        raise ValueError("capability profile actor IDs must be unique")
     if any(
         profile.governing_policy_hash != request.governing_policy_hash
         for profile in declared_profiles
@@ -83,7 +145,10 @@ def _derive_cohort(
 
     ranked: list[tuple[tuple[int, int], CapabilityProfile, tuple[CapabilityAssessment, ...]]] = []
     for profile in candidates:
-        assessments = tuple(assess_capability(profile, requirement) for requirement in requirements)
+        assessments = tuple(
+            _assess_capability_validated(profile, requirement)
+            for requirement in requirements
+        )
         required_count = sum(
             assessment.disposition is CapabilityDisposition.SATISFIED
             for assessment in assessments[: len(request.required_capabilities)]
@@ -196,11 +261,20 @@ def _derive_cohort(
     )
 
 
+def _derive_cohort(
+    request: CohortRequest,
+    profiles: tuple[CapabilityProfile, ...],
+) -> _CohortDerivation:
+    validated_request, validated_profiles = _prepare_cohort_inputs(request, profiles)
+    return _derive_cohort_validated(validated_request, validated_profiles)
+
+
 def build_cohort(
     request: CohortRequest,
     profiles: tuple[CapabilityProfile, ...],
 ) -> CohortPlan:
-    derived = _derive_cohort(request, profiles)
+    request, profiles = _prepare_cohort_inputs(request, profiles)
+    derived = _derive_cohort_validated(request, profiles)
     return CohortPlan.build(
         cohort_plan_id=f"{request.request_id}:plan",
         request_id=request.request_id,

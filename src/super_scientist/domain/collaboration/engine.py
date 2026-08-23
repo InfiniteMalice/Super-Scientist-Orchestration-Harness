@@ -18,10 +18,13 @@ from super_scientist.domain.collaboration.models import (
     collaboration_semantic_state_hash,
     collaboration_termination_reason,
     eligible_peer_ids,
+    exact_remaining_resources,
+    exact_usage_snapshot,
+    exact_usage_within_budget,
     sum_usage,
     usage_matches,
 )
-from super_scientist.domain.improvement.models import ResourceUsage, usage_within_budget
+from super_scientist.domain.improvement.models import ResourceUsage
 
 
 def initial_collaboration_state(session: CollaborationSession) -> CollaborationState:
@@ -46,7 +49,7 @@ def initial_collaboration_state(session: CollaborationSession) -> CollaborationS
         peer_contribution_counts=Counter(),
         contribution_kind_counts=Counter(),
         last_peer_id=None,
-        usage=zero,
+        exact_usage=exact_usage_snapshot(()),
         completed=False,
     )
     semantic_hash = collaboration_semantic_state_hash(
@@ -58,7 +61,7 @@ def initial_collaboration_state(session: CollaborationSession) -> CollaborationS
         peer_contribution_counts=Counter(),
         contribution_kind_counts=Counter(),
         last_peer_id=None,
-        usage=zero,
+        exact_usage=exact_usage_snapshot(()),
         request_ids=(),
         contribution_depths=(),
         cycle_projection_counts=Counter((cycle_projection,)),
@@ -224,11 +227,15 @@ def advance_collaboration(
         raise ValueError("peer contribution kind is not allowed")
     _require_artifacts_and_tools(session, request, contribution)
     _require_parents(session, state, request, contribution)
-    expected_remaining = session.remaining_resources(state.usage)
+    expected_remaining = exact_remaining_resources(
+        session.budget.resources,
+        state.usage_history,
+    )
     if not usage_matches(request.remaining_budget, expected_remaining):
         raise ValueError("peer request remaining budget does not match current usage")
-    updated_usage = sum_usage((*state.usage_history, usage))
-    if not usage_within_budget(updated_usage, session.budget.resources):
+    updated_usage_history = (*state.usage_history, usage)
+    updated_usage = sum_usage(updated_usage_history)
+    if not exact_usage_within_budget(updated_usage_history, session.budget.resources):
         raise ValueError("peer transition exceeds the collaboration resource budget")
     contributions = (*state.contributions, contribution)
     completed = _completion_satisfied(session, contributions)
@@ -240,7 +247,7 @@ def advance_collaboration(
             item.contribution_kind for item in contributions
         ),
         last_peer_id=contribution.peer_id,
-        usage=updated_usage,
+        exact_usage=exact_usage_snapshot(updated_usage_history),
         completed=completed,
     )
     cycle_projection_counts = Counter(state.cycle_projection_hashes)
@@ -260,7 +267,7 @@ def advance_collaboration(
             item.contribution_kind for item in contributions
         ),
         last_peer_id=contribution.peer_id,
-        usage=updated_usage,
+        exact_usage=exact_usage_snapshot(updated_usage_history),
         request_ids=tuple(sorted(item.request_id for item in (*state.requests, request))),
         contribution_depths=_contribution_depths(contributions),
         cycle_projection_counts=cycle_projection_counts,
@@ -273,7 +280,7 @@ def advance_collaboration(
         topology_events=state.topology_events,
         requests=(*state.requests, request),
         contributions=contributions,
-        usage_history=(*state.usage_history, usage),
+        usage_history=updated_usage_history,
         usage=updated_usage,
         hop_count=state.hop_count + 1,
         scheduling_position=state.scheduling_position + 1,
@@ -326,7 +333,7 @@ def apply_topology_event(
         last_peer_id=(
             state.contributions[-1].peer_id if state.contributions else None
         ),
-        usage=state.usage,
+        exact_usage=exact_usage_snapshot(state.usage_history),
         completed=state.completed,
     )
     cycle_projection_counts = Counter(state.cycle_projection_hashes)
@@ -352,7 +359,7 @@ def apply_topology_event(
         last_peer_id=(
             state.contributions[-1].peer_id if state.contributions else None
         ),
-        usage=state.usage,
+        exact_usage=exact_usage_snapshot(state.usage_history),
         request_ids=tuple(sorted(item.request_id for item in state.requests)),
         contribution_depths=_contribution_depths(state.contributions),
         cycle_projection_counts=cycle_projection_counts,

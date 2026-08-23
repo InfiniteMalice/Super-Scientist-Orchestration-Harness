@@ -204,6 +204,26 @@ def test_diversity_rejects_profile_revision_drift_for_same_actor(drift_kind: str
         assess_diversity(_cohort(retained), (drifted,), ())
 
 
+def test_diversity_revalidates_stale_profile_content_hash_before_reading() -> None:
+    retained = _profile("peer-a", prompt_strategy="direct")
+    stale_fingerprint = retained.diversity_fingerprint.model_copy(
+        update={"prompt_strategy": "forged"}
+    )
+    stale = retained.model_copy(update={"diversity_fingerprint": stale_fingerprint})
+
+    with pytest.raises((ValidationError, ValueError), match=r"capability profile|content_hash"):
+        assess_diversity(_cohort(retained), (stale,), ())
+
+
+def test_diversity_revalidates_stale_cohort_hash_before_reading() -> None:
+    retained = _profile("peer-a", prompt_strategy="direct")
+    cohort = _cohort(retained)
+    stale = cohort.model_copy(update={"minimum_size_met": False})
+
+    with pytest.raises((ValidationError, ValueError), match=r"cohort plan|content_hash"):
+        assess_diversity(stale, (retained,), ())
+
+
 def _correlation(*, policy_hash: str = POLICY) -> ErrorCorrelationRecord:
     return ErrorCorrelationRecord(
         correlation_id="correlation-a",
@@ -216,6 +236,15 @@ def _correlation(*, policy_hash: str = POLICY) -> ErrorCorrelationRecord:
         value=0.5,
         governing_policy_hash=policy_hash,
     )
+
+
+def test_diversity_revalidates_preconstructed_error_correlations() -> None:
+    left = _profile("peer-a", prompt_strategy="direct")
+    right = _profile("peer-b", prompt_strategy="direct")
+    malformed = _correlation().model_copy(update={"sample_count": 10**30})
+
+    with pytest.raises((ValidationError, ValueError), match=r"correlation|sample_count"):
+        assess_diversity(_cohort(left, right), (left, right), (malformed,))
 
 
 def test_error_correlation_sample_count_has_a_finite_contract_bound() -> None:

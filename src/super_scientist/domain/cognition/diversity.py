@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from super_scientist.domain.cognition.models import (
+    MAX_COGNITION_ITEMS,
     CapabilityProfile,
     CohortPlan,
     DiversityAssessment,
@@ -8,6 +9,7 @@ from super_scientist.domain.cognition.models import (
     DiversityAxisStatus,
     DiversityFingerprint,
     ErrorCorrelationRecord,
+    _strict_revalidate_cognition_model,
 )
 
 
@@ -26,6 +28,33 @@ def assess_diversity(
     profiles: tuple[CapabilityProfile, ...],
     error_correlations: tuple[ErrorCorrelationRecord, ...],
 ) -> DiversityAssessment:
+    if type(profiles) is not tuple or type(error_correlations) is not tuple:
+        raise TypeError("diversity inputs must use exact tuples")
+    if len(profiles) > MAX_COGNITION_ITEMS:
+        raise ValueError("diversity accepts at most 64 profiles")
+    if len(error_correlations) > MAX_COGNITION_ITEMS:
+        raise ValueError("diversity accepts at most 64 error correlations")
+    cohort = _strict_revalidate_cognition_model(
+        cohort,
+        CohortPlan,
+        label="cohort plan",
+    )
+    profiles = tuple(
+        _strict_revalidate_cognition_model(
+            profile,
+            CapabilityProfile,
+            label="capability profile",
+        )
+        for profile in profiles
+    )
+    error_correlations = tuple(
+        _strict_revalidate_cognition_model(
+            record,
+            ErrorCorrelationRecord,
+            label="error correlation",
+        )
+        for record in error_correlations
+    )
     cohort_profile_bindings = tuple(
         sorted(
             (member.actor_id, member.profile_id, member.profile_content_hash)

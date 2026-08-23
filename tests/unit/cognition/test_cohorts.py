@@ -225,6 +225,65 @@ def test_supplied_profiles_cannot_expand_the_fixed_candidate_roster() -> None:
     assert "peer-b" not in plan.excluded_actor_ids
 
 
+def test_build_cohort_revalidates_surplus_profiles_before_roster_filtering() -> None:
+    request = _request(candidates=("peer-a",))
+    malformed_surplus = _profile("peer-z").model_copy(
+        update={"governing_policy_hash": "e" * 64}
+    )
+
+    with pytest.raises((ValidationError, ValueError), match=r"capability profile|content_hash"):
+        build_cohort(request, (_profile("peer-a"), malformed_surplus))
+
+
+def test_build_cohort_rejects_duplicate_surplus_actor_profiles() -> None:
+    request = _request(candidates=("peer-a",))
+
+    with pytest.raises(ValueError, match="actor IDs must be unique"):
+        build_cohort(
+            request,
+            (_profile("peer-a"), _profile("peer-z"), _profile("peer-z")),
+        )
+
+
+def test_build_cohort_requires_an_exact_profiles_tuple() -> None:
+    with pytest.raises(TypeError, match="exact tuple"):
+        build_cohort(  # type: ignore[arg-type]
+            _request(candidates=("peer-a",)),
+            [_profile("peer-a")],
+        )
+
+
+def test_build_cohort_rejects_supplied_profile_count_before_filtering() -> None:
+    repeated_surplus = (_profile("peer-z"),) * 10_001
+
+    with pytest.raises(ValueError, match="at most 64 supplied profiles"):
+        build_cohort(_request(candidates=("peer-a",)), repeated_surplus)
+
+
+def test_build_cohort_rejects_supplied_profile_bytes_before_filtering() -> None:
+    constraints = tuple(f"{index:02d}-" + "x" * 1997 for index in range(64))
+    profiles = []
+    for index in range(33):
+        actor_id = f"peer-{index:02d}"
+        values = _profile(actor_id).model_dump(mode="python", exclude={"content_hash"})
+        values["execution_constraints"] = constraints
+        profiles.append(CapabilityProfile.build(**values))
+
+    with pytest.raises(ValueError, match="supplied profile inputs exceed"):
+        build_cohort(
+            _request(candidates=("peer-00",)),
+            tuple(profiles),
+        )
+
+
+def test_build_cohort_revalidates_preconstructed_request_hash() -> None:
+    request = _request(candidates=("peer-a",))
+    stale = request.model_copy(update={"task_id": "task-forged"})
+
+    with pytest.raises((ValidationError, ValueError), match=r"cohort request|content_hash"):
+        build_cohort(stale, (_profile("peer-a"),))
+
+
 def test_candidate_roster_change_changes_request_and_plan_hashes() -> None:
     left_request = _request(candidates=("peer-a",))
     right_request = _request(candidates=("peer-a", "peer-b"))
@@ -424,7 +483,7 @@ def test_cohort_plan_rejects_grounding_input_snapshot_above_byte_limit() -> None
         values["execution_constraints"] = constraints
         profiles.append(CapabilityProfile.build(**values))
 
-    with pytest.raises(ValidationError, match="grounding inputs exceed"):
+    with pytest.raises((ValidationError, ValueError), match="profile inputs exceed"):
         build_cohort(
             _request(max_members=1, candidates=actor_ids),
             tuple(profiles),

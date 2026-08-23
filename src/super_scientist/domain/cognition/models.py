@@ -133,6 +133,20 @@ class _StrictFrozenModel(BaseModel):
     )
 
 
+def _strict_revalidate_cognition_model[CognitionModelT: BaseModel](
+    value: object,
+    expected_type: type[CognitionModelT],
+    *,
+    label: str,
+) -> CognitionModelT:
+    if type(value) is not expected_type:
+        raise TypeError(f"{label} must be an exact {expected_type.__name__}")
+    try:
+        return expected_type.model_validate_json(value.model_dump_json(warnings=False))
+    except (PydanticValidationError, TypeError, ValueError):
+        raise ValueError(f"{label} is invalid") from None
+
+
 def _require_canonical_unique(
     values: tuple[str, ...],
     *,
@@ -320,6 +334,13 @@ class _CapabilityProfilePayload(_StrictFrozenModel):
     ) -> tuple[CapabilityAssertion, ...]:
         if len({item.assertion_id for item in assertions}) != len(assertions):
             raise ValueError("assertion IDs must be unique")
+        logical_keys = tuple(
+            (item.capability_id, item.task_family_id) for item in assertions
+        )
+        if len(set(logical_keys)) != len(logical_keys):
+            raise ValueError(
+                "assertions must contain one entry per logical capability/task key"
+            )
         expected = tuple(
             sorted(
                 assertions,

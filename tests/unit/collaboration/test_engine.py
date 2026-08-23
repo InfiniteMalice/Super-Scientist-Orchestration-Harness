@@ -111,7 +111,7 @@ def test_single_peer_requires_declared_edge_after_initial_exchange(
                 session,
                 "peer-a",
                 sequence=2,
-                remaining_budget=session.remaining_resources(state.usage),
+                remaining_budget=session.remaining_resources(state.usage_history),
             ),
             _contribution(session, "peer-a", sequence=2),
             unit_usage(),
@@ -219,7 +219,7 @@ def test_recursive_parent_depth_is_bounded(
         sequence=2,
         sender_id="peer-a",
         parent_contribution_id="contribution-1",
-        remaining_budget=session.remaining_resources(state.usage),
+        remaining_budget=session.remaining_resources(state.usage_history),
     )
     contribution = _contribution(
         session, "peer-b", sequence=2, parent_contribution_ids=("contribution-1",)
@@ -331,7 +331,7 @@ def test_resource_replay_accumulates_original_entries_without_float_round_trip(
                 recipient,
                 sequence=sequence,
                 sender_id=sender,
-                remaining_budget=session.remaining_resources(state.usage),
+                remaining_budget=session.remaining_resources(state.usage_history),
             ),
             _contribution(session, recipient, sequence=sequence),
             usage,
@@ -340,6 +340,140 @@ def test_resource_replay_accumulates_original_entries_without_float_round_trip(
     expected = float(sum((Decimal(str(value)) for value in values), Decimal("0")))
     assert state.usage.cost_usd == expected
     assert CollaborationState.model_validate_json(state.model_dump_json()) == state
+
+
+def test_advance_rejects_exact_decimal_budget_overrun_hidden_by_float_rounding(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory(
+        "peer-a",
+        "peer-b",
+        completion_count=8,
+        resource_cost_usd=1.0,
+    )
+    state = initial_collaboration_state(session)
+    first_usage = ResourceUsage(
+        cost_usd=0.1,
+        compute_units=0.0,
+        tokens=0,
+        elapsed_seconds=0.0,
+        tool_calls=0,
+        human_interventions=0,
+    )
+    state = advance_collaboration(
+        session,
+        state,
+        _request(session, "peer-a"),
+        _contribution(session, "peer-a"),
+        first_usage,
+    )
+    rounded_overrun = ResourceUsage(
+        cost_usd=0.9000000000000001,
+        compute_units=0.0,
+        tokens=0,
+        elapsed_seconds=0.0,
+        tool_calls=0,
+        human_interventions=0,
+    )
+
+    with pytest.raises(ValueError, match="resource budget"):
+        advance_collaboration(
+            session,
+            state,
+            _request(
+                session,
+                "peer-b",
+                sequence=2,
+                sender_id="peer-a",
+                remaining_budget=session.remaining_resources(state.usage_history),
+            ),
+            _contribution(session, "peer-b", sequence=2),
+            rounded_overrun,
+        )
+
+
+def test_semantic_hash_distinguishes_exact_totals_with_equal_display_float(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    final_hashes: list[str] = []
+    display_totals: list[float] = []
+    for values in ((0.1, 0.9), (0.1, 0.9000000000000001)):
+        session = session_factory("peer-a", "peer-b", completion_count=8)
+        state = initial_collaboration_state(session)
+        for sequence, (recipient, sender, value) in enumerate(
+            zip(("peer-a", "peer-b"), (None, "peer-a"), values, strict=True),
+            start=1,
+        ):
+            usage = ResourceUsage(
+                cost_usd=value,
+                compute_units=0.0,
+                tokens=0,
+                elapsed_seconds=0.0,
+                tool_calls=0,
+                human_interventions=0,
+            )
+            state = advance_collaboration(
+                session,
+                state,
+                _request(
+                    session,
+                    recipient,
+                    sequence=sequence,
+                    sender_id=sender,
+                    remaining_budget=session.remaining_resources(state.usage_history),
+                ),
+                _contribution(session, recipient, sequence=sequence),
+                usage,
+            )
+        display_totals.append(state.usage.cost_usd)
+        final_hashes.append(state.observed_state_hashes[-1])
+
+    assert display_totals == [1.0, 1.0]
+    assert final_hashes[0] != final_hashes[1]
+
+
+def test_remaining_budget_is_derived_from_original_usage_history(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory(
+        "peer-a",
+        "peer-b",
+        completion_count=8,
+        resource_cost_usd=2.0,
+    )
+    state = initial_collaboration_state(session)
+    for sequence, (recipient, sender, value) in enumerate(
+        zip(
+            ("peer-a", "peer-b"),
+            (None, "peer-a"),
+            (0.1, 0.9000000000000001),
+            strict=True,
+        ),
+        start=1,
+    ):
+        state = advance_collaboration(
+            session,
+            state,
+            _request(
+                session,
+                recipient,
+                sequence=sequence,
+                sender_id=sender,
+                remaining_budget=session.remaining_resources(state.usage_history),
+            ),
+            _contribution(session, recipient, sequence=sequence),
+            ResourceUsage(
+                cost_usd=value,
+                compute_units=0.0,
+                tokens=0,
+                elapsed_seconds=0.0,
+                tool_calls=0,
+                human_interventions=0,
+            ),
+        )
+
+    assert state.usage.cost_usd == 1.0
+    assert session.remaining_resources(state.usage_history).cost_usd == 0.9999999999999999
 
 
 def test_candidate_content_parser_exhaustion_is_a_closed_validation_failure(

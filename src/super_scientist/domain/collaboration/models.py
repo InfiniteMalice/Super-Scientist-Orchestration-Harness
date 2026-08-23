@@ -55,6 +55,11 @@ RESOURCE_FIELDS = (
     "tool_calls",
     "human_interventions",
 )
+ExactUsageSnapshot = tuple[str, str, int, str, int, int]
+
+
+def _canonical_decimal_text(value: Decimal) -> str:
+    return str(value.normalize()) if value else "0"
 
 
 def _strip_text(value: object) -> object:
@@ -327,12 +332,72 @@ class _UsageAccumulator:
             human_interventions=self.human_interventions,
         )
 
+    def exact_snapshot(self) -> ExactUsageSnapshot:
+        return (
+            _canonical_decimal_text(self.cost_usd),
+            _canonical_decimal_text(self.compute_units),
+            self.tokens,
+            _canonical_decimal_text(self.elapsed_seconds),
+            self.tool_calls,
+            self.human_interventions,
+        )
 
-def sum_usage(usages: tuple[ResourceUsage, ...]) -> ResourceUsage:
+    def within_budget(self, budget: ResourceBudget) -> bool:
+        return (
+            self.cost_usd <= Decimal(str(budget.cost_usd))
+            and self.compute_units <= Decimal(str(budget.compute_units))
+            and self.tokens <= budget.tokens
+            and self.elapsed_seconds <= Decimal(str(budget.elapsed_seconds))
+            and self.tool_calls <= budget.tool_calls
+            and self.human_interventions <= budget.human_interventions
+        )
+
+    def remaining(self, budget: ResourceBudget) -> ResourceBudget:
+        if not self.within_budget(budget):
+            raise ValueError("usage exceeds collaboration resource budget")
+        return ResourceBudget(
+            cost_usd=float(Decimal(str(budget.cost_usd)) - self.cost_usd),
+            compute_units=float(
+                Decimal(str(budget.compute_units)) - self.compute_units
+            ),
+            tokens=budget.tokens - self.tokens,
+            elapsed_seconds=float(
+                Decimal(str(budget.elapsed_seconds)) - self.elapsed_seconds
+            ),
+            tool_calls=budget.tool_calls - self.tool_calls,
+            human_interventions=(
+                budget.human_interventions - self.human_interventions
+            ),
+        )
+
+
+def _usage_accumulator(usages: tuple[ResourceUsage, ...]) -> _UsageAccumulator:
     accumulator = _UsageAccumulator()
     for usage in usages:
         accumulator.add(usage)
-    return accumulator.to_usage()
+    return accumulator
+
+
+def exact_usage_snapshot(usages: tuple[ResourceUsage, ...]) -> ExactUsageSnapshot:
+    return _usage_accumulator(usages).exact_snapshot()
+
+
+def exact_usage_within_budget(
+    usages: tuple[ResourceUsage, ...],
+    budget: ResourceBudget,
+) -> bool:
+    return _usage_accumulator(usages).within_budget(budget)
+
+
+def exact_remaining_resources(
+    budget: ResourceBudget,
+    usages: tuple[ResourceUsage, ...],
+) -> ResourceBudget:
+    return _usage_accumulator(usages).remaining(budget)
+
+
+def sum_usage(usages: tuple[ResourceUsage, ...]) -> ResourceUsage:
+    return _usage_accumulator(usages).to_usage()
 
 
 def usage_matches(
@@ -349,21 +414,6 @@ def usage_matches(
             for field_name in ("cost_usd", "compute_units", "elapsed_seconds")
         )
     )
-
-
-def remaining_resources(budget: ResourceBudget, usage: ResourceUsage) -> ResourceBudget:
-    if any(getattr(usage, name) > getattr(budget, name) for name in RESOURCE_FIELDS):
-        raise ValueError("usage exceeds collaboration resource budget")
-    values: dict[str, float | int] = {}
-    for name in RESOURCE_FIELDS:
-        if name in {"tokens", "tool_calls", "human_interventions"}:
-            values[name] = getattr(budget, name) - getattr(usage, name)
-        else:
-            values[name] = float(
-                Decimal(str(getattr(budget, name)))
-                - Decimal(str(getattr(usage, name)))
-            )
-    return ResourceBudget.model_validate(values)
 
 
 class CollaborationTerminationReason(StrEnum):
@@ -626,8 +676,11 @@ class CollaborationSession(_CollaborationSessionPayload):
         digest = sha256_hex(canonical_json_bytes(payload.model_dump(mode="json")))
         return cls(**payload.model_dump(mode="python"), content_hash=digest)
 
-    def remaining_resources(self, usage: ResourceUsage) -> ResourceBudget:
-        return remaining_resources(self.budget.resources, usage)
+    def remaining_resources(
+        self,
+        usage_history: tuple[ResourceUsage, ...],
+    ) -> ResourceBudget:
+        return exact_remaining_resources(self.budget.resources, usage_history)
 
     @model_validator(mode="after")
     def require_hash(self) -> Self:
@@ -934,9 +987,8 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                 raise ValueError("contribution parent depth exceeds collaboration budget")
             if contribution.contribution_id in known_ids:
                 raise ValueError("contribution IDs must be unique")
-            expected_remaining = remaining_resources(
-                session.budget.resources,
-                validation_usage_accumulator.to_usage(),
+            expected_remaining = validation_usage_accumulator.remaining(
+                session.budget.resources
             )
             if not usage_matches(request.remaining_budget, expected_remaining):
                 raise ValueError("request remaining budget must match state usage")
@@ -944,6 +996,10 @@ class _CollaborationStatePayload(_StrictFrozenModel):
             request_ids.add(request.request_id)
             known_depths[contribution.contribution_id] = parent_depth
             validation_usage_accumulator.add(transition_usage)
+            if not validation_usage_accumulator.within_budget(
+                session.budget.resources
+            ):
+                raise ValueError("collaboration state exceeds its resource budget")
         completed = _completion_satisfied(session, self.contributions)
         if self.completed != completed:
             raise ValueError("completed flag must exactly match the session completion predicate")
@@ -970,7 +1026,6 @@ class _CollaborationStatePayload(_StrictFrozenModel):
         topology_churn_count = 0
         prior_topology_hash: str | None = None
         usage_accumulator = _UsageAccumulator()
-        usage = usage_accumulator.to_usage()
         request_ids: set[str] = set()
         contribution_depths: dict[str, int] = {}
         completed = False
@@ -980,7 +1035,7 @@ class _CollaborationStatePayload(_StrictFrozenModel):
             peer_contribution_counts=peer_counts,
             contribution_kind_counts=contribution_kind_counts,
             last_peer_id=last_peer_id,
-            usage=usage,
+            exact_usage=usage_accumulator.exact_snapshot(),
             completed=completed,
         )
         cycle_projection_counts[initial_cycle_projection] += 1
@@ -993,7 +1048,7 @@ class _CollaborationStatePayload(_StrictFrozenModel):
             peer_contribution_counts=peer_counts,
             contribution_kind_counts=contribution_kind_counts,
             last_peer_id=last_peer_id,
-            usage=usage,
+            exact_usage=usage_accumulator.exact_snapshot(),
             request_ids=tuple(sorted(request_ids)),
             contribution_depths=tuple(sorted(contribution_depths.items())),
             cycle_projection_counts=cycle_projection_counts,
@@ -1060,7 +1115,10 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                 if request.recipient_id != expected_peer:
                     raise ValueError("request recipient must be the expected peer")
                 usage_accumulator.add(self.usage_history[peer_index])
-                usage = usage_accumulator.to_usage()
+                if not usage_accumulator.within_budget(self.session.budget.resources):
+                    raise ValueError(
+                        "transition replay exceeds the collaboration resource budget"
+                    )
                 peer_counts[contribution.peer_id] += 1
                 contribution_kind_counts[contribution.contribution_kind] += 1
                 last_peer_id = contribution.peer_id
@@ -1088,7 +1146,7 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                 peer_contribution_counts=peer_counts,
                 contribution_kind_counts=contribution_kind_counts,
                 last_peer_id=last_peer_id,
-                usage=usage,
+                exact_usage=usage_accumulator.exact_snapshot(),
                 completed=completed,
             )
             cycle_projection_counts[cycle_projection] += 1
@@ -1101,7 +1159,7 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                 peer_contribution_counts=peer_counts,
                 contribution_kind_counts=contribution_kind_counts,
                 last_peer_id=last_peer_id,
-                usage=usage,
+                exact_usage=usage_accumulator.exact_snapshot(),
                 request_ids=tuple(sorted(request_ids)),
                 contribution_depths=tuple(sorted(contribution_depths.items())),
                 cycle_projection_counts=cycle_projection_counts,
@@ -1174,7 +1232,7 @@ def collaboration_semantic_state_hash(
     peer_contribution_counts: Counter[str],
     contribution_kind_counts: Counter[str],
     last_peer_id: str | None,
-    usage: ResourceUsage,
+    exact_usage: ExactUsageSnapshot,
     request_ids: tuple[str, ...],
     contribution_depths: tuple[tuple[str, int], ...],
     cycle_projection_counts: Counter[str],
@@ -1183,7 +1241,7 @@ def collaboration_semantic_state_hash(
     """Authenticate every retained value that can affect a future transition."""
 
     payload = {
-        "semantic_schema_version": 3,
+        "semantic_schema_version": 4,
         "session_content_hash": session.content_hash,
         "topology_content_hash": topology.content_hash,
         "prior_topology_hash": prior_topology_hash,
@@ -1192,7 +1250,7 @@ def collaboration_semantic_state_hash(
         "peer_contribution_counts": tuple(sorted(peer_contribution_counts.items())),
         "contribution_kind_counts": tuple(sorted(contribution_kind_counts.items())),
         "last_peer_id": last_peer_id,
-        "usage": usage.model_dump(mode="json"),
+        "exact_usage": dict(zip(RESOURCE_FIELDS, exact_usage, strict=True)),
         "request_ids": request_ids,
         "contribution_depths": contribution_depths,
         "cycle_projection_counts": tuple(sorted(cycle_projection_counts.items())),
@@ -1208,19 +1266,19 @@ def collaboration_cycle_projection_hash(
     peer_contribution_counts: Counter[str],
     contribution_kind_counts: Counter[str],
     last_peer_id: str | None,
-    usage: ResourceUsage,
+    exact_usage: ExactUsageSnapshot,
     completed: bool,
 ) -> str:
     """Project operational state for cycle counting, excluding monotonic audit progress."""
 
     payload = {
-        "cycle_projection_schema_version": 1,
+        "cycle_projection_schema_version": 2,
         "session_content_hash": session.content_hash,
         "topology_content_hash": topology.content_hash,
         "peer_contribution_counts": tuple(sorted(peer_contribution_counts.items())),
         "contribution_kind_counts": tuple(sorted(contribution_kind_counts.items())),
         "last_peer_id": last_peer_id,
-        "usage": usage.model_dump(mode="json"),
+        "exact_usage": dict(zip(RESOURCE_FIELDS, exact_usage, strict=True)),
         "completed": completed,
     }
     return sha256_hex(canonical_json_bytes(payload))

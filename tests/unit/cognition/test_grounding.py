@@ -206,11 +206,61 @@ def test_verified_assertion_requires_validator_identity_version_and_evidence() -
         )
 
 
+def test_profile_rejects_multiple_assertions_for_one_logical_capability() -> None:
+    verified = _assertion(CapabilityEvidenceStatus.VERIFIED)
+    unsupported = _assertion(CapabilityEvidenceStatus.UNSUPPORTED)
+
+    with pytest.raises(ValidationError, match="logical capability"):
+        CapabilityProfile.build(
+            profile_id="profile-a",
+            actor=_actor(),
+            diversity_fingerprint=_fingerprint(),
+            assertions=(unsupported, verified),
+            governing_policy_hash=POLICY,
+        )
+
+
+@pytest.mark.parametrize("construction", ("model-copy", "model-construct"))
+def test_assess_capability_revalidates_stale_verified_profile_instances(
+    construction: str,
+) -> None:
+    original = _profile(_assertion(CapabilityEvidenceStatus.UNKNOWN))
+    forged_assertion = original.assertions[0].model_copy(
+        update={
+            "status": CapabilityEvidenceStatus.VERIFIED,
+            "evidence_ids": ("evidence-forged",),
+            "validator_id": "validator-forged",
+            "validator_version": "v-forged",
+        }
+    )
+    if construction == "model-copy":
+        forged = original.model_copy(update={"assertions": (forged_assertion,)})
+    else:
+        values = original.model_dump(mode="python")
+        values["assertions"] = (forged_assertion,)
+        forged = CapabilityProfile.model_construct(**values)
+
+    with pytest.raises((ValidationError, ValueError), match=r"capability profile|content_hash"):
+        assess_capability(forged, _requirement())
+
+
+def test_assess_capability_revalidates_preconstructed_requirement() -> None:
+    malformed = _requirement().model_copy(update={"required_tools": ("z-tool", "a-tool")})
+
+    with pytest.raises((ValidationError, ValueError), match=r"requirement|required_tools"):
+        assess_capability(
+            _profile(_assertion(CapabilityEvidenceStatus.VERIFIED)),
+            malformed,
+        )
+
+
 def test_profile_rejects_unsorted_assertions_and_tampered_content_hash() -> None:
     later = _assertion(CapabilityEvidenceStatus.UNKNOWN).model_copy(
         update={"assertion_id": "z-assertion"}
     )
-    earlier = later.model_copy(update={"assertion_id": "a-assertion"})
+    earlier = later.model_copy(
+        update={"assertion_id": "a-assertion", "capability_id": "a-capability"}
+    )
     with pytest.raises(ValidationError, match="assertions must be sorted"):
         CapabilityProfile.build(
             profile_id="profile-a",

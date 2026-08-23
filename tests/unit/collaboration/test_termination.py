@@ -46,7 +46,7 @@ def _advance(
         artifact_refs=(artifact(),),
         parent_contribution_id=parent,
         tool_ids=("tool-a",),
-        remaining_budget=session.remaining_resources(state.usage),
+        remaining_budget=session.remaining_resources(state.usage_history),
     )
     contribution = PeerContribution.build(
         contribution_id=f"contribution-{sequence}",
@@ -190,7 +190,7 @@ def test_monopoly_terminates_before_accepting_a_second_contribution(
         artifact_refs=(artifact(),),
         parent_contribution_id="contribution-1",
         tool_ids=("tool-a",),
-        remaining_budget=session.remaining_resources(state.usage),
+        remaining_budget=session.remaining_resources(state.usage_history),
     )
     contribution = PeerContribution.build(
         contribution_id="contribution-2",
@@ -645,7 +645,7 @@ def test_direct_replay_rejects_single_peer_without_declared_edge(
         artifact_refs=(artifact(),),
         parent_contribution_id="contribution-1",
         tool_ids=("tool-a",),
-        remaining_budget=session.remaining_resources(state.usage),
+        remaining_budget=session.remaining_resources(state.usage_history),
     )
     contribution = PeerContribution.build(
         contribution_id="contribution-2",
