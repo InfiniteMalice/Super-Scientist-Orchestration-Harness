@@ -5,6 +5,7 @@ from super_scientist.domain.procedures.compiler import (
     validate_procedure,
 )
 from super_scientist.domain.procedures.models import (
+    MAX_PROCEDURE_REQUEST_BYTES,
     MAX_PROCEDURE_RESOURCE_VALUE,
     AcceptedSourceReceiptRef,
     ArtifactCatalogEntry,
@@ -40,6 +41,7 @@ from super_scientist.domain.procedures.models import (
 from super_scientist.domain.procedures.progress_binding import procedure_to_progress_plan
 
 __all__ = [
+    "MAX_PROCEDURE_REQUEST_BYTES",
     "MAX_PROCEDURE_RESOURCE_VALUE",
     "PROCEDURE_COMPILER_ID",
     "PROCEDURE_COMPILER_VERSION",

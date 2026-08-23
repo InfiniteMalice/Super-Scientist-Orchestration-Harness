@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterable, Mapping
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from super_scientist.domain.cognition.grounding import assess_capability
 from super_scientist.domain.cognition.models import (
@@ -14,6 +14,7 @@ from super_scientist.domain.cognition.models import (
 from super_scientist.domain.improvement.models import ResourceBudget
 from super_scientist.domain.primitives import canonical_json_bytes
 from super_scientist.domain.procedures.models import (
+    MAX_PROCEDURE_REQUEST_BYTES,
     AcceptedSourceReceiptRef,
     CatalogFactStatus,
     ExecutableProcedure,
@@ -115,6 +116,8 @@ def _grounded_assessment_is_valid(value: GroundedCapabilityAssessment) -> bool:
     receipt = value.profile_receipt
     return (
         value.content_hash == canonical_model_hash(value, exclude_fields={"content_hash"})
+        and value.profile.content_hash
+        == canonical_model_hash(value.profile, exclude_fields={"content_hash"})
         and _accepted_receipt_is_canonical(receipt)
         and receipt.source_kind is ProcedureEvidenceSourceKind.CAPABILITY_PROFILE
         and receipt.source_record_id == value.profile.profile_id
@@ -980,7 +983,23 @@ def validate_procedure(
     return _ordered(finding for check in _CHECKS for finding in check(request, procedure))
 
 
+def _strict_canonical_request(
+    request: ProcedureCompilationRequest,
+    request_bytes: bytes,
+) -> ProcedureCompilationRequest:
+    try:
+        parsed = ProcedureCompilationRequest.model_validate_json(request_bytes, strict=True)
+    except ValidationError:
+        raise ValueError("procedure compilation request failed canonical validation") from None
+    if parsed != request:
+        raise ValueError("procedure compilation request failed canonical validation")
+    return parsed
+
+
 def compile_method(request: ProcedureCompilationRequest) -> ProcedureCompilationResult:
+    request_bytes = canonical_json_bytes(request.model_dump(mode="json"))
+    if len(request_bytes) > MAX_PROCEDURE_REQUEST_BYTES:
+        raise ValueError("procedure compilation request exceeds canonical byte limit")
     procedure = compile_declared_stages(request)
     findings = validate_procedure(request, procedure)
     if any(finding.severity is ProcedureFindingSeverity.ERROR for finding in findings):
@@ -989,6 +1008,7 @@ def compile_method(request: ProcedureCompilationRequest) -> ProcedureCompilation
         status = ProcedureValidationStatus.INCONCLUSIVE
     else:
         status = ProcedureValidationStatus.VALID
+        request = _strict_canonical_request(request, request_bytes)
     report = ProcedureValidationReport(
         status=status,
         findings=findings,
@@ -998,7 +1018,7 @@ def compile_method(request: ProcedureCompilationRequest) -> ProcedureCompilation
         compiler_id=request.compiler_id,
         compiler_version=request.compiler_version,
         request_hash=canonical_model_hash(request),
-        request_json=canonical_json_bytes(request.model_dump(mode="json")).decode("utf-8"),
+        request_json=request_bytes.decode("utf-8"),
         procedure=procedure,
         report=report,
     )

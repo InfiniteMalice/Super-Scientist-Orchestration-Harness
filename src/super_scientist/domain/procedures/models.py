@@ -32,8 +32,8 @@ MAX_PROCEDURE_FINDINGS = 1_024
 MAX_IDENTIFIER_LENGTH = 200
 MAX_TEXT_LENGTH = 2_000
 MAX_PROCEDURE_RESOURCE_VALUE = 1_000_000_000
-# Covers the declared nested 64-item text/profile limits while bounding retained requests.
-MAX_PROCEDURE_CANONICAL_JSON_LENGTH = 64_000_000
+# Keeps accepted requests practical to retain and deterministically recompile.
+MAX_PROCEDURE_REQUEST_BYTES = 65_536
 
 
 def _strip_text(value: object) -> object:
@@ -657,6 +657,13 @@ class ProcedureCompilationRequest(_StrictFrozenModel):
             raise ValueError("catalog receipts must share one fixed source snapshot")
         return self
 
+    @model_validator(mode="after")
+    def require_bounded_canonical_request(self) -> Self:
+        request_bytes = canonical_json_bytes(self.model_dump(mode="json"))
+        if len(request_bytes) > MAX_PROCEDURE_REQUEST_BYTES:
+            raise ValueError("procedure compilation request exceeds canonical byte limit")
+        return self
+
 
 class _ExecutableProcedurePayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
@@ -761,19 +768,22 @@ class _ProcedureCompilationResultPayload(_StrictFrozenModel):
     request_json: str = Field(
         strict=True,
         min_length=2,
-        max_length=MAX_PROCEDURE_CANONICAL_JSON_LENGTH,
+        max_length=MAX_PROCEDURE_REQUEST_BYTES,
     )
     procedure: ExecutableProcedure
     report: ProcedureValidationReport
 
     @model_validator(mode="after")
     def require_procedure_identity_alignment(self) -> Self:
+        request_bytes = self.request_json.encode("utf-8")
+        if len(request_bytes) > MAX_PROCEDURE_REQUEST_BYTES:
+            raise ValueError("compilation result request exceeds canonical byte limit")
         try:
             request_payload = json.loads(self.request_json)
         except (TypeError, ValueError) as error:
             raise ValueError("compilation result must retain canonical request JSON") from error
         canonical_request = canonical_json_bytes(request_payload)
-        if self.request_json.encode("utf-8") != canonical_request:
+        if request_bytes != canonical_request:
             raise ValueError("compilation result must retain canonical request JSON")
         if self.request_hash != sha256_hex(canonical_request):
             raise ValueError("compilation result request hash must match the retained request")
@@ -948,6 +958,7 @@ class MethodDirectionOutcome(_MethodDirectionOutcomePayload):
 
 
 __all__ = [
+    "MAX_PROCEDURE_REQUEST_BYTES",
     "MAX_PROCEDURE_RESOURCE_VALUE",
     "AcceptedSourceReceiptRef",
     "ArtifactCatalogEntry",
