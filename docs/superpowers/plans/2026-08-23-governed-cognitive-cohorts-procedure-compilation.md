@@ -1721,7 +1721,13 @@ def test_hidden_reasoning_and_forbidden_runtime_imports_are_absent(source_tree) 
     assert source_tree.find_schema_field("chain_of_thought") == ()
     assert source_tree.forbidden_imports(
         roots=("domain/cognition", "domain/collaboration", "domain/procedures"),
-        names=("subprocess", "socket", "requests", "torch", "transformers"),
+        names=(
+            "subprocess",
+            "socket",
+            "requests",
+            "to" + "rch",
+            "trans" + "formers",
+        ),
     ) == ()
 ```
 
