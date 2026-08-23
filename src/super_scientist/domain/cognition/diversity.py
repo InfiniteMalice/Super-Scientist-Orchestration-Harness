@@ -26,10 +26,18 @@ def assess_diversity(
     profiles: tuple[CapabilityProfile, ...],
     error_correlations: tuple[ErrorCorrelationRecord, ...],
 ) -> DiversityAssessment:
-    cohort_actor_ids = tuple(sorted(member.actor_id for member in cohort.members))
-    profile_actor_ids = tuple(sorted(profile.actor_id for profile in profiles))
-    if profile_actor_ids != cohort_actor_ids:
-        raise ValueError("profiles must exactly match cohort membership")
+    cohort_profile_bindings = tuple(
+        sorted(
+            (member.actor_id, member.profile_id, member.profile_content_hash)
+            for member in cohort.members
+        )
+    )
+    profile_bindings = tuple(
+        sorted((profile.actor_id, profile.profile_id, profile.content_hash) for profile in profiles)
+    )
+    if profile_bindings != cohort_profile_bindings:
+        raise ValueError("profiles must exactly match cohort membership and profile revisions")
+    cohort_actor_ids = tuple(binding[0] for binding in cohort_profile_bindings)
     if any(profile.governing_policy_hash != cohort.governing_policy_hash for profile in profiles):
         raise ValueError("profiles and cohort must share governing policy")
     cohort_actor_set = set(cohort_actor_ids)
@@ -39,6 +47,11 @@ def assess_diversity(
         for record in error_correlations
     ):
         raise ValueError("error correlations must reference only cohort members")
+    if any(
+        record.governing_policy_hash != cohort.governing_policy_hash
+        for record in error_correlations
+    ):
+        raise ValueError("error correlations and cohort must share governing policy")
     correlations = tuple(sorted(error_correlations, key=lambda record: record.correlation_id))
     fingerprints = tuple(
         profile.diversity_fingerprint

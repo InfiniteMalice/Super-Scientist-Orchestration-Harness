@@ -336,6 +336,53 @@ class CapabilityAssessment(_StrictFrozenModel):
     ) -> tuple[str, ...]:
         return _require_canonical_unique(values, field_name=info.field_name)
 
+    @model_validator(mode="after")
+    def require_consistent_semantics(self) -> Self:
+        matched = set(self.matched_assertion_ids)
+        verified = set(self.verified_assertion_ids)
+        if not verified.issubset(matched):
+            raise ValueError(
+                "capability assessment verified assertion IDs must be matched assertion IDs"
+            )
+        if verified and self.evidence_status is not CapabilityEvidenceStatus.VERIFIED:
+            raise ValueError(
+                "capability assessment verified assertions require VERIFIED evidence status"
+            )
+        if not matched and self.evidence_status is not CapabilityEvidenceStatus.UNKNOWN:
+            raise ValueError(
+                "capability assessment without matches must retain UNKNOWN evidence status"
+            )
+        if self.disposition is CapabilityDisposition.SATISFIED:
+            if (
+                self.evidence_status is not CapabilityEvidenceStatus.VERIFIED
+                or not verified
+                or self.missing_dimensions
+                or self.failed_dimensions
+            ):
+                raise ValueError(
+                    "capability assessment SATISFIED disposition requires verified evidence "
+                    "without missing or failed dimensions"
+                )
+        elif self.disposition is CapabilityDisposition.UNSATISFIED:
+            if not self.failed_dimensions or self.evidence_status in {
+                CapabilityEvidenceStatus.SELF_REPORTED,
+                CapabilityEvidenceStatus.UNKNOWN,
+            } or (
+                self.evidence_status is CapabilityEvidenceStatus.VERIFIED and not verified
+            ):
+                raise ValueError(
+                    "capability assessment UNSATISFIED disposition requires a grounded failure"
+                )
+        elif not self.missing_dimensions and not self.failed_dimensions:
+            raise ValueError(
+                "capability assessment UNKNOWN disposition requires a missing or failed dimension"
+            )
+        elif self.evidence_status is CapabilityEvidenceStatus.UNSUPPORTED:
+            raise ValueError(
+                "capability assessment UNSUPPORTED evidence cannot have UNKNOWN disposition"
+            )
+        return self
+
     @classmethod
     def from_matches(
         cls,
@@ -422,7 +469,7 @@ class CapabilityAssessment(_StrictFrozenModel):
         )
 
 
-class CohortRequest(_StrictFrozenModel):
+class _CohortRequestPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     request_id: BoundedIdentifier
     task_id: BoundedIdentifier
@@ -480,6 +527,22 @@ class CohortRequest(_StrictFrozenModel):
         return self
 
 
+class CohortRequest(_CohortRequestPayload):
+    content_hash: Sha256Hex
+
+    @classmethod
+    def build(cls, **values: Any) -> CohortRequest:
+        payload = _CohortRequestPayload(**values)
+        digest = sha256_hex(canonical_json_bytes(payload.model_dump(mode="json")))
+        return cls(**payload.model_dump(mode="python"), content_hash=digest)
+
+    @model_validator(mode="after")
+    def require_canonical_content_hash(self) -> Self:
+        if self.content_hash != _content_hash(self):
+            raise ValueError("content_hash must canonically address the cohort request")
+        return self
+
+
 class CohortMember(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     actor_id: BoundedIdentifier
@@ -505,6 +568,7 @@ class _CohortPlanPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     cohort_plan_id: BoundedIdentifier
     request_id: BoundedIdentifier
+    request_content_hash: Sha256Hex
     task_id: BoundedIdentifier
     members: tuple[CohortMember, ...] = Field(max_length=MAX_COGNITION_ITEMS)
     excluded_actor_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_COGNITION_ITEMS)
@@ -552,6 +616,119 @@ class _CohortPlanPayload(_StrictFrozenModel):
         if len(set(actors)) != len(actors):
             raise ValueError("an actor may appear in only one ranked tie set")
         return tie_sets
+
+    @model_validator(mode="after")
+    def require_cross_field_integrity(self) -> Self:
+        member_actor_ids = tuple(member.actor_id for member in self.members)
+        if len(set(member_actor_ids)) != len(member_actor_ids):
+            raise ValueError("cohort plan members must have unique actor IDs")
+        expected_members = tuple(
+            sorted(
+                self.members,
+                key=lambda item: (
+                    -item.required_satisfied,
+                    -item.preferred_satisfied,
+                    item.actor_id,
+                ),
+            )
+        )
+        if self.members != expected_members:
+            raise ValueError("cohort plan members must use canonical score and actor order")
+        if len({member.profile_id for member in self.members}) != len(self.members):
+            raise ValueError("cohort plan member profile IDs must be unique")
+        if len({member.profile_content_hash for member in self.members}) != len(self.members):
+            raise ValueError("cohort plan member profile content hashes must be unique")
+
+        coverage_ids = tuple(item.requirement.requirement_id for item in self.coverage)
+        _require_canonical_unique(coverage_ids, field_name="cohort plan coverage")
+        selected = set(member_actor_ids)
+        excluded = set(self.excluded_actor_ids)
+        if selected & excluded:
+            raise ValueError("cohort plan selected and excluded actors must be disjoint")
+        known_actors = selected | excluded
+        if set(self.unresolved_candidate_actor_ids) & selected:
+            raise ValueError("unresolved candidate actor cannot be a selected cohort member")
+
+        tied_actors = {actor_id for tie_set in self.tie_sets for actor_id in tie_set}
+        if not tied_actors.issubset(known_actors):
+            raise ValueError("cohort plan tie sets must reference declared cohort actors")
+
+        coverage_by_id = {
+            item.requirement.requirement_id: item.requirement for item in self.coverage
+        }
+        for member in self.members:
+            assessment_ids = tuple(
+                assessment.requirement.requirement_id for assessment in member.assessments
+            )
+            if len(set(assessment_ids)) != len(assessment_ids):
+                raise ValueError("cohort member assessments must have unique requirement IDs")
+            if assessment_ids[: len(coverage_ids)] != coverage_ids:
+                raise ValueError(
+                    "cohort member assessments must begin with canonical required coverage"
+                )
+            if assessment_ids[len(coverage_ids) :] != tuple(
+                sorted(assessment_ids[len(coverage_ids) :])
+            ):
+                raise ValueError("cohort member preferred assessments must be canonically sorted")
+            for assessment in member.assessments:
+                if (
+                    assessment.profile_id != member.profile_id
+                    or assessment.actor_id != member.actor_id
+                ):
+                    raise ValueError(
+                        "cohort member profile identity must match every retained assessment"
+                    )
+                requirement_id = assessment.requirement.requirement_id
+                if (
+                    requirement_id in coverage_by_id
+                    and assessment.requirement != coverage_by_id[requirement_id]
+                ):
+                    raise ValueError(
+                        "cohort member required assessment must match retained coverage"
+                    )
+            required_count = sum(
+                assessment.disposition is CapabilityDisposition.SATISFIED
+                for assessment in member.assessments[: len(coverage_ids)]
+            )
+            preferred_count = sum(
+                assessment.disposition is CapabilityDisposition.SATISFIED
+                for assessment in member.assessments[len(coverage_ids) :]
+            )
+            if (
+                member.required_satisfied != required_count
+                or member.preferred_satisfied != preferred_count
+            ):
+                raise ValueError("cohort member assessment counts must match dispositions")
+
+        for coverage in self.coverage:
+            if not set(coverage.satisfying_actor_ids).issubset(selected):
+                raise ValueError("cohort coverage must reference selected cohort actors")
+            expected_satisfying = tuple(
+                member.actor_id
+                for member in self.members
+                if any(
+                    assessment.requirement.requirement_id
+                    == coverage.requirement.requirement_id
+                    and assessment.disposition is CapabilityDisposition.SATISFIED
+                    for assessment in member.assessments
+                )
+            )
+            if coverage.satisfying_actor_ids != tuple(sorted(expected_satisfying)):
+                raise ValueError("cohort coverage must exactly match member assessments")
+
+        expected_unresolved = tuple(
+            coverage.requirement.requirement_id
+            for coverage in self.coverage
+            if not coverage.satisfying_actor_ids
+        )
+        if self.unresolved_requirement_ids != expected_unresolved:
+            raise ValueError("unresolved requirements must exactly match uncovered requirements")
+        member_hashes = {member.profile_content_hash for member in self.members}
+        if not member_hashes.issubset(self.profile_content_hashes):
+            raise ValueError("cohort member profile content hash must be retained by the plan")
+        if len(self.profile_content_hashes) != len(known_actors):
+            raise ValueError("profile content hashes must exactly cover resolved candidate actors")
+        return self
 
 
 class CohortPlan(_CohortPlanPayload):
@@ -675,6 +852,17 @@ class _DiversityAssessmentPayload(_StrictFrozenModel):
         ids = tuple(record.correlation_id for record in records)
         _require_canonical_unique(ids, field_name="error_correlations")
         return records
+
+    @model_validator(mode="after")
+    def require_correlation_policy_alignment(self) -> Self:
+        if any(
+            record.governing_policy_hash != self.governing_policy_hash
+            for record in self.error_correlations
+        ):
+            raise ValueError(
+                "error correlations and diversity assessment must share governing policy"
+            )
+        return self
 
 
 class DiversityAssessment(_DiversityAssessmentPayload):

@@ -4,12 +4,13 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus, EvidenceLink
 from super_scientist.domain.cognition import (
+    CapabilityAssessment,
     CapabilityProfile,
     CohortRequest,
     DiversityFingerprint,
 )
-from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus, EvidenceLink
 from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord, EvidenceSpan
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.kernel.transactions.models import (
@@ -176,7 +177,7 @@ def test_cognition_records_forbid_extras_and_coercive_schema_versions() -> None:
         diversity_fingerprint=fingerprint,
         governing_policy_hash="f" * 64,
     )
-    request = CohortRequest(
+    request = CohortRequest.build(
         request_id="request-strict",
         task_id="task-strict",
         required_capabilities=(),
@@ -198,7 +199,7 @@ def test_cognition_records_forbid_extras_and_coercive_schema_versions() -> None:
 
 
 def test_cognition_json_parser_accepts_bounded_tuple_collections() -> None:
-    request = CohortRequest(
+    request = CohortRequest.build(
         request_id="request-json",
         task_id="task-json",
         required_capabilities=(),
@@ -216,3 +217,32 @@ def test_cognition_json_parser_accepts_bounded_tuple_collections() -> None:
     )
 
     assert parsed == request
+
+
+def test_strict_capability_assessment_parser_rejects_self_report_as_satisfied() -> None:
+    payload = {
+        "schema_version": 1,
+        "profile_id": "profile-self-report",
+        "actor_id": "model-actor",
+        "requirement": {
+            "schema_version": 1,
+            "requirement_id": "requirement-self-report",
+            "capability_id": "analysis",
+            "task_family_id": "research",
+            "evidence_snapshot_hash": "a" * 64,
+            "required_tools": [],
+            "required_modalities": [],
+            "required_schema_ids": [],
+            "required_execution_constraints": [],
+            "disqualifying_failure_categories": [],
+        },
+        "matched_assertion_ids": ["assertion-self-report"],
+        "verified_assertion_ids": [],
+        "disposition": "SATISFIED",
+        "evidence_status": "SELF_REPORTED",
+        "missing_dimensions": [],
+        "failed_dimensions": [],
+    }
+
+    with pytest.raises(ValidationError, match="capability assessment"):
+        CapabilityAssessment.model_validate_json(json.dumps(payload), strict=True)

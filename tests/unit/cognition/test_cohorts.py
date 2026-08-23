@@ -10,11 +10,13 @@ from super_scientist.domain.cognition import (
     CapabilityEvidenceStatus,
     CapabilityProfile,
     CapabilityRequirement,
+    CohortPlan,
     CohortRequest,
     DiversityFingerprint,
     build_cohort,
 )
 from super_scientist.domain.identity import ActorIdentity, ActorKind
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 SNAPSHOT = "a" * 64
@@ -92,7 +94,7 @@ def _request(
     prohibited: tuple[tuple[str, str], ...] = (),
     required: tuple[CapabilityRequirement, ...] | None = None,
 ) -> CohortRequest:
-    return CohortRequest(
+    return CohortRequest.build(
         request_id="cohort-request-a",
         task_id="task-a",
         required_capabilities=(_requirement(),) if required is None else required,
@@ -171,3 +173,122 @@ def test_cohort_plan_content_hash_changes_with_selection() -> None:
     right = build_cohort(_request(), (_profile("peer-b"),))
 
     assert left.content_hash != right.content_hash
+
+
+def test_cohort_request_hash_changes_with_material_constraints() -> None:
+    left = _request(max_members=1)
+    right = _request(max_members=2)
+
+    assert hasattr(left, "content_hash")
+    assert left.content_hash != right.content_hash
+
+
+def test_cohort_plan_binds_exact_request_hash() -> None:
+    request = _request()
+    plan = build_cohort(request, (_profile("peer-a"),))
+
+    assert plan.request_content_hash == request.content_hash
+
+
+def test_cohort_request_parser_rejects_constraints_changed_under_same_hash() -> None:
+    request = _request(max_members=1)
+    assert hasattr(request, "content_hash")
+    payload = request.model_dump(mode="python") | {"max_members": 2}
+
+    with pytest.raises(ValidationError, match="content_hash"):
+        CohortRequest.model_validate(payload)
+
+
+def _two_member_plan() -> CohortPlan:
+    request = _request(
+        min_members=2,
+        max_members=2,
+        required=(_requirement("requirement-a"), _requirement("requirement-b")),
+    )
+    return build_cohort(request, (_profile("peer-b"), _profile("peer-a")))
+
+
+def _rehash_plan_payload(payload: dict[str, object]) -> dict[str, object]:
+    unhashed = {key: value for key, value in payload.items() if key != "content_hash"}
+    payload["content_hash"] = sha256_hex(canonical_json_bytes(unhashed))
+    return payload
+
+
+@pytest.mark.parametrize("mutation", ("reverse", "duplicate"))
+def test_cohort_plan_parser_rejects_noncanonical_or_duplicate_members(mutation: str) -> None:
+    plan = _two_member_plan()
+    payload = plan.model_dump(mode="python")
+    members = list(payload["members"])
+    payload["members"] = (
+        tuple(reversed(members)) if mutation == "reverse" else (members[0], members[0])
+    )
+
+    with pytest.raises(ValidationError, match="members"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
+@pytest.mark.parametrize("mutation", ("reverse", "duplicate"))
+def test_cohort_plan_parser_rejects_noncanonical_or_duplicate_coverage(mutation: str) -> None:
+    plan = _two_member_plan()
+    payload = plan.model_dump(mode="python")
+    coverage = list(payload["coverage"])
+    payload["coverage"] = (
+        tuple(reversed(coverage)) if mutation == "reverse" else (coverage[0], coverage[0])
+    )
+
+    with pytest.raises(ValidationError, match="coverage"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
+def test_cohort_plan_parser_rejects_selected_actor_as_excluded() -> None:
+    payload = _two_member_plan().model_dump(mode="python")
+    payload["excluded_actor_ids"] = ("peer-a",)
+
+    with pytest.raises(ValidationError, match="selected and excluded"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
+def test_cohort_plan_parser_rejects_member_assessment_count_drift() -> None:
+    payload = _two_member_plan().model_dump(mode="python")
+    members = list(payload["members"])
+    assert isinstance(members[0], dict)
+    assert isinstance(members[1], dict)
+    members[0]["required_satisfied"] = 0
+    members[1]["required_satisfied"] = 0
+    payload["members"] = tuple(members)
+
+    with pytest.raises(ValidationError, match="assessment counts"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
+@pytest.mark.parametrize("location", ("coverage", "tie-set"))
+def test_cohort_plan_parser_rejects_outsider_actor_references(location: str) -> None:
+    payload = _two_member_plan().model_dump(mode="python")
+    if location == "coverage":
+        coverage = list(payload["coverage"])
+        assert isinstance(coverage[0], dict)
+        coverage[0]["satisfying_actor_ids"] = ("peer-z",)
+        payload["coverage"] = tuple(coverage)
+    else:
+        payload["tie_sets"] = (("peer-a", "peer-z"),)
+
+    with pytest.raises(ValidationError, match="cohort actors"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
+@pytest.mark.parametrize("mutation", ("profile-hash", "assessment-identity"))
+def test_cohort_plan_parser_rejects_member_profile_binding_drift(mutation: str) -> None:
+    payload = _two_member_plan().model_dump(mode="python")
+    members = list(payload["members"])
+    assert isinstance(members[0], dict)
+    if mutation == "profile-hash":
+        members[0]["profile_content_hash"] = "0" * 64
+    else:
+        assessments = list(members[0]["assessments"])
+        assert isinstance(assessments[0], dict)
+        assessments[0]["actor_id"] = "peer-z"
+        members[0]["assessments"] = tuple(assessments)
+    payload["members"] = tuple(members)
+
+    with pytest.raises(ValidationError, match="member profile"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))

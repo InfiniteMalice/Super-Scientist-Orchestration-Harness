@@ -136,6 +136,7 @@ def build_cohort(
     return CohortPlan.build(
         cohort_plan_id=f"{request.request_id}:plan",
         request_id=request.request_id,
+        request_content_hash=request.content_hash,
         task_id=request.task_id,
         members=members,
         excluded_actor_ids=excluded_actor_ids,

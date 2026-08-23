@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -17,6 +18,7 @@ from super_scientist.domain.cognition import (
     build_cohort,
 )
 from super_scientist.domain.identity import ActorIdentity, ActorKind, are_independent
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 POLICY = "f" * 64
@@ -65,7 +67,7 @@ def _profile(
 
 
 def _cohort(*profiles: CapabilityProfile):
-    request = CohortRequest(
+    request = CohortRequest.build(
         request_id="request-a",
         task_id="task-a",
         required_capabilities=(),
@@ -176,3 +178,66 @@ def test_diversity_rejects_profiles_outside_exact_cohort_membership() -> None:
 
     with pytest.raises(ValueError, match="exactly match cohort membership"):
         assess_diversity(_cohort(left), (left, outsider), ())
+
+
+@pytest.mark.parametrize("drift_kind", ("profile-id", "content"))
+def test_diversity_rejects_profile_revision_drift_for_same_actor(drift_kind: str) -> None:
+    retained = _profile("peer-a", prompt_strategy="direct")
+    drifted_fingerprint = retained.diversity_fingerprint.model_copy(
+        update={"prompt_strategy": "drifted"}
+    )
+    drifted = CapabilityProfile.build(
+        profile_id=("profile-drifted" if drift_kind == "profile-id" else retained.profile_id),
+        actor=retained.actor,
+        diversity_fingerprint=(
+            retained.diversity_fingerprint
+            if drift_kind == "profile-id"
+            else drifted_fingerprint
+        ),
+        governing_policy_hash=POLICY,
+    )
+
+    with pytest.raises(ValueError, match="profile revisions"):
+        assess_diversity(_cohort(retained), (drifted,), ())
+
+
+def _correlation(*, policy_hash: str = POLICY) -> ErrorCorrelationRecord:
+    return ErrorCorrelationRecord(
+        correlation_id="correlation-a",
+        left_actor_id="peer-a",
+        right_actor_id="peer-b",
+        evaluation_set_id="evaluation-a",
+        sample_count=10,
+        method="pearson",
+        status=ErrorCorrelationStatus.KNOWN,
+        value=0.5,
+        governing_policy_hash=policy_hash,
+    )
+
+
+def test_diversity_function_rejects_correlation_from_another_policy() -> None:
+    left = _profile("peer-a", prompt_strategy="direct")
+    right = _profile("peer-b", prompt_strategy="direct")
+
+    with pytest.raises(ValueError, match="governing policy"):
+        assess_diversity(_cohort(left, right), (left, right), (_correlation(policy_hash="e" * 64),))
+
+
+def test_diversity_direct_parser_rejects_correlation_policy_mismatch() -> None:
+    left = _profile("peer-a", prompt_strategy="direct")
+    right = _profile("peer-b", prompt_strategy="direct")
+    valid = assess_diversity(
+        _cohort(left, right),
+        (left, right),
+        (_correlation(),),
+    )
+    payload = valid.model_dump(mode="json")
+    correlations = payload["error_correlations"]
+    assert isinstance(correlations, list)
+    assert isinstance(correlations[0], dict)
+    correlations[0]["governing_policy_hash"] = "e" * 64
+    unhashed = {key: value for key, value in payload.items() if key != "content_hash"}
+    payload["content_hash"] = sha256_hex(canonical_json_bytes(unhashed))
+
+    with pytest.raises(ValidationError, match="governing policy"):
+        DiversityAssessment.model_validate_json(json.dumps(payload), strict=True)

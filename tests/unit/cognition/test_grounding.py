@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from super_scientist.domain.cognition import (
     CapabilityAssertion,
+    CapabilityAssessment,
     CapabilityDisposition,
     CapabilityEvidenceStatus,
     CapabilityProfile,
@@ -224,3 +225,49 @@ def test_profile_rejects_unsorted_assertions_and_tampered_content_hash() -> None
         CapabilityProfile.model_validate(
             valid.model_dump(mode="python") | {"content_hash": "0" * 64}
         )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    (
+        {
+            "disposition": CapabilityDisposition.SATISFIED,
+            "evidence_status": CapabilityEvidenceStatus.SELF_REPORTED,
+            "verified_assertion_ids": (),
+            "missing_dimensions": (),
+            "failed_dimensions": (),
+        },
+        {"verified_assertion_ids": ("assertion-outside-matches",)},
+        {
+            "disposition": CapabilityDisposition.SATISFIED,
+            "missing_dimensions": ("required_tools",),
+        },
+        {
+            "disposition": CapabilityDisposition.UNKNOWN,
+            "missing_dimensions": (),
+            "failed_dimensions": (),
+        },
+        {
+            "disposition": CapabilityDisposition.UNSATISFIED,
+            "verified_assertion_ids": (),
+            "failed_dimensions": ("evidence_snapshot_hash",),
+        },
+    ),
+    ids=(
+        "self-report-satisfied",
+        "verified-id-outside-matches",
+        "satisfied-with-missing-dimension",
+        "unknown-without-diagnostic",
+        "unsatisfied-without-grounding",
+    ),
+)
+def test_direct_capability_assessment_rejects_contradictory_semantics(
+    updates: dict[str, object],
+) -> None:
+    valid = assess_capability(
+        _profile(_assertion(CapabilityEvidenceStatus.VERIFIED)),
+        _requirement(),
+    )
+
+    with pytest.raises(ValidationError, match="capability assessment"):
+        CapabilityAssessment.model_validate(valid.model_dump(mode="python") | updates)
