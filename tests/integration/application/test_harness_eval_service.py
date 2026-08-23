@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,7 @@ from super_scientist.application.harness_eval.service import (
     decide_campaign,
 )
 from super_scientist.application.transactions.coordinator import TransactionCoordinator
+from super_scientist.application.workspace_integrity import verify_workspace
 from super_scientist.config.loader import policy_hash
 from super_scientist.config.models import (
     AdaptationRequirement,
@@ -112,6 +114,84 @@ class Runtime:
     policy: PolicySnapshot
     proposer: ActorIdentity
     authority: ActorIdentity
+    artifacts: FileArtifactStore
+
+    def record_complete_campaign(self) -> None:
+        campaign = _campaign(self, extra_attempt=True)
+        assert self.service.create_campaign(_create_proposal(self, campaign)).accepted
+        confound = HarnessConfound(
+            confound_id="confound-integrity",
+            campaign_id=campaign.campaign_id,
+            code=HarnessConfoundCode.ATTEMPTS_MISMATCH,
+            description="candidate received an additional attempt",
+            affected_variant=HarnessVariant.EVOLVED_HARNESS,
+            resolved=False,
+            independent_analysis_id=None,
+            recorded_at=NOW,
+            governing_policy_hash=self.policy.policy_hash,
+        )
+        assert self.service.record_confound(
+            RecordHarnessConfound(
+                proposal_id="integrity-confound",
+                idempotency_key="integrity-confound-key",
+                proposer=self.authority,
+                approval=_approval(self),
+                confound=confound,
+            )
+        ).accepted
+        iterations, metrics = _record_complete_evidence(self, campaign, transfer=Decimal("0.4"))
+        report = _report(
+            self,
+            campaign,
+            confounds=(confound,),
+            iterations=iterations,
+            metrics=metrics,
+        )
+        assert self.service.decide_campaign(
+            DecideHarnessCampaign(
+                proposal_id="integrity-decision",
+                idempotency_key="integrity-decision-key",
+                proposer=self.authority,
+                approval=_approval(self),
+                report=report,
+                decision=decide_campaign(report),
+            )
+        ).accepted
+
+    def tamper_append_only_row(
+        self,
+        *,
+        table: str,
+        record_id: str,
+        values: dict[str, object],
+    ) -> None:
+        identifier_fields = {"harness_observations": "observation_id"}
+        identifier_field = identifier_fields[table]
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql(f"DROP TRIGGER {table}_no_update")
+            row = connection.execute(
+                text(
+                    f"SELECT record_json FROM {table} "
+                    f"WHERE {identifier_field} = :record_id"
+                ),
+                {"record_id": record_id},
+            ).mappings().one()
+            record = json.loads(str(row["record_json"]))
+            record.update(values)
+            connection.execute(
+                text(
+                    f"UPDATE {table} SET record_json = :record_json "
+                    f"WHERE {identifier_field} = :record_id"
+                ),
+                {
+                    "record_json": json.dumps(record, sort_keys=True, separators=(",", ":")),
+                    "record_id": record_id,
+                },
+            )
+            connection.exec_driver_sql(
+                f"CREATE TRIGGER {table}_no_update BEFORE UPDATE ON {table} "
+                "BEGIN SELECT RAISE(ABORT, 'append-only table'); END"
+            )
 
 
 @pytest.fixture
@@ -126,11 +206,12 @@ def runtime(tmp_path: Path) -> Iterator[Runtime]:
 
     with uow_factory() as uow:
         uow.repositories().policies.add_and_activate(policy, NOW)
+    artifacts = FileArtifactStore(tmp_path / "artifacts")
     coordinator = TransactionCoordinator(
         uow_factory,
         policy,
         _Clock(),
-        FileArtifactStore(tmp_path / "artifacts"),
+        artifacts,
     )
     validator = _InProcessResultValidator()
     try:
@@ -142,10 +223,24 @@ def runtime(tmp_path: Path) -> Iterator[Runtime]:
             policy=policy,
             proposer=_model_actor("candidate-producer"),
             authority=_human_actor("campaign-authority"),
+            artifacts=artifacts,
         )
     finally:
         validator.close()
         engine.dispose()
+
+
+def test_harness_observation_tampering_invalidates_workspace(runtime: Runtime) -> None:
+    runtime.record_complete_campaign()
+    runtime.tamper_append_only_row(
+        table="harness_observations",
+        record_id="observation-evidence-harness_discovery_tasks-evolved_harness",
+        values={"candidate_output_hash": "0" * 64},
+    )
+    with runtime.uow_factory() as unit_of_work:
+        assert (
+            verify_workspace(unit_of_work.repositories(), runtime.artifacts).valid is False
+        )
 
 
 @pytest.mark.integration

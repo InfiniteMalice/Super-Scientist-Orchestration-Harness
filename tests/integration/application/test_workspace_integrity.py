@@ -11,6 +11,10 @@ from super_scientist.application.kernel_service import KernelService
 from super_scientist.application.workspace_integrity import verify_workspace
 from super_scientist.config.loader import policy_hash
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
+from super_scientist.domain.behavioral_rules.models import (
+    RuleIncident,
+    RuleIncidentKind,
+)
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus, EvidenceLink
 from super_scientist.domain.evidence.models import (
     EvidenceRecord,
@@ -35,6 +39,7 @@ from super_scientist.providers.storage.database import (
     create_database_engine,
     upgrade_database,
 )
+from super_scientist.providers.storage.domain_records import RuleIncidentRepository
 from super_scientist.providers.storage.repositories import StorageIntegrityError
 from super_scientist.providers.storage.schema import (
     audit_events,
@@ -106,6 +111,25 @@ class IntegrityFixture:
             ),
         )
 
+    def insert_rule_incident_without_policy(self) -> None:
+        incident = RuleIncident(
+            incident_id="rule-incident-without-policy",
+            incident_kind=RuleIncidentKind.VERIFIED_FAILURE,
+            summary="A retained rule incident requires governed workspace state.",
+            evidence_ids=("evidence-rule-incident",),
+            observed_at=NOW,
+            reported_by=self.actor,
+            recorded_at=NOW,
+            governing_policy_hash=self.policy.policy_hash,
+        )
+        with self.engine.begin() as connection:
+            RuleIncidentRepository(connection).add(
+                incident.incident_id,
+                incident,
+                incident.recorded_at,
+            )
+            connection.execute(delete(governance_state))
+
 
 @pytest.fixture
 def integrity(tmp_path: Path) -> Iterator[IntegrityFixture]:
@@ -137,6 +161,15 @@ def integrity(tmp_path: Path) -> Iterator[IntegrityFixture]:
 def _verify(integrity: IntegrityFixture) -> object:
     with integrity.uow() as unit_of_work:
         return verify_workspace(unit_of_work.repositories(), integrity.artifacts)
+
+
+def test_rule_only_state_counts_as_durable(integrity: IntegrityFixture) -> None:
+    integrity.insert_rule_incident_without_policy()
+
+    result = _verify(integrity)
+
+    assert result.valid is False
+    assert "active registered policy" in (result.reason or "")
 
 
 def test_workspace_verifier_recomputes_composite_quality_policy_hash(

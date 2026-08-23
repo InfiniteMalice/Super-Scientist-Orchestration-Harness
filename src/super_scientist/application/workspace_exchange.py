@@ -36,7 +36,6 @@ from super_scientist.providers.storage.database import (
     create_database_engine,
     upgrade_database,
 )
-from super_scientist.providers.storage.domain_records import HarnessCampaignHeadRepository
 from super_scientist.providers.storage.repositories import RepositorySet, StoredTransaction
 
 type UnitOfWorkFactory = Callable[[], DatabaseUnitOfWork]
@@ -673,7 +672,7 @@ def _projection_expectations(
     )
     values.extend(
         ("harness_campaign_head", item[0], item[1:])
-        for item in HarnessCampaignHeadRepository(connection).list_all()
+        for item in repositories.harness_integrity_snapshot().heads
     )
     return tuple(
         sorted(

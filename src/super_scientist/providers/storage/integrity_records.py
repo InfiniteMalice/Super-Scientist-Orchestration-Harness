@@ -40,9 +40,17 @@ from super_scientist.domain.progress.models import (
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 
 if TYPE_CHECKING:
+    from super_scientist.domain.harness_eval.models import HarnessDecisionStatus
     from super_scientist.providers.storage.domain_records import (
         CounterexampleRecord,
         ExecutableModelSpecRecord,
+        HarnessBudgetRecord,
+        HarnessCampaignRecord,
+        HarnessConfoundRecord,
+        HarnessDecisionRecord,
+        HarnessMetricRecord,
+        HarnessObservationRecord,
+        HarnessPartitionManifestRecord,
         HypothesisAdmissionDecisionRecord,
         HypothesisAdmissionStatus,
         HypothesisRevisionRecord,
@@ -108,6 +116,20 @@ class RuleIntegritySnapshot:
     decisions: tuple[RuleConsolidationDecision, ...]
     regressions: tuple[RuleRegressionCase, ...]
     heads: tuple[tuple[str, str, str, RuleStatus], ...]
+
+
+@dataclass(frozen=True)
+class HarnessIntegritySnapshot:
+    """Fixed read-only harness view used only for transaction replay."""
+
+    campaigns: tuple[HarnessCampaignRecord, ...]
+    partitions: tuple[HarnessPartitionManifestRecord, ...]
+    budgets: tuple[HarnessBudgetRecord, ...]
+    observations: tuple[HarnessObservationRecord, ...]
+    metrics: tuple[HarnessMetricRecord, ...]
+    confounds: tuple[HarnessConfoundRecord, ...]
+    decisions: tuple[HarnessDecisionRecord, ...]
+    heads: tuple[tuple[str, str, HarnessDecisionStatus], ...]
 
 
 @dataclass(frozen=True)

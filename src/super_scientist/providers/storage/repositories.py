@@ -25,6 +25,7 @@ from super_scientist.kernel.audit.models import AuditEvent
 from super_scientist.kernel.transactions.models import Proposal, TransactionDecision
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
+    HarnessIntegritySnapshot,
     HypothesisIntegritySnapshot,
     ProgressIntegritySnapshot,
     RepresentationIntegritySnapshot,
@@ -33,6 +34,11 @@ from super_scientist.providers.storage.integrity_records import (
 )
 from super_scientist.providers.storage.schema import (
     audit_events,
+    behavior_rule_link_versions,
+    behavioral_rule_heads,
+    behavioral_rule_version_incidents,
+    behavioral_rule_version_supersessions,
+    behavioral_rule_versions,
     claim_heads,
     claim_versions,
     completion_decisions,
@@ -53,6 +59,15 @@ from super_scientist.providers.storage.schema import (
     executable_model_specs,
     governance_policies,
     governance_state,
+    handbook_verification_records,
+    harness_budgets,
+    harness_campaign_heads,
+    harness_campaigns,
+    harness_confounds,
+    harness_decisions,
+    harness_metrics,
+    harness_observations,
+    harness_partition_manifests,
     hypothesis_admission_decisions,
     hypothesis_heads,
     hypothesis_revisions,
@@ -68,6 +83,15 @@ from super_scientist.providers.storage.schema import (
     research_run_events,
     research_run_heads,
     research_runs,
+    reviewer_assessment_incidents,
+    reviewer_assessment_rule_versions,
+    reviewer_assessments,
+    rule_consolidation_assessments,
+    rule_consolidation_decisions,
+    rule_consolidation_incidents,
+    rule_incidents,
+    rule_regression_case_incidents,
+    rule_regression_cases,
     run_budgets,
     run_checkpoints,
     self_improvement_measurements,
@@ -1035,6 +1059,29 @@ class RepositorySet:
             heads=BehavioralRuleHeadRepository(self._connection).list_all(),
         )
 
+    def harness_integrity_snapshot(self) -> HarnessIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            HarnessBudgetRepository,
+            HarnessCampaignHeadRepository,
+            HarnessCampaignRepository,
+            HarnessConfoundRepository,
+            HarnessDecisionRepository,
+            HarnessMetricRepository,
+            HarnessObservationRepository,
+            HarnessPartitionManifestRepository,
+        )
+
+        return HarnessIntegritySnapshot(
+            campaigns=HarnessCampaignRepository(self._connection).list_all(),
+            partitions=HarnessPartitionManifestRepository(self._connection).list_all(),
+            budgets=HarnessBudgetRepository(self._connection).list_all(),
+            observations=HarnessObservationRepository(self._connection).list_all(),
+            metrics=HarnessMetricRepository(self._connection).list_all(),
+            confounds=HarnessConfoundRepository(self._connection).list_all(),
+            decisions=HarnessDecisionRepository(self._connection).list_all(),
+            heads=HarnessCampaignHeadRepository(self._connection).list_all(),
+        )
+
     def representation_integrity_snapshot(self) -> RepresentationIntegritySnapshot:
         from super_scientist.providers.storage.domain_records import (
             PrimitiveEvaluationRepository,
@@ -1112,6 +1159,19 @@ class RepositorySet:
             evidence_trail_assessments,
             report_sentence_bindings,
             evidence_trail_heads,
+            rule_incidents,
+            behavioral_rule_versions,
+            reviewer_assessments,
+            rule_consolidation_decisions,
+            rule_regression_cases,
+            behavioral_rule_version_incidents,
+            behavioral_rule_version_supersessions,
+            reviewer_assessment_rule_versions,
+            reviewer_assessment_incidents,
+            rule_consolidation_assessments,
+            rule_consolidation_incidents,
+            rule_regression_case_incidents,
+            behavioral_rule_heads,
             primitive_versions,
             primitive_evaluations,
             primitive_heads,
@@ -1124,6 +1184,16 @@ class RepositorySet:
             hypothesis_revisions,
             hypothesis_admission_decisions,
             hypothesis_heads,
+            behavior_rule_link_versions,
+            handbook_verification_records,
+            harness_campaigns,
+            harness_partition_manifests,
+            harness_budgets,
+            harness_observations,
+            harness_metrics,
+            harness_confounds,
+            harness_decisions,
+            harness_campaign_heads,
         )
         return any(
             self._connection.execute(select(table).limit(1)).first() is not None for table in tables
