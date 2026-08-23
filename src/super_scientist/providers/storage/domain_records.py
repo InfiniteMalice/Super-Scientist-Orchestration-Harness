@@ -61,10 +61,18 @@ from super_scientist.domain.progress.models import (
 from super_scientist.domain.representations.models import TransformationKind
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 from super_scientist.providers.storage.append_only import (
-    AppendOnlyRecordRepository,
-    OrderedReferenceBinding,
-    ReferencedAppendOnlyRecordRepository,
-    StrictFrozenStorageRecord,
+    AppendOnlyRecordRepository as _AppendOnlyRecordRepository,
+)
+from super_scientist.providers.storage.append_only import (
+    OrderedReferenceBinding as _OrderedReferenceBinding,
+)
+from super_scientist.providers.storage.append_only import (
+    ReferencedAppendOnlyRecordRepository as _ReferencedAppendOnlyRecordRepository,
+)
+from super_scientist.providers.storage.append_only import (
+    StrictFrozenStorageRecord as _StrictFrozenStorageRecord,
+)
+from super_scientist.providers.storage.append_only import (
     _require_integrity,
     _stored_integer,
     _stored_relationship_value,
@@ -236,7 +244,7 @@ class AdmissionDecisionOutcome(StrEnum):
     ABSTAIN = "ABSTAIN"
 
 
-class MetricValueRecord(StrictFrozenStorageRecord):
+class MetricValueRecord(_StrictFrozenStorageRecord):
     metric_id: StableIdentifier
     value: Decimal
 
@@ -248,7 +256,7 @@ class MetricValueRecord(StrictFrozenStorageRecord):
         return value
 
 
-class BehaviorRuleLinkVersionRecord(StrictFrozenStorageRecord):
+class BehaviorRuleLinkVersionRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     link_version_id: StableIdentifier
     behavior_id: StableIdentifier
@@ -260,7 +268,7 @@ class BehaviorRuleLinkVersionRecord(StrictFrozenStorageRecord):
     governing_policy_hash: Sha256Hex
 
 
-class HandbookVerificationRecord(StrictFrozenStorageRecord):
+class HandbookVerificationRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     verification_id: StableIdentifier
     manifest_hash: Sha256Hex
@@ -279,7 +287,7 @@ class HandbookVerificationRecord(StrictFrozenStorageRecord):
         return _require_unique_references(value, "source_hashes")
 
 
-class HarnessCampaignRecord(StrictFrozenStorageRecord):
+class HarnessCampaignRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     campaign_id: StableIdentifier
     version: int = Field(ge=1)
@@ -311,7 +319,7 @@ class HarnessCampaignRecord(StrictFrozenStorageRecord):
         return value
 
 
-class HarnessPartitionManifestRecord(StrictFrozenStorageRecord):
+class HarnessPartitionManifestRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     partition_manifest_id: StableIdentifier
     campaign_id: StableIdentifier
@@ -329,7 +337,7 @@ class HarnessPartitionManifestRecord(StrictFrozenStorageRecord):
         return _require_unique_references(value, "task_ids")
 
 
-class HarnessBudgetRecord(StrictFrozenStorageRecord):
+class HarnessBudgetRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     budget_id: StableIdentifier
     campaign_id: StableIdentifier
@@ -363,7 +371,7 @@ class HarnessBudgetRecord(StrictFrozenStorageRecord):
         return value
 
 
-class HarnessObservationRecord(StrictFrozenStorageRecord):
+class HarnessObservationRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     observation_id: StableIdentifier
     campaign_id: StableIdentifier
@@ -382,7 +390,7 @@ class HarnessObservationRecord(StrictFrozenStorageRecord):
     governing_policy_hash: Sha256Hex
 
 
-class HarnessMetricRecord(StrictFrozenStorageRecord):
+class HarnessMetricRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     result_id: StableIdentifier
     campaign_id: StableIdentifier
@@ -406,7 +414,7 @@ class HarnessMetricRecord(StrictFrozenStorageRecord):
         return value
 
 
-class HarnessConfoundRecord(StrictFrozenStorageRecord):
+class HarnessConfoundRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     confound_id: StableIdentifier
     campaign_id: StableIdentifier
@@ -419,7 +427,7 @@ class HarnessConfoundRecord(StrictFrozenStorageRecord):
     governing_policy_hash: Sha256Hex
 
 
-class HarnessDecisionRecord(StrictFrozenStorageRecord):
+class HarnessDecisionRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     decision_id: StableIdentifier
     campaign_id: StableIdentifier
@@ -448,7 +456,7 @@ def _require_unique_references(value: tuple[str, ...], field_name: str) -> tuple
     return value
 
 
-class PrimitiveVersionRecord(StrictFrozenStorageRecord):
+class PrimitiveVersionRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     primitive_version_id: StableIdentifier
     primitive_id: StableIdentifier
@@ -496,7 +504,7 @@ class PrimitiveVersionRecord(StrictFrozenStorageRecord):
         return self
 
 
-class PrimitiveEvaluationRecord(StrictFrozenStorageRecord):
+class PrimitiveEvaluationRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     primitive_evaluation_id: StableIdentifier
     primitive_version_id: StableIdentifier
@@ -523,7 +531,7 @@ class PrimitiveEvaluationRecord(StrictFrozenStorageRecord):
         )
 
 
-class HypothesisVersionRecord(StrictFrozenStorageRecord):
+class HypothesisVersionRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     hypothesis_version_id: StableIdentifier
     hypothesis_id: StableIdentifier
@@ -554,7 +562,7 @@ class HypothesisVersionRecord(StrictFrozenStorageRecord):
         )
 
 
-class ExecutableModelSpecRecord(StrictFrozenStorageRecord):
+class ExecutableModelSpecRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     model_spec_id: StableIdentifier
     hypothesis_version_id: StableIdentifier
@@ -594,7 +602,7 @@ class ExecutableModelSpecRecord(StrictFrozenStorageRecord):
         return self
 
 
-class VerificationMechanismSpecRecord(StrictFrozenStorageRecord):
+class VerificationMechanismSpecRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     mechanism_spec_id: StableIdentifier
     hypothesis_version_id: StableIdentifier
@@ -609,7 +617,7 @@ class VerificationMechanismSpecRecord(StrictFrozenStorageRecord):
     governing_policy_hash: Sha256Hex
 
 
-class SimulationResultRecord(StrictFrozenStorageRecord):
+class SimulationResultRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     simulation_result_id: StableIdentifier
     hypothesis_version_id: StableIdentifier
@@ -631,7 +639,7 @@ class SimulationResultRecord(StrictFrozenStorageRecord):
         return value
 
 
-class VerificationResultRecord(StrictFrozenStorageRecord):
+class VerificationResultRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     verification_result_id: StableIdentifier
     hypothesis_version_id: StableIdentifier
@@ -679,7 +687,7 @@ class VerificationResultRecord(StrictFrozenStorageRecord):
         return self
 
 
-class CounterexampleRecord(StrictFrozenStorageRecord):
+class CounterexampleRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     counterexample_id: StableIdentifier
     hypothesis_version_id: StableIdentifier
@@ -724,7 +732,7 @@ class CounterexampleRecord(StrictFrozenStorageRecord):
         return self
 
 
-class HypothesisRevisionRecord(StrictFrozenStorageRecord):
+class HypothesisRevisionRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     revision_id: StableIdentifier
     hypothesis_id: StableIdentifier
@@ -769,7 +777,7 @@ class HypothesisRevisionRecord(StrictFrozenStorageRecord):
         return self
 
 
-class HypothesisAdmissionDecisionRecord(StrictFrozenStorageRecord):
+class HypothesisAdmissionDecisionRecord(_StrictFrozenStorageRecord):
     schema_version: Literal[1] = 1
     admission_decision_id: StableIdentifier
     hypothesis_version_id: StableIdentifier
@@ -894,7 +902,7 @@ __all__ = [
 ]
 
 
-class BehaviorRuleLinkVersionRepository(AppendOnlyRecordRepository[BehaviorRuleLinkVersionRecord]):
+class BehaviorRuleLinkVersionRepository(_AppendOnlyRecordRepository[BehaviorRuleLinkVersionRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -910,7 +918,7 @@ class BehaviorRuleLinkVersionRepository(AppendOnlyRecordRepository[BehaviorRuleL
         )
 
 
-class HandbookVerificationRepository(AppendOnlyRecordRepository[HandbookVerificationRecord]):
+class HandbookVerificationRepository(_AppendOnlyRecordRepository[HandbookVerificationRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -924,7 +932,7 @@ class HandbookVerificationRepository(AppendOnlyRecordRepository[HandbookVerifica
         )
 
 
-class HarnessCampaignRepository(AppendOnlyRecordRepository[HarnessCampaignRecord]):
+class HarnessCampaignRepository(_AppendOnlyRecordRepository[HarnessCampaignRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -937,7 +945,7 @@ class HarnessCampaignRepository(AppendOnlyRecordRepository[HarnessCampaignRecord
 
 
 class HarnessPartitionManifestRepository(
-    AppendOnlyRecordRepository[HarnessPartitionManifestRecord]
+    _AppendOnlyRecordRepository[HarnessPartitionManifestRecord]
 ):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
@@ -955,7 +963,7 @@ class HarnessPartitionManifestRepository(
         )
 
 
-class HarnessBudgetRepository(AppendOnlyRecordRepository[HarnessBudgetRecord]):
+class HarnessBudgetRepository(_AppendOnlyRecordRepository[HarnessBudgetRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -969,7 +977,7 @@ class HarnessBudgetRepository(AppendOnlyRecordRepository[HarnessBudgetRecord]):
         )
 
 
-class HarnessObservationRepository(AppendOnlyRecordRepository[HarnessObservationRecord]):
+class HarnessObservationRepository(_AppendOnlyRecordRepository[HarnessObservationRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -986,7 +994,7 @@ class HarnessObservationRepository(AppendOnlyRecordRepository[HarnessObservation
         )
 
 
-class HarnessMetricRepository(AppendOnlyRecordRepository[HarnessMetricRecord]):
+class HarnessMetricRepository(_AppendOnlyRecordRepository[HarnessMetricRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1005,7 +1013,7 @@ class HarnessMetricRepository(AppendOnlyRecordRepository[HarnessMetricRecord]):
         )
 
 
-class HarnessConfoundRepository(AppendOnlyRecordRepository[HarnessConfoundRecord]):
+class HarnessConfoundRepository(_AppendOnlyRecordRepository[HarnessConfoundRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1019,7 +1027,7 @@ class HarnessConfoundRepository(AppendOnlyRecordRepository[HarnessConfoundRecord
         )
 
 
-class HarnessDecisionRepository(AppendOnlyRecordRepository[HarnessDecisionRecord]):
+class HarnessDecisionRepository(_AppendOnlyRecordRepository[HarnessDecisionRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1033,7 +1041,7 @@ class HarnessDecisionRepository(AppendOnlyRecordRepository[HarnessDecisionRecord
         )
 
 
-class RuleIncidentRepository(AppendOnlyRecordRepository[RuleIncident]):
+class RuleIncidentRepository(_AppendOnlyRecordRepository[RuleIncident]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1043,7 +1051,7 @@ class RuleIncidentRepository(AppendOnlyRecordRepository[RuleIncident]):
         )
 
 
-class BehavioralRuleVersionRepository(ReferencedAppendOnlyRecordRepository[BehavioralRuleVersion]):
+class BehavioralRuleVersionRepository(_ReferencedAppendOnlyRecordRepository[BehavioralRuleVersion]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1056,13 +1064,13 @@ class BehavioralRuleVersionRepository(ReferencedAppendOnlyRecordRepository[Behav
                 "status": "status",
             },
             reference_bindings=(
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=behavioral_rule_version_incidents,
                     owner_column="rule_version_id",
                     record_field="source_incident_ids",
                     reference_column="incident_id",
                 ),
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=behavioral_rule_version_supersessions,
                     owner_column="rule_version_id",
                     record_field="supersedes_rule_version_ids",
@@ -1072,7 +1080,7 @@ class BehavioralRuleVersionRepository(ReferencedAppendOnlyRecordRepository[Behav
         )
 
 
-class ReviewerAssessmentRepository(ReferencedAppendOnlyRecordRepository[ReviewerAssessment]):
+class ReviewerAssessmentRepository(_ReferencedAppendOnlyRecordRepository[ReviewerAssessment]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1080,13 +1088,13 @@ class ReviewerAssessmentRepository(ReferencedAppendOnlyRecordRepository[Reviewer
             model_type=ReviewerAssessment,
             identifier_field="assessment_id",
             reference_bindings=(
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=reviewer_assessment_rule_versions,
                     owner_column="assessment_id",
                     record_field="rule_version_ids",
                     reference_column="rule_version_id",
                 ),
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=reviewer_assessment_incidents,
                     owner_column="assessment_id",
                     record_field="incident_ids",
@@ -1097,7 +1105,7 @@ class ReviewerAssessmentRepository(ReferencedAppendOnlyRecordRepository[Reviewer
 
 
 class RuleConsolidationDecisionRepository(
-    ReferencedAppendOnlyRecordRepository[RuleConsolidationDecision]
+    _ReferencedAppendOnlyRecordRepository[RuleConsolidationDecision]
 ):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
@@ -1110,13 +1118,13 @@ class RuleConsolidationDecisionRepository(
             },
             nullable_relationship_fields={"resulting_rule_version_id"},
             reference_bindings=(
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=rule_consolidation_assessments,
                     owner_column="consolidation_decision_id",
                     record_field="consumed_assessment_ids",
                     reference_column="assessment_id",
                 ),
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=rule_consolidation_incidents,
                     owner_column="consolidation_decision_id",
                     record_field="consumed_incident_ids",
@@ -1126,7 +1134,7 @@ class RuleConsolidationDecisionRepository(
         )
 
 
-class RuleRegressionCaseRepository(ReferencedAppendOnlyRecordRepository[RuleRegressionCase]):
+class RuleRegressionCaseRepository(_ReferencedAppendOnlyRecordRepository[RuleRegressionCase]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1135,7 +1143,7 @@ class RuleRegressionCaseRepository(ReferencedAppendOnlyRecordRepository[RuleRegr
             identifier_field="regression_case_id",
             relationship_fields={"rule_version_id": "rule_version_id"},
             reference_bindings=(
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=rule_regression_case_incidents,
                     owner_column="regression_case_id",
                     record_field="incident_ids",
@@ -1145,7 +1153,7 @@ class RuleRegressionCaseRepository(ReferencedAppendOnlyRecordRepository[RuleRegr
         )
 
 
-class PrimitiveVersionRepository(ReferencedAppendOnlyRecordRepository[PrimitiveVersionRecord]):
+class PrimitiveVersionRepository(_ReferencedAppendOnlyRecordRepository[PrimitiveVersionRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1158,19 +1166,19 @@ class PrimitiveVersionRepository(ReferencedAppendOnlyRecordRepository[PrimitiveV
                 "status": "status",
             },
             reference_bindings=(
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=primitive_version_predecessors,
                     owner_column="primitive_version_id",
                     record_field="predecessor_primitive_version_ids",
                     reference_column="predecessor_primitive_version_id",
                 ),
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=primitive_version_dependencies,
                     owner_column="primitive_version_id",
                     record_field="dependency_primitive_version_ids",
                     reference_column="dependency_primitive_version_id",
                 ),
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=primitive_version_measurements,
                     owner_column="primitive_version_id",
                     record_field="measurement_ids",
@@ -1181,7 +1189,7 @@ class PrimitiveVersionRepository(ReferencedAppendOnlyRecordRepository[PrimitiveV
 
 
 class PrimitiveEvaluationRepository(
-    ReferencedAppendOnlyRecordRepository[PrimitiveEvaluationRecord]
+    _ReferencedAppendOnlyRecordRepository[PrimitiveEvaluationRecord]
 ):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
@@ -1194,13 +1202,13 @@ class PrimitiveEvaluationRepository(
                 "frame": "frame",
             },
             reference_bindings=(
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=primitive_evaluation_verification_results,
                     owner_column="primitive_evaluation_id",
                     record_field="verification_result_ids",
                     reference_column="verification_result_id",
                 ),
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=primitive_evaluation_evidence,
                     owner_column="primitive_evaluation_id",
                     record_field="evidence_ids",
@@ -1210,7 +1218,7 @@ class PrimitiveEvaluationRepository(
         )
 
 
-class HypothesisVersionRepository(ReferencedAppendOnlyRecordRepository[HypothesisVersionRecord]):
+class HypothesisVersionRepository(_ReferencedAppendOnlyRecordRepository[HypothesisVersionRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1224,13 +1232,13 @@ class HypothesisVersionRepository(ReferencedAppendOnlyRecordRepository[Hypothesi
             },
             relationship_types={"version": int},
             reference_bindings=(
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=hypothesis_version_primitives,
                     owner_column="hypothesis_version_id",
                     record_field="primitive_version_ids",
                     reference_column="primitive_version_id",
                 ),
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=hypothesis_version_evidence,
                     owner_column="hypothesis_version_id",
                     record_field="evidence_ids",
@@ -1240,7 +1248,7 @@ class HypothesisVersionRepository(ReferencedAppendOnlyRecordRepository[Hypothesi
         )
 
 
-class ExecutableModelSpecRepository(AppendOnlyRecordRepository[ExecutableModelSpecRecord]):
+class ExecutableModelSpecRepository(_AppendOnlyRecordRepository[ExecutableModelSpecRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1267,7 +1275,7 @@ class ExecutableModelSpecRepository(AppendOnlyRecordRepository[ExecutableModelSp
 
 
 class VerificationMechanismSpecRepository(
-    AppendOnlyRecordRepository[VerificationMechanismSpecRecord]
+    _AppendOnlyRecordRepository[VerificationMechanismSpecRecord]
 ):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
@@ -1283,7 +1291,7 @@ class VerificationMechanismSpecRepository(
         )
 
 
-class SimulationResultRepository(AppendOnlyRecordRepository[SimulationResultRecord]):
+class SimulationResultRepository(_AppendOnlyRecordRepository[SimulationResultRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1299,7 +1307,7 @@ class SimulationResultRepository(AppendOnlyRecordRepository[SimulationResultReco
         )
 
 
-class VerificationResultRepository(ReferencedAppendOnlyRecordRepository[VerificationResultRecord]):
+class VerificationResultRepository(_ReferencedAppendOnlyRecordRepository[VerificationResultRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1317,7 +1325,7 @@ class VerificationResultRepository(ReferencedAppendOnlyRecordRepository[Verifica
             nullable_relationship_fields={"model_spec_id", "model_execution_mode"},
             hypothesis_scope_field="hypothesis_version_id",
             reference_bindings=(
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=verification_result_simulations,
                     owner_column="verification_result_id",
                     record_field="simulation_result_ids",
@@ -1333,7 +1341,7 @@ class VerificationResultRepository(ReferencedAppendOnlyRecordRepository[Verifica
         )
 
 
-class CounterexampleRecordRepository(ReferencedAppendOnlyRecordRepository[CounterexampleRecord]):
+class CounterexampleRecordRepository(_ReferencedAppendOnlyRecordRepository[CounterexampleRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1348,7 +1356,7 @@ class CounterexampleRecordRepository(ReferencedAppendOnlyRecordRepository[Counte
             nullable_relationship_fields={"model_spec_id", "model_execution_mode"},
             hypothesis_scope_field="hypothesis_version_id",
             reference_bindings=(
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=counterexample_simulations,
                     owner_column="counterexample_id",
                     record_field="simulation_result_ids",
@@ -1360,7 +1368,7 @@ class CounterexampleRecordRepository(ReferencedAppendOnlyRecordRepository[Counte
                         "model_execution_mode",
                     ),
                 ),
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=counterexample_verification_results,
                     owner_column="counterexample_id",
                     record_field="verification_result_ids",
@@ -1372,7 +1380,7 @@ class CounterexampleRecordRepository(ReferencedAppendOnlyRecordRepository[Counte
                         "model_execution_mode",
                     ),
                 ),
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=counterexample_evidence,
                     owner_column="counterexample_id",
                     record_field="evidence_ids",
@@ -1382,7 +1390,7 @@ class CounterexampleRecordRepository(ReferencedAppendOnlyRecordRepository[Counte
         )
 
 
-class HypothesisRevisionRepository(ReferencedAppendOnlyRecordRepository[HypothesisRevisionRecord]):
+class HypothesisRevisionRepository(_ReferencedAppendOnlyRecordRepository[HypothesisRevisionRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1398,14 +1406,14 @@ class HypothesisRevisionRepository(ReferencedAppendOnlyRecordRepository[Hypothes
             },
             relationship_types={"prior_version": int, "resulting_version": int},
             reference_bindings=(
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=hypothesis_revision_verification_results,
                     owner_column="revision_id",
                     record_field="triggering_verification_result_ids",
                     reference_column="verification_result_id",
                     scope_columns=("hypothesis_id",),
                 ),
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=hypothesis_revision_counterexamples,
                     owner_column="revision_id",
                     record_field="considered_counterexample_ids",
@@ -1417,7 +1425,7 @@ class HypothesisRevisionRepository(ReferencedAppendOnlyRecordRepository[Hypothes
 
 
 class HypothesisAdmissionDecisionRepository(
-    ReferencedAppendOnlyRecordRepository[HypothesisAdmissionDecisionRecord]
+    _ReferencedAppendOnlyRecordRepository[HypothesisAdmissionDecisionRecord]
 ):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
@@ -1434,28 +1442,28 @@ class HypothesisAdmissionDecisionRepository(
             relationship_types={"version": int},
             pre_parent_reference_fields={"revision_ids"},
             reference_bindings=(
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=hypothesis_admission_models,
                     owner_column="admission_decision_id",
                     record_field="model_spec_ids",
                     reference_column="model_spec_id",
                     scope_columns=("hypothesis_id",),
                 ),
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=hypothesis_admission_verification_results,
                     owner_column="admission_decision_id",
                     record_field="verification_result_ids",
                     reference_column="verification_result_id",
                     scope_columns=("hypothesis_id",),
                 ),
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=hypothesis_admission_counterexamples,
                     owner_column="admission_decision_id",
                     record_field="counterexample_ids",
                     reference_column="counterexample_id",
                     scope_columns=("hypothesis_id",),
                 ),
-                OrderedReferenceBinding(
+                _OrderedReferenceBinding(
                     table=hypothesis_admission_revisions,
                     owner_column="admission_decision_id",
                     record_field="revision_ids",
@@ -1509,7 +1517,7 @@ class HypothesisAdmissionDecisionRepository(
         )
 
 
-class ResearchRunRepository(AppendOnlyRecordRepository[ResearchRun]):
+class ResearchRunRepository(_AppendOnlyRecordRepository[ResearchRun]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1519,7 +1527,7 @@ class ResearchRunRepository(AppendOnlyRecordRepository[ResearchRun]):
         )
 
 
-class ResearchRunEventRepository(AppendOnlyRecordRepository[ResearchRunEvent]):
+class ResearchRunEventRepository(_AppendOnlyRecordRepository[ResearchRunEvent]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1530,7 +1538,7 @@ class ResearchRunEventRepository(AppendOnlyRecordRepository[ResearchRunEvent]):
         )
 
 
-class ConfigurationVersionRepository(AppendOnlyRecordRepository[ConfigurationVersion]):
+class ConfigurationVersionRepository(_AppendOnlyRecordRepository[ConfigurationVersion]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1541,7 +1549,7 @@ class ConfigurationVersionRepository(AppendOnlyRecordRepository[ConfigurationVer
 
 
 class SelfImprovementMeasurementRepository(
-    AppendOnlyRecordRepository[SelfImprovementMeasurementRecord]
+    _AppendOnlyRecordRepository[SelfImprovementMeasurementRecord]
 ):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
@@ -1556,7 +1564,7 @@ class SelfImprovementMeasurementRepository(
         )
 
 
-class EvaluatorAuditRepository(AppendOnlyRecordRepository[EvaluatorAuditRecord]):
+class EvaluatorAuditRepository(_AppendOnlyRecordRepository[EvaluatorAuditRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1566,7 +1574,7 @@ class EvaluatorAuditRepository(AppendOnlyRecordRepository[EvaluatorAuditRecord])
         )
 
 
-class EvaluatorVersionRepository(AppendOnlyRecordRepository[EvaluatorVersion]):
+class EvaluatorVersionRepository(_AppendOnlyRecordRepository[EvaluatorVersion]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1576,7 +1584,7 @@ class EvaluatorVersionRepository(AppendOnlyRecordRepository[EvaluatorVersion]):
         )
 
 
-class EvaluatorSuccessionRepository(AppendOnlyRecordRepository[EvaluatorSuccessionDecision]):
+class EvaluatorSuccessionRepository(_AppendOnlyRecordRepository[EvaluatorSuccessionDecision]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1591,7 +1599,7 @@ class EvaluatorSuccessionRepository(AppendOnlyRecordRepository[EvaluatorSuccessi
         )
 
 
-class EvaluatorCollapseRepository(AppendOnlyRecordRepository[EvaluatorCollapseRecord]):
+class EvaluatorCollapseRepository(_AppendOnlyRecordRepository[EvaluatorCollapseRecord]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1602,7 +1610,7 @@ class EvaluatorCollapseRepository(AppendOnlyRecordRepository[EvaluatorCollapseRe
         )
 
 
-class ProgressPlanRepository(AppendOnlyRecordRepository[ProgressPlan]):
+class ProgressPlanRepository(_AppendOnlyRecordRepository[ProgressPlan]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1616,7 +1624,7 @@ class ProgressPlanRepository(AppendOnlyRecordRepository[ProgressPlan]):
         return self._list_by_relationship("run_id", run_id)
 
 
-class ProgressSubtaskRepository(AppendOnlyRecordRepository[ProgressSubtask]):
+class ProgressSubtaskRepository(_AppendOnlyRecordRepository[ProgressSubtask]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1630,7 +1638,7 @@ class ProgressSubtaskRepository(AppendOnlyRecordRepository[ProgressSubtask]):
         return self._get_many(subtask_ids)
 
 
-class ProgressEventRepository(AppendOnlyRecordRepository[ProgressValidationEvent]):
+class ProgressEventRepository(_AppendOnlyRecordRepository[ProgressValidationEvent]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1648,7 +1656,7 @@ class ProgressEventRepository(AppendOnlyRecordRepository[ProgressValidationEvent
         return self._list_by_relationship("plan_version_id", plan_version_id)
 
 
-class RunBudgetRepository(AppendOnlyRecordRepository[BudgetAllocation]):
+class RunBudgetRepository(_AppendOnlyRecordRepository[BudgetAllocation]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1665,7 +1673,7 @@ class RunBudgetRepository(AppendOnlyRecordRepository[BudgetAllocation]):
         return self._list_by_relationship("plan_version_id", plan_version_id)
 
 
-class RunCheckpointRepository(AppendOnlyRecordRepository[RunCheckpoint]):
+class RunCheckpointRepository(_AppendOnlyRecordRepository[RunCheckpoint]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1679,7 +1687,7 @@ class RunCheckpointRepository(AppendOnlyRecordRepository[RunCheckpoint]):
         )
 
 
-class CompletionDecisionRepository(AppendOnlyRecordRepository[CompletionDecision]):
+class CompletionDecisionRepository(_AppendOnlyRecordRepository[CompletionDecision]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1693,7 +1701,7 @@ class CompletionDecisionRepository(AppendOnlyRecordRepository[CompletionDecision
         )
 
 
-class EvidenceTrailVersionRepository(AppendOnlyRecordRepository[EvidenceTrailVersion]):
+class EvidenceTrailVersionRepository(_AppendOnlyRecordRepository[EvidenceTrailVersion]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1709,7 +1717,7 @@ class EvidenceTrailVersionRepository(AppendOnlyRecordRepository[EvidenceTrailVer
         )
 
 
-class EvidenceTrailNodeRepository(AppendOnlyRecordRepository[EvidenceTrailNode]):
+class EvidenceTrailNodeRepository(_AppendOnlyRecordRepository[EvidenceTrailNode]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1723,7 +1731,7 @@ class EvidenceTrailNodeRepository(AppendOnlyRecordRepository[EvidenceTrailNode])
         )
 
 
-class EvidenceTrailRelationRepository(AppendOnlyRecordRepository[EvidenceTrailRelation]):
+class EvidenceTrailRelationRepository(_AppendOnlyRecordRepository[EvidenceTrailRelation]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1738,7 +1746,7 @@ class EvidenceTrailRelationRepository(AppendOnlyRecordRepository[EvidenceTrailRe
         )
 
 
-class EvidenceTrailCheckRepository(AppendOnlyRecordRepository[TrailCheckResult]):
+class EvidenceTrailCheckRepository(_AppendOnlyRecordRepository[TrailCheckResult]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1749,7 +1757,7 @@ class EvidenceTrailCheckRepository(AppendOnlyRecordRepository[TrailCheckResult])
         )
 
 
-class EvidenceTrailAssessmentRepository(AppendOnlyRecordRepository[TrailAssessment]):
+class EvidenceTrailAssessmentRepository(_AppendOnlyRecordRepository[TrailAssessment]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -1760,7 +1768,7 @@ class EvidenceTrailAssessmentRepository(AppendOnlyRecordRepository[TrailAssessme
         )
 
 
-class ReportSentenceBindingRepository(AppendOnlyRecordRepository[ReportSentenceBinding]):
+class ReportSentenceBindingRepository(_AppendOnlyRecordRepository[ReportSentenceBinding]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
