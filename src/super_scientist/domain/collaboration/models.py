@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
-import unicodedata
 from collections import Counter
 from datetime import datetime
 from decimal import Decimal
@@ -48,24 +46,6 @@ MAX_ARTIFACT_PATH_LENGTH = 1_000
 MAX_MEDIA_TYPE_LENGTH = 255
 MAX_ARTIFACT_SIZE_BYTES = 1_000_000_000_000
 MAX_RESOURCE_SCALAR = 1_000_000_000_000
-MAX_CANDIDATE_DEPTH = 12
-MAX_CANDIDATE_NODES = 512
-MAX_CANDIDATE_MAPPING_KEYS = 64
-MAX_CANDIDATE_COLLECTION_ITEMS = 128
-MAX_CANDIDATE_KEY_LENGTH = 200
-MAX_CANDIDATE_STRING_LENGTH = 4_000
-MAX_CANDIDATE_INTEGER_ABS = 10**18
-MAX_CANDIDATE_FLOAT_ABS = 10**100
-FORBIDDEN_CANDIDATE_KEYS = frozenset(
-    {
-        "chainofthought",
-        "scratchpad",
-        "providerpayload",
-        "secret",
-        "protectedanswer",
-        "command",
-    }
-)
 RESOURCE_FIELDS = (
     "cost_usd",
     "compute_units",
@@ -253,6 +233,31 @@ def _canonical_unique(values: tuple[str, ...], field_name: str) -> tuple[str, ..
     if values != tuple(sorted(values)):
         raise ValueError(f"{field_name} must use canonical order")
     return values
+
+
+class PublicCandidateFinding(StrEnum):
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    INCONCLUSIVE = "inconclusive"
+
+
+class _PublicCandidatePayload(_StrictFrozenModel):
+    """Closed public surface: no free-form or executable candidate payloads."""
+
+    finding: PublicCandidateFinding
+    evidence_ids: tuple[BoundedIdentifier, ...] = Field(
+        default=(), max_length=MAX_COLLABORATION_ITEMS
+    )
+
+    @field_validator("evidence_ids")
+    @classmethod
+    def require_canonical_evidence_ids(
+        cls, values: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        canonical = _canonical_unique(values, "evidence_ids")
+        if any(not evidence_id.startswith("evidence-") for evidence_id in canonical):
+            raise ValueError("public candidate evidence IDs must use the evidence- namespace")
+        return canonical
 
 
 def _canonical_edges(
@@ -691,73 +696,28 @@ def _reject_candidate_content(message: str) -> NoReturn:
 
 def _canonical_candidate_json(value: object) -> object:
     if not isinstance(value, str) or len(value) > MAX_CANDIDATE_CONTENT_LENGTH:
-        _reject_candidate_content("candidate_content must be a bounded canonical JSON object")
+        _reject_candidate_content("candidate_content must be a closed public candidate object")
     try:
-        parsed = json.loads(
-            value,
-            parse_constant=_reject_json_constant,
-        )
+        parsed = json.loads(value, parse_constant=_reject_json_constant)
+        if not isinstance(parsed, dict):
+            _reject_candidate_content("candidate_content must be a closed public candidate object")
+        candidate = _PublicCandidatePayload.model_validate_json(value, strict=True)
+        canonical = canonical_json_bytes(
+            candidate.model_dump(mode="json", exclude_defaults=True)
+        ).decode("utf-8")
     except (
         json.JSONDecodeError,
         MemoryError,
         OverflowError,
         RecursionError,
+        PydanticValidationError,
         ValueError,
     ):
-        _reject_candidate_content("candidate_content must be a bounded canonical JSON object")
-    if not isinstance(parsed, dict):
-        _reject_candidate_content("candidate_content must be a bounded canonical JSON object")
-
-    node_count = 0
-    stack: list[tuple[object, int]] = [(parsed, 1)]
-    while stack:
-        item, depth = stack.pop()
-        node_count += 1
-        if node_count > MAX_CANDIDATE_NODES or depth > MAX_CANDIDATE_DEPTH:
-            _reject_candidate_content("candidate_content exceeds bounded depth or node limits")
-        if isinstance(item, dict):
-            if len(item) > MAX_CANDIDATE_MAPPING_KEYS:
-                _reject_candidate_content("candidate_content exceeds bounded mapping size")
-            for key, nested in item.items():
-                if (
-                    not key
-                    or key != key.strip()
-                    or len(key) > MAX_CANDIDATE_KEY_LENGTH
-                ):
-                    _reject_candidate_content("candidate_content contains an invalid bounded key")
-                normalized_key = "".join(
-                    character.casefold()
-                    for character in unicodedata.normalize("NFKC", key)
-                    if character.isalnum()
-                )
-                if normalized_key in FORBIDDEN_CANDIDATE_KEYS:
-                    _reject_candidate_content(
-                        "candidate_content contains forbidden public candidate key"
-                    )
-                stack.append((nested, depth + 1))
-        elif isinstance(item, list):
-            if len(item) > MAX_CANDIDATE_COLLECTION_ITEMS:
-                _reject_candidate_content("candidate_content exceeds bounded collection size")
-            stack.extend((nested, depth + 1) for nested in item)
-        elif isinstance(item, str):
-            if len(item) > MAX_CANDIDATE_STRING_LENGTH:
-                _reject_candidate_content("candidate_content contains an oversized string")
-        elif isinstance(item, bool) or item is None:
-            continue
-        elif isinstance(item, int):
-            if abs(item) > MAX_CANDIDATE_INTEGER_ABS:
-                _reject_candidate_content("candidate_content contains an oversized integer")
-        elif isinstance(item, float):
-            if not math.isfinite(item) or abs(item) > MAX_CANDIDATE_FLOAT_ABS:
-                _reject_candidate_content("candidate_content contains an invalid finite number")
-        else:
-            _reject_candidate_content("candidate_content contains an unsupported public value")
-    try:
-        canonical = canonical_json_bytes(parsed).decode("utf-8")
-    except (MemoryError, OverflowError, RecursionError, TypeError, ValueError):
-        _reject_candidate_content("candidate_content must be a bounded canonical JSON object")
+        _reject_candidate_content("candidate_content must be a closed public candidate object")
     if canonical != value:
-        _reject_candidate_content("candidate_content must be a canonical JSON object")
+        _reject_candidate_content(
+            "candidate_content must be a canonical closed public candidate object"
+        )
     return value
 
 

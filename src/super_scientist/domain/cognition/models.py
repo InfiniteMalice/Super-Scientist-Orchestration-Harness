@@ -644,6 +644,16 @@ class CapabilityCoverage(_StrictFrozenModel):
         return _require_canonical_unique(values, field_name="satisfying_actor_ids")
 
 
+class CohortTieRank(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    required_satisfied: int = Field(strict=True, ge=0, le=MAX_COGNITION_ITEMS)
+    preferred_satisfied: int = Field(strict=True, ge=0, le=MAX_COGNITION_ITEMS)
+
+    @property
+    def key(self) -> tuple[int, int]:
+        return (self.required_satisfied, self.preferred_satisfied)
+
+
 class _CohortPlanPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     cohort_plan_id: BoundedIdentifier
@@ -662,6 +672,7 @@ class _CohortPlanPayload(_StrictFrozenModel):
     tie_sets: tuple[tuple[BoundedIdentifier, ...], ...] = Field(
         max_length=MAX_COGNITION_ITEMS
     )
+    tie_group_ranks: tuple[CohortTieRank, ...] = Field(max_length=MAX_COGNITION_ITEMS)
     evidence_snapshot_hashes: tuple[Sha256Hex, ...] = Field(max_length=MAX_COGNITION_ITEMS)
     profile_content_hashes: tuple[Sha256Hex, ...] = Field(max_length=MAX_COGNITION_ITEMS)
     minimum_size_met: bool
@@ -735,6 +746,13 @@ class _CohortPlanPayload(_StrictFrozenModel):
         tied_actors = {actor_id for tie_set in self.tie_sets for actor_id in tie_set}
         if not tied_actors.issubset(known_actors):
             raise ValueError("cohort plan tie sets must reference declared cohort actors")
+        if len(self.tie_sets) != len(self.tie_group_ranks):
+            raise ValueError("cohort plan tie sets must retain one rank key per group")
+        tie_rank_keys = tuple(rank.key for rank in self.tie_group_ranks)
+        if tie_rank_keys != tuple(sorted(tie_rank_keys, reverse=True)):
+            raise ValueError("cohort plan tie groups must use descending canonical rank order")
+        if len(set(tie_rank_keys)) != len(tie_rank_keys):
+            raise ValueError("cohort plan tie groups must retain one group per rank key")
 
         coverage_by_id = {
             item.requirement.requirement_id: item.requirement for item in self.coverage
@@ -782,6 +800,16 @@ class _CohortPlanPayload(_StrictFrozenModel):
                 or member.preferred_satisfied != preferred_count
             ):
                 raise ValueError("cohort member assessment counts must match dispositions")
+
+        members_by_actor = {member.actor_id: member for member in self.members}
+        for tie_set, rank in zip(self.tie_sets, self.tie_group_ranks, strict=True):
+            for actor_id in tie_set:
+                tied_member = members_by_actor.get(actor_id)
+                if tied_member is not None and (
+                    tied_member.required_satisfied != rank.required_satisfied
+                    or tied_member.preferred_satisfied != rank.preferred_satisfied
+                ):
+                    raise ValueError("cohort plan tie set rank must match retained member score")
 
         for coverage in self.coverage:
             if not set(coverage.satisfying_actor_ids).issubset(selected):
@@ -998,6 +1026,7 @@ __all__ = [
     "CohortPlan",
     "CohortPlanReceiptRef",
     "CohortRequest",
+    "CohortTieRank",
     "DiversityAssessment",
     "DiversityAxes",
     "DiversityAxisStatus",

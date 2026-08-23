@@ -241,7 +241,7 @@ def test_candidate_content_is_canonical_public_json(
     session_factory: Callable[..., CollaborationSession],
 ) -> None:
     session = session_factory("peer-a")
-    with pytest.raises(ValidationError, match="canonical JSON object"):
+    with pytest.raises(ValidationError, match="closed public candidate"):
         _contribution(session, "peer-a", candidate_content='{"b": 1, "a": 2}')
     with pytest.raises(ValidationError):
         _contribution(session, "peer-a", provider_reasoning={"secret": "chain"})
@@ -267,7 +267,7 @@ def test_candidate_content_rejects_private_or_executable_keys_at_any_depth(
     session = session_factory("peer-a")
     content = f'{{"outer":[{{"{forbidden_key}":"not-public"}}]}}'
 
-    with pytest.raises(ValidationError, match="forbidden public candidate key"):
+    with pytest.raises(ValidationError, match="closed public candidate"):
         _contribution(session, "peer-a", candidate_content=content)
 
 
@@ -459,7 +459,7 @@ def test_candidate_content_normalizes_forbidden_key_spellings(
     session_factory: Callable[..., CollaborationSession],
     forbidden_key: str,
 ) -> None:
-    with pytest.raises(ValidationError, match="forbidden public candidate key"):
+    with pytest.raises(ValidationError, match="closed public candidate"):
         _contribution(
             session_factory("peer-a"),
             "peer-a",
@@ -484,6 +484,52 @@ def test_candidate_validation_errors_never_echo_secret_input(
     assert marker not in repr(captured.value)
     assert marker not in repr(captured.value.errors())
     assert captured.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("candidate_content", "marker"),
+    (
+        ('{"api_key":"sk-private-marker","finding":"supported"}', "sk-private-marker"),
+        (
+            '{"finding":"supported","private_reasoning":"hidden scratch work"}',
+            "hidden scratch work",
+        ),
+        ('{"apiKey":"sk-private-alias","finding":"supported"}', "sk-private-alias"),
+        ('{"finding":"PRIVATE-VALUE-MARKER"}', "PRIVATE-VALUE-MARKER"),
+        (
+            '{"evidence_ids":["sk-private-evidence"],"finding":"supported"}',
+            "sk-private-evidence",
+        ),
+    ),
+)
+def test_candidate_content_rejects_private_keys_aliases_and_secret_values(
+    session_factory: Callable[..., CollaborationSession],
+    candidate_content: str,
+    marker: str,
+) -> None:
+    with pytest.raises(ValidationError) as captured:
+        _contribution(
+            session_factory("peer-a"),
+            "peer-a",
+            candidate_content=candidate_content,
+        )
+
+    assert marker not in str(captured.value)
+    assert marker not in repr(captured.value)
+    assert marker not in repr(captured.value.errors())
+    assert captured.value.__cause__ is None
+
+
+def test_candidate_content_accepts_closed_public_finding_and_evidence_ids(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    contribution = _contribution(
+        session_factory("peer-a"),
+        "peer-a",
+        candidate_content='{"evidence_ids":["evidence-a"],"finding":"supported"}',
+    )
+
+    assert contribution.candidate_content == '{"evidence_ids":["evidence-a"],"finding":"supported"}'
 
 
 def test_collaboration_evidence_has_no_promotion_authority(

@@ -128,6 +128,21 @@ def test_all_complete_score_ties_are_retained_in_rank_order() -> None:
     assert tuple(member.actor_id for member in plan.members) == ("peer-a", "peer-b")
 
 
+def test_cohort_plan_parser_rejects_reversed_ranked_tie_sets() -> None:
+    profiles = (
+        _profile("peer-d", status=CapabilityEvidenceStatus.UNKNOWN),
+        _profile("peer-b"),
+        _profile("peer-c", status=CapabilityEvidenceStatus.UNKNOWN),
+        _profile("peer-a"),
+    )
+    payload = build_cohort(_request(max_members=2), profiles).model_dump(mode="python")
+    payload["tie_sets"] = tuple(reversed(payload["tie_sets"]))
+    payload["tie_group_ranks"] = tuple(reversed(payload["tie_group_ranks"]))
+
+    with pytest.raises(ValidationError, match="rank order"):
+        CohortPlan.model_validate(_rehash_plan_payload(payload))
+
+
 def test_fixed_candidates_and_prohibited_combinations_are_honored_purely() -> None:
     plan = build_cohort(
         _request(
