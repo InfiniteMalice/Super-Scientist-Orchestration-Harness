@@ -8,6 +8,9 @@ from pydantic import ValidationError
 import super_scientist.domain.harness_eval as harness_eval
 from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
 from super_scientist.domain.harness_eval.rewards import (
+    ResolvedRewardHackingDiagnostic,
+    ResolvedVerificationResultSnapshot,
+    RewardHackingCoverageAttestation,
     RewardHackingFamily,
     RewardHackingFinding,
     RewardHackingFindingStatus,
@@ -17,7 +20,9 @@ from super_scientist.domain.harness_eval.rewards import (
     VerificationOutcomeEvidence,
     VerificationOutcomeStatus,
     reward_assessment_hash,
+    reward_hacking_diagnostic_status_snapshot_hash,
     valid_reward_evidence,
+    verification_result_status_snapshot_hash,
 )
 from super_scientist.domain.harness_eval.rewards import (
     assess_reward_validity as assess_reward_validity_contract,
@@ -55,31 +60,76 @@ def _verification_evidence(
         else VerificationOutcomeStatus.FAILED
     )
     observed = trace.observed_binding  # type: ignore[union-attr]
-    return VerificationOutcomeEvidence.build(
-        outcome_id="verification-outcome-1",
-        verifier=EvidenceReceipt(
-            record_id=observed.validator_id,
-            schema_version=1,
-            content_hash=observed.validator_hash,
-        ),
-        verifier_result=EvidenceReceipt(
+    verifier = EvidenceReceipt(
+        record_id=observed.validator_id,
+        schema_version=1,
+        content_hash=observed.validator_hash,
+    )
+    checker = EvidenceReceipt(
+        record_id=observed.checker_id,
+        schema_version=1,
+        content_hash=observed.checker_hash,
+    )
+    verifier_result_values: dict[str, object] = {
+        "snapshot_id": "resolved-verifier-result-1",
+        "executor": verifier,
+        "result": EvidenceReceipt(
             record_id=trace.verifier_result_id,  # type: ignore[union-attr]
             schema_version=1,
             content_hash=trace.verifier_result_hash,  # type: ignore[union-attr]
         ),
-        verifier_status=status,
-        checker=EvidenceReceipt(
-            record_id=observed.checker_id,
-            schema_version=1,
-            content_hash=observed.checker_hash,
+        "status": status,
+        "observable_evidence": (
+            EvidenceReceipt(
+                record_id="verifier-evidence",
+                schema_version=1,
+                content_hash="a" * 64,
+            ),
         ),
-        checker_result=EvidenceReceipt(
+        "resolver": EvidenceReceipt(
+            record_id="verification-result-resolver",
+            schema_version=1,
+            content_hash="b" * 64,
+        ),
+    }
+    verifier_result_values["source"] = EvidenceReceipt(
+        record_id="resolved-verifier-result-1",
+        schema_version=1,
+        content_hash=verification_result_status_snapshot_hash(verifier_result_values),
+    )
+    checker_result_values: dict[str, object] = {
+        "snapshot_id": "resolved-checker-result-1",
+        "executor": checker,
+        "result": EvidenceReceipt(
             record_id=trace.checker_result_id,  # type: ignore[union-attr]
             schema_version=1,
             content_hash=trace.checker_result_hash,  # type: ignore[union-attr]
         ),
-        checker_status=status,
-        evidence_ids=("checker-evidence", "verifier-evidence"),
+        "status": status,
+        "observable_evidence": (
+            EvidenceReceipt(
+                record_id="checker-evidence",
+                schema_version=1,
+                content_hash="c" * 64,
+            ),
+        ),
+        "resolver": EvidenceReceipt(
+            record_id="verification-result-resolver",
+            schema_version=1,
+            content_hash="b" * 64,
+        ),
+    }
+    checker_result_values["source"] = EvidenceReceipt(
+        record_id="resolved-checker-result-1",
+        schema_version=1,
+        content_hash=verification_result_status_snapshot_hash(checker_result_values),
+    )
+    return VerificationOutcomeEvidence.build(
+        outcome_id="verification-outcome-1",
+        verifier=verifier,
+        verifier_result=ResolvedVerificationResultSnapshot.build(**verifier_result_values),
+        checker=checker,
+        checker_result=ResolvedVerificationResultSnapshot.build(**checker_result_values),
     )
 
 
@@ -107,13 +157,73 @@ def assess_reward_validity(
     *,
     verifier_succeeded: bool | None,
 ) -> RewardValidityAssessment:
+    completed = _complete_diagnostics(trace, findings)
     return assess_reward_validity_contract(
         observation,  # type: ignore[arg-type]
         trace,  # type: ignore[arg-type]
-        _complete_diagnostics(trace, findings),
+        completed,
         expectation=trace_expectation(),
         verification=_verification_evidence(trace, verifier_succeeded),
+        diagnostic_coverage=_diagnostic_coverage(trace, completed),
     )
+
+
+def _diagnostic_coverage(
+    trace: object,
+    findings: tuple[RewardHackingFinding, ...],
+) -> RewardHackingCoverageAttestation:
+    return RewardHackingCoverageAttestation.build(
+        attestation_id="diagnostic-coverage-1",
+        trace=EvidenceReceipt(
+            record_id=trace.trace_id,  # type: ignore[union-attr]
+            schema_version=1,
+            content_hash=trace.content_hash,  # type: ignore[union-attr]
+        ),
+        observation=EvidenceReceipt(
+            record_id=trace.reward_observation.observation_id,  # type: ignore[union-attr]
+            schema_version=1,
+            content_hash=trace.reward_observation.content_hash,  # type: ignore[union-attr]
+        ),
+        diagnostics=tuple(
+            _resolved_diagnostic(finding, index) for index, finding in enumerate(findings)
+        ),
+        provenance=(
+            EvidenceReceipt(
+                record_id="diagnostic-coverage-provenance",
+                schema_version=1,
+                content_hash="c" * 64,
+            ),
+        ),
+    )
+
+
+def _resolved_diagnostic(
+    finding: RewardHackingFinding,
+    index: int,
+) -> ResolvedRewardHackingDiagnostic:
+    values: dict[str, object] = {
+        "family": finding.family,
+        "status": finding.status,
+        "observable_evidence": tuple(
+            EvidenceReceipt(
+                record_id=evidence_id,
+                schema_version=1,
+                content_hash="d" * 64,
+            )
+            for evidence_id in finding.evidence_ids
+        ),
+        "resolver": EvidenceReceipt(
+            record_id="diagnostic-resolver",
+            schema_version=1,
+            content_hash="b" * 64,
+        ),
+    }
+    values["source"] = EvidenceReceipt(
+        record_id=f"diagnostic-source-{index:02d}",
+        schema_version=1,
+        content_hash=reward_hacking_diagnostic_status_snapshot_hash(values),
+    )
+    return ResolvedRewardHackingDiagnostic.build(**values)
 
 
 def test_valid_reward_requires_current_complete_observable_evidence() -> None:

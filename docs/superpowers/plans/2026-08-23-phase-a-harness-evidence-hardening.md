@@ -10,6 +10,41 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-23-governed-cognitive-cohorts-procedure-compilation-design.md` sections 11-14.
 
+## Round 2: Resolution Attestations and Exact Cell Evidence Chains
+
+### Problem
+
+Round 1 introduced exact receipts but did not prove that receipt contents came from an independent
+resolver. A caller can reconstruct a `TraceExpectation` from one attacked trace, declare arbitrary
+verifier/checker and diagnostic statuses beside matching receipts, and reuse one valid assessment
+for unrelated matrix coordinates. `HarnessExecutionTrace` also embeds the released `ResourceUsage`
+DTO, whose integer fields do not have Phase A upper bounds.
+
+### Design
+
+1. Add immutable, canonically hashed resolution snapshots. A trace expectation must bind an accepted
+   expectation-source receipt, an independent resolver identity, and the complete resolved receipt
+   set. Freshness rejects an expectation when the expectation source is the same record as the trace
+   or when its attestation does not canonically bind the snapshot.
+2. Derive verifier and checker outcome status from independently resolved result snapshots. Add a
+   resolved observable-evidence inventory and a coverage attestation that exactly binds every reward
+   hacking family and evidence receipt. Findings bind their status to that coverage entry.
+3. Make matrix validation join each cell receipt to one exact assessment/freshness/trace chain. The
+   trace protocol, task set, model, harness, partition, verifier, checker, and assessment freshness
+   must match the cell coordinate and protocol fields. Each accepted cell must have a distinct trace.
+4. Revalidate embedded `ResourceUsage` integer fields through a Phase A wrapper with explicit upper
+   bounds, without changing the released improvement DTO.
+
+### Tests and invariants
+
+- RED probes cover unattested/reconstructed expectation sources, equal trace mutation, arbitrary
+  verification status, diagnostic status/evidence substitution, unrelated cell evidence,
+  freshness/assessment substitution, and 1001-bit resource integers.
+- Existing protected-evaluation, campaign, reward-observation separation, canonical hashing,
+  24,512-comparison capacity, and 8-by-8 complete analysis behavior remain unchanged.
+- Domain models only compare resolved records and receipts. They do not read repositories or gain
+  transaction, provider, network, execution, promotion, or governance authority.
+
 ## Global Constraints
 
 - Preserve protected-evaluation and `HarnessCampaign` behavior.

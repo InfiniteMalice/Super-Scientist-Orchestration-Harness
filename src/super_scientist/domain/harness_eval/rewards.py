@@ -92,40 +92,138 @@ def _assessment_evidence_ids(
     observation_evidence_id: str | None,
     findings: tuple[RewardHackingFinding, ...],
     verification: VerificationOutcomeEvidence,
+    diagnostic_coverage: RewardHackingCoverageAttestation,
 ) -> tuple[str, ...]:
     evidence_ids = {item for finding in findings for item in finding.evidence_ids}
     if observation_evidence_id is not None:
         evidence_ids.add(observation_evidence_id)
     evidence_ids.update(verification.evidence_ids)
+    evidence_ids.update(item.record_id for item in diagnostic_coverage.provenance)
+    evidence_ids.update(
+        receipt.record_id
+        for diagnostic in diagnostic_coverage.diagnostics
+        for receipt in diagnostic.observable_evidence
+    )
     return tuple(sorted(evidence_ids))
+
+
+class _ResolvedVerificationResultSnapshotPayload(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    snapshot_id: BoundedTraceIdentifier
+    executor: EvidenceReceipt
+    result: EvidenceReceipt
+    status: VerificationOutcomeStatus
+    observable_evidence: tuple[EvidenceReceipt, ...] = Field(
+        min_length=1,
+        max_length=MAX_REWARD_EVIDENCE,
+    )
+    source: EvidenceReceipt
+    resolver: EvidenceReceipt
+
+    @field_validator("observable_evidence")
+    @classmethod
+    def require_canonical_observable_evidence(
+        cls,
+        values: tuple[EvidenceReceipt, ...],
+    ) -> tuple[EvidenceReceipt, ...]:
+        keys = tuple((item.record_id, item.schema_version, item.content_hash) for item in values)
+        if len(keys) != len(set(keys)) or keys != tuple(sorted(keys)):
+            raise ValueError("resolved result evidence receipts must be unique and canonical")
+        return values
+
+    @model_validator(mode="after")
+    def require_accepted_source_snapshot(self) -> Self:
+        if (
+            self.source.record_id != self.snapshot_id
+            or self.source.content_hash != verification_result_status_snapshot_hash(self)
+        ):
+            raise ValueError("verification result source must address the exact status snapshot")
+        if self.source.record_id == self.resolver.record_id:
+            raise ValueError("verification result source and resolver must be distinct")
+        return self
+
+
+class ResolvedVerificationResultSnapshot(_ResolvedVerificationResultSnapshotPayload):
+    """Result content and status resolved outside the pure domain layer."""
+
+    content_hash: Sha256Hex
+
+    @classmethod
+    def build(cls, **values: Any) -> Self:
+        payload = _ResolvedVerificationResultSnapshotPayload(**values)
+        return cls(
+            **payload.model_dump(mode="python"),
+            content_hash=resolved_verification_result_hash(payload),
+        )
+
+    @model_validator(mode="after")
+    def require_canonical_content_hash(self) -> Self:
+        if self.content_hash != resolved_verification_result_hash(self):
+            raise ValueError("content_hash must canonically address the resolved result snapshot")
+        return self
+
+
+def resolved_verification_result_hash(record: BaseModel | Mapping[str, object]) -> str:
+    return _canonical_record_hash(record)
+
+
+def verification_result_status_snapshot_hash(
+    record: BaseModel | Mapping[str, object],
+) -> str:
+    if isinstance(record, BaseModel):
+        return _canonical_record_hash(
+            record,
+            exclude_fields={"snapshot_id", "source", "resolver"},
+        )
+    payload = dict(record)
+    payload.setdefault("schema_version", 1)
+    return _canonical_record_hash(
+        payload,
+        exclude_fields={"snapshot_id", "source", "resolver"},
+    )
 
 
 class _VerificationOutcomeEvidencePayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     outcome_id: BoundedTraceIdentifier
     verifier: EvidenceReceipt
-    verifier_result: EvidenceReceipt
-    verifier_status: VerificationOutcomeStatus
+    verifier_result: ResolvedVerificationResultSnapshot
     checker: EvidenceReceipt
-    checker_result: EvidenceReceipt
-    checker_status: VerificationOutcomeStatus
-    evidence_ids: tuple[BoundedTraceIdentifier, ...] = Field(
-        min_length=1,
-        max_length=MAX_REWARD_EVIDENCE,
-    )
+    checker_result: ResolvedVerificationResultSnapshot
 
-    @field_validator("evidence_ids")
-    @classmethod
-    def require_canonical_evidence(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        if len(values) != len(set(values)) or values != tuple(sorted(values)):
-            raise ValueError("verification evidence IDs must be unique and canonical")
-        return values
+    @model_validator(mode="after")
+    def require_result_executor_bindings(self) -> Self:
+        if self.verifier_result.executor != self.verifier:
+            raise ValueError("verifier result snapshot must bind the exact verifier")
+        if self.checker_result.executor != self.checker:
+            raise ValueError("checker result snapshot must bind the exact checker")
+        return self
 
 
 class VerificationOutcomeEvidence(_VerificationOutcomeEvidencePayload):
     """Receipt-bound observable outcomes for both verifier and checker execution."""
 
     content_hash: Sha256Hex
+
+    @property
+    def verifier_status(self) -> VerificationOutcomeStatus:
+        return self.verifier_result.status
+
+    @property
+    def checker_status(self) -> VerificationOutcomeStatus:
+        return self.checker_result.status
+
+    @property
+    def evidence_ids(self) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                {
+                    item.record_id
+                    for snapshot in (self.verifier_result, self.checker_result)
+                    for item in snapshot.observable_evidence
+                }
+            )
+        )
 
     @classmethod
     def build(cls, **values: Any) -> Self:
@@ -143,6 +241,138 @@ class VerificationOutcomeEvidence(_VerificationOutcomeEvidencePayload):
 
 
 def verification_outcome_hash(record: BaseModel | Mapping[str, object]) -> str:
+    return _canonical_record_hash(record)
+
+
+class _ResolvedRewardHackingDiagnosticPayload(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    family: RewardHackingFamily
+    status: RewardHackingFindingStatus
+    observable_evidence: tuple[EvidenceReceipt, ...] = Field(
+        min_length=1,
+        max_length=MAX_REWARD_EVIDENCE,
+    )
+    source: EvidenceReceipt
+    resolver: EvidenceReceipt
+
+    @field_validator("observable_evidence")
+    @classmethod
+    def require_canonical_observable_evidence(
+        cls,
+        values: tuple[EvidenceReceipt, ...],
+    ) -> tuple[EvidenceReceipt, ...]:
+        keys = tuple((item.record_id, item.schema_version, item.content_hash) for item in values)
+        if len(keys) != len(set(keys)) or keys != tuple(sorted(keys)):
+            raise ValueError("diagnostic evidence receipts must be unique and canonical")
+        return values
+
+    @model_validator(mode="after")
+    def require_accepted_source_snapshot(self) -> Self:
+        if self.source.content_hash != reward_hacking_diagnostic_status_snapshot_hash(self):
+            raise ValueError(
+                "diagnostic source must address the exact status and evidence snapshot"
+            )
+        if self.source.record_id == self.resolver.record_id:
+            raise ValueError("diagnostic source and resolver must be distinct")
+        return self
+
+
+class ResolvedRewardHackingDiagnostic(_ResolvedRewardHackingDiagnosticPayload):
+    """One diagnostic result resolved from an accepted observable evidence source."""
+
+    content_hash: Sha256Hex
+
+    @classmethod
+    def build(cls, **values: Any) -> Self:
+        payload = _ResolvedRewardHackingDiagnosticPayload(**values)
+        return cls(
+            **payload.model_dump(mode="python"),
+            content_hash=resolved_reward_hacking_diagnostic_hash(payload),
+        )
+
+    @model_validator(mode="after")
+    def require_canonical_content_hash(self) -> Self:
+        if self.content_hash != resolved_reward_hacking_diagnostic_hash(self):
+            raise ValueError("content_hash must canonically address the resolved diagnostic")
+        return self
+
+
+def resolved_reward_hacking_diagnostic_hash(record: BaseModel | Mapping[str, object]) -> str:
+    return _canonical_record_hash(record)
+
+
+def reward_hacking_diagnostic_status_snapshot_hash(
+    record: BaseModel | Mapping[str, object],
+) -> str:
+    if isinstance(record, BaseModel):
+        return _canonical_record_hash(record, exclude_fields={"source", "resolver"})
+    payload = dict(record)
+    payload.setdefault("schema_version", 1)
+    return _canonical_record_hash(payload, exclude_fields={"source", "resolver"})
+
+
+class _RewardHackingCoverageAttestationPayload(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    attestation_id: BoundedTraceIdentifier
+    trace: EvidenceReceipt
+    observation: EvidenceReceipt
+    diagnostics: tuple[ResolvedRewardHackingDiagnostic, ...] = Field(
+        min_length=len(RewardHackingFamily),
+        max_length=len(RewardHackingFamily),
+    )
+    provenance: tuple[EvidenceReceipt, ...] = Field(
+        min_length=1,
+        max_length=MAX_REWARD_EVIDENCE,
+    )
+
+    @field_validator("diagnostics")
+    @classmethod
+    def require_complete_canonical_diagnostics(
+        cls,
+        values: tuple[ResolvedRewardHackingDiagnostic, ...],
+    ) -> tuple[ResolvedRewardHackingDiagnostic, ...]:
+        if tuple(item.family for item in values) != tuple(RewardHackingFamily):
+            raise ValueError("coverage must resolve every reward-hacking family in canonical order")
+        evidence_ids = tuple(
+            receipt.record_id for item in values for receipt in item.observable_evidence
+        )
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("coverage diagnostic evidence identifiers must be globally unique")
+        return values
+
+    @field_validator("provenance")
+    @classmethod
+    def require_canonical_provenance(
+        cls,
+        values: tuple[EvidenceReceipt, ...],
+    ) -> tuple[EvidenceReceipt, ...]:
+        keys = tuple((item.record_id, item.schema_version, item.content_hash) for item in values)
+        if len(keys) != len(set(keys)) or keys != tuple(sorted(keys)):
+            raise ValueError("coverage provenance receipts must be unique and canonical")
+        return values
+
+
+class RewardHackingCoverageAttestation(_RewardHackingCoverageAttestationPayload):
+    """Complete independently resolved diagnostic inventory for one trace observation."""
+
+    content_hash: Sha256Hex
+
+    @classmethod
+    def build(cls, **values: Any) -> Self:
+        payload = _RewardHackingCoverageAttestationPayload(**values)
+        return cls(
+            **payload.model_dump(mode="python"),
+            content_hash=reward_hacking_coverage_hash(payload),
+        )
+
+    @model_validator(mode="after")
+    def require_canonical_content_hash(self) -> Self:
+        if self.content_hash != reward_hacking_coverage_hash(self):
+            raise ValueError("content_hash must canonically address diagnostic coverage")
+        return self
+
+
+def reward_hacking_coverage_hash(record: BaseModel | Mapping[str, object]) -> str:
     return _canonical_record_hash(record)
 
 
@@ -205,6 +435,34 @@ def _require_complete_diagnostic_coverage(
     return findings
 
 
+def _require_resolved_diagnostic_coverage(
+    coverage: RewardHackingCoverageAttestation,
+    findings: tuple[RewardHackingFinding, ...],
+    trace: HarnessExecutionTrace,
+    observation: RewardObservation,
+) -> None:
+    expected_trace = EvidenceReceipt(
+        record_id=trace.trace_id,
+        schema_version=trace.schema_version,
+        content_hash=trace.content_hash,
+    )
+    expected_observation = EvidenceReceipt(
+        record_id=observation.observation_id,
+        schema_version=observation.schema_version,
+        content_hash=observation.content_hash,
+    )
+    if coverage.trace != expected_trace or coverage.observation != expected_observation:
+        raise ValueError("diagnostic coverage must bind the exact trace and observation")
+    for finding, resolved in zip(findings, coverage.diagnostics, strict=True):
+        if (
+            finding.family is not resolved.family
+            or finding.status is not resolved.status
+            or finding.evidence_ids
+            != tuple(item.record_id for item in resolved.observable_evidence)
+        ):
+            raise ValueError("finding status and evidence must match resolved diagnostic coverage")
+
+
 class _RewardValidityAssessmentPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     assessment_id: BoundedAssessmentIdentifier
@@ -223,6 +481,7 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
     evidence_ids: tuple[BoundedTraceIdentifier, ...] = Field(max_length=MAX_REWARD_EVIDENCE)
     expectation: TraceExpectation
     verification: VerificationOutcomeEvidence
+    diagnostic_coverage: RewardHackingCoverageAttestation
     freshness: TraceFreshness
     assessor_id: BoundedTraceIdentifier
     assessor_version: BoundedTraceIdentifier
@@ -259,6 +518,7 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
             self.observation.evidence_id,
             self.findings,
             self.verification,
+            self.diagnostic_coverage,
         )
         if self.evidence_ids != expected_evidence:
             raise ValueError("assessment evidence IDs must exactly bind observable evidence")
@@ -270,6 +530,12 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
                 or finding.observation_hash != self.observation.content_hash
             ):
                 raise ValueError("reward-hacking finding must bind exact trace and reward identity")
+        _require_resolved_diagnostic_coverage(
+            self.diagnostic_coverage,
+            self.findings,
+            self.trace,
+            self.observation,
+        )
         expected_freshness = trace_freshness(self.expectation, self.trace)
         if (
             self.freshness != expected_freshness
@@ -297,6 +563,7 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
             self.findings,
             self.expectation,
             self.verification,
+            self.diagnostic_coverage,
         ):
             raise ValueError("assessment_id must address the exact validity inputs")
         return self
@@ -339,6 +606,7 @@ def reward_assessment_id(
     findings: tuple[RewardHackingFinding, ...],
     expectation: TraceExpectation,
     verification: VerificationOutcomeEvidence,
+    diagnostic_coverage: RewardHackingCoverageAttestation,
 ) -> str:
     payload_hash = sha256_hex(
         _canonical_record_hash(
@@ -348,6 +616,7 @@ def reward_assessment_id(
                 "finding_hashes": [item.content_hash for item in findings],
                 "expectation_hash": expectation.content_hash,
                 "verification_hash": verification.content_hash,
+                "diagnostic_coverage_hash": diagnostic_coverage.content_hash,
             }
         ).encode("ascii")
     )
@@ -399,8 +668,8 @@ def ordered_invalidation_reasons(
         or observation.checker_version != trace.observed_binding.checker_version
         or verification.verifier != expected_verifier
         or verification.checker != expected_checker
-        or verification.verifier_result != expected_verifier_result
-        or verification.checker_result != expected_checker_result
+        or verification.verifier_result.result != expected_verifier_result
+        or verification.checker_result.result != expected_checker_result
     ):
         reasons.add(RewardInvalidationReason.VERIFIER_MISMATCH)
     if (
@@ -458,15 +727,23 @@ def assess_reward_validity(
     *,
     expectation: TraceExpectation,
     verification: VerificationOutcomeEvidence,
+    diagnostic_coverage: RewardHackingCoverageAttestation,
 ) -> RewardValidityAssessment:
     validated_observation = RewardObservation.model_validate(observation)
     validated_trace = HarnessExecutionTrace.model_validate(trace)
     validated_expectation = TraceExpectation.model_validate(expectation)
     validated_verification = VerificationOutcomeEvidence.model_validate(verification)
+    validated_coverage = RewardHackingCoverageAttestation.model_validate(diagnostic_coverage)
     if validated_trace.reward_observation != validated_observation:
         raise ValueError("reward observation must be the exact observation embedded in the trace")
     validated_findings = tuple(RewardHackingFinding.model_validate(item) for item in findings)
     _require_complete_diagnostic_coverage(validated_findings)
+    _require_resolved_diagnostic_coverage(
+        validated_coverage,
+        validated_findings,
+        validated_trace,
+        validated_observation,
+    )
     for finding in validated_findings:
         if (
             finding.trace_id != validated_trace.trace_id
@@ -487,6 +764,7 @@ def assess_reward_validity(
         validated_observation.evidence_id,
         validated_findings,
         validated_verification,
+        validated_coverage,
     )
     return RewardValidityAssessment.build(
         assessment_id=reward_assessment_id(
@@ -495,6 +773,7 @@ def assess_reward_validity(
             validated_findings,
             validated_expectation,
             validated_verification,
+            validated_coverage,
         ),
         observation=validated_observation,
         trace=validated_trace,
@@ -505,6 +784,7 @@ def assess_reward_validity(
         evidence_ids=evidence_ids,
         expectation=validated_expectation,
         verification=validated_verification,
+        diagnostic_coverage=validated_coverage,
         freshness=freshness,
         assessor_id=validated_observation.evaluator_id,
         assessor_version=validated_observation.evaluator_version,
@@ -533,6 +813,9 @@ def valid_reward_evidence(
 
 
 __all__ = [
+    "ResolvedRewardHackingDiagnostic",
+    "ResolvedVerificationResultSnapshot",
+    "RewardHackingCoverageAttestation",
     "RewardHackingFamily",
     "RewardHackingFinding",
     "RewardHackingFindingStatus",
@@ -543,9 +826,14 @@ __all__ = [
     "VerificationOutcomeStatus",
     "assess_reward_validity",
     "ordered_invalidation_reasons",
+    "resolved_reward_hacking_diagnostic_hash",
+    "resolved_verification_result_hash",
     "reward_assessment_hash",
+    "reward_hacking_coverage_hash",
+    "reward_hacking_diagnostic_status_snapshot_hash",
     "reward_hacking_finding_hash",
     "reward_validity_receipt",
     "valid_reward_evidence",
     "verification_outcome_hash",
+    "verification_result_status_snapshot_hash",
 ]

@@ -160,22 +160,22 @@ def _cell(
     trace_current: bool = True,
     reward_valid: bool = True,
 ) -> ModelHarnessCell:
-    freshness, assessment = _validated_evidence()
-    from super_scientist.domain.harness_eval.rewards import reward_validity_receipt
-    from super_scientist.domain.harness_eval.traces import trace_freshness_receipt
+    chain = _validated_evidence(protocol, coordinate)
+    from super_scientist.domain.harness_eval.evidence_chains import (
+        harness_cell_evidence_chain_receipt,
+    )
 
-    trace_receipt = trace_freshness_receipt(freshness)
-    reward_receipt = reward_validity_receipt(assessment)
+    chain_receipt = harness_cell_evidence_chain_receipt(chain)
     if not trace_current:
-        trace_receipt = EvidenceReceipt(
-            record_id=trace_receipt.record_id,
-            schema_version=trace_receipt.schema_version,
+        chain_receipt = EvidenceReceipt(
+            record_id=chain_receipt.record_id,
+            schema_version=chain_receipt.schema_version,
             content_hash=HASH_B,
         )
     if not reward_valid:
-        reward_receipt = EvidenceReceipt(
-            record_id=reward_receipt.record_id,
-            schema_version=reward_receipt.schema_version,
+        chain_receipt = EvidenceReceipt(
+            record_id=chain_receipt.record_id,
+            schema_version=chain_receipt.schema_version,
             content_hash=HASH_B,
         )
     return ModelHarnessCell.from_protocol(
@@ -186,8 +186,7 @@ def _cell(
         protocol=protocol,
         coordinate=coordinate,
         metrics=_metrics(score),
-        trace_freshness_receipt=trace_receipt,
-        reward_validity_receipt=reward_receipt,
+        evidence_chain_receipt=chain_receipt,
         observed_at=NOW,
     )
 
@@ -196,25 +195,34 @@ def _cells(protocol: ModelHarnessProtocol) -> tuple[ModelHarnessCell, ...]:
     return tuple(_cell(protocol, coordinate) for coordinate in protocol.expected_grid)
 
 
-@lru_cache(maxsize=1)
-def _validated_evidence() -> tuple[object, object]:
+@lru_cache(maxsize=256)
+def _validated_evidence(
+    protocol: ModelHarnessProtocol,
+    coordinate: ModelHarnessCoordinate,
+) -> object:
     from tests.unit.harness_eval.test_harness_security_contracts import (
-        _valid_evaluation_snapshots,
+        _matrix_evidence_chain,
     )
 
-    return _valid_evaluation_snapshots()
+    return _matrix_evidence_chain(
+        protocol,
+        coordinate,
+        protocol.expected_grid.index(coordinate),
+    )
+
+
+def _evidence_chains(protocol: ModelHarnessProtocol) -> tuple[object, ...]:
+    return tuple(_validated_evidence(protocol, coordinate) for coordinate in protocol.expected_grid)
 
 
 def analyze_model_harness(
     protocol: ModelHarnessProtocol,
     cells: tuple[ModelHarnessCell, ...],
 ) -> ModelHarnessAnalysis:
-    freshness, assessment = _validated_evidence()
     return analyze_model_harness_contract(
         protocol,
         cells,
-        trace_freshness=(freshness,),  # type: ignore[arg-type]
-        reward_assessments=(assessment,),  # type: ignore[arg-type]
+        evidence_chains=_evidence_chains(protocol),  # type: ignore[arg-type]
     )
 
 

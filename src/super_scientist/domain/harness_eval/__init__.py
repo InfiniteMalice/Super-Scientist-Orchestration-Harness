@@ -1,5 +1,9 @@
 """Strict matched-budget harness-evaluation contracts."""
 
+from super_scientist.domain.harness_eval.evidence_chains import (
+    HarnessCellEvidenceChain,
+    harness_cell_evidence_chain_receipt,
+)
 from super_scientist.domain.harness_eval.guidance import (
     EvaluationConfoundCode,
     EvaluationMetricComponent,
@@ -77,6 +81,9 @@ from super_scientist.domain.harness_eval.models import (
 )
 from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
 from super_scientist.domain.harness_eval.rewards import (
+    ResolvedRewardHackingDiagnostic,
+    ResolvedVerificationResultSnapshot,
+    RewardHackingCoverageAttestation,
     RewardHackingFamily,
     RewardHackingFinding,
     RewardHackingFindingStatus,
@@ -86,8 +93,10 @@ from super_scientist.domain.harness_eval.rewards import (
     VerificationOutcomeEvidence,
     VerificationOutcomeStatus,
     assess_reward_validity,
+    reward_hacking_diagnostic_status_snapshot_hash,
     reward_validity_receipt,
     valid_reward_evidence,
+    verification_result_status_snapshot_hash,
 )
 from super_scientist.domain.harness_eval.traces import (
     AvailableValue,
@@ -100,6 +109,7 @@ from super_scientist.domain.harness_eval.traces import (
     GenerationMetadata,
     GenerationStopReason,
     HarnessExecutionTrace,
+    HarnessResourceUsage,
     MetadataAvailability,
     ObservableArtifactRef,
     RewardObservation,
@@ -108,6 +118,7 @@ from super_scientist.domain.harness_eval.traces import (
     TraceBinding,
     TraceBindingMismatch,
     TraceExpectation,
+    TraceExpectationResolutionAttestation,
     TraceFreshness,
     TraceFreshnessStatus,
     trace_freshness,
@@ -145,6 +156,7 @@ __all__ = [
     "GuidanceEvaluationProtocol",
     "HarnessCampaign",
     "HarnessCampaignReport",
+    "HarnessCellEvidenceChain",
     "HarnessConfound",
     "HarnessConfoundCode",
     "HarnessDecision",
@@ -152,6 +164,7 @@ __all__ = [
     "HarnessExecutionTrace",
     "HarnessIdentity",
     "HarnessPartition",
+    "HarnessResourceUsage",
     "HarnessRollback",
     "HarnessVariant",
     "MetadataAvailability",
@@ -176,7 +189,10 @@ __all__ = [
     "RecoveryAttemptEvent",
     "RecoveryOutcome",
     "ReferenceMissingness",
+    "ResolvedRewardHackingDiagnostic",
+    "ResolvedVerificationResultSnapshot",
     "ResourceUsageDelta",
+    "RewardHackingCoverageAttestation",
     "RewardHackingFamily",
     "RewardHackingFinding",
     "RewardHackingFindingStatus",
@@ -189,6 +205,7 @@ __all__ = [
     "TraceBinding",
     "TraceBindingMismatch",
     "TraceExpectation",
+    "TraceExpectationResolutionAttestation",
     "TraceFreshness",
     "TraceFreshnessStatus",
     "VariantEvaluationBudget",
@@ -206,6 +223,7 @@ __all__ = [
     "guidance_identity_confounds",
     "guidance_protocol_hash",
     "harness_campaign_hash",
+    "harness_cell_evidence_chain_receipt",
     "metric_component_deltas",
     "model_budget_binding_hash",
     "model_harness_analysis_hash",
@@ -213,9 +231,11 @@ __all__ = [
     "model_harness_comparison_hash",
     "model_harness_protocol_hash",
     "partition_manifest_hash",
+    "reward_hacking_diagnostic_status_snapshot_hash",
     "reward_validity_receipt",
     "trace_freshness",
     "trace_freshness_receipt",
     "valid_reward_evidence",
     "validate_complete_matched_grid",
+    "verification_result_status_snapshot_hash",
 ]

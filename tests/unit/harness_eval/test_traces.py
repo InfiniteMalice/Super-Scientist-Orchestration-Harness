@@ -32,11 +32,13 @@ from super_scientist.domain.harness_eval.traces import (
     TraceBinding,
     TraceBindingMismatch,
     TraceExpectation,
+    TraceExpectationResolutionAttestation,
     TraceFreshnessStatus,
     artifact_collection_hash,
     context_transformation_hash,
     generation_metadata_hash,
     trace_binding_hash,
+    trace_expectation_snapshot_hash,
     trace_freshness,
     trace_hash,
 )
@@ -262,7 +264,7 @@ def test_direct_parse_rejects_rehashed_contradictory_trace_state() -> None:
 def test_trace_freshness_is_exact_hash_identity_not_time() -> None:
     current = valid_trace()
     later = valid_trace(observed_at=datetime(2099, 1, 1, tzinfo=UTC))
-    expectation = trace_expectation(current)
+    expectation = trace_expectation()
 
     assert trace_freshness(expectation, current).status is TraceFreshnessStatus.CURRENT
     assert trace_freshness(expectation, later).status is TraceFreshnessStatus.CURRENT
@@ -275,7 +277,7 @@ def test_trace_freshness_is_exact_hash_identity_not_time() -> None:
 
 def test_freshness_compares_task_model_procedure_environment_context_validator_artifacts() -> None:
     current = valid_trace()
-    expectation = trace_expectation(current)
+    expectation = trace_expectation()
     guidance = current.observed_binding.guidance_protocol
     assert guidance is not None
     changed_protocol_values = guidance.model_dump(mode="python")
@@ -320,6 +322,27 @@ def test_freshness_compares_task_model_procedure_environment_context_validator_a
                         content_hash=HASH_D,
                     ),
                 )
+            expectation_values["resolution"] = TraceExpectationResolutionAttestation.build(
+                attestation_id="expectation-resolution-1",
+                expectation_source=EvidenceReceipt(
+                    record_id="accepted-expectation-1",
+                    schema_version=1,
+                    content_hash=trace_expectation_snapshot_hash(expectation_values),
+                ),
+                resolver=EvidenceReceipt(
+                    record_id="expectation-resolver-v1",
+                    schema_version=1,
+                    content_hash=HASH_B,
+                ),
+                resolved_snapshot_hash=trace_expectation_snapshot_hash(expectation_values),
+                provenance=(
+                    EvidenceReceipt(
+                        record_id="expectation-resolution-evidence-1",
+                        schema_version=1,
+                        content_hash=HASH_C,
+                    ),
+                ),
+            )
             changed_expectation = TraceExpectation.build(**expectation_values)
             assert mismatch in trace_freshness(changed_expectation, current).mismatches
             continue
@@ -588,8 +611,11 @@ def valid_trace(
     observation: RewardObservation | None = None,
     observed_at: datetime = NOW,
     include_reward: bool = True,
+    trace_id: str = "trace-1",
+    observed_binding: TraceBinding | None = None,
+    context_artifacts_override: tuple[ObservableArtifactRef, ...] | None = None,
 ) -> HarnessExecutionTrace:
-    context_artifacts = (
+    context_artifacts = context_artifacts_override or (
         ObservableArtifactRef.build(
             artifact_id="public-context",
             sha256=HASH_A,
@@ -618,9 +644,10 @@ def valid_trace(
             ),
         )
         final_context_hash = HASH_C
-    base_binding = binding(
+    base_binding = observed_binding or binding(
         context_hash=final_context_hash,
-        artifact_hashes=(HASH_A,),
+        artifact_hashes=tuple(item.sha256 for item in context_artifacts),
+        artifact_ids=tuple(item.artifact_id for item in context_artifacts),
     )
     observed_values = base_binding.model_dump(mode="python")
     observed_values.pop("content_hash")
@@ -657,8 +684,8 @@ def valid_trace(
     events = tuple(
         EnvironmentEvent.build(
             sequence=index,
-            environment_id="environment",
-            environment_version="v1",
+            environment_id=observed_binding.environment_id,
+            environment_version=observed_binding.environment_version,
             kind=kind,
             evidence_id=f"environment-event-{index}",
         )
@@ -683,7 +710,7 @@ def valid_trace(
         else not_applicable()
     )
     return HarnessExecutionTrace.build(
-        trace_id="trace-1",
+        trace_id=trace_id,
         observed_binding=observed_binding,
         context_artifacts=context_artifacts,
         initial_context_hash=initial_context_hash,
@@ -767,72 +794,113 @@ def binding(
     )
 
 
-def trace_expectation(trace: HarnessExecutionTrace | None = None) -> TraceExpectation:
-    observed = (valid_trace() if trace is None else trace).observed_binding
-    return TraceExpectation.build(
-        protocol=EvidenceReceipt(
-            record_id=observed.protocol_id,
-            schema_version=1,
-            content_hash=observed.protocol_hash,
+def trace_expectation() -> TraceExpectation:
+    context_artifacts = (
+        ObservableArtifactRef.build(
+            artifact_id="public-context",
+            sha256=HASH_A,
+            size_bytes=12,
+            media_type="application/json",
         ),
-        task=EvidenceReceipt(
-            record_id=observed.task_id,
+    )
+    expected_binding = binding(
+        context_hash=artifact_collection_hash(context_artifacts),
+        artifact_hashes=(HASH_A,),
+    )
+    return attested_trace_expectation(expected_binding)
+
+
+def attested_trace_expectation(
+    expected_binding: TraceBinding,
+    *,
+    suffix: str = "1",
+) -> TraceExpectation:
+    values: dict[str, object] = {
+        "protocol": EvidenceReceipt(
+            record_id=expected_binding.protocol_id,
             schema_version=1,
-            content_hash=observed.task_input_hash,
+            content_hash=expected_binding.protocol_hash,
         ),
-        model=EvidenceReceipt(
-            record_id=observed.model.model_id,
+        "task": EvidenceReceipt(
+            record_id=expected_binding.task_id,
             schema_version=1,
-            content_hash=observed.model_hash,
+            content_hash=expected_binding.task_input_hash,
         ),
-        harness=EvidenceReceipt(
-            record_id=observed.harness.harness_id,
+        "model": EvidenceReceipt(
+            record_id=expected_binding.model.model_id,
             schema_version=1,
-            content_hash=observed.harness_hash,
+            content_hash=expected_binding.model_hash,
         ),
-        procedure=EvidenceReceipt(
-            record_id=observed.procedure_id,
+        "harness": EvidenceReceipt(
+            record_id=expected_binding.harness.harness_id,
             schema_version=1,
-            content_hash=observed.procedure_hash,
+            content_hash=expected_binding.harness_hash,
         ),
-        environment=EvidenceReceipt(
-            record_id=observed.environment_id,
+        "procedure": EvidenceReceipt(
+            record_id=expected_binding.procedure_id,
             schema_version=1,
-            content_hash=observed.environment_hash,
+            content_hash=expected_binding.procedure_hash,
         ),
-        context=EvidenceReceipt(
-            record_id="context-a",
+        "environment": EvidenceReceipt(
+            record_id=expected_binding.environment_id,
             schema_version=1,
-            content_hash=observed.context_hash,
+            content_hash=expected_binding.environment_hash,
         ),
-        validator=EvidenceReceipt(
-            record_id=observed.validator_id,
+        "context": EvidenceReceipt(
+            record_id=expected_binding.context_id,
             schema_version=1,
-            content_hash=observed.validator_hash,
+            content_hash=expected_binding.context_hash,
         ),
-        checker=EvidenceReceipt(
-            record_id=observed.checker_id,
+        "validator": EvidenceReceipt(
+            record_id=expected_binding.validator_id,
             schema_version=1,
-            content_hash=observed.checker_hash,
+            content_hash=expected_binding.validator_hash,
         ),
-        artifacts=tuple(
+        "checker": EvidenceReceipt(
+            record_id=expected_binding.checker_id,
+            schema_version=1,
+            content_hash=expected_binding.checker_hash,
+        ),
+        "artifacts": tuple(
             EvidenceReceipt(
                 record_id=artifact_id,
                 schema_version=1,
                 content_hash=artifact_hash,
             )
             for artifact_id, artifact_hash in zip(
-                observed.artifact_ids,
-                observed.artifact_hashes,
+                expected_binding.artifact_ids,
+                expected_binding.artifact_hashes,
                 strict=True,
             )
         ),
-        output_schema=EvidenceReceipt(
-            record_id="output-schema-a",
+        "output_schema": EvidenceReceipt(
+            record_id=expected_binding.output_schema_id,
             schema_version=1,
-            content_hash=observed.output_schema_hash,
+            content_hash=expected_binding.output_schema_hash,
+        ),
+    }
+    values["resolution"] = TraceExpectationResolutionAttestation.build(
+        attestation_id=f"expectation-resolution-{suffix}",
+        expectation_source=EvidenceReceipt(
+            record_id=f"accepted-expectation-{suffix}",
+            schema_version=1,
+            content_hash=trace_expectation_snapshot_hash(values),
+        ),
+        resolver=EvidenceReceipt(
+            record_id="expectation-resolver-v1",
+            schema_version=1,
+            content_hash=HASH_B,
+        ),
+        resolved_snapshot_hash=trace_expectation_snapshot_hash(values),
+        provenance=(
+            EvidenceReceipt(
+                record_id=f"expectation-resolution-evidence-{suffix}",
+                schema_version=1,
+                content_hash=HASH_C,
+            ),
         ),
     )
+    return TraceExpectation.build(**values)
 
 
 def reward_observation(

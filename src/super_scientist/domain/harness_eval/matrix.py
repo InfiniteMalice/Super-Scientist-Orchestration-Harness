@@ -27,8 +27,7 @@ from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
 from super_scientist.domain.primitives import Sha256Hex, UtcTimestamp
 
 if TYPE_CHECKING:
-    from super_scientist.domain.harness_eval.rewards import RewardValidityAssessment
-    from super_scientist.domain.harness_eval.traces import TraceFreshness
+    from super_scientist.domain.harness_eval.evidence_chains import HarnessCellEvidenceChain
 
 # The 256-cell grid reaches this maximum at 128 models x 2 harnesses x 1 partition
 # when all non-transfer comparison families are declared.
@@ -343,8 +342,7 @@ class _ModelHarnessCellPayload(_StrictFrozenModel):
     evaluation_budget: EvaluationBudget
     governing_policy_hash: Sha256Hex
     metrics: EvaluationMetricVector
-    trace_freshness_receipt: EvidenceReceipt
-    reward_validity_receipt: EvidenceReceipt
+    evidence_chain_receipt: EvidenceReceipt
     observed_at: UtcTimestamp
 
     @field_validator("artifact_ids")
@@ -645,34 +643,31 @@ def validate_complete_matched_grid(
     protocol: ModelHarnessProtocol,
     cells: tuple[ModelHarnessCell, ...],
     *,
-    trace_freshness: tuple[TraceFreshness, ...],
-    reward_assessments: tuple[RewardValidityAssessment, ...],
+    evidence_chains: tuple[HarnessCellEvidenceChain, ...],
 ) -> tuple[ModelHarnessConfoundCode, ...]:
+    from super_scientist.domain.harness_eval.evidence_chains import (
+        HarnessCellEvidenceChain,
+        harness_cell_evidence_chain_receipt,
+    )
     from super_scientist.domain.harness_eval.rewards import (
-        RewardValidityAssessment,
         RewardValidityStatus,
-        reward_validity_receipt,
     )
     from super_scientist.domain.harness_eval.traces import (
-        TraceFreshness,
         TraceFreshnessStatus,
-        trace_freshness_receipt,
     )
 
     validated_protocol = ModelHarnessProtocol.model_validate(protocol)
     validated_cells = tuple(ModelHarnessCell.model_validate(item) for item in cells)
-    validated_freshness = tuple(TraceFreshness.model_validate(item) for item in trace_freshness)
-    validated_rewards = tuple(
-        RewardValidityAssessment.model_validate(item) for item in reward_assessments
+    validated_chains = tuple(
+        HarnessCellEvidenceChain.model_validate(item) for item in evidence_chains
     )
-    freshness_ids = tuple(item.freshness_id for item in validated_freshness)
-    reward_ids = tuple(item.assessment_id for item in validated_rewards)
-    if len(freshness_ids) != len(set(freshness_ids)):
-        raise ValueError("validated trace freshness snapshots must have unique identifiers")
-    if len(reward_ids) != len(set(reward_ids)):
-        raise ValueError("validated reward assessments must have unique identifiers")
-    freshness_by_id = {item.freshness_id: item for item in validated_freshness}
-    rewards_by_id = {item.assessment_id: item for item in validated_rewards}
+    chain_ids = tuple(item.chain_id for item in validated_chains)
+    trace_ids = tuple(item.trace.trace_id for item in validated_chains)
+    if len(chain_ids) != len(set(chain_ids)):
+        raise ValueError("validated cell evidence chains must have unique identifiers")
+    if len(trace_ids) != len(set(trace_ids)):
+        raise ValueError("each validated matrix cell requires its own trace")
+    chains_by_id = {item.chain_id: item for item in validated_chains}
     confounds: set[ModelHarnessConfoundCode] = set()
     cell_ids = tuple(item.cell_id for item in validated_cells)
     if len(cell_ids) != len(set(cell_ids)):
@@ -700,18 +695,19 @@ def validate_complete_matched_grid(
             confounds.add(ModelHarnessConfoundCode.HARNESS_IDENTITY_MISMATCH)
         if cell.coordinate.partition not in expected_partitions:
             confounds.add(ModelHarnessConfoundCode.PARTITION_MISMATCH)
-        freshness = freshness_by_id.get(cell.trace_freshness_receipt.record_id)
-        if freshness is None or trace_freshness_receipt(freshness) != cell.trace_freshness_receipt:
-            confounds.add(ModelHarnessConfoundCode.TRACE_RECEIPT_MISMATCH)
-        elif freshness.status is not TraceFreshnessStatus.CURRENT:
-            confounds.add(ModelHarnessConfoundCode.STALE_TRACE)
-        assessment = rewards_by_id.get(cell.reward_validity_receipt.record_id)
+        chain = chains_by_id.get(cell.evidence_chain_receipt.record_id)
         if (
-            assessment is None
-            or reward_validity_receipt(assessment) != cell.reward_validity_receipt
+            chain is None
+            or harness_cell_evidence_chain_receipt(chain) != cell.evidence_chain_receipt
+            or chain.protocol != validated_protocol
+            or chain.coordinate != cell.coordinate
         ):
+            confounds.add(ModelHarnessConfoundCode.TRACE_RECEIPT_MISMATCH)
             confounds.add(ModelHarnessConfoundCode.REWARD_RECEIPT_MISMATCH)
-        elif assessment.status is not RewardValidityStatus.VALID:
+            continue
+        if chain.freshness.status is not TraceFreshnessStatus.CURRENT:
+            confounds.add(ModelHarnessConfoundCode.STALE_TRACE)
+        if chain.assessment.status is not RewardValidityStatus.VALID:
             confounds.add(ModelHarnessConfoundCode.INVALID_REWARD)
     return tuple(sorted(confounds, key=_CONFOUND_ORDER.__getitem__))
 
@@ -840,8 +836,7 @@ def analyze_model_harness(
     protocol: ModelHarnessProtocol,
     cells: tuple[ModelHarnessCell, ...],
     *,
-    trace_freshness: tuple[TraceFreshness, ...],
-    reward_assessments: tuple[RewardValidityAssessment, ...],
+    evidence_chains: tuple[HarnessCellEvidenceChain, ...],
 ) -> ModelHarnessAnalysis:
     validated_protocol = ModelHarnessProtocol.model_validate(protocol)
     validated_cells = tuple(ModelHarnessCell.model_validate(item) for item in cells)
@@ -849,8 +844,7 @@ def analyze_model_harness(
     confounds = validate_complete_matched_grid(
         validated_protocol,
         ordered_cells,
-        trace_freshness=trace_freshness,
-        reward_assessments=reward_assessments,
+        evidence_chains=evidence_chains,
     )
     comparisons_out = (
         () if confounds else _build_declared_comparisons(validated_protocol, validated_cells)
