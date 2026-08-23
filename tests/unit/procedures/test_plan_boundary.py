@@ -131,6 +131,45 @@ def test_task_12_safe_parse_precedes_recomputation_and_record_construction() -> 
     assert "proposal.compilation.result" not in task_12
 
 
+def test_task_12_resolves_every_accepted_source_before_recomputation_or_acceptance() -> None:
+    task_12 = _task(PLAN_PATH.read_text(encoding="utf-8"), 12)
+
+    resolve_sources = task_12.index("resolved_sources = resolve_procedure_source_receipts(")
+    reject_unresolved = task_12.index(
+        "return rejected(proposal, RejectionCode.STALE_REFERENCE)",
+        resolve_sources,
+    )
+    recompute = task_12.index("expected = compile_method(", reject_unresolved)
+    accept = task_12.index("return reject_existing_or_accept(", recompute)
+
+    assert resolve_sources < reject_unresolved < recompute < accept
+    for repository_name in (
+        "accepted_source_receipts",
+        "capability_profiles",
+        "artifact_catalog_snapshots",
+        "tool_catalog_snapshots",
+        "validator_catalog_snapshots",
+        "source_snapshots",
+    ):
+        assert repository_name in task_12
+    assert "resolve every `AcceptedSourceReceiptRef`" in task_12
+    binding_handler = task_12.index("class BindCompiledProgressPlanHandler:")
+    binding_resolution = task_12.index(
+        "resolved_sources = resolve_procedure_source_receipts(",
+        binding_handler,
+    )
+    binding_rejection = task_12.index(
+        "return rejected(proposal, RejectionCode.STALE_REFERENCE)",
+        binding_resolution,
+    )
+    progress_mapping = task_12.index(
+        "expected_plan = procedure_to_progress_plan(",
+        binding_rejection,
+    )
+
+    assert binding_resolution < binding_rejection < progress_mapping
+
+
 def test_integrity_plan_normalizes_accepted_compilation_envelopes() -> None:
     plan = PLAN_PATH.read_text(encoding="utf-8")
 

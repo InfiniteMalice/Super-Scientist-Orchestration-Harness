@@ -27,6 +27,7 @@ from super_scientist.domain.procedures import (
     ProcedureBoundaryValidationError,
     ProcedureCompilationRecord,
     ProcedureCompilationRequest,
+    ProcedureCompilationResult,
     ProcedureEvidenceSourceKind,
     ProcedureFindingCode,
     ProcedureValidationStatus,
@@ -118,6 +119,35 @@ def _request_with_validator_actor_id(actor_id: str) -> ProcedureCompilationReque
     return _replace_step(request, 0, first)
 
 
+def _request_with_invalid_nested_resource(*, construct: bool) -> ProcedureCompilationRequest:
+    request = valid_request()
+    resource = request.candidate.resource_estimate
+    if construct:
+        invalid_resource = type(resource).model_construct(
+            **(resource.__dict__ | {"tokens": PRIVATE_MARKER})
+        )
+    else:
+        invalid_resource = resource.model_copy(update={"tokens": PRIVATE_MARKER})
+    candidate = request.candidate.model_copy(update={"resource_estimate": invalid_resource})
+    return request.model_copy(update={"candidate": candidate})
+
+
+def _result_with_invalid_constructed_resource() -> ProcedureCompilationResult:
+    result = compile_method(valid_request())
+    candidate = result.procedure.source_candidate
+    resource = candidate.resource_estimate
+    invalid_resource = type(resource).model_construct(
+        **(resource.__dict__ | {"tokens": PRIVATE_MARKER})
+    )
+    invalid_candidate = candidate.model_construct(
+        **(candidate.__dict__ | {"resource_estimate": invalid_resource})
+    )
+    invalid_procedure = result.procedure.model_construct(
+        **(result.procedure.__dict__ | {"source_candidate": invalid_candidate})
+    )
+    return result.model_construct(**(result.__dict__ | {"procedure": invalid_procedure}))
+
+
 def test_compilation_request_rejects_naked_catalog_and_capability_facts() -> None:
     request = valid_request()
     payload = request.model_dump(mode="python")
@@ -138,11 +168,12 @@ def test_catalog_receipt_binds_exact_authorization_facts() -> None:
     )
     forged = request.model_copy(update={"tool_catalog_receipt": forged_receipt})
 
-    result = compile_method(forged)
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        compile_method(forged)
 
-    assert result.report.status is ProcedureValidationStatus.INVALID
-    assert ProcedureFindingCode.SPOOFED_EVIDENCE_BINDING in tuple(
-        finding.code for finding in result.report.findings
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation request failed canonical validation",
     )
 
 
@@ -216,19 +247,21 @@ def test_compiler_rejects_model_copy_bypass_of_capability_grounding() -> None:
     forged_grounded = grounded.model_copy(update={"assessment": forged_assessment})
     forged = request.model_copy(update={"capability_assessments": (forged_grounded,)})
 
-    result = compile_method(forged)
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        compile_method(forged)
 
-    assert result.report.status is ProcedureValidationStatus.INVALID
-    assert ProcedureFindingCode.SPOOFED_EVIDENCE_BINDING in tuple(
-        finding.code for finding in result.report.findings
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation request failed canonical validation",
     )
 
 
 def test_validation_rejects_rehashed_wrapper_with_stale_profile_hash() -> None:
-    request = valid_request().model_copy(
+    valid = valid_request()
+    request = valid.model_copy(
         update={"capability_assessments": (_forged_verified_assessment_from_unknown(),)}
     )
-    procedure = compile_declared_stages(request)
+    procedure = compile_declared_stages(valid)
 
     findings = validate_procedure(request, procedure)
 
@@ -242,11 +275,12 @@ def test_compiler_rejects_rehashed_wrapper_with_stale_profile_hash() -> None:
         update={"capability_assessments": (_forged_verified_assessment_from_unknown(),)}
     )
 
-    result = compile_method(request)
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        compile_method(request)
 
-    assert result.report.status is ProcedureValidationStatus.INVALID
-    assert ProcedureFindingCode.SPOOFED_EVIDENCE_BINDING in tuple(
-        finding.code for finding in result.report.findings
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation request failed canonical validation",
     )
 
 
@@ -558,6 +592,74 @@ def test_compiler_deep_model_copy_fails_with_fixed_safe_error() -> None:
     )
 
 
+@pytest.mark.parametrize("construct", (False, True))
+def test_compiler_rejects_invalid_nested_resource_without_marker_warning(
+    construct: bool,
+) -> None:
+    request = _request_with_invalid_nested_resource(construct=construct)
+
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        with pytest.raises(ProcedureBoundaryValidationError) as caught:
+            compile_method(request)
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation request failed canonical validation",
+    )
+    assert all(PRIVATE_MARKER not in str(item.message) for item in caught_warnings)
+
+
+def test_untrusted_result_parser_rejects_constructed_nested_resource_without_warning() -> None:
+    forged = _result_with_invalid_constructed_resource()
+
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        with pytest.raises(ProcedureBoundaryValidationError) as caught:
+            parse_untrusted_procedure_compilation_result(forged)
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation result failed validation",
+    )
+    assert all(PRIVATE_MARKER not in str(item.message) for item in caught_warnings)
+
+
+def test_result_request_parser_rejects_structurally_invalid_result_before_field_read() -> None:
+    forged = _result_with_invalid_constructed_resource()
+
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        with pytest.raises(ProcedureBoundaryValidationError) as caught:
+            forged.parse_request()
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "compilation result request failed validation",
+    )
+    assert all(PRIVATE_MARKER not in str(item.message) for item in caught_warnings)
+
+
+def test_opaque_envelope_builder_rejects_invalid_typed_result_before_serialization() -> None:
+    forged = _result_with_invalid_constructed_resource()
+
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        with pytest.raises(ProcedureBoundaryValidationError) as caught:
+            OpaqueProcedureCompilationEnvelope.build(
+                compilation_id="compilation-opaque",
+                result=forged,
+                created_at=NOW,
+                governing_policy_hash="f" * 64,
+            )
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation result failed validation",
+    )
+    assert all(PRIVATE_MARKER not in str(item.message) for item in caught_warnings)
+
+
 def test_request_accepts_multibyte_payload_at_canonical_byte_boundary() -> None:
     prototype = _request_with_validator_actor_id("é")
     prototype_size = len(canonical_json_bytes(prototype.model_dump(mode="json")))
@@ -588,7 +690,10 @@ def test_request_rejects_multibyte_payload_over_canonical_byte_limit() -> None:
 def test_compiler_rejects_oversize_model_copy_before_result_build() -> None:
     request = _request_with_validator_actor_id("é" * REQUEST_BYTE_LIMIT)
 
-    with pytest.raises(ValueError, match="exceeds canonical byte limit"):
+    with pytest.raises(
+        ProcedureBoundaryValidationError,
+        match="failed canonical validation",
+    ):
         compile_method(request)
 
 

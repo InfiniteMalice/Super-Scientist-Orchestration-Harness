@@ -999,15 +999,20 @@ git commit -m "feat: add cognitive procedure storage schema"
 **Files:**
 - Create: `src/super_scientist/providers/storage/cognitive_records.py`
 - Create: `src/super_scientist/providers/storage/evaluation_records.py`
+- Create: `src/super_scientist/providers/storage/procedure_sources.py`
 - Modify: `src/super_scientist/providers/storage/integrity_records.py`
 - Modify: `src/super_scientist/providers/storage/repositories.py:939`
 - Create: `tests/integration/storage/test_cognitive_repositories.py`
 - Create: `tests/integration/storage/test_evaluation_repositories.py`
+- Create: `tests/integration/storage/test_procedure_source_repositories.py`
 - Create: `tests/property/test_cognitive_append_only.py`
 
 **Interfaces:**
-- Consumes: Task 9 tables and `AppendOnlyRecordRepository`.
-- Produces: one fixed repository per table; `CognitiveIntegritySnapshot`; `EvaluationExtensionIntegritySnapshot`; complete `has_durable_state()` coverage.
+- Consumes: Task 9 tables, `AppendOnlyRecordRepository`, `EvidenceRepository`,
+  `ArtifactStore`, `TransactionRepository`, and `AuditRepository`.
+- Produces: one fixed repository per table; focused accepted procedure-source readers;
+  `CognitiveIntegritySnapshot`; `EvaluationExtensionIntegritySnapshot`; complete
+  `has_durable_state()` coverage.
 
 - [ ] **Step 1: Write strict decode, relationship, and idempotent-read tests**
 
@@ -1025,11 +1030,17 @@ def test_guidance_cells_are_returned_in_canonical_identity_order(runtime) -> Non
     assert tuple(item.cell_id for item in repository.list_for_protocol("protocol-1")) == (
         "cell-a", "cell-b"
     )
+
+
+def test_procedure_source_reader_rejects_any_receipt_or_snapshot_mismatch(runtime) -> None:
+    reference = runtime.accepted_artifact_catalog_reference()
+    for forged in runtime.each_single_field_source_forgery(reference):
+        assert runtime.procedure_sources.resolve(forged) is None
 ```
 
 - [ ] **Step 2: Run repository tests**
 
-Run: `python -m pytest tests/integration/storage/test_cognitive_repositories.py tests/integration/storage/test_evaluation_repositories.py tests/property/test_cognitive_append_only.py -v`
+Run: `python -m pytest tests/integration/storage/test_cognitive_repositories.py tests/integration/storage/test_evaluation_repositories.py tests/integration/storage/test_procedure_source_repositories.py tests/property/test_cognitive_append_only.py -v`
 
 Expected: FAIL because the repository modules do not exist.
 
@@ -1055,18 +1066,47 @@ class PeerContributionRepository(AppendOnlyRecordRepository[PeerContribution]):
 
 Do not create a generic repository locator or dynamic model registry. Export explicit repository classes and explicit snapshot fields. Each `add()` receives the coordinator transaction ID and uses the domain record's timestamp/policy hash.
 
+Add these focused read contracts in `procedure_sources.py`:
+
+- `AcceptedProcedureSourceReceiptReader` reconstructs accepted source receipts from
+  `TransactionRepository` and `AuditRepository`. It requires one accepted transaction,
+  one exact persisted audit event, exact proposal ID/hash, and exact audit event ID/hash.
+- `CapabilityProfileRepository` resolves a capability-profile source by profile ID,
+  schema version, and canonical content hash. The accepted proposal must be
+  `RecordCapabilityProfile` and must contain that exact profile.
+- `ArtifactCatalogSnapshotRepository`, `ToolCatalogSnapshotRepository`, and
+  `ValidatorCatalogSnapshotRepository` resolve catalog sources from accepted
+  `AddEvidence` records whose artifacts contain canonical schema-version-1 catalog JSON.
+  Each repository decodes only its fixed catalog kind and requires exact source record
+  ID, source content hash, ordered entries, completeness flag, and artifact hash.
+- `ProcedureSourceSnapshotRepository` resolves `source_snapshot_id` to one accepted
+  `AddEvidence` snapshot artifact, requires its artifact hash to equal
+  `source_snapshot_hash`, and exposes `is_current(snapshot_id, snapshot_hash)`. A
+  snapshot artifact contains `schema_version`, `snapshot_family_id`, `snapshot_id`, and
+  the canonically ordered source record ID/content-hash bindings. A snapshot is current
+  only when its accepted audit sequence is the greatest sequence for that
+  `snapshot_family_id`; duplicate greatest sequences or duplicate IDs fail resolution.
+
+The catalog source artifact bytes are exactly the canonical JSON object hashed by
+`catalog_snapshot_content_hash()`: `catalog_kind`, `entries`, and `complete`. The
+artifact's accepted `AddEvidence` proposal and audit event establish acceptance; the
+separate accepted snapshot artifact establishes the fixed-snapshot identity and
+freshness. These readers are explicit compositions over existing evidence,
+transaction, audit, and artifact storage. They do not add a generic repository locator,
+a mutable catalog head, or repository authority to the procedure domain.
+
 - [ ] **Step 4: Test every record family and durable-state probe**
 
-Run: `python -m pytest tests/integration/storage/test_cognitive_repositories.py tests/integration/storage/test_evaluation_repositories.py tests/property/test_cognitive_append_only.py tests/integration/application/test_workspace_integrity.py -v`
+Run: `python -m pytest tests/integration/storage/test_cognitive_repositories.py tests/integration/storage/test_evaluation_repositories.py tests/integration/storage/test_procedure_source_repositories.py tests/property/test_cognitive_append_only.py tests/integration/application/test_workspace_integrity.py -v`
 
 Expected: PASS for round trip, unknown field, content-hash corruption, derived-column mismatch, relationship ordering, append-only enforcement, and one-row-only durable-state detection for all 18 tables.
 
 - [ ] **Step 5: Run static checks and commit**
 
-Run: `python -m ruff check src/super_scientist/providers/storage tests/integration/storage/test_cognitive_repositories.py tests/integration/storage/test_evaluation_repositories.py tests/property/test_cognitive_append_only.py && python -m mypy src`
+Run: `python -m ruff check src/super_scientist/providers/storage tests/integration/storage/test_cognitive_repositories.py tests/integration/storage/test_evaluation_repositories.py tests/integration/storage/test_procedure_source_repositories.py tests/property/test_cognitive_append_only.py && python -m mypy src`
 
 ```bash
-git add src/super_scientist/providers/storage tests/integration/storage/test_cognitive_repositories.py tests/integration/storage/test_evaluation_repositories.py tests/property/test_cognitive_append_only.py
+git add src/super_scientist/providers/storage tests/integration/storage/test_cognitive_repositories.py tests/integration/storage/test_evaluation_repositories.py tests/integration/storage/test_procedure_source_repositories.py tests/property/test_cognitive_append_only.py
 git commit -m "feat: persist cognitive and evaluation records"
 ```
 
@@ -1177,7 +1217,7 @@ git commit -m "feat: govern cognitive collaboration records"
 - Modify: `tests/integration/application/test_progress_integrity.py`
 
 **Interfaces:**
-- Consumes: `parse_untrusted_procedure_compilation_envelope()`, `parse_untrusted_procedure_compilation_result()`, `compile_method()`, `procedure_to_progress_plan()`, `RecordProgressPlanHandler`, compilation receipts, procedure repositories, and progress capabilities.
+- Consumes: `parse_untrusted_procedure_compilation_envelope()`, `parse_untrusted_procedure_compilation_result()`, `compile_method()`, `procedure_to_progress_plan()`, `RecordProgressPlanHandler`, compilation receipts, the focused Task 10 accepted-source readers, procedure repositories, and progress capabilities.
 - Produces: `fixed_procedure_handlers()`, `procedure_capabilities()`, accepted invalid-compilation history, method terminal outcomes, and atomic compiled-plan binding.
 
 - [ ] **Step 1: Write invalid-history and no-plan tests**
@@ -1220,6 +1260,17 @@ class RecordProcedureCompilationHandler:
             supplied_request = supplied_result.parse_request()
         except ProcedureBoundaryValidationError:
             return rejected(proposal, RejectionCode.INVALID_PROCEDURE)
+        resolved_sources = resolve_procedure_source_receipts(
+            supplied_request,
+            accepted_source_receipts=context.accepted_source_receipts,
+            capability_profiles=context.capability_profiles,
+            artifact_catalog_snapshots=context.artifact_catalog_snapshots,
+            tool_catalog_snapshots=context.tool_catalog_snapshots,
+            validator_catalog_snapshots=context.validator_catalog_snapshots,
+            source_snapshots=context.source_snapshots,
+        )
+        if resolved_sources is None:
+            return rejected(proposal, RejectionCode.STALE_REFERENCE)
         expected = compile_method(supplied_request)
         if expected != supplied_result:
             return rejected(proposal, RejectionCode.DERIVATION_MISMATCH)
@@ -1249,6 +1300,36 @@ same complete-envelope validation before reading compilation ID, time, policy ha
 result bytes. No handler treats the opaque proposal envelope as a
 `ProcedureCompilationRecord`.
 
+`resolve_procedure_source_receipts()` must resolve every `AcceptedSourceReceiptRef` in
+the `GroundedCapabilityAssessment.profile_receipt` fields plus the artifact, tool, and
+validator catalog receipts. For each reference, it performs these checks before
+compiler recomputation, active-policy comparison, duplicate acceptance, projection, or
+progress binding:
+
+1. `AcceptedProcedureSourceReceiptReader.resolve(reference)` must return one accepted
+   transaction and its one exact persisted audit event. The resolved proposal ID/hash
+   and audit event ID/hash must equal the reference. The reference content hash must be
+   canonical, and `receipt_id` must resolve uniquely.
+2. The focused repository selected by `source_kind` must return one source record. The
+   resolved record ID, schema version, and canonical content hash must equal
+   `source_record_id`, `source_schema_version`, and `source_content_hash`.
+3. `ProcedureSourceSnapshotRepository.resolve_exact(source_snapshot_id,
+   source_snapshot_hash)` must return one accepted snapshot artifact, and
+   `is_current(source_snapshot_id, source_snapshot_hash)` must be true.
+4. A capability source must equal the retained profile, its accepted
+   `RecordCapabilityProfile` payload, and the evidence snapshot used by the recomputed
+   assessment. A catalog source must equal the request's complete ordered entries and
+   completeness flag. The three catalog sources must resolve to the same current
+   snapshot ID/hash.
+
+If any receipt is absent, duplicated, stale, wrong-kind, schema-mismatched,
+content-mismatched, snapshot-mismatched, proposal-mismatched, or audit-mismatched, the
+handler returns `STALE_REFERENCE`. It performs no compiler, policy, acceptance,
+projection, or progress action. The coordinator therefore rejects the proposal
+atomically without appending a compilation, binding, or progress plan. The coordinator
+retains the rejected transaction decision and its audit event together under its
+existing semantics. No accept path may bypass this complete resolution.
+
 `RecordMethodDirectionOutcomeHandler` accepts `SUPPORTED`, `UNSUPPORTED`, `INCONCLUSIVE`, or `ABANDONED` only when every referenced compilation, failure, evidence, and existing budget record exists. `SUPPORTED` remains an evidence outcome and has no claim or admission projection.
 
 - [ ] **Step 4: Compose the existing progress handler inside one transaction**
@@ -1258,6 +1339,21 @@ class BindCompiledProgressPlanHandler:
     proposal_type = "bind_compiled_progress_plan"
 
     def decide(self, proposal, context) -> TransactionDecision:
+        try:
+            compilation_request = context.compilation.result.parse_request()
+        except ProcedureBoundaryValidationError:
+            return rejected(proposal, RejectionCode.INVALID_PROCEDURE)
+        resolved_sources = resolve_procedure_source_receipts(
+            compilation_request,
+            accepted_source_receipts=context.accepted_source_receipts,
+            capability_profiles=context.capability_profiles,
+            artifact_catalog_snapshots=context.artifact_catalog_snapshots,
+            tool_catalog_snapshots=context.tool_catalog_snapshots,
+            validator_catalog_snapshots=context.validator_catalog_snapshots,
+            source_snapshots=context.source_snapshots,
+        )
+        if resolved_sources is None:
+            return rejected(proposal, RejectionCode.STALE_REFERENCE)
         require_current_valid_compilation(context.compilation, proposal.compilation_receipt)
         expected_plan = procedure_to_progress_plan(
             context.compilation.result,
@@ -1277,7 +1373,12 @@ class BindCompiledProgressPlanHandler:
         capability.append_binding(proposal.binding)
 ```
 
-The synthetic `RecordProgressPlan` uses the binding proposal's proposal ID, proposer, approval, and exact plan. It does not submit a nested transaction. Both plan and binding roll back together.
+The binding handler repeats complete accepted-source resolution against the stored
+compilation request before it validates the compilation receipt or calls
+`procedure_to_progress_plan()`. A source that became stale after compilation acceptance
+therefore cannot produce a progress plan. The synthetic `RecordProgressPlan` uses the
+binding proposal's proposal ID, proposer, approval, and exact plan. It does not submit a
+nested transaction. Both plan and binding roll back together.
 
 Run: `python -m pytest tests/integration/application/test_procedure_service.py tests/integration/application/test_progress_service.py tests/integration/application/test_progress_integrity.py tests/unit/procedures tests/unit/progress -v`
 

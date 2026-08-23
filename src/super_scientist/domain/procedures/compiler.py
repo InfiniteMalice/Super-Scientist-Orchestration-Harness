@@ -5,7 +5,7 @@ from contextlib import suppress
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from super_scientist.domain.cognition.grounding import assess_capability
 from super_scientist.domain.cognition.models import (
@@ -937,7 +937,7 @@ _CHECKS: tuple[
 )
 
 
-def compile_declared_stages(request: ProcedureCompilationRequest) -> ExecutableProcedure:
+def _compile_declared_stages(request: ProcedureCompilationRequest) -> ExecutableProcedure:
     request_hash = canonical_model_hash(request)
     producers = _producer_map(request.candidate.stages)
     steps_by_id = _step_map(request.candidate.stages)
@@ -979,6 +979,13 @@ def compile_declared_stages(request: ProcedureCompilationRequest) -> ExecutableP
     )
 
 
+def compile_declared_stages(request: ProcedureCompilationRequest) -> ExecutableProcedure:
+    """Compile only a complete strict request, including copied model instances."""
+
+    request, _request_bytes = _strict_canonical_request(request)
+    return _compile_declared_stages(request)
+
+
 def validate_procedure(
     request: ProcedureCompilationRequest,
     procedure: ExecutableProcedure,
@@ -988,34 +995,36 @@ def validate_procedure(
 
 def _strict_canonical_request(
     request: ProcedureCompilationRequest,
-    request_bytes: bytes,
-) -> ProcedureCompilationRequest:
-    request_json = request_bytes.decode("utf-8")
-    if not procedure_request_json_is_bounded(request_json):
-        raise ProcedureBoundaryValidationError(
-            "procedure compilation request failed canonical validation"
-        ) from None
+) -> tuple[ProcedureCompilationRequest, bytes]:
+    request_bytes: bytes | None = None
     parsed: ProcedureCompilationRequest | None = None
-    with suppress(MemoryError, OverflowError, RecursionError, ValidationError):
-        parsed = ProcedureCompilationRequest.model_validate_json(request_bytes, strict=True)
+    with suppress(
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        TypeError,
+        ValueError,
+    ):
+        request_bytes = canonical_json_bytes(request.model_dump(mode="json", warnings=False))
+        request_json = request_bytes.decode("utf-8")
+        if len(request_bytes) <= MAX_PROCEDURE_REQUEST_BYTES and procedure_request_json_is_bounded(
+            request_json
+        ):
+            parsed = ProcedureCompilationRequest.model_validate_json(
+                request_bytes,
+                strict=True,
+            )
     if parsed is None or parsed != request:
         raise ProcedureBoundaryValidationError(
             "procedure compilation request failed canonical validation"
         ) from None
-    return parsed
+    assert request_bytes is not None
+    return parsed, request_bytes
 
 
 def compile_method(request: ProcedureCompilationRequest) -> ProcedureCompilationResult:
-    request_bytes: bytes | None = None
-    with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
-        request_bytes = canonical_json_bytes(request.model_dump(mode="json"))
-    if request_bytes is None:
-        raise ProcedureBoundaryValidationError(
-            "procedure compilation request failed canonical validation"
-        ) from None
-    if len(request_bytes) > MAX_PROCEDURE_REQUEST_BYTES:
-        raise ValueError("procedure compilation request exceeds canonical byte limit")
-    procedure = compile_declared_stages(request)
+    request, request_bytes = _strict_canonical_request(request)
+    procedure = _compile_declared_stages(request)
     findings = validate_procedure(request, procedure)
     if any(finding.severity is ProcedureFindingSeverity.ERROR for finding in findings):
         status = ProcedureValidationStatus.INVALID
@@ -1023,7 +1032,6 @@ def compile_method(request: ProcedureCompilationRequest) -> ProcedureCompilation
         status = ProcedureValidationStatus.INCONCLUSIVE
     else:
         status = ProcedureValidationStatus.VALID
-        request = _strict_canonical_request(request, request_bytes)
     report = ProcedureValidationReport(
         status=status,
         findings=findings,

@@ -458,6 +458,16 @@ After successful recomputation, persistence and integrity reconstruction use
 `ProcedureCompilationRecord.build_from_untrusted_envelope()`; no other component may
 treat the proposal envelope as a durable typed record.
 
+Before recomputation or any policy, acceptance, projection, or progress decision, the
+procedure handler resolves every `AcceptedSourceReceiptRef` through focused storage
+readers. Resolution proves the exact accepted proposal and audit event, source record
+ID/schema/content hash, source snapshot ID/hash, and current snapshot head. Capability
+sources must equal the retained profiles and evidence snapshots. Artifact, tool, and
+validator sources must equal the complete ordered catalogs and completeness flags and
+must share one current catalog snapshot. Any missing, duplicate, stale, or mismatched
+resolution rejects the proposal atomically. The pure compiler never receives repository
+authority.
+
 Serialized proposals enter through `parse_untrusted_proposal_json()`, not a public raw
 `PROPOSAL_ADAPTER` call. That boundary checks the 8 MiB proposal limit and iterative
 depth limit before Pydantic parsing. It converts validation and resource failures to one
@@ -480,7 +490,8 @@ A separate `BindCompiledProgressPlan` proposal references a committed, current,
 handler:
 
 1. loads the compilation by ID and verifies its content hash;
-2. verifies compiler and catalog freshness;
+2. resolves every compilation source receipt and verifies compiler, evidence, and
+   catalog freshness;
 3. deterministically regenerates the plan mapping;
 4. requires byte-for-byte canonical equality with the proposed plan;
 5. invokes the existing progress-domain validation and persistence functions inside

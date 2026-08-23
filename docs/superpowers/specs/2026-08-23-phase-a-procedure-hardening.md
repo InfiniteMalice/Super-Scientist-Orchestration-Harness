@@ -260,3 +260,54 @@ the record builder expose a marker through a raw Pydantic error.
 - Verify valid envelope parsing and record construction remain exact, then run all
   procedure, Phase A, adversarial, formatting, lint, typing, dependency, documentation,
   and diff gates.
+
+## Round 7: strict typed-input normalization and accepted-source resolution
+
+### Problem
+
+Pydantic serializers warn by default when a copied or constructed nested model contains
+an invalid value. `compile_method()` could therefore emit a private marker in a warning
+and later expose a raw validation error. The safe result parser hid its exception but
+could emit the same marker warning. The Task 12 sketch also trusted receipt-shaped data
+without specifying the repository operations that prove acceptance, exact source
+content, snapshot identity, and freshness.
+
+### Design and expected behavior
+
+- Every public procedure compilation or safe parsing boundary serializes typed model
+  inputs with `warnings=False`, strictly reparses the complete canonical value, and
+  requires exact equality before reading fields or deriving output. A structurally
+  invalid `model_copy()` or `model_construct()` value raises the boundary's fixed
+  `ProcedureBoundaryValidationError` after leaving the caught-exception scope.
+- This round supersedes Round 2's compiler behavior for schema-invalid copied receipt
+  or profile cross-links: full strict round-trip rejection now occurs before the sixteen
+  checks. The defensive checks remain available to `validate_procedure()` for a
+  caller-supplied procedure/request pair, while schema-valid semantic failures still
+  receive a complete deterministic report.
+- `compile_method()` rejects structurally invalid typed bypasses before all compilation
+  work. Structurally valid semantic failures, including unsupported compiler identity,
+  impossible authority, unavailable registered tools, and unknown catalog facts, still
+  produce deterministic reports with all sixteen checks.
+- Task 10 provides focused accepted-source, capability-profile, catalog-source, and
+  source-snapshot readers over exact transaction, audit, evidence, artifact, and
+  cognitive records. Task 12 resolves every profile and catalog
+  `AcceptedSourceReceiptRef` through those readers before recomputation, policy checks,
+  acceptance, projection, or progress binding.
+- Exact resolution compares proposal and audit IDs/hashes, source record ID/schema/hash,
+  snapshot ID/hash, decoded catalog contents/completeness, retained profile contents,
+  and the single current snapshot head. Any missing, duplicate, stale, or mismatched
+  value fails closed and causes no compilation, binding, or progress write. The existing
+  coordinator still retains the rejection decision and its audit event atomically.
+
+### Tests
+
+- Inject a marker into copied and constructed nested resource/result models. Capture
+  warnings and require the fixed error, no marker warning, no raw structured error, and
+  no cause or context at compilation, result parsing, request parsing, and envelope
+  construction boundaries.
+- Require the executable Task 12 plan to resolve every source kind through the focused
+  Task 10 readers and to reject unresolved or stale sources before recomputation or any
+  accept path.
+- Preserve valid compilation, semantic invalid/inconclusive reports, receipt and request
+  integrity, opaque proposal transport, deterministic progress recomputation, and all
+  sixteen checks.

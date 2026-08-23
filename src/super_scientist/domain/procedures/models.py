@@ -76,7 +76,11 @@ def canonical_model_hash(
     *,
     exclude_fields: set[str] | None = None,
 ) -> str:
-    payload = model.model_dump(mode="json", exclude=exclude_fields or set())
+    payload = model.model_dump(
+        mode="json",
+        exclude=exclude_fields or set(),
+        warnings=False,
+    )
     return sha256_hex(canonical_json_bytes(payload))
 
 
@@ -89,7 +93,7 @@ def catalog_snapshot_content_hash(
         canonical_json_bytes(
             {
                 "catalog_kind": catalog_kind,
-                "entries": tuple(item.model_dump(mode="json") for item in entries),
+                "entries": tuple(item.model_dump(mode="json", warnings=False) for item in entries),
                 "complete": complete,
             }
         )
@@ -326,7 +330,7 @@ class DeclaredProcedureArtifact(_DeclaredProcedureArtifactPayload):
     def build(cls, **values: Any) -> Self:
         payload = _DeclaredProcedureArtifactPayload(**values)
         return cls(
-            **payload.model_dump(mode="python"),
+            **payload.model_dump(mode="python", warnings=False),
             content_hash=canonical_model_hash(payload),
         )
 
@@ -425,7 +429,7 @@ class ProcedureStep(_ProcedureStepPayload):
     def build(cls, **values: Any) -> Self:
         payload = _ProcedureStepPayload(**values)
         return cls(
-            **payload.model_dump(mode="python"),
+            **payload.model_dump(mode="python", warnings=False),
             content_hash=canonical_model_hash(payload),
         )
 
@@ -483,7 +487,7 @@ class CandidateMethod(_CandidateMethodPayload):
     def build(cls, **values: Any) -> Self:
         payload = _CandidateMethodPayload(**values)
         return cls(
-            **payload.model_dump(mode="python"),
+            **payload.model_dump(mode="python", warnings=False),
             content_hash=canonical_model_hash(payload),
         )
 
@@ -516,7 +520,7 @@ class AcceptedSourceReceiptRef(_AcceptedSourceReceiptPayload):
     def build(cls, **values: Any) -> Self:
         payload = _AcceptedSourceReceiptPayload(**values)
         return cls(
-            **payload.model_dump(mode="python"),
+            **payload.model_dump(mode="python", warnings=False),
             content_hash=canonical_model_hash(payload),
         )
 
@@ -563,7 +567,7 @@ class GroundedCapabilityAssessment(_GroundedCapabilityAssessmentPayload):
     def build(cls, **values: Any) -> Self:
         payload = _GroundedCapabilityAssessmentPayload(**values)
         return cls(
-            **payload.model_dump(mode="python"),
+            **payload.model_dump(mode="python", warnings=False),
             content_hash=canonical_model_hash(payload),
         )
 
@@ -741,7 +745,7 @@ class ProcedureCompilationRequest(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_bounded_canonical_request(self) -> Self:
-        request_bytes = canonical_json_bytes(self.model_dump(mode="json"))
+        request_bytes = canonical_json_bytes(self.model_dump(mode="json", warnings=False))
         if len(request_bytes) > MAX_PROCEDURE_REQUEST_BYTES:
             raise ValueError("procedure compilation request exceeds canonical byte limit")
         return self
@@ -793,7 +797,7 @@ class ExecutableProcedure(_ExecutableProcedurePayload):
     def build(cls, **values: Any) -> Self:
         payload = _ExecutableProcedurePayload(**values)
         return cls(
-            **payload.model_dump(mode="python"),
+            **payload.model_dump(mode="python", warnings=False),
             content_hash=canonical_model_hash(payload),
         )
 
@@ -884,14 +888,22 @@ class _ProcedureCompilationResultPayload(_StrictFrozenModel):
         return self
 
     def parse_request(self) -> ProcedureCompilationRequest:
-        if not procedure_request_json_is_bounded(self.request_json):
+        validated_result: ProcedureCompilationResult | None = None
+        with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
+            validated_result = parse_untrusted_procedure_compilation_result(self)
+        if validated_result is None:
+            raise ProcedureBoundaryValidationError(
+                "compilation result request failed validation"
+            ) from None
+        request_json = validated_result.request_json
+        if not procedure_request_json_is_bounded(request_json):
             raise ProcedureBoundaryValidationError(
                 "compilation result request failed validation"
             ) from None
         request: ProcedureCompilationRequest | None = None
         with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
             request = ProcedureCompilationRequest.model_validate_json(
-                self.request_json,
+                request_json,
                 strict=True,
             )
         if request is None:
@@ -910,7 +922,7 @@ class ProcedureCompilationResult(_ProcedureCompilationResultPayload):
     def build(cls, **values: Any) -> Self:
         payload = _ProcedureCompilationResultPayload(**values)
         return cls(
-            **payload.model_dump(mode="python"),
+            **payload.model_dump(mode="python", warnings=False),
             result_hash=canonical_model_hash(payload),
         )
 
@@ -952,7 +964,8 @@ class OpaqueProcedureCompilationEnvelope(_StrictFrozenModel):
         created_at: UtcTimestamp,
         governing_policy_hash: str,
     ) -> Self:
-        result_json = canonical_json_bytes(result.model_dump(mode="json"))
+        result = parse_untrusted_procedure_compilation_result(result)
+        result_json = canonical_json_bytes(result.model_dump(mode="json", warnings=False))
         return cls(
             compilation_id=compilation_id,
             result_json_base64=base64.b64encode(result_json).decode("ascii"),
@@ -989,7 +1002,7 @@ def parse_untrusted_procedure_compilation_envelope(
     envelope: OpaqueProcedureCompilationEnvelope | None = None
     with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
         if isinstance(value, BaseModel):
-            value = value.model_dump(mode="python", warnings="none")
+            value = value.model_dump(mode="python", warnings=False)
         if isinstance(value, (str, bytes, bytearray)):
             envelope = OpaqueProcedureCompilationEnvelope.model_validate_json(
                 value,
@@ -1014,16 +1027,19 @@ def parse_untrusted_procedure_compilation_result(
 ) -> ProcedureCompilationResult:
     """Parse an untrusted result without exposing Pydantic input diagnostics."""
 
+    supplied_result = value if isinstance(value, ProcedureCompilationResult) else None
     result: ProcedureCompilationResult | None = None
     with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
         if isinstance(value, OpaqueProcedureCompilationEnvelope):
             value = parse_untrusted_procedure_compilation_envelope(value).result_json_bytes()
         elif isinstance(value, BaseModel):
-            value = value.model_dump(mode="python")
+            value = value.model_dump(mode="python", warnings=False)
         if isinstance(value, (str, bytes, bytearray)):
             result = ProcedureCompilationResult.model_validate_json(value, strict=True)
         else:
-            result = ProcedureCompilationResult.model_validate(value)
+            result = ProcedureCompilationResult.model_validate(value, strict=True)
+        if supplied_result is not None and result != supplied_result:
+            result = None
     if result is None:
         raise ProcedureBoundaryValidationError(
             "procedure compilation result failed validation"
@@ -1046,7 +1062,7 @@ class ProcedureCompilationRecord(_ProcedureCompilationRecordPayload):
     def build(cls, **values: Any) -> Self:
         payload = _ProcedureCompilationRecordPayload(**values)
         return cls(
-            **payload.model_dump(mode="python"),
+            **payload.model_dump(mode="python", warnings=False),
             content_hash=canonical_model_hash(payload),
         )
 
@@ -1110,7 +1126,7 @@ class CompiledProgressPlanBinding(_CompiledProgressPlanBindingPayload):
     def build(cls, **values: Any) -> Self:
         payload = _CompiledProgressPlanBindingPayload(**values)
         return cls(
-            **payload.model_dump(mode="python"),
+            **payload.model_dump(mode="python", warnings=False),
             content_hash=canonical_model_hash(payload),
         )
 
@@ -1171,7 +1187,7 @@ class MethodDirectionOutcome(_MethodDirectionOutcomePayload):
     def build(cls, **values: Any) -> Self:
         payload = _MethodDirectionOutcomePayload(**values)
         return cls(
-            **payload.model_dump(mode="python"),
+            **payload.model_dump(mode="python", warnings=False),
             content_hash=canonical_model_hash(payload),
         )
 

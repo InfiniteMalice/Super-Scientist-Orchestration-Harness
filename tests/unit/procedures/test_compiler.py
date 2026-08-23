@@ -389,7 +389,12 @@ def request_with_undefined_output() -> ProcedureCompilationRequest:
 
 def request_with_unavailable_tool() -> ProcedureCompilationRequest:
     request = valid_request()
-    tool = request.tool_catalog[0].model_copy(update={"availability": CatalogFactStatus.ABSENT})
+    tool = request.tool_catalog[0].model_copy(
+        update={
+            "availability": CatalogFactStatus.ABSENT,
+            "authorization": CatalogFactStatus.ABSENT,
+        }
+    )
     return _replace_catalog(request, "TOOL_CATALOG", (tool,), True)
 
 

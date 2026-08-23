@@ -62,8 +62,11 @@ def test_compiler_runs_all_sixteen_checks_in_stable_order() -> None:
 
     assert result.report.checks_run == tuple(range(1, 17))
 
-    malformed = valid_request().model_copy(
-        update={"compiler_version": "unsupported", "tool_catalog": ()}
+    malformed = _replace_catalog(
+        valid_request().model_copy(update={"compiler_version": "unsupported"}),
+        "TOOL_CATALOG",
+        (),
+        True,
     )
     first = compile_method(malformed).report.findings
     second = compile_method(malformed).report.findings
@@ -78,7 +81,11 @@ def test_check_1_rejects_unsupported_schema_and_compiler_version() -> None:
     unsupported_schema = request.model_construct(**{**request.__dict__, "schema_version": 2})
 
     assert ProcedureFindingCode.UNSUPPORTED_COMPILER_VERSION in _codes(request)
-    assert ProcedureFindingCode.UNSUPPORTED_SCHEMA_VERSION in _codes(unsupported_schema)
+    with pytest.raises(
+        ProcedureBoundaryValidationError,
+        match="failed canonical validation",
+    ):
+        compile_method(unsupported_schema)
 
 
 def test_request_cannot_supply_compiler_support_policy() -> None:
