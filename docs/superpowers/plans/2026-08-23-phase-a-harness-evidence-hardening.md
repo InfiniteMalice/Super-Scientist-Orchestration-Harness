@@ -45,6 +45,42 @@ DTO, whose integer fields do not have Phase A upper bounds.
 - Domain models only compare resolved records and receipts. They do not read repositories or gain
   transaction, provider, network, execution, promotion, or governance authority.
 
+## Round 3: Handler-Resolved Evidence Inventory Capability
+
+### Problem
+
+Canonical receipts and attestations remain constructible data. A direct caller can remint the
+expectation source, resolver, provenance, verifier/checker result sources, and diagnostic sources
+after changing an attacked snapshot. Labels such as “accepted” and “independent” do not create a
+trust boundary.
+
+### Design
+
+1. Add a strict, canonically hashed `ResolvedEvidenceInventory`. A later application handler builds
+   this inventory only from committed receipt/snapshot records that the handler resolved. No domain
+   helper derives the inventory from a trace, expectation, finding, or assessment.
+2. Require `trace_freshness()` to receive the inventory as a separate argument. The function checks
+   exact source, resolver, provenance, snapshot-kind, and snapshot-hash membership. The resulting
+   freshness record embeds and hashes the inventory capability so direct parsing revalidates it.
+3. Require `assess_reward_validity()` to receive the inventory separately. The inventory must cover
+   verifier/checker result source, result, resolver, and observable evidence receipts; every
+   diagnostic source, resolver, and observable evidence receipt; coverage provenance; and the reward
+   observation evidence record. The assessment stores accepted receipts instead of arbitrary IDs.
+4. Treat the inventory parameter as a capability boundary. A direct caller can construct ordinary
+   domain data, but a handler must supply the previously resolved inventory before a current
+   freshness or valid reward result can exist. The pure domain does not resolve repositories.
+
+### Tests and invariants
+
+- RED probes omit the separately supplied inventory and coordinate an expectation remint against an
+  original inventory.
+- RED probes change an `INVALIDATING` diagnostic to `CLEARED`, remint all adjacent records, and reuse
+  the original inventory; reward validity must fail closed.
+- Direct parse rejects freshness or reward records whose inventory hash, membership, snapshot kind,
+  or accepted receipts are substituted.
+- Per-cell evidence chains, 24,512 comparison capacity, 1,232-comparison 8-by-8 behavior, resource
+  bounds, protected evaluation, canonical order, and the Phase A authority boundary remain unchanged.
+
 ## Global Constraints
 
 - Preserve protected-evaluation and `HarnessCampaign` behavior.

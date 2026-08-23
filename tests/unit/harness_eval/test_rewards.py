@@ -6,7 +6,10 @@ import pytest
 from pydantic import ValidationError
 
 import super_scientist.domain.harness_eval as harness_eval
-from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
+from super_scientist.domain.harness_eval.receipts import (
+    EvidenceReceipt,
+    ResolvedEvidenceKind,
+)
 from super_scientist.domain.harness_eval.rewards import (
     ResolvedRewardHackingDiagnostic,
     ResolvedVerificationResultSnapshot,
@@ -42,8 +45,9 @@ from tests.unit.harness_eval.test_traces import (
     HASH_D,
     available,
     binding,
+    resolved_evidence_inventory,
     reward_observation,
-    trace_expectation,
+    trace_expectation_bundle,
     valid_trace,
 )
 
@@ -52,6 +56,17 @@ def _verification_evidence(
     trace: object,
     succeeded: bool | None,
 ) -> VerificationOutcomeEvidence:
+    evidence, _ = _verification_evidence_bundle(trace, succeeded)
+    return evidence
+
+
+def _verification_evidence_bundle(
+    trace: object,
+    succeeded: bool | None,
+) -> tuple[
+    VerificationOutcomeEvidence,
+    tuple[tuple[EvidenceReceipt, ResolvedEvidenceKind], ...],
+]:
     status = (
         VerificationOutcomeStatus.UNKNOWN
         if succeeded is None
@@ -124,13 +139,27 @@ def _verification_evidence(
         schema_version=1,
         content_hash=verification_result_status_snapshot_hash(checker_result_values),
     )
-    return VerificationOutcomeEvidence.build(
+    evidence = VerificationOutcomeEvidence.build(
         outcome_id="verification-outcome-1",
         verifier=verifier,
         verifier_result=ResolvedVerificationResultSnapshot.build(**verifier_result_values),
         checker=checker,
         checker_result=ResolvedVerificationResultSnapshot.build(**checker_result_values),
     )
+    entries: list[tuple[EvidenceReceipt, ResolvedEvidenceKind]] = []
+    for snapshot in (evidence.verifier_result, evidence.checker_result):
+        entries.extend(
+            (
+                (snapshot.source, ResolvedEvidenceKind.VERIFICATION_RESULT_SOURCE),
+                (snapshot.result, ResolvedEvidenceKind.VERIFICATION_RESULT),
+                (snapshot.resolver, ResolvedEvidenceKind.RESOLVER),
+            )
+        )
+        entries.extend(
+            (item, ResolvedEvidenceKind.OBSERVABLE_EVIDENCE)
+            for item in snapshot.observable_evidence
+        )
+    return evidence, tuple(entries)
 
 
 def _complete_diagnostics(
@@ -158,13 +187,36 @@ def assess_reward_validity(
     verifier_succeeded: bool | None,
 ) -> RewardValidityAssessment:
     completed = _complete_diagnostics(trace, findings)
+    expectation, expectation_inventory = trace_expectation_bundle()
+    verification, verification_entries = _verification_evidence_bundle(trace, verifier_succeeded)
+    coverage, diagnostic_entries = _diagnostic_coverage_bundle(trace, completed)
+    reward = trace.reward_observation  # type: ignore[union-attr]
+    assert reward is not None
+    assert reward.evidence_id is not None
+    inventory = resolved_evidence_inventory(
+        (
+            *((item.receipt, item.kind) for item in expectation_inventory.records),
+            *verification_entries,
+            *diagnostic_entries,
+            (
+                EvidenceReceipt(
+                    record_id=reward.evidence_id,
+                    schema_version=1,
+                    content_hash=reward.content_hash,
+                ),
+                ResolvedEvidenceKind.OBSERVABLE_EVIDENCE,
+            ),
+        ),
+        inventory_id="reward-evidence-inventory-1",
+    )
     return assess_reward_validity_contract(
         observation,  # type: ignore[arg-type]
         trace,  # type: ignore[arg-type]
         completed,
-        expectation=trace_expectation(),
-        verification=_verification_evidence(trace, verifier_succeeded),
-        diagnostic_coverage=_diagnostic_coverage(trace, completed),
+        expectation=expectation,
+        verification=verification,
+        diagnostic_coverage=coverage,
+        inventory=inventory,
     )
 
 
@@ -172,7 +224,18 @@ def _diagnostic_coverage(
     trace: object,
     findings: tuple[RewardHackingFinding, ...],
 ) -> RewardHackingCoverageAttestation:
-    return RewardHackingCoverageAttestation.build(
+    coverage, _ = _diagnostic_coverage_bundle(trace, findings)
+    return coverage
+
+
+def _diagnostic_coverage_bundle(
+    trace: object,
+    findings: tuple[RewardHackingFinding, ...],
+) -> tuple[
+    RewardHackingCoverageAttestation,
+    tuple[tuple[EvidenceReceipt, ResolvedEvidenceKind], ...],
+]:
+    coverage = RewardHackingCoverageAttestation.build(
         attestation_id="diagnostic-coverage-1",
         trace=EvidenceReceipt(
             record_id=trace.trace_id,  # type: ignore[union-attr]
@@ -195,6 +258,20 @@ def _diagnostic_coverage(
             ),
         ),
     )
+    entries: list[tuple[EvidenceReceipt, ResolvedEvidenceKind]] = []
+    for diagnostic in coverage.diagnostics:
+        entries.extend(
+            (
+                (diagnostic.source, ResolvedEvidenceKind.DIAGNOSTIC_SOURCE),
+                (diagnostic.resolver, ResolvedEvidenceKind.RESOLVER),
+            )
+        )
+        entries.extend(
+            (item, ResolvedEvidenceKind.OBSERVABLE_EVIDENCE)
+            for item in diagnostic.observable_evidence
+        )
+    entries.extend((item, ResolvedEvidenceKind.PROVENANCE) for item in coverage.provenance)
+    return coverage, tuple(entries)
 
 
 def _resolved_diagnostic(

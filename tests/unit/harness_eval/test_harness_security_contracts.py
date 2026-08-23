@@ -6,6 +6,7 @@ from itertools import product
 import pytest
 from pydantic import ValidationError
 
+import super_scientist.domain.harness_eval as harness_eval
 from super_scientist.domain.harness_eval.evidence_chains import (
     HarnessCellEvidenceChain,
     harness_cell_evidence_chain_receipt,
@@ -27,7 +28,11 @@ from super_scientist.domain.harness_eval.matrix import (
     evaluation_resource_envelope_hash,
 )
 from super_scientist.domain.harness_eval.models import HarnessPartition
-from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
+from super_scientist.domain.harness_eval.receipts import (
+    EvidenceReceipt,
+    ResolvedEvidenceInventory,
+    ResolvedEvidenceKind,
+)
 from super_scientist.domain.harness_eval.rewards import (
     ResolvedRewardHackingDiagnostic,
     ResolvedVerificationResultSnapshot,
@@ -39,6 +44,7 @@ from super_scientist.domain.harness_eval.rewards import (
     VerificationOutcomeEvidence,
     VerificationOutcomeStatus,
     assess_reward_validity,
+    reward_assessment_hash,
     reward_hacking_diagnostic_status_snapshot_hash,
     verification_result_status_snapshot_hash,
 )
@@ -55,7 +61,9 @@ from super_scientist.domain.harness_eval.traces import (
     TraceFreshness,
     TraceFreshnessStatus,
     artifact_collection_hash,
+    trace_expectation_snapshot_hash,
     trace_freshness,
+    trace_freshness_hash,
 )
 from super_scientist.domain.improvement.models import ResourceUsage
 from tests.unit.harness_eval.test_model_harness_matrix import _budget, _metrics
@@ -64,8 +72,10 @@ from tests.unit.harness_eval.test_traces import (
     HASH_B,
     HASH_C,
     HASH_D,
-    attested_trace_expectation,
+    attested_trace_expectation_bundle,
+    resolved_evidence_inventory,
     trace_expectation,
+    trace_expectation_bundle,
     valid_trace,
 )
 
@@ -82,6 +92,54 @@ def _expectation_for_trace() -> TraceExpectation:
     return trace_expectation()
 
 
+def _accepted_inventory(
+    expectation_inventory: ResolvedEvidenceInventory,
+    verification: VerificationOutcomeEvidence,
+    coverage: RewardHackingCoverageAttestation,
+    observation: RewardObservation,
+    *,
+    suffix: str = "1",
+) -> ResolvedEvidenceInventory:
+    assert observation.evidence_id is not None
+    entries: list[tuple[EvidenceReceipt, ResolvedEvidenceKind]] = [
+        (item.receipt, item.kind) for item in expectation_inventory.records
+    ]
+    for snapshot in (verification.verifier_result, verification.checker_result):
+        entries.extend(
+            (
+                (snapshot.source, ResolvedEvidenceKind.VERIFICATION_RESULT_SOURCE),
+                (snapshot.result, ResolvedEvidenceKind.VERIFICATION_RESULT),
+                (snapshot.resolver, ResolvedEvidenceKind.RESOLVER),
+            )
+        )
+        entries.extend(
+            (item, ResolvedEvidenceKind.OBSERVABLE_EVIDENCE)
+            for item in snapshot.observable_evidence
+        )
+    for diagnostic in coverage.diagnostics:
+        entries.extend(
+            (
+                (diagnostic.source, ResolvedEvidenceKind.DIAGNOSTIC_SOURCE),
+                (diagnostic.resolver, ResolvedEvidenceKind.RESOLVER),
+            )
+        )
+        entries.extend(
+            (item, ResolvedEvidenceKind.OBSERVABLE_EVIDENCE)
+            for item in diagnostic.observable_evidence
+        )
+    entries.extend((item, ResolvedEvidenceKind.PROVENANCE) for item in coverage.provenance)
+    entries.append(
+        (
+            _receipt(observation.evidence_id, observation.content_hash),
+            ResolvedEvidenceKind.OBSERVABLE_EVIDENCE,
+        )
+    )
+    return resolved_evidence_inventory(
+        tuple(entries),
+        inventory_id=f"accepted-evidence-{suffix}",
+    )
+
+
 def test_trace_expectation_rejects_an_unattested_resolved_snapshot() -> None:
     values = _expectation_for_trace().model_dump(
         mode="python",
@@ -92,9 +150,14 @@ def test_trace_expectation_rejects_an_unattested_resolved_snapshot() -> None:
         TraceExpectation.build(**values)
 
 
+def test_trace_freshness_requires_separately_supplied_resolved_inventory() -> None:
+    with pytest.raises(TypeError, match="inventory"):
+        trace_freshness(_expectation_for_trace(), valid_trace())  # type: ignore[call-arg]
+
+
 def test_trace_freshness_rejects_same_record_expectation_source() -> None:
     trace = valid_trace()
-    expectation = _expectation_for_trace()
+    expectation, inventory = trace_expectation_bundle()
     values = expectation.model_dump(mode="python", exclude={"content_hash"})
     resolution_values = expectation.resolution.model_dump(
         mode="python",
@@ -107,10 +170,8 @@ def test_trace_freshness_rejects_same_record_expectation_source() -> None:
     values["resolution"] = TraceExpectationResolutionAttestation.build(**resolution_values)
     reconstructed = TraceExpectation.build(**values)
 
-    freshness = trace_freshness(reconstructed, trace)
-
-    assert freshness.status is TraceFreshnessStatus.STALE
-    assert freshness.mismatches == (TraceBindingMismatch.EXPECTATION_SOURCE,)
+    with pytest.raises(ValueError, match="does not accept EXPECTATION_SOURCE"):
+        trace_freshness(reconstructed, trace, inventory=inventory)
 
 
 def test_expectation_source_receipt_must_address_resolved_snapshot() -> None:
@@ -126,12 +187,12 @@ def test_expectation_source_receipt_must_address_resolved_snapshot() -> None:
 
 
 def test_equal_attacker_mutation_cannot_self_authenticate_trace_freshness() -> None:
-    expectation = _expectation_for_trace()
+    expectation, inventory = trace_expectation_bundle()
     attacked = valid_trace(
         observed_binding_updates={"environment_hash": HASH_D},
     )
 
-    freshness = trace_freshness(expectation, attacked)
+    freshness = trace_freshness(expectation, attacked, inventory=inventory)
 
     assert freshness.status is TraceFreshnessStatus.STALE
     assert freshness.mismatches == (TraceBindingMismatch.ENVIRONMENT,)
@@ -151,8 +212,36 @@ def test_equal_trace_and_expectation_mutation_breaks_source_attestation() -> Non
         TraceExpectation.build(**values)
 
 
+def test_coordinated_expectation_remint_fails_against_original_inventory() -> None:
+    attacked = valid_trace(observed_binding_updates={"environment_hash": HASH_D})
+    expectation, original_inventory = trace_expectation_bundle()
+    values = expectation.model_dump(
+        mode="python",
+        exclude={"content_hash", "resolution"},
+    )
+    values["environment"] = _receipt(
+        attacked.observed_binding.environment_id,
+        attacked.observed_binding.environment_hash,
+    )
+    snapshot_hash = trace_expectation_snapshot_hash(values)
+    resolution_values = expectation.resolution.model_dump(
+        mode="python",
+        exclude={"content_hash"},
+    )
+    resolution_values["resolved_snapshot_hash"] = snapshot_hash
+    resolution_values["expectation_source"] = _receipt(
+        expectation.resolution.expectation_source.record_id,
+        snapshot_hash,
+    )
+    values["resolution"] = TraceExpectationResolutionAttestation.build(**resolution_values)
+    reminted = TraceExpectation.build(**values)
+
+    with pytest.raises(ValueError, match="does not accept EXPECTATION_SOURCE"):
+        trace_freshness(reminted, attacked, inventory=original_inventory)
+
+
 def test_freshness_binds_stable_context_and_output_schema_ids() -> None:
-    expectation = _expectation_for_trace()
+    expectation, inventory = trace_expectation_bundle()
     attacked = valid_trace(
         observed_binding_updates={
             "context_id": "context-attacker",
@@ -160,7 +249,7 @@ def test_freshness_binds_stable_context_and_output_schema_ids() -> None:
         }
     )
 
-    freshness = trace_freshness(expectation, attacked)
+    freshness = trace_freshness(expectation, attacked, inventory=inventory)
 
     assert TraceBindingMismatch.CONTEXT in freshness.mismatches
     assert TraceBindingMismatch.OUTPUT_SCHEMA in freshness.mismatches
@@ -378,15 +467,20 @@ def test_omitted_reward_hacking_diagnostic_families_fail_closed() -> None:
     observation = trace.reward_observation
     assert observation is not None
 
+    complete_findings = _completed_diagnostics(trace)
+    expectation, expectation_inventory = trace_expectation_bundle()
+    verification = _verification_evidence(trace)
+    coverage = _diagnostic_coverage(trace, complete_findings)
+    inventory = _accepted_inventory(expectation_inventory, verification, coverage, observation)
     with pytest.raises(ValueError, match="every reward-hacking family"):
-        complete_findings = _completed_diagnostics(trace)
         assess_reward_validity(
             observation,
             trace,
             (),
-            expectation=trace_expectation(),
-            verification=_verification_evidence(),
-            diagnostic_coverage=_diagnostic_coverage(trace, complete_findings),
+            expectation=expectation,
+            verification=verification,
+            diagnostic_coverage=coverage,
+            inventory=inventory,
         )
 
 
@@ -404,6 +498,23 @@ def test_reward_validity_requires_resolved_diagnostic_coverage_attestation() -> 
             expectation=trace_expectation(),
             verification=_verification_evidence(trace),
         )
+
+
+def test_reward_validity_requires_separately_supplied_resolved_inventory() -> None:
+    trace = valid_trace()
+    observation = trace.reward_observation
+    assert observation is not None
+    findings = _completed_diagnostics(trace)
+
+    with pytest.raises(TypeError, match="inventory"):
+        assess_reward_validity(
+            observation,
+            trace,
+            findings,
+            expectation=trace_expectation(),
+            verification=_verification_evidence(trace),
+            diagnostic_coverage=_diagnostic_coverage(trace, findings),
+        )  # type: ignore[call-arg]
 
     with pytest.raises(ValidationError):
         ResolvedRewardHackingDiagnostic.build(
@@ -437,6 +548,9 @@ def test_finding_status_or_evidence_substitution_fails_closed(
     assert observation is not None
     findings = _completed_diagnostics(trace)
     coverage = _diagnostic_coverage(trace, findings)
+    expectation, expectation_inventory = trace_expectation_bundle()
+    verification = _verification_evidence(trace)
+    inventory = _accepted_inventory(expectation_inventory, verification, coverage, observation)
     first_values = findings[0].model_dump(mode="python", exclude={"content_hash"})
     substituted = (
         RewardHackingFinding.build(**(first_values | finding_update)),
@@ -448,27 +562,110 @@ def test_finding_status_or_evidence_substitution_fails_closed(
             observation,
             trace,
             substituted,
-            expectation=trace_expectation(),
-            verification=_verification_evidence(trace),
+            expectation=expectation,
+            verification=verification,
             diagnostic_coverage=coverage,
+            inventory=inventory,
+        )
+
+
+def test_coordinated_diagnostic_status_remint_fails_original_inventory() -> None:
+    trace = valid_trace()
+    observation = trace.reward_observation
+    assert observation is not None
+    cleared = _completed_diagnostics(trace)
+    first_values = cleared[0].model_dump(mode="python", exclude={"content_hash"})
+    invalidating = (
+        RewardHackingFinding.build(
+            **(first_values | {"status": RewardHackingFindingStatus.INVALIDATING})
+        ),
+        *cleared[1:],
+    )
+    expectation, expectation_inventory = trace_expectation_bundle()
+    verification = _verification_evidence(trace)
+    original_coverage = _diagnostic_coverage(trace, invalidating)
+    original_inventory = _accepted_inventory(
+        expectation_inventory,
+        verification,
+        original_coverage,
+        observation,
+    )
+    reminted_coverage = _diagnostic_coverage(trace, cleared)
+
+    with pytest.raises(ValueError, match="does not accept DIAGNOSTIC_SOURCE"):
+        assess_reward_validity(
+            observation,
+            trace,
+            cleared,
+            expectation=expectation,
+            verification=verification,
+            diagnostic_coverage=reminted_coverage,
+            inventory=original_inventory,
+        )
+
+
+def test_coordinated_verifier_status_remint_fails_original_inventory() -> None:
+    trace = valid_trace()
+    observation = trace.reward_observation
+    assert observation is not None
+    findings = _completed_diagnostics(trace)
+    expectation, expectation_inventory = trace_expectation_bundle()
+    verification = _verification_evidence(trace)
+    coverage = _diagnostic_coverage(trace, findings)
+    original_inventory = _accepted_inventory(
+        expectation_inventory,
+        verification,
+        coverage,
+        observation,
+    )
+    result_values = verification.verifier_result.model_dump(
+        mode="python",
+        exclude={"content_hash", "source"},
+    )
+    result_values["status"] = VerificationOutcomeStatus.FAILED
+    result_values["source"] = _receipt(
+        verification.verifier_result.source.record_id,
+        verification_result_status_snapshot_hash(result_values),
+    )
+    reminted_result = ResolvedVerificationResultSnapshot.build(**result_values)
+    verification_values = verification.model_dump(
+        mode="python",
+        exclude={"content_hash"},
+    )
+    verification_values["verifier_result"] = reminted_result
+    reminted_verification = VerificationOutcomeEvidence.build(**verification_values)
+
+    with pytest.raises(ValueError, match="does not accept VERIFICATION_RESULT_SOURCE"):
+        assess_reward_validity(
+            observation,
+            trace,
+            findings,
+            expectation=expectation,
+            verification=reminted_verification,
+            diagnostic_coverage=coverage,
+            inventory=original_inventory,
         )
 
 
 def test_reward_assessment_binds_the_exact_freshness_hash() -> None:
     trace = valid_trace()
-    expectation = trace_expectation()
-    freshness = trace_freshness(expectation, trace)
+    expectation, expectation_inventory = trace_expectation_bundle()
     observation = trace.reward_observation
     assert observation is not None
 
     findings = _completed_diagnostics(trace)
+    verification = _verification_evidence(trace)
+    coverage = _diagnostic_coverage(trace, findings)
+    inventory = _accepted_inventory(expectation_inventory, verification, coverage, observation)
+    freshness = trace_freshness(expectation, trace, inventory=inventory)
     assessment = assess_reward_validity(
         observation,
         trace,
         findings,
         expectation=expectation,
-        verification=_verification_evidence(trace),
-        diagnostic_coverage=_diagnostic_coverage(trace, findings),
+        verification=verification,
+        diagnostic_coverage=coverage,
+        inventory=inventory,
     )
 
     assert assessment.freshness_hash == freshness.content_hash
@@ -476,20 +673,45 @@ def test_reward_assessment_binds_the_exact_freshness_hash() -> None:
 
 def _valid_evaluation_snapshots() -> tuple[TraceFreshness, RewardValidityAssessment]:
     trace = valid_trace()
-    expectation = trace_expectation()
-    freshness = trace_freshness(expectation, trace)
+    expectation, expectation_inventory = trace_expectation_bundle()
     observation = trace.reward_observation
     assert observation is not None
     findings = _completed_diagnostics(trace)
+    verification = _verification_evidence(trace)
+    coverage = _diagnostic_coverage(trace, findings)
+    inventory = _accepted_inventory(expectation_inventory, verification, coverage, observation)
+    freshness = trace_freshness(expectation, trace, inventory=inventory)
     assessment = assess_reward_validity(
         observation,
         trace,
         findings,
         expectation=expectation,
-        verification=_verification_evidence(),
-        diagnostic_coverage=_diagnostic_coverage(trace, findings),
+        verification=verification,
+        diagnostic_coverage=coverage,
+        inventory=inventory,
     )
     return freshness, assessment
+
+
+def test_direct_parse_revalidates_inventory_bound_snapshots() -> None:
+    freshness, assessment = _valid_evaluation_snapshots()
+    freshness_payload = freshness.model_dump(mode="python")
+    freshness_payload["resolution_inventory_hash"] = HASH_D
+    freshness_payload["content_hash"] = trace_freshness_hash(freshness_payload)
+    with pytest.raises(ValidationError, match="exact resolved evidence inventory"):
+        TraceFreshness.model_validate(freshness_payload)
+
+    assessment_payload = assessment.model_dump(mode="python")
+    assessment_payload["evidence_receipts"] = assessment.evidence_receipts[1:]
+    assessment_payload["content_hash"] = reward_assessment_hash(assessment_payload)
+    with pytest.raises(ValidationError, match="exact accepted evidence receipts"):
+        RewardValidityAssessment.model_validate(assessment_payload)
+
+
+def test_resolved_inventory_contracts_are_publicly_exported() -> None:
+    assert harness_eval.ResolvedEvidenceInventory is ResolvedEvidenceInventory
+    assert harness_eval.ResolvedEvidenceKind is ResolvedEvidenceKind
+    assert harness_eval.ResolvedEvidenceRecord.__name__ == "ResolvedEvidenceRecord"
 
 
 def _matrix_evidence_chain(
@@ -552,19 +774,29 @@ def _matrix_evidence_chain(
         context_artifacts_override=(artifact,),
         observation=observation,
     )
-    expectation = attested_trace_expectation(
+    expectation, expectation_inventory = attested_trace_expectation_bundle(
         expected_binding,
         suffix=f"matrix-{index:03d}",
     )
-    freshness = trace_freshness(expectation, trace)
     findings = _completed_diagnostics(trace)
+    verification = _verification_evidence(trace)
+    coverage = _diagnostic_coverage(trace, findings)
+    inventory = _accepted_inventory(
+        expectation_inventory,
+        verification,
+        coverage,
+        observation,
+        suffix=f"matrix-{index:03d}",
+    )
+    freshness = trace_freshness(expectation, trace, inventory=inventory)
     assessment = assess_reward_validity(
         observation,
         trace,
         findings,
         expectation=expectation,
-        verification=_verification_evidence(trace),
-        diagnostic_coverage=_diagnostic_coverage(trace, findings),
+        verification=verification,
+        diagnostic_coverage=coverage,
+        inventory=inventory,
     )
     return HarnessCellEvidenceChain.build(
         protocol=protocol,

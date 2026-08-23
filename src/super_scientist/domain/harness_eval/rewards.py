@@ -6,7 +6,12 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
+from super_scientist.domain.harness_eval.receipts import (
+    EvidenceReceipt,
+    ResolvedEvidenceInventory,
+    ResolvedEvidenceKind,
+    require_resolved_evidence,
+)
 from super_scientist.domain.harness_eval.traces import (
     BoundedTraceIdentifier,
     EnvironmentEventKind,
@@ -88,23 +93,60 @@ class VerificationOutcomeStatus(StrEnum):
 _REASON_ORDER = {item: index for index, item in enumerate(RewardInvalidationReason)}
 
 
-def _assessment_evidence_ids(
-    observation_evidence_id: str | None,
+def _accepted_reward_evidence_receipts(
+    observation: RewardObservation,
     findings: tuple[RewardHackingFinding, ...],
     verification: VerificationOutcomeEvidence,
     diagnostic_coverage: RewardHackingCoverageAttestation,
-) -> tuple[str, ...]:
-    evidence_ids = {item for finding in findings for item in finding.evidence_ids}
-    if observation_evidence_id is not None:
-        evidence_ids.add(observation_evidence_id)
-    evidence_ids.update(verification.evidence_ids)
-    evidence_ids.update(item.record_id for item in diagnostic_coverage.provenance)
-    evidence_ids.update(
+    inventory: ResolvedEvidenceInventory,
+) -> tuple[EvidenceReceipt, ...]:
+    accepted: dict[tuple[str, int, str], EvidenceReceipt] = {}
+
+    def accept(receipt: EvidenceReceipt, kind: ResolvedEvidenceKind) -> None:
+        resolved = require_resolved_evidence(inventory, receipt, kind)
+        key = (
+            resolved.receipt.record_id,
+            resolved.receipt.schema_version,
+            resolved.receipt.content_hash,
+        )
+        accepted[key] = resolved.receipt
+
+    for snapshot in (verification.verifier_result, verification.checker_result):
+        accept(snapshot.source, ResolvedEvidenceKind.VERIFICATION_RESULT_SOURCE)
+        accept(snapshot.result, ResolvedEvidenceKind.VERIFICATION_RESULT)
+        accept(snapshot.resolver, ResolvedEvidenceKind.RESOLVER)
+        for receipt in snapshot.observable_evidence:
+            accept(receipt, ResolvedEvidenceKind.OBSERVABLE_EVIDENCE)
+    for diagnostic in diagnostic_coverage.diagnostics:
+        accept(diagnostic.source, ResolvedEvidenceKind.DIAGNOSTIC_SOURCE)
+        accept(diagnostic.resolver, ResolvedEvidenceKind.RESOLVER)
+        for receipt in diagnostic.observable_evidence:
+            accept(receipt, ResolvedEvidenceKind.OBSERVABLE_EVIDENCE)
+    for receipt in diagnostic_coverage.provenance:
+        accept(receipt, ResolvedEvidenceKind.PROVENANCE)
+    if observation.evidence_id is None:
+        raise ValueError("reward observation requires accepted observable evidence")
+    observation_record = next(
+        (
+            item
+            for item in inventory.records
+            if item.kind is ResolvedEvidenceKind.OBSERVABLE_EVIDENCE
+            and item.receipt.record_id == observation.evidence_id
+        ),
+        None,
+    )
+    if observation_record is None:
+        raise ValueError("resolved evidence inventory does not accept reward observation evidence")
+    accept(observation_record.receipt, ResolvedEvidenceKind.OBSERVABLE_EVIDENCE)
+    finding_ids = {item for finding in findings for item in finding.evidence_ids}
+    accepted_diagnostic_ids = {
         receipt.record_id
         for diagnostic in diagnostic_coverage.diagnostics
         for receipt in diagnostic.observable_evidence
-    )
-    return tuple(sorted(evidence_ids))
+    }
+    if finding_ids != accepted_diagnostic_ids:
+        raise ValueError("finding evidence IDs must equal accepted diagnostic evidence receipts")
+    return tuple(accepted[key] for key in sorted(accepted))
 
 
 class _ResolvedVerificationResultSnapshotPayload(_StrictFrozenModel):
@@ -478,10 +520,12 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
         min_length=len(RewardHackingFamily),
         max_length=len(RewardHackingFamily),
     )
-    evidence_ids: tuple[BoundedTraceIdentifier, ...] = Field(max_length=MAX_REWARD_EVIDENCE)
+    evidence_receipts: tuple[EvidenceReceipt, ...] = Field(max_length=MAX_REWARD_EVIDENCE)
     expectation: TraceExpectation
     verification: VerificationOutcomeEvidence
     diagnostic_coverage: RewardHackingCoverageAttestation
+    evidence_inventory: ResolvedEvidenceInventory
+    evidence_inventory_hash: Sha256Hex
     freshness: TraceFreshness
     assessor_id: BoundedTraceIdentifier
     assessor_version: BoundedTraceIdentifier
@@ -514,14 +558,17 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
         _require_complete_diagnostic_coverage(self.findings)
         if self.finding_ids != tuple(item.finding_id for item in self.findings):
             raise ValueError("finding_ids must exactly identify the embedded findings")
-        expected_evidence = _assessment_evidence_ids(
-            self.observation.evidence_id,
+        if self.evidence_inventory_hash != self.evidence_inventory.content_hash:
+            raise ValueError("assessment must bind the exact resolved evidence inventory")
+        expected_evidence = _accepted_reward_evidence_receipts(
+            self.observation,
             self.findings,
             self.verification,
             self.diagnostic_coverage,
+            self.evidence_inventory,
         )
-        if self.evidence_ids != expected_evidence:
-            raise ValueError("assessment evidence IDs must exactly bind observable evidence")
+        if self.evidence_receipts != expected_evidence:
+            raise ValueError("assessment must bind exact accepted evidence receipts")
         for finding in self.findings:
             if (
                 finding.trace_id != self.trace_id
@@ -536,7 +583,11 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
             self.trace,
             self.observation,
         )
-        expected_freshness = trace_freshness(self.expectation, self.trace)
+        expected_freshness = trace_freshness(
+            self.expectation,
+            self.trace,
+            inventory=self.evidence_inventory,
+        )
         if (
             self.freshness != expected_freshness
             or self.freshness_hash != expected_freshness.content_hash
@@ -553,6 +604,7 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
             self.findings,
             self.expectation,
             self.verification,
+            self.evidence_inventory,
         )
         expected_status = reward_status(expected_reasons)
         if self.reasons != expected_reasons or self.status is not expected_status:
@@ -564,6 +616,7 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
             self.expectation,
             self.verification,
             self.diagnostic_coverage,
+            self.evidence_inventory,
         ):
             raise ValueError("assessment_id must address the exact validity inputs")
         return self
@@ -607,6 +660,7 @@ def reward_assessment_id(
     expectation: TraceExpectation,
     verification: VerificationOutcomeEvidence,
     diagnostic_coverage: RewardHackingCoverageAttestation,
+    inventory: ResolvedEvidenceInventory,
 ) -> str:
     payload_hash = sha256_hex(
         _canonical_record_hash(
@@ -617,6 +671,7 @@ def reward_assessment_id(
                 "expectation_hash": expectation.content_hash,
                 "verification_hash": verification.content_hash,
                 "diagnostic_coverage_hash": diagnostic_coverage.content_hash,
+                "evidence_inventory_hash": inventory.content_hash,
             }
         ).encode("ascii")
     )
@@ -629,6 +684,7 @@ def ordered_invalidation_reasons(
     findings: tuple[RewardHackingFinding, ...],
     expectation: TraceExpectation,
     verification: VerificationOutcomeEvidence,
+    inventory: ResolvedEvidenceInventory,
 ) -> tuple[RewardInvalidationReason, ...]:
     reasons: set[RewardInvalidationReason] = set()
     event_kinds = {item.kind for item in trace.environment_events}
@@ -685,7 +741,7 @@ def ordered_invalidation_reasons(
         reasons.add(RewardInvalidationReason.REWARD_HACKING_FINDING)
     if trace.evaluator_succeeded.value is False:
         reasons.add(RewardInvalidationReason.EVALUATOR_FAILURE)
-    freshness = trace_freshness(expectation, trace)
+    freshness = trace_freshness(expectation, trace, inventory=inventory)
     runtime_mismatches = {
         TraceBindingMismatch.TASK,
         TraceBindingMismatch.ENVIRONMENT,
@@ -728,12 +784,20 @@ def assess_reward_validity(
     expectation: TraceExpectation,
     verification: VerificationOutcomeEvidence,
     diagnostic_coverage: RewardHackingCoverageAttestation,
+    inventory: ResolvedEvidenceInventory,
 ) -> RewardValidityAssessment:
+    """Assess observable reward evidence under a handler-supplied inventory capability.
+
+    Repository resolution remains outside this pure domain function. Constructing or
+    reminting verifier and diagnostic records cannot produce a valid assessment unless
+    their exact receipts already occur in the separately supplied committed inventory.
+    """
     validated_observation = RewardObservation.model_validate(observation)
     validated_trace = HarnessExecutionTrace.model_validate(trace)
     validated_expectation = TraceExpectation.model_validate(expectation)
     validated_verification = VerificationOutcomeEvidence.model_validate(verification)
     validated_coverage = RewardHackingCoverageAttestation.model_validate(diagnostic_coverage)
+    validated_inventory = ResolvedEvidenceInventory.model_validate(inventory)
     if validated_trace.reward_observation != validated_observation:
         raise ValueError("reward observation must be the exact observation embedded in the trace")
     validated_findings = tuple(RewardHackingFinding.model_validate(item) for item in findings)
@@ -743,6 +807,13 @@ def assess_reward_validity(
         validated_findings,
         validated_trace,
         validated_observation,
+    )
+    evidence_receipts = _accepted_reward_evidence_receipts(
+        validated_observation,
+        validated_findings,
+        validated_verification,
+        validated_coverage,
+        validated_inventory,
     )
     for finding in validated_findings:
         if (
@@ -758,13 +829,12 @@ def assess_reward_validity(
         validated_findings,
         validated_expectation,
         validated_verification,
+        validated_inventory,
     )
-    freshness = trace_freshness(validated_expectation, validated_trace)
-    evidence_ids = _assessment_evidence_ids(
-        validated_observation.evidence_id,
-        validated_findings,
-        validated_verification,
-        validated_coverage,
+    freshness = trace_freshness(
+        validated_expectation,
+        validated_trace,
+        inventory=validated_inventory,
     )
     return RewardValidityAssessment.build(
         assessment_id=reward_assessment_id(
@@ -774,6 +844,7 @@ def assess_reward_validity(
             validated_expectation,
             validated_verification,
             validated_coverage,
+            validated_inventory,
         ),
         observation=validated_observation,
         trace=validated_trace,
@@ -781,10 +852,12 @@ def assess_reward_validity(
         trace_hash=validated_trace.content_hash,
         findings=validated_findings,
         finding_ids=tuple(item.finding_id for item in validated_findings),
-        evidence_ids=evidence_ids,
+        evidence_receipts=evidence_receipts,
         expectation=validated_expectation,
         verification=validated_verification,
         diagnostic_coverage=validated_coverage,
+        evidence_inventory=validated_inventory,
+        evidence_inventory_hash=validated_inventory.content_hash,
         freshness=freshness,
         assessor_id=validated_observation.evaluator_id,
         assessor_version=validated_observation.evaluator_version,

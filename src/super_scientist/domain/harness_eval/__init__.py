@@ -79,7 +79,12 @@ from super_scientist.domain.harness_eval.models import (
     harness_campaign_hash,
     partition_manifest_hash,
 )
-from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
+from super_scientist.domain.harness_eval.receipts import (
+    EvidenceReceipt,
+    ResolvedEvidenceInventory,
+    ResolvedEvidenceKind,
+    ResolvedEvidenceRecord,
+)
 from super_scientist.domain.harness_eval.rewards import (
     ResolvedRewardHackingDiagnostic,
     ResolvedVerificationResultSnapshot,
@@ -189,6 +194,9 @@ __all__ = [
     "RecoveryAttemptEvent",
     "RecoveryOutcome",
     "ReferenceMissingness",
+    "ResolvedEvidenceInventory",
+    "ResolvedEvidenceKind",
+    "ResolvedEvidenceRecord",
     "ResolvedRewardHackingDiagnostic",
     "ResolvedVerificationResultSnapshot",
     "ResourceUsageDelta",

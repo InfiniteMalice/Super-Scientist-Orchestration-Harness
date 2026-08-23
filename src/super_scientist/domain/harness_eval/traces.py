@@ -21,7 +21,12 @@ from super_scientist.domain.harness_eval.matrix import (
     ModelIdentity,
 )
 from super_scientist.domain.harness_eval.models import HarnessPartition
-from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
+from super_scientist.domain.harness_eval.receipts import (
+    EvidenceReceipt,
+    ResolvedEvidenceInventory,
+    ResolvedEvidenceKind,
+    require_resolved_evidence,
+)
 from super_scientist.domain.improvement.models import ResourceUsage
 from super_scientist.domain.primitives import (
     Sha256Hex,
@@ -864,9 +869,16 @@ def trace_expectation_snapshot_hash(record: BaseModel | Mapping[str, object]) ->
 class _TraceFreshnessPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     freshness_id: BoundedTraceIdentifier
+    trace: HarnessExecutionTrace
     trace_id: BoundedTraceIdentifier
     trace_hash: Sha256Hex
+    expectation: TraceExpectation
     expectation_hash: Sha256Hex
+    expectation_resolution: TraceExpectationResolutionAttestation
+    expected_snapshot_hash: Sha256Hex
+    resolution_inventory: ResolvedEvidenceInventory
+    resolution_inventory_hash: Sha256Hex
+    observed_binding: TraceBinding
     observed_binding_hash: Sha256Hex
     status: TraceFreshnessStatus
     mismatches: tuple[TraceBindingMismatch, ...] = Field(max_length=len(TraceBindingMismatch))
@@ -885,8 +897,45 @@ class _TraceFreshnessPayload(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_exact_status(self) -> Self:
-        if (self.status is TraceFreshnessStatus.CURRENT) != (not self.mismatches):
+        if self.trace_id != self.trace.trace_id or self.trace_hash != self.trace.content_hash:
+            raise ValueError("freshness must bind the exact harness trace")
+        if self.expectation_hash != self.expectation.content_hash:
+            raise ValueError("freshness must bind the exact trace expectation")
+        if self.expectation_resolution != self.expectation.resolution:
+            raise ValueError("freshness must bind the expectation's exact resolution")
+        if self.expected_snapshot_hash != trace_expectation_snapshot_hash(self.expectation):
+            raise ValueError("freshness must bind the exact expected snapshot")
+        if self.resolution_inventory_hash != self.resolution_inventory.content_hash:
+            raise ValueError("freshness must bind the exact resolved evidence inventory")
+        _require_expectation_inventory(
+            self.expectation_resolution,
+            self.expected_snapshot_hash,
+            self.resolution_inventory,
+        )
+        if (
+            self.observed_binding != self.trace.observed_binding
+            or self.observed_binding_hash != self.observed_binding.content_hash
+        ):
+            raise ValueError("freshness must bind the exact observed trace binding")
+        expected_mismatches = _trace_binding_mismatches(
+            self.expectation,
+            self.observed_binding,
+            trace_id=self.trace_id,
+            trace_hash=self.trace_hash,
+        )
+        if self.mismatches != expected_mismatches:
+            raise ValueError("trace freshness mismatches must be recomputed from exact bindings")
+        expected_status = (
+            TraceFreshnessStatus.CURRENT if not expected_mismatches else TraceFreshnessStatus.STALE
+        )
+        if self.status is not expected_status:
             raise ValueError("trace freshness status must exactly match hash mismatches")
+        if self.freshness_id != _trace_freshness_id(
+            self.expectation,
+            self.trace_hash,
+            self.resolution_inventory,
+        ):
+            raise ValueError("freshness_id must address exact freshness inputs")
         return self
 
 
@@ -910,6 +959,31 @@ class TraceFreshness(_TraceFreshnessPayload):
 
 def trace_freshness_hash(record: BaseModel | Mapping[str, object]) -> str:
     return _canonical_record_hash(record)
+
+
+def _require_expectation_inventory(
+    resolution: TraceExpectationResolutionAttestation,
+    snapshot_hash: str,
+    inventory: ResolvedEvidenceInventory,
+) -> None:
+    if resolution.resolved_snapshot_hash != snapshot_hash:
+        raise ValueError("expectation resolution must bind the supplied snapshot hash")
+    require_resolved_evidence(
+        inventory,
+        resolution.expectation_source,
+        ResolvedEvidenceKind.EXPECTATION_SOURCE,
+    )
+    require_resolved_evidence(
+        inventory,
+        resolution.resolver,
+        ResolvedEvidenceKind.RESOLVER,
+    )
+    for receipt in resolution.provenance:
+        require_resolved_evidence(
+            inventory,
+            receipt,
+            ResolvedEvidenceKind.PROVENANCE,
+        )
 
 
 class _HarnessExecutionTracePayload(_StrictFrozenModel):
@@ -1262,87 +1336,103 @@ def _observed_receipt_groups(binding: TraceBinding) -> tuple[object, ...]:
 def trace_freshness(
     expectation: TraceExpectation,
     trace: HarnessExecutionTrace,
+    *,
+    inventory: ResolvedEvidenceInventory,
 ) -> TraceFreshness:
+    """Compare trace receipts only under a handler-supplied resolution capability.
+
+    The pure domain does not resolve repositories. Callers may construct domain data,
+    but cannot obtain CURRENT without separately supplying the inventory of committed
+    receipt/snapshot records resolved by a trusted handler.
+    """
     validated_expectation = TraceExpectation.model_validate(expectation)
     validated = HarnessExecutionTrace.model_validate(trace)
+    validated_inventory = ResolvedEvidenceInventory.model_validate(inventory)
+    _require_expectation_inventory(
+        validated_expectation.resolution,
+        trace_expectation_snapshot_hash(validated_expectation),
+        validated_inventory,
+    )
     observed = validated.observed_binding
+    mismatches = _trace_binding_mismatches(
+        validated_expectation,
+        observed,
+        trace_id=validated.trace_id,
+        trace_hash=validated.content_hash,
+    )
+    freshness_id = _trace_freshness_id(
+        validated_expectation,
+        validated.content_hash,
+        validated_inventory,
+    )
+    return TraceFreshness.build(
+        freshness_id=freshness_id,
+        trace=validated,
+        trace_id=validated.trace_id,
+        trace_hash=validated.content_hash,
+        expectation=validated_expectation,
+        expectation_hash=validated_expectation.content_hash,
+        expectation_resolution=validated_expectation.resolution,
+        expected_snapshot_hash=trace_expectation_snapshot_hash(validated_expectation),
+        resolution_inventory=validated_inventory,
+        resolution_inventory_hash=validated_inventory.content_hash,
+        observed_binding=observed,
+        observed_binding_hash=observed.content_hash,
+        status=(TraceFreshnessStatus.CURRENT if not mismatches else TraceFreshnessStatus.STALE),
+        mismatches=mismatches,
+    )
+
+
+def _trace_binding_mismatches(
+    expectation: TraceExpectation,
+    observed: TraceBinding,
+    *,
+    trace_id: str,
+    trace_hash: str,
+) -> tuple[TraceBindingMismatch, ...]:
     observed_receipts = _observed_receipt_groups(observed)
     comparisons: tuple[tuple[object, object, TraceBindingMismatch], ...] = (
         (
             False,
-            validated_expectation.resolution.expectation_source.record_id == validated.trace_id
-            or validated_expectation.resolution.expectation_source.content_hash
-            == validated.content_hash,
+            expectation.resolution.expectation_source.record_id == trace_id
+            or expectation.resolution.expectation_source.content_hash == trace_hash,
             TraceBindingMismatch.EXPECTATION_SOURCE,
         ),
+        (expectation.protocol, observed_receipts[0], TraceBindingMismatch.PROTOCOL),
+        (expectation.task, observed_receipts[1], TraceBindingMismatch.TASK),
+        (expectation.model, observed_receipts[2], TraceBindingMismatch.MODEL),
+        (expectation.harness, observed_receipts[3], TraceBindingMismatch.HARNESS),
+        (expectation.procedure, observed_receipts[4], TraceBindingMismatch.PROCEDURE),
+        (expectation.environment, observed_receipts[5], TraceBindingMismatch.ENVIRONMENT),
+        (expectation.context, observed_receipts[6], TraceBindingMismatch.CONTEXT),
         (
-            validated_expectation.protocol,
-            observed_receipts[0],
-            TraceBindingMismatch.PROTOCOL,
-        ),
-        (
-            validated_expectation.task,
-            observed_receipts[1],
-            TraceBindingMismatch.TASK,
-        ),
-        (
-            validated_expectation.model,
-            observed_receipts[2],
-            TraceBindingMismatch.MODEL,
-        ),
-        (
-            validated_expectation.harness,
-            observed_receipts[3],
-            TraceBindingMismatch.HARNESS,
-        ),
-        (
-            validated_expectation.procedure,
-            observed_receipts[4],
-            TraceBindingMismatch.PROCEDURE,
-        ),
-        (
-            validated_expectation.environment,
-            observed_receipts[5],
-            TraceBindingMismatch.ENVIRONMENT,
-        ),
-        (
-            validated_expectation.context,
-            observed_receipts[6],
-            TraceBindingMismatch.CONTEXT,
-        ),
-        (
-            (validated_expectation.validator, validated_expectation.checker),
+            (expectation.validator, expectation.checker),
             observed_receipts[7],
             TraceBindingMismatch.VALIDATOR,
         ),
+        (expectation.artifacts, observed_receipts[8], TraceBindingMismatch.ARTIFACTS),
         (
-            validated_expectation.artifacts,
-            observed_receipts[8],
-            TraceBindingMismatch.ARTIFACTS,
-        ),
-        (
-            validated_expectation.output_schema,
+            expectation.output_schema,
             observed_receipts[9],
             TraceBindingMismatch.OUTPUT_SCHEMA,
         ),
     )
-    mismatches = tuple(item for left, right, item in comparisons if left != right)
-    freshness_id = "trace-freshness-" + sha256_hex(
+    return tuple(item for left, right, item in comparisons if left != right)
+
+
+def _trace_freshness_id(
+    expectation: TraceExpectation,
+    trace_hash: str,
+    inventory: ResolvedEvidenceInventory,
+) -> str:
+    return "trace-freshness-" + sha256_hex(
         canonical_json_bytes(
             {
-                "expectation_hash": validated_expectation.content_hash,
-                "trace_hash": validated.content_hash,
+                "expectation_hash": expectation.content_hash,
+                "trace_hash": trace_hash,
+                "resolution_inventory_hash": inventory.content_hash,
             }
         )
-    )
-    return TraceFreshness.build(
-        freshness_id=freshness_id,
-        trace_id=validated.trace_id,
-        trace_hash=validated.content_hash,
-        expectation_hash=validated_expectation.content_hash,
-        observed_binding_hash=observed.content_hash,
-        status=(TraceFreshnessStatus.CURRENT if not mismatches else TraceFreshnessStatus.STALE),
-        mismatches=mismatches,
     )
 
 

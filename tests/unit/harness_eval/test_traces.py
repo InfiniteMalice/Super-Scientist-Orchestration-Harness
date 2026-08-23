@@ -12,7 +12,12 @@ from super_scientist.domain.harness_eval.guidance import (
     GuidanceCondition,
     GuidanceEvaluationProtocol,
 )
-from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
+from super_scientist.domain.harness_eval.receipts import (
+    EvidenceReceipt,
+    ResolvedEvidenceInventory,
+    ResolvedEvidenceKind,
+    ResolvedEvidenceRecord,
+)
 from super_scientist.domain.harness_eval.traces import (
     AvailableValue,
     CaptureRewardValidityStatus,
@@ -264,20 +269,26 @@ def test_direct_parse_rejects_rehashed_contradictory_trace_state() -> None:
 def test_trace_freshness_is_exact_hash_identity_not_time() -> None:
     current = valid_trace()
     later = valid_trace(observed_at=datetime(2099, 1, 1, tzinfo=UTC))
-    expectation = trace_expectation()
+    expectation, inventory = trace_expectation_bundle()
 
-    assert trace_freshness(expectation, current).status is TraceFreshnessStatus.CURRENT
-    assert trace_freshness(expectation, later).status is TraceFreshnessStatus.CURRENT
+    assert (
+        trace_freshness(expectation, current, inventory=inventory).status
+        is TraceFreshnessStatus.CURRENT
+    )
+    assert (
+        trace_freshness(expectation, later, inventory=inventory).status
+        is TraceFreshnessStatus.CURRENT
+    )
 
     stale = valid_trace(observed_binding_updates={"harness_hash": HASH_D})
-    freshness = trace_freshness(expectation, stale)
+    freshness = trace_freshness(expectation, stale, inventory=inventory)
     assert freshness.status is TraceFreshnessStatus.STALE
     assert freshness.mismatches == (TraceBindingMismatch.HARNESS,)
 
 
 def test_freshness_compares_task_model_procedure_environment_context_validator_artifacts() -> None:
     current = valid_trace()
-    expectation = trace_expectation()
+    expectation, inventory = trace_expectation_bundle()
     guidance = current.observed_binding.guidance_protocol
     assert guidance is not None
     changed_protocol_values = guidance.model_dump(mode="python")
@@ -292,7 +303,10 @@ def test_freshness_compares_task_model_procedure_environment_context_validator_a
             "task_input_hash": HASH_D,
         },
     )
-    assert TraceBindingMismatch.TASK in trace_freshness(expectation, stale_task).mismatches
+    assert (
+        TraceBindingMismatch.TASK
+        in trace_freshness(expectation, stale_task, inventory=inventory).mismatches
+    )
 
     expected = {
         "model_hash": TraceBindingMismatch.MODEL,
@@ -344,11 +358,36 @@ def test_freshness_compares_task_model_procedure_environment_context_validator_a
                 ),
             )
             changed_expectation = TraceExpectation.build(**expectation_values)
-            assert mismatch in trace_freshness(changed_expectation, current).mismatches
+            changed_resolution = changed_expectation.resolution
+            changed_inventory = resolved_evidence_inventory(
+                (
+                    (
+                        changed_resolution.expectation_source,
+                        ResolvedEvidenceKind.EXPECTATION_SOURCE,
+                    ),
+                    (changed_resolution.resolver, ResolvedEvidenceKind.RESOLVER),
+                    *(
+                        (
+                            item,
+                            ResolvedEvidenceKind.PROVENANCE,
+                        )
+                        for item in changed_resolution.provenance
+                    ),
+                ),
+                inventory_id=f"changed-expectation-{field}",
+            )
+            assert (
+                mismatch
+                in trace_freshness(
+                    changed_expectation,
+                    current,
+                    inventory=changed_inventory,
+                ).mismatches
+            )
             continue
         value: object = (HASH_D,) if field == "artifact_hashes" else HASH_D
         stale = valid_trace(observed_binding_updates={field: value})
-        assert mismatch in trace_freshness(expectation, stale).mismatches
+        assert mismatch in trace_freshness(expectation, stale, inventory=inventory).mismatches
 
 
 def test_capture_reward_validity_is_diagnostic_and_bound_into_trace() -> None:
@@ -795,6 +834,11 @@ def binding(
 
 
 def trace_expectation() -> TraceExpectation:
+    expectation, _ = trace_expectation_bundle()
+    return expectation
+
+
+def trace_expectation_bundle() -> tuple[TraceExpectation, ResolvedEvidenceInventory]:
     context_artifacts = (
         ObservableArtifactRef.build(
             artifact_id="public-context",
@@ -807,7 +851,7 @@ def trace_expectation() -> TraceExpectation:
         context_hash=artifact_collection_hash(context_artifacts),
         artifact_hashes=(HASH_A,),
     )
-    return attested_trace_expectation(expected_binding)
+    return attested_trace_expectation_bundle(expected_binding)
 
 
 def attested_trace_expectation(
@@ -815,6 +859,53 @@ def attested_trace_expectation(
     *,
     suffix: str = "1",
 ) -> TraceExpectation:
+    expectation, _ = attested_trace_expectation_bundle(expected_binding, suffix=suffix)
+    return expectation
+
+
+def resolved_evidence_inventory(
+    entries: tuple[tuple[EvidenceReceipt, ResolvedEvidenceKind], ...],
+    *,
+    inventory_id: str = "resolved-evidence-inventory-1",
+) -> ResolvedEvidenceInventory:
+    """Build a handler fixture only from explicitly declared accepted records."""
+    unique = {(receipt.record_id, kind): (receipt, kind) for receipt, kind in entries}
+    records = tuple(
+        sorted(
+            (
+                ResolvedEvidenceRecord.build(
+                    schema_version=1,
+                    receipt=receipt,
+                    kind=kind,
+                    snapshot_hash=receipt.content_hash,
+                )
+                for receipt, kind in unique.values()
+            ),
+            key=lambda item: (
+                item.receipt.record_id,
+                item.receipt.schema_version,
+                item.receipt.content_hash,
+                item.kind.value,
+            ),
+        )
+    )
+    return ResolvedEvidenceInventory.build(
+        schema_version=1,
+        inventory_id=inventory_id,
+        resolved_by=EvidenceReceipt(
+            record_id="committed-evidence-resolver",
+            schema_version=1,
+            content_hash=HASH_D,
+        ),
+        records=records,
+    )
+
+
+def attested_trace_expectation_bundle(
+    expected_binding: TraceBinding,
+    *,
+    suffix: str = "1",
+) -> tuple[TraceExpectation, ResolvedEvidenceInventory]:
     values: dict[str, object] = {
         "protocol": EvidenceReceipt(
             record_id=expected_binding.protocol_id,
@@ -879,7 +970,7 @@ def attested_trace_expectation(
             content_hash=expected_binding.output_schema_hash,
         ),
     }
-    values["resolution"] = TraceExpectationResolutionAttestation.build(
+    resolution = TraceExpectationResolutionAttestation.build(
         attestation_id=f"expectation-resolution-{suffix}",
         expectation_source=EvidenceReceipt(
             record_id=f"accepted-expectation-{suffix}",
@@ -900,7 +991,17 @@ def attested_trace_expectation(
             ),
         ),
     )
-    return TraceExpectation.build(**values)
+    values["resolution"] = resolution
+    expectation = TraceExpectation.build(**values)
+    inventory = resolved_evidence_inventory(
+        (
+            (resolution.expectation_source, ResolvedEvidenceKind.EXPECTATION_SOURCE),
+            (resolution.resolver, ResolvedEvidenceKind.RESOLVER),
+            *((item, ResolvedEvidenceKind.PROVENANCE) for item in resolution.provenance),
+        ),
+        inventory_id=f"expectation-inventory-{suffix}",
+    )
+    return expectation, inventory
 
 
 def reward_observation(
