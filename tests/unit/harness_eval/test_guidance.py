@@ -17,7 +17,9 @@ from super_scientist.domain.harness_eval.guidance import (
     GuidanceEvaluationCell,
     GuidanceEvaluationProtocol,
     MetricMissingness,
+    MetricMissingnessDelta,
     MetricMissingReason,
+    MissingnessSide,
     RecoveryAttemptEvent,
     RecoveryOutcome,
     ReferenceMissingness,
@@ -118,6 +120,13 @@ def _protocol(**updates: object) -> GuidanceEvaluationProtocol:
         "evaluation_budget": _budget(),
     }
     values.update(updates)
+    if "evaluation_budget" not in updates and (
+        "model_id" in updates or "model_version" in updates
+    ):
+        values["evaluation_budget"] = _budget(
+            model_id=values["model_id"],
+            model_version=values["model_version"],
+        )
     return GuidanceEvaluationProtocol.build(**values)
 
 
@@ -204,6 +213,11 @@ def test_present_metric_rejects_a_contradictory_missingness_reason() -> None:
     )
     with pytest.raises(ValidationError, match="missingness must exactly describe"):
         EvaluationMetricVector.model_validate(values)
+
+
+def test_guidance_protocol_rejects_a_budget_for_a_different_model() -> None:
+    with pytest.raises(ValidationError, match="budget must bind the exact guidance model"):
+        _protocol(evaluation_budget=_budget(model_id="model-b"))
 
 
 def test_missing_cell_reference_requires_typed_missingness() -> None:
@@ -339,6 +353,66 @@ def test_comparison_retains_canonical_component_deltas_without_collapsing_metric
     assert comparison.component_deltas.resource_usage_delta is not None
     assert comparison.component_deltas.resource_usage_delta.tokens == 15
     assert "composite_delta" not in type(comparison.component_deltas).model_fields
+    assert comparison.content_hash == guidance_comparison_hash(comparison)
+
+
+def test_component_deltas_preserve_left_right_and_both_missingness_reasons() -> None:
+    left_values = _metrics().model_dump(mode="python")
+    left_values["task_score"] = None
+    left_values["resource_usage"] = None
+    left_values["missingness"] = (
+        MetricMissingness(
+            component=EvaluationMetricComponent.TASK_SCORE,
+            reason=MetricMissingReason.NOT_OBSERVED,
+        ),
+        MetricMissingness(
+            component=EvaluationMetricComponent.RESOURCE_USAGE,
+            reason=MetricMissingReason.INSTRUMENTATION_UNAVAILABLE,
+        ),
+    )
+    right_values = _metrics().model_dump(mode="python")
+    right_values["resource_usage"] = None
+    right_values["final_validation"] = None
+    right_values["missingness"] = (
+        MetricMissingness(
+            component=EvaluationMetricComponent.RESOURCE_USAGE,
+            reason=MetricMissingReason.NOT_APPLICABLE,
+        ),
+        MetricMissingness(
+            component=EvaluationMetricComponent.FINAL_VALIDATION,
+            reason=MetricMissingReason.VALIDATION_NOT_RUN,
+        ),
+    )
+
+    comparison = compare_guidance_cells(
+        _cell(metrics=EvaluationMetricVector.model_validate(left_values)),
+        _cell(
+            condition=GuidanceCondition.METHOD_ONLY,
+            metrics=EvaluationMetricVector.model_validate(right_values),
+        ),
+    )
+
+    assert comparison.component_deltas.missingness_deltas == (
+        MetricMissingnessDelta(
+            component=EvaluationMetricComponent.TASK_SCORE,
+            affected_side=MissingnessSide.LEFT,
+            left_reason=MetricMissingReason.NOT_OBSERVED,
+            right_reason=None,
+        ),
+        MetricMissingnessDelta(
+            component=EvaluationMetricComponent.RESOURCE_USAGE,
+            affected_side=MissingnessSide.BOTH,
+            left_reason=MetricMissingReason.INSTRUMENTATION_UNAVAILABLE,
+            right_reason=MetricMissingReason.NOT_APPLICABLE,
+        ),
+        MetricMissingnessDelta(
+            component=EvaluationMetricComponent.FINAL_VALIDATION,
+            affected_side=MissingnessSide.RIGHT,
+            left_reason=None,
+            right_reason=MetricMissingReason.VALIDATION_NOT_RUN,
+        ),
+    )
+    assert "missing_components" not in type(comparison.component_deltas).model_fields
     assert comparison.content_hash == guidance_comparison_hash(comparison)
 
 

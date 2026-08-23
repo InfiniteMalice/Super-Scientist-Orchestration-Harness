@@ -16,7 +16,11 @@ from super_scientist.domain.harness_eval.guidance import (
     _StrictFrozenModel,
     metric_component_deltas,
 )
-from super_scientist.domain.harness_eval.models import EvaluationBudget, HarnessPartition
+from super_scientist.domain.harness_eval.models import (
+    BUDGET_COMPARISON_FIELDS,
+    EvaluationBudget,
+    HarnessPartition,
+)
 from super_scientist.domain.primitives import Sha256Hex, UtcTimestamp
 
 
@@ -73,6 +77,59 @@ class ModelHarnessCoordinate(_StrictFrozenModel):
     partition: HarnessPartition
 
 
+RESOURCE_ENVELOPE_FIELDS = BUDGET_COMPARISON_FIELDS[3:]
+
+
+def evaluation_resource_envelope_hash(budget: EvaluationBudget) -> str:
+    validated = EvaluationBudget.model_validate(budget)
+    serialized = validated.model_dump(mode="json")
+    return _canonical_record_hash(
+        {field_name: serialized[field_name] for field_name in RESOURCE_ENVELOPE_FIELDS}
+    )
+
+
+class _ModelBudgetBindingPayload(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    model: ModelIdentity
+    budget: EvaluationBudget
+    resource_envelope_hash: Sha256Hex
+
+    @model_validator(mode="after")
+    def require_exact_model_and_envelope(self) -> Self:
+        if (
+            self.budget.model_id != self.model.model_id
+            or self.budget.model_version != self.model.model_version
+        ):
+            raise ValueError("budget must bind its exact matrix model")
+        if self.resource_envelope_hash != evaluation_resource_envelope_hash(self.budget):
+            raise ValueError("resource_envelope_hash must address the model-agnostic limits")
+        return self
+
+
+class ModelBudgetBinding(_ModelBudgetBindingPayload):
+    content_hash: Sha256Hex
+
+    @classmethod
+    def build(cls, **values: Any) -> Self:
+        supplied = dict(values)
+        budget = EvaluationBudget.model_validate(supplied["budget"])
+        supplied.setdefault(
+            "resource_envelope_hash",
+            evaluation_resource_envelope_hash(budget),
+        )
+        payload = _ModelBudgetBindingPayload(**supplied)
+        return cls(
+            **payload.model_dump(mode="python"),
+            content_hash=model_budget_binding_hash(payload),
+        )
+
+    @model_validator(mode="after")
+    def require_canonical_content_hash(self) -> Self:
+        if self.content_hash != model_budget_binding_hash(self):
+            raise ValueError("content_hash must canonically address the model budget binding")
+        return self
+
+
 def _coordinate_key(
     coordinate: ModelHarnessCoordinate,
 ) -> tuple[str, str, str, str, int]:
@@ -119,7 +176,11 @@ class _ModelHarnessProtocolPayload(_StrictFrozenModel):
     artifact_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_EVALUATION_ITEMS)
     random_seed: int | None = Field(default=None, strict=True, ge=0)
     output_schema_hash: Sha256Hex
-    evaluation_budget: EvaluationBudget
+    model_budgets: tuple[ModelBudgetBinding, ...] = Field(
+        min_length=1,
+        max_length=MAX_EVALUATION_ITEMS,
+    )
+    matched_resource_envelope_hash: Sha256Hex
     expected_grid: tuple[ModelHarnessCoordinate, ...] = Field(
         min_length=4,
         max_length=MAX_EVALUATION_ITEMS,
@@ -185,6 +246,13 @@ class _ModelHarnessProtocolPayload(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_complete_declared_grid(self) -> Self:
+        if tuple(binding.model for binding in self.model_budgets) != self.models:
+            raise ValueError("protocol requires exactly one budget for every model")
+        if any(
+            binding.resource_envelope_hash != self.matched_resource_envelope_hash
+            for binding in self.model_budgets
+        ):
+            raise ValueError("all matrix models must use the same resource envelope")
         expected = tuple(
             ModelHarnessCoordinate(model=model, harness=harness, partition=partition)
             for model, harness, partition in product(
@@ -292,6 +360,8 @@ class ModelHarnessCell(_ModelHarnessCellPayload):
         **values: Any,
     ) -> Self:
         validated = ModelHarnessProtocol.model_validate(protocol)
+        coordinate = ModelHarnessCoordinate.model_validate(values["coordinate"])
+        budget_by_model = {binding.model: binding.budget for binding in validated.model_budgets}
         return cls.build(
             protocol=validated,
             protocol_id=validated.protocol_id,
@@ -306,7 +376,7 @@ class ModelHarnessCell(_ModelHarnessCellPayload):
             artifact_ids=validated.artifact_ids,
             random_seed=validated.random_seed,
             output_schema_hash=validated.output_schema_hash,
-            evaluation_budget=validated.evaluation_budget,
+            evaluation_budget=budget_by_model[coordinate.model],
             governing_policy_hash=validated.governing_policy_hash,
             **values,
         )
@@ -397,8 +467,9 @@ class _ModelHarnessAnalysisPayload(_StrictFrozenModel):
             raise ValueError("analysis must bind the exact protocol hash")
         if len(self.cell_ids) != len(self.cell_hashes):
             raise ValueError("analysis cell identifiers and hashes must align")
-        if self.cell_ids != tuple(sorted(self.cell_ids)):
-            raise ValueError("analysis cell identifiers must be canonically ordered")
+        inventory = tuple(zip(self.cell_ids, self.cell_hashes, strict=True))
+        if inventory != tuple(sorted(inventory)):
+            raise ValueError("analysis cell identifier-hash pairs must be canonically ordered")
         identifiers_are_unique = len(self.cell_ids) == len(set(self.cell_ids))
         duplicate_is_declared = ModelHarnessConfoundCode.DUPLICATE_CELL in self.confounds
         if not identifiers_are_unique and not duplicate_is_declared:
@@ -409,6 +480,19 @@ class _ModelHarnessAnalysisPayload(_StrictFrozenModel):
             raise ValueError("analysis confounds must be unique and canonical")
         if self.confounds and self.comparisons:
             raise ValueError("confounded analysis cannot emit comparisons")
+        inventory_set = set(inventory)
+        for comparison in self.comparisons:
+            if comparison.kind not in self.protocol.comparison_kinds:
+                raise ValueError("analysis comparison kind must be declared by the protocol")
+            comparison_inventory = zip(
+                comparison.cell_ids,
+                comparison.cell_hashes,
+                strict=True,
+            )
+            if any(item not in inventory_set for item in comparison_inventory):
+                raise ValueError("comparison cells must belong to the analysis cell inventory")
+            if any(item not in self.protocol.partitions for item in comparison.partitions):
+                raise ValueError("comparison partitions must belong to the analysis protocol")
         comparison_keys = tuple(_comparison_key(item) for item in self.comparisons)
         if comparison_keys != tuple(sorted(comparison_keys)):
             raise ValueError("analysis comparisons must be canonically ordered")
@@ -441,6 +525,14 @@ def model_harness_protocol_hash(
     return _canonical_record_hash(record, exclude_fields=exclude_fields)
 
 
+def model_budget_binding_hash(
+    record: BaseModel | Mapping[str, object],
+    *,
+    exclude_fields: set[str] | None = None,
+) -> str:
+    return _canonical_record_hash(record, exclude_fields=exclude_fields)
+
+
 def model_harness_cell_hash(
     record: BaseModel | Mapping[str, object],
     *,
@@ -466,7 +558,7 @@ def model_harness_analysis_hash(
 
 
 def canonical_cells(cells: tuple[ModelHarnessCell, ...]) -> tuple[ModelHarnessCell, ...]:
-    return tuple(sorted(cells, key=lambda item: item.cell_id))
+    return tuple(sorted(cells, key=lambda item: (item.cell_id, item.content_hash)))
 
 
 def _add_protocol_identity_confounds(
@@ -503,11 +595,6 @@ def _add_protocol_identity_confounds(
             ModelHarnessConfoundCode.OUTPUT_SCHEMA_MISMATCH,
         ),
         (
-            protocol.evaluation_budget,
-            cell.evaluation_budget,
-            ModelHarnessConfoundCode.BUDGET_MISMATCH,
-        ),
-        (
             protocol.governing_policy_hash,
             cell.governing_policy_hash,
             ModelHarnessConfoundCode.POLICY_MISMATCH,
@@ -516,6 +603,16 @@ def _add_protocol_identity_confounds(
     confounds.update(
         code for expected, observed, code in pairs if expected != observed
     )
+    expected_budget = next(
+        (
+            binding.budget
+            for binding in protocol.model_budgets
+            if binding.model == cell.coordinate.model
+        ),
+        None,
+    )
+    if expected_budget is None or cell.evaluation_budget != expected_budget:
+        confounds.add(ModelHarnessConfoundCode.BUDGET_MISMATCH)
 
 
 def validate_complete_matched_grid(
@@ -606,7 +703,7 @@ def _comparison_key(
     )
 
 
-def build_declared_comparisons(
+def _build_declared_comparisons(
     protocol: ModelHarnessProtocol,
     cells: tuple[ModelHarnessCell, ...],
 ) -> tuple[ModelHarnessComparison, ...]:
@@ -689,7 +786,7 @@ def analyze_model_harness(
     comparisons_out = (
         ()
         if confounds
-        else build_declared_comparisons(validated_protocol, validated_cells)
+        else _build_declared_comparisons(validated_protocol, validated_cells)
     )
     return ModelHarnessAnalysis.build(
         protocol=validated_protocol,
@@ -706,6 +803,7 @@ def analyze_model_harness(
 
 __all__ = [
     "HarnessIdentity",
+    "ModelBudgetBinding",
     "ModelHarnessAnalysis",
     "ModelHarnessCell",
     "ModelHarnessComparison",
@@ -715,8 +813,9 @@ __all__ = [
     "ModelHarnessProtocol",
     "ModelIdentity",
     "analyze_model_harness",
-    "build_declared_comparisons",
     "canonical_cells",
+    "evaluation_resource_envelope_hash",
+    "model_budget_binding_hash",
     "model_harness_analysis_hash",
     "model_harness_cell_hash",
     "model_harness_comparison_hash",

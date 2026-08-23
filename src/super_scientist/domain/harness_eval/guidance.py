@@ -94,6 +94,12 @@ class MetricMissingReason(StrEnum):
     VALIDATION_NOT_RUN = "VALIDATION_NOT_RUN"
 
 
+class MissingnessSide(StrEnum):
+    LEFT = "LEFT"
+    RIGHT = "RIGHT"
+    BOTH = "BOTH"
+
+
 class ExecutionFailureKind(StrEnum):
     COMPILATION_FAILURE = "COMPILATION_FAILURE"
     TOOL_FAILURE = "TOOL_FAILURE"
@@ -134,6 +140,29 @@ class MetricMissingness(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     component: EvaluationMetricComponent
     reason: MetricMissingReason
+
+
+class MetricMissingnessDelta(_StrictFrozenModel):
+    schema_version: Literal[1] = 1
+    component: EvaluationMetricComponent
+    affected_side: MissingnessSide
+    left_reason: MetricMissingReason | None
+    right_reason: MetricMissingReason | None
+
+    @model_validator(mode="after")
+    def require_exact_side_and_reasons(self) -> Self:
+        expected_side = (
+            MissingnessSide.BOTH
+            if self.left_reason is not None and self.right_reason is not None
+            else MissingnessSide.LEFT
+            if self.left_reason is not None
+            else MissingnessSide.RIGHT
+            if self.right_reason is not None
+            else None
+        )
+        if expected_side is None or self.affected_side is not expected_side:
+            raise ValueError("missingness delta side must exactly match its typed reasons")
+        return self
 
 
 class ReferenceMissingness(_StrictFrozenModel):
@@ -234,7 +263,7 @@ class EvaluationMetricDeltaVector(_StrictFrozenModel):
     recovery_attempt_event_count_delta: int = Field(strict=True)
     resource_usage_delta: ResourceUsageDelta | None
     final_validation_changed: bool | None
-    missing_components: tuple[EvaluationMetricComponent, ...] = Field(
+    missingness_deltas: tuple[MetricMissingnessDelta, ...] = Field(
         max_length=len(_NULLABLE_METRIC_FIELDS)
     )
 
@@ -275,6 +304,11 @@ class _GuidanceEvaluationProtocolPayload(_StrictFrozenModel):
     def require_disjoint_artifact_families(self) -> Self:
         if set(self.artifact_ids) & set(self.declared_distractor_artifact_ids):
             raise ValueError("base and distractor artifact identifiers must be disjoint")
+        if (
+            self.evaluation_budget.model_id != self.model_id
+            or self.evaluation_budget.model_version != self.model_version
+        ):
+            raise ValueError("evaluation budget must bind the exact guidance model")
         return self
 
 
@@ -576,10 +610,23 @@ def metric_component_deltas(
 ) -> EvaluationMetricDeltaVector:
     left_metrics = EvaluationMetricVector.model_validate(left)
     right_metrics = EvaluationMetricVector.model_validate(right)
-    missing = tuple(
-        component
-        for field_name, component in _NULLABLE_METRIC_FIELDS
-        if getattr(left_metrics, field_name) is None or getattr(right_metrics, field_name) is None
+    left_missing = {item.component: item.reason for item in left_metrics.missingness}
+    right_missing = {item.component: item.reason for item in right_metrics.missingness}
+    missingness_deltas = tuple(
+        MetricMissingnessDelta(
+            component=component,
+            affected_side=(
+                MissingnessSide.BOTH
+                if component in left_missing and component in right_missing
+                else MissingnessSide.LEFT
+                if component in left_missing
+                else MissingnessSide.RIGHT
+            ),
+            left_reason=left_missing.get(component),
+            right_reason=right_missing.get(component),
+        )
+        for _, component in _NULLABLE_METRIC_FIELDS
+        if component in left_missing or component in right_missing
     )
     return EvaluationMetricDeltaVector(
         task_score_delta=(
@@ -615,7 +662,7 @@ def metric_component_deltas(
             left_metrics.final_validation,
             right_metrics.final_validation,
         ),
-        missing_components=missing,
+        missingness_deltas=missingness_deltas,
     )
 
 
@@ -651,6 +698,8 @@ __all__ = [
     "GuidanceEvaluationProtocol",
     "MetricMissingReason",
     "MetricMissingness",
+    "MetricMissingnessDelta",
+    "MissingnessSide",
     "RecoveryAttemptEvent",
     "RecoveryOutcome",
     "ReferenceMissingness",
