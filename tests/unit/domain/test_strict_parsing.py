@@ -4,6 +4,11 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+from super_scientist.domain.cognition import (
+    CapabilityProfile,
+    CohortRequest,
+    DiversityFingerprint,
+)
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus, EvidenceLink
 from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord, EvidenceSpan
 from super_scientist.domain.identity import ActorIdentity, ActorKind
@@ -146,3 +151,68 @@ def test_strict_external_parser_accepts_legitimate_json_collections(kind: str) -
     parsed = PROPOSAL_ADAPTER.validate_json(json.dumps(payload))
 
     assert parsed.proposal_id == payload["proposal_id"]
+
+
+def test_cognition_records_forbid_extras_and_coercive_schema_versions() -> None:
+    fingerprint = DiversityFingerprint(
+        fingerprint_id="fingerprint-strict",
+        model_family=None,
+        model_version=None,
+        scale_class=None,
+        provider=None,
+        adapter_hash=None,
+        configuration_hash=None,
+        prompt_strategy=None,
+        methodological_prior=None,
+        tools=None,
+        evidence_partitions=None,
+        modalities=None,
+        previous_error_clusters=None,
+        prior_task_specializations=None,
+    )
+    profile = CapabilityProfile.build(
+        profile_id="profile-strict",
+        actor=_actor(),
+        diversity_fingerprint=fingerprint,
+        governing_policy_hash="f" * 64,
+    )
+    request = CohortRequest(
+        request_id="request-strict",
+        task_id="task-strict",
+        required_capabilities=(),
+        preferred_capabilities=(),
+        min_members=0,
+        max_members=1,
+        candidate_actor_ids=(),
+        prohibited_combinations=(),
+        governing_policy_hash="f" * 64,
+    )
+
+    profile_payload = profile.model_dump(mode="json") | {"unexpected": True}
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        CapabilityProfile.model_validate_json(json.dumps(profile_payload), strict=True)
+
+    request_payload = request.model_dump(mode="json") | {"schema_version": "1"}
+    with pytest.raises(ValidationError):
+        CohortRequest.model_validate_json(json.dumps(request_payload), strict=True)
+
+
+def test_cognition_json_parser_accepts_bounded_tuple_collections() -> None:
+    request = CohortRequest(
+        request_id="request-json",
+        task_id="task-json",
+        required_capabilities=(),
+        preferred_capabilities=(),
+        min_members=0,
+        max_members=2,
+        candidate_actor_ids=("peer-a", "peer-b"),
+        prohibited_combinations=(("peer-a", "peer-b"),),
+        governing_policy_hash="f" * 64,
+    )
+
+    parsed = CohortRequest.model_validate_json(
+        json.dumps(request.model_dump(mode="json")),
+        strict=True,
+    )
+
+    assert parsed == request
