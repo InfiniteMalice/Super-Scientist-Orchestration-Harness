@@ -1,0 +1,295 @@
+from __future__ import annotations
+
+from collections import Counter
+
+from super_scientist.domain.collaboration.models import (
+    CollaborationSession,
+    CollaborationState,
+    CollaborationTermination,
+    CollaborationTerminationReason,
+    CollaborationTransition,
+    CollaborationTransitionKind,
+    PeerContribution,
+    PeerRequest,
+    TopologyEvent,
+    TopologySnapshot,
+    _apply_topology_operation,
+    _completion_satisfied,
+    contribution_counts,
+    sum_usage,
+    usage_matches,
+)
+from super_scientist.domain.improvement.models import ResourceUsage, usage_within_budget
+
+
+def initial_collaboration_state(session: CollaborationSession) -> CollaborationState:
+    active = set(session.initial_active_peer_ids)
+    topology = TopologySnapshot.build(
+        active_peer_ids=session.initial_active_peer_ids,
+        enabled_edges=tuple(
+            edge for edge in session.declared_edges if edge[0] in active and edge[1] in active
+        ),
+    )
+    zero = ResourceUsage(
+        cost_usd=0.0,
+        compute_units=0.0,
+        tokens=0,
+        elapsed_seconds=0.0,
+        tool_calls=0,
+        human_interventions=0,
+    )
+    return CollaborationState.build(
+        session=session,
+        topology=topology,
+        topology_history=(topology,),
+        topology_events=(),
+        requests=(),
+        contributions=(),
+        usage_history=(),
+        usage=zero,
+        hop_count=0,
+        scheduling_position=0,
+        transitions=(),
+        observed_state_hashes=(),
+        completed=False,
+    )
+
+
+def _require_matching_session(session: CollaborationSession, state: CollaborationState) -> None:
+    if state.session != session:
+        raise ValueError("collaboration state must bind the exact session snapshot")
+
+
+def _eligible_peer_ids(session: CollaborationSession, state: CollaborationState) -> tuple[str, ...]:
+    counts = contribution_counts(state)
+    active = set(state.topology.active_peer_ids)
+    candidates = {
+        peer.actor_id
+        for peer in session.peers
+        if peer.actor_id in active
+        and counts[peer.actor_id] < session.budget.max_contributions_per_peer
+    }
+    if state.contributions and len(active) > 1:
+        sender = state.contributions[-1].peer_id
+        targets = {target for source, target in state.topology.enabled_edges if source == sender}
+        candidates &= targets
+    return tuple(sorted(candidates))
+
+
+def next_peer(session: CollaborationSession, state: CollaborationState) -> str | None:
+    _require_matching_session(session, state)
+    if evaluate_termination(state).terminated:
+        return None
+    eligible = _eligible_peer_ids(session, state)
+    return eligible[0] if eligible else None
+
+
+def _topology_churn_count(state: CollaborationState) -> int:
+    hashes = tuple(item.content_hash for item in state.topology_history)
+    return sum(hashes[index] == hashes[index - 2] for index in range(2, len(hashes)))
+
+
+def evaluate_termination(state: CollaborationState) -> CollaborationTermination:
+    budget = state.session.budget
+    counts = contribution_counts(state)
+    reason: CollaborationTerminationReason | None = None
+    if state.completed:
+        reason = CollaborationTerminationReason.COMPLETED
+    elif state.hop_count >= budget.max_hops:
+        reason = CollaborationTerminationReason.MAX_HOPS_REACHED
+    elif len(state.contributions) >= budget.max_contributions:
+        reason = CollaborationTerminationReason.MAX_CONTRIBUTIONS_REACHED
+    elif any(count >= budget.max_contributions_per_peer for count in counts.values()):
+        reason = CollaborationTerminationReason.PER_PEER_LIMIT_REACHED
+    elif state.topology_events and len(state.topology_events) >= budget.max_topology_changes:
+        reason = CollaborationTerminationReason.TOPOLOGY_CHANGE_LIMIT_REACHED
+    elif any(
+        count > budget.max_state_repetitions
+        for count in Counter(state.observed_state_hashes).values()
+    ):
+        reason = CollaborationTerminationReason.REPEATED_STATE_LOOP
+    elif _topology_churn_count(state) >= budget.max_topology_churn:
+        reason = CollaborationTerminationReason.TOPOLOGY_CHURN
+    elif len(state.contributions) >= 2 and any(
+        count / len(state.contributions) > budget.max_peer_contribution_share
+        for count in counts.values()
+    ):
+        reason = CollaborationTerminationReason.CONTRIBUTION_MONOPOLY
+    elif not _eligible_peer_ids(state.session, state):
+        reason = CollaborationTerminationReason.NO_ELIGIBLE_PEER
+    return CollaborationTermination(reason=reason)
+
+
+def _require_artifacts_and_tools(
+    session: CollaborationSession,
+    request: PeerRequest,
+    contribution: PeerContribution,
+) -> None:
+    allowed_artifacts = set(session.allowed_artifacts)
+    if not set(request.artifact_refs).issubset(allowed_artifacts):
+        raise ValueError("peer request contains an undeclared artifact")
+    if not set(contribution.artifact_refs).issubset(allowed_artifacts):
+        raise ValueError("peer contribution contains an undeclared artifact")
+    allowed_tools = set(session.budget.allowed_tool_ids)
+    if not set(request.tool_ids).issubset(allowed_tools):
+        raise ValueError("peer request contains an undeclared tool")
+    if not set(contribution.tool_ids).issubset(allowed_tools):
+        raise ValueError("peer contribution contains an undeclared tool")
+
+
+def _require_parents(
+    session: CollaborationSession,
+    state: CollaborationState,
+    request: PeerRequest,
+    contribution: PeerContribution,
+) -> None:
+    known = {item.contribution_id: item for item in state.contributions}
+    if request.parent_contribution_id is not None and request.parent_contribution_id not in known:
+        raise ValueError("peer request parent must be a declared prior contribution")
+    if not set(contribution.parent_contribution_ids).issubset(known):
+        raise ValueError("peer contribution parent must be a declared prior contribution")
+    if (
+        request.parent_contribution_id is not None
+        and request.parent_contribution_id not in contribution.parent_contribution_ids
+    ):
+        raise ValueError("peer contribution must retain its request parent")
+    depths: dict[str, int] = {}
+    for item in state.contributions:
+        depths[item.contribution_id] = (
+            0
+            if not item.parent_contribution_ids
+            else 1 + max(depths[parent] for parent in item.parent_contribution_ids)
+        )
+    depth = (
+        0
+        if not contribution.parent_contribution_ids
+        else 1 + max(depths[parent] for parent in contribution.parent_contribution_ids)
+    )
+    if depth > session.budget.max_parent_depth:
+        raise ValueError("peer contribution parent depth exceeds collaboration budget")
+
+
+def advance_collaboration(
+    session: CollaborationSession,
+    state: CollaborationState,
+    request: PeerRequest,
+    contribution: PeerContribution,
+    usage: ResourceUsage,
+) -> CollaborationState:
+    _require_matching_session(session, state)
+    termination = evaluate_termination(state)
+    if termination.terminated:
+        raise ValueError(f"collaboration is terminated: {termination.reason}")
+    expected_peer = next_peer(session, state)
+    if request.recipient_id != expected_peer:
+        raise ValueError("peer request recipient is not the expected peer")
+    expected_sequence = len(state.requests) + 1
+    if request.session_id != session.session_id or request.sequence != expected_sequence:
+        raise ValueError("peer request must bind the session and next sequence")
+    expected_sender = state.contributions[-1].peer_id if state.contributions else None
+    if request.sender_id != expected_sender:
+        raise ValueError("peer request sender must match the prior contributing peer")
+    if contribution.session_id != session.session_id:
+        raise ValueError("peer contribution must bind the collaboration session")
+    if contribution.request_id != request.request_id:
+        raise ValueError("peer contribution must bind the peer request")
+    if contribution.peer_id != request.recipient_id:
+        raise ValueError("peer contribution peer must match request recipient")
+    if contribution.contribution_id in {item.contribution_id for item in state.contributions}:
+        raise ValueError("peer contribution identifier must be unique")
+    capability_ids = {
+        assessment.requirement.capability_id
+        for member in session.cohort_plan.members
+        if member.actor_id == request.recipient_id
+        for assessment in member.assessments
+    }
+    if request.requested_capability_id not in capability_ids:
+        raise ValueError("peer request capability is not declared for the expected peer")
+    if contribution.contribution_kind not in session.allowed_contribution_kinds:
+        raise ValueError("peer contribution kind is not allowed")
+    _require_artifacts_and_tools(session, request, contribution)
+    _require_parents(session, state, request, contribution)
+    expected_remaining = session.remaining_resources(state.usage)
+    if not usage_matches(request.remaining_budget, expected_remaining):
+        raise ValueError("peer request remaining budget does not match current usage")
+    updated_usage = sum_usage((*state.usage_history, usage))
+    if not usage_within_budget(updated_usage, session.budget.resources):
+        raise ValueError("peer transition exceeds the collaboration resource budget")
+    contributions = (*state.contributions, contribution)
+    return CollaborationState.build(
+        session=session,
+        topology=state.topology,
+        topology_history=state.topology_history,
+        topology_events=state.topology_events,
+        requests=(*state.requests, request),
+        contributions=contributions,
+        usage_history=(*state.usage_history, usage),
+        usage=updated_usage,
+        hop_count=state.hop_count + 1,
+        scheduling_position=state.scheduling_position + 1,
+        transitions=(
+            *state.transitions,
+            CollaborationTransition(
+                position=state.scheduling_position + 1,
+                kind=CollaborationTransitionKind.PEER_EXCHANGE,
+                request_id=request.request_id,
+                contribution_id=contribution.contribution_id,
+                topology_event_id=None,
+            ),
+        ),
+        observed_state_hashes=(*state.observed_state_hashes, state.state_hash),
+        completed=_completion_satisfied(session, contributions),
+    )
+
+
+def apply_topology_event(
+    session: CollaborationSession,
+    state: CollaborationState,
+    event: TopologyEvent,
+) -> CollaborationState:
+    _require_matching_session(session, state)
+    termination = evaluate_termination(state)
+    if termination.terminated:
+        raise ValueError(f"collaboration is terminated: {termination.reason}")
+    if len(state.topology_events) >= session.budget.max_topology_changes:
+        raise ValueError("collaboration topology change limit reached")
+    if event.session_id != session.session_id or event.sequence != len(state.topology_events) + 1:
+        raise ValueError("topology event must bind the session and next event sequence")
+    if event.before_topology_hash != state.topology.content_hash:
+        raise ValueError("topology event before topology hash does not match current topology")
+    after = _apply_topology_operation(session, state.topology, event)
+    if event.after_topology_hash != after.content_hash:
+        raise ValueError("topology event after topology hash does not match its operation")
+    return CollaborationState.build(
+        session=session,
+        topology=after,
+        topology_history=(*state.topology_history, after),
+        topology_events=(*state.topology_events, event),
+        requests=state.requests,
+        contributions=state.contributions,
+        usage_history=state.usage_history,
+        usage=state.usage,
+        hop_count=state.hop_count,
+        scheduling_position=state.scheduling_position + 1,
+        transitions=(
+            *state.transitions,
+            CollaborationTransition(
+                position=state.scheduling_position + 1,
+                kind=CollaborationTransitionKind.TOPOLOGY_EVENT,
+                request_id=None,
+                contribution_id=None,
+                topology_event_id=event.event_id,
+            ),
+        ),
+        observed_state_hashes=(*state.observed_state_hashes, state.state_hash),
+        completed=state.completed,
+    )
+
+
+__all__ = [
+    "advance_collaboration",
+    "apply_topology_event",
+    "evaluate_termination",
+    "initial_collaboration_state",
+    "next_peer",
+]
