@@ -461,9 +461,17 @@ treat the proposal envelope as a durable typed record.
 Serialized proposals enter through `parse_untrusted_proposal_json()`, not a public raw
 `PROPOSAL_ADAPTER` call. That boundary checks the 8 MiB proposal limit and iterative
 depth limit before Pydantic parsing. It converts validation and resource failures to one
-fixed error with no cause, context, structured diagnostics, or rejected payload.
+fixed error after leaving the caught-exception scope. The fixed error has no cause,
+context, structured diagnostics, or rejected payload.
 Base64 is only the opaque JSON transport representation; it is not treated as encryption
 or redaction.
+
+`parse_untrusted_procedure_compilation_envelope()` fresh-validates every envelope field
+before the procedure handler reads compilation ID, created time, governing policy hash,
+or result bytes. If the supplied value is already an envelope model, the parser requires
+exact equality after validation. `ProcedureCompilationRecord.build_from_untrusted_envelope()`
+uses that parser first. The record content hash therefore binds only normalized metadata
+and a validated result.
 
 ### 9.6 Binding to `ProgressPlan`
 

@@ -215,3 +215,48 @@ was unreachable.
   the opaque envelope and requires Task 12 safe normalization before recomputation.
 - Run plan/documentation, complete procedure, Phase A, adversarial, formatting, lint,
   typing, dependency, raw-parser-consumer, and diff gates.
+
+## Round 6: context-free proposal failure and complete-envelope normalization
+
+### Problem
+
+The Task 8 `parse_untrusted_proposal_json()` sketch raised its fixed error inside the
+`except` block. `raise ... from None` hid the direct cause but retained the caught raw
+validation error in `__context__`. In the implemented procedure contract,
+`ProcedureCompilationRecord.build_from_untrusted_envelope()` validated the nested result
+but read `compilation_id`, `created_at`, and `governing_policy_hash` from the supplied
+model without fresh complete-envelope validation. A `model_copy()` mutation could make
+the record builder expose a marker through a raw Pydantic error.
+
+### Design and expected behavior
+
+- Add `parse_untrusted_procedure_compilation_envelope()` as the only public parser for an
+  untrusted envelope model, mapping, or JSON value. The parser fresh-validates the
+  complete envelope and raises one fixed `ProcedureBoundaryValidationError` only after
+  the caught-exception scope exits.
+- When the supplied value is already an envelope model, serialize and fresh-validate all
+  fields. Require exact equality after validation so `model_copy()` cannot bypass
+  canonical normalization.
+- Make `parse_untrusted_procedure_compilation_result()` normalize an envelope through the
+  complete-envelope parser before unwrapping result bytes.
+- Make `ProcedureCompilationRecord.build_from_untrusted_envelope()` normalize the
+  complete envelope before it reads compilation ID, time, or policy metadata. The
+  resulting record's canonical content hash binds those normalized metadata fields and
+  the validated result.
+- Change the Task 8 proposal-parser sketch to store the parsed value inside a suppressed
+  exception scope, leave that scope, and only then raise its fixed error. Require both
+  `__cause__` and `__context__` to be `None`.
+- Preserve the opaque transport shape, byte/depth limits, result/request integrity,
+  unknown-as-`INCONCLUSIVE`, all sixteen checks, and Task 12 repository ownership.
+
+### Tests
+
+- Execute the Task 8 parser function from the plan with an adapter that raises a
+  marker-bearing error. Assert the public error has the fixed message, no marker, no
+  structured error surface, and no cause or context.
+- Mutate `compilation_id`, `created_at`, and `governing_policy_hash` independently through
+  `model_copy()`. Assert both safe result parsing and safe record construction reject each
+  mutation without a raw Pydantic error, marker, cause, context, or structured input.
+- Verify valid envelope parsing and record construction remain exact, then run all
+  procedure, Phase A, adversarial, formatting, lint, typing, dependency, documentation,
+  and diff gates.

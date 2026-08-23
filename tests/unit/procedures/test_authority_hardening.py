@@ -32,6 +32,7 @@ from super_scientist.domain.procedures import (
     ProcedureValidationStatus,
     canonical_model_hash,
     compile_method,
+    parse_untrusted_procedure_compilation_envelope,
     parse_untrusted_procedure_compilation_result,
     validate_procedure,
 )
@@ -349,6 +350,7 @@ def test_valid_opaque_envelope_normalizes_to_result_and_record() -> None:
         governing_policy_hash="f" * 64,
     )
 
+    assert parse_untrusted_procedure_compilation_envelope(envelope) == envelope
     assert parse_untrusted_procedure_compilation_result(envelope) == result
     record = ProcedureCompilationRecord.build_from_untrusted_envelope(envelope)
 
@@ -356,6 +358,105 @@ def test_valid_opaque_envelope_normalizes_to_result_and_record() -> None:
     assert record.result == result
     assert record.created_at == NOW
     assert record.governing_policy_hash == "f" * 64
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ("compilation_id", "created_at", "governing_policy_hash"),
+)
+def test_safe_envelope_boundaries_reject_model_copy_metadata_markers(
+    field_name: str,
+) -> None:
+    result = compile_method(valid_request())
+    envelope = OpaqueProcedureCompilationEnvelope.build(
+        compilation_id="compilation-opaque",
+        result=result,
+        created_at=NOW,
+        governing_policy_hash="f" * 64,
+    )
+    forged = envelope.model_copy(update={field_name: PRIVATE_MARKER})
+    boundaries = (
+        (
+            lambda: parse_untrusted_procedure_compilation_envelope(forged),
+            "procedure compilation envelope failed validation",
+        ),
+        (
+            lambda: parse_untrusted_procedure_compilation_result(forged),
+            "procedure compilation result failed validation",
+        ),
+        (
+            lambda: ProcedureCompilationRecord.build_from_untrusted_envelope(forged),
+            "procedure compilation envelope failed validation",
+        ),
+    )
+
+    for invoke, expected_message in boundaries:
+        with pytest.raises(ProcedureBoundaryValidationError) as caught:
+            invoke()
+        _assert_sanitized_boundary_error(caught.value, expected_message)
+
+
+def test_safe_envelope_parser_rejects_noncanonical_model_copy_metadata() -> None:
+    result = compile_method(valid_request())
+    envelope = OpaqueProcedureCompilationEnvelope.build(
+        compilation_id="compilation-opaque",
+        result=result,
+        created_at=NOW,
+        governing_policy_hash="f" * 64,
+    )
+    forged = envelope.model_copy(update={"compilation_id": " compilation-opaque "})
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_envelope(forged)
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation envelope failed validation",
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    (
+        ("compilation_id", "compilation-other"),
+        ("created_at", datetime(2026, 8, 23, 13, 0, tzinfo=UTC)),
+        ("governing_policy_hash", "e" * 64),
+    ),
+)
+def test_record_hash_binds_validated_envelope_metadata(
+    field_name: str,
+    replacement: object,
+) -> None:
+    result = compile_method(valid_request())
+    envelope = OpaqueProcedureCompilationEnvelope.build(
+        compilation_id="compilation-opaque",
+        result=result,
+        created_at=NOW,
+        governing_policy_hash="f" * 64,
+    )
+    baseline = ProcedureCompilationRecord.build_from_untrusted_envelope(envelope)
+    changed = OpaqueProcedureCompilationEnvelope.build(
+        compilation_id=(
+            replacement
+            if field_name == "compilation_id" and isinstance(replacement, str)
+            else envelope.compilation_id
+        ),
+        result=result,
+        created_at=(
+            replacement
+            if field_name == "created_at" and isinstance(replacement, datetime)
+            else envelope.created_at
+        ),
+        governing_policy_hash=(
+            replacement
+            if field_name == "governing_policy_hash" and isinstance(replacement, str)
+            else envelope.governing_policy_hash
+        ),
+    )
+
+    changed_record = ProcedureCompilationRecord.build_from_untrusted_envelope(changed)
+
+    assert changed_record.content_hash != baseline.content_hash
 
 
 def test_opaque_envelope_rejects_over_depth_json_without_exposing_plaintext() -> None:

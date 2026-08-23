@@ -980,6 +980,35 @@ class OpaqueProcedureCompilationEnvelope(_StrictFrozenModel):
         return result_json
 
 
+def parse_untrusted_procedure_compilation_envelope(
+    value: object,
+) -> OpaqueProcedureCompilationEnvelope:
+    """Fresh-validate a complete envelope without retaining input diagnostics."""
+
+    supplied_envelope = value if isinstance(value, OpaqueProcedureCompilationEnvelope) else None
+    envelope: OpaqueProcedureCompilationEnvelope | None = None
+    with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
+        if isinstance(value, BaseModel):
+            value = value.model_dump(mode="python", warnings="none")
+        if isinstance(value, (str, bytes, bytearray)):
+            envelope = OpaqueProcedureCompilationEnvelope.model_validate_json(
+                value,
+                strict=True,
+            )
+        else:
+            envelope = OpaqueProcedureCompilationEnvelope.model_validate(
+                value,
+                strict=True,
+            )
+        if supplied_envelope is not None and envelope != supplied_envelope:
+            envelope = None
+    if envelope is None:
+        raise ProcedureBoundaryValidationError(
+            "procedure compilation envelope failed validation"
+        ) from None
+    return envelope
+
+
 def parse_untrusted_procedure_compilation_result(
     value: object,
 ) -> ProcedureCompilationResult:
@@ -988,7 +1017,7 @@ def parse_untrusted_procedure_compilation_result(
     result: ProcedureCompilationResult | None = None
     with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
         if isinstance(value, OpaqueProcedureCompilationEnvelope):
-            value = value.result_json_bytes()
+            value = parse_untrusted_procedure_compilation_envelope(value).result_json_bytes()
         elif isinstance(value, BaseModel):
             value = value.model_dump(mode="python")
         if isinstance(value, (str, bytes, bytearray)):
@@ -1028,6 +1057,7 @@ class ProcedureCompilationRecord(_ProcedureCompilationRecordPayload):
     ) -> Self:
         """Normalize an opaque proposal envelope through the safe result parser."""
 
+        envelope = parse_untrusted_procedure_compilation_envelope(envelope)
         return cls.build(
             compilation_id=envelope.compilation_id,
             result=parse_untrusted_procedure_compilation_result(envelope),
@@ -1188,5 +1218,6 @@ __all__ = [
     "RegisteredValidator",
     "canonical_model_hash",
     "catalog_snapshot_content_hash",
+    "parse_untrusted_procedure_compilation_envelope",
     "parse_untrusted_procedure_compilation_result",
 ]

@@ -40,6 +40,7 @@ from super_scientist.domain.procedures.models import (
     RegisteredValidator,
     canonical_model_hash,
     catalog_snapshot_content_hash,
+    parse_untrusted_procedure_compilation_envelope,
     parse_untrusted_procedure_compilation_result,
 )
 from super_scientist.domain.procedures.progress_binding import procedure_to_progress_plan
@@ -83,6 +84,7 @@ __all__ = [
     "canonical_model_hash",
     "catalog_snapshot_content_hash",
     "compile_method",
+    "parse_untrusted_procedure_compilation_envelope",
     "parse_untrusted_procedure_compilation_result",
     "procedure_to_progress_plan",
     "validate_procedure",
