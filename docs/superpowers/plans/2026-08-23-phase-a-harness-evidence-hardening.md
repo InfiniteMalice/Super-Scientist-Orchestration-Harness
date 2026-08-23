@@ -81,6 +81,49 @@ trust boundary.
 - Per-cell evidence chains, 24,512 comparison capacity, 1,232-comparison 8-by-8 behavior, resource
   bounds, protected evaluation, canonical order, and the Phase A authority boundary remain unchanged.
 
+## Round 4: Composable Bounds and Shared Matrix Snapshot Indexes
+
+### Problem
+
+The accepted reward components can produce more than 256 distinct evidence receipts even though
+`RewardValidityAssessment.evidence_receipts` permits at most 256. Decimal reward and generation
+values bound finiteness but not coefficient digits, exponent, or serialized size. Matrix evidence
+chains recursively embed the same trace, freshness, and assessment snapshots, and analysis
+revalidates those nested snapshots repeatedly; the required 8-by-8 grid is therefore too slow and
+the 256-cell maximum is not operationally usable.
+
+### Design
+
+1. Separate the per-component evidence bound from the exact aggregate accepted-receipt bound. The
+   aggregate bound equals the mathematical worst case admitted by verification, diagnostic,
+   provenance, and observation components, so every accepted component set can construct an
+   assessment. Test the exact aggregate boundary and one component overflow.
+2. Validate each numeric `Decimal` with explicit coefficient-digit, exponent, and canonical-byte
+   limits. Validate the canonical byte length of each reward observation and harness trace before
+   computing its content hash. Every overflow raises a fixed validation error without interpolating
+   attacker-controlled values.
+3. Make `HarnessCellEvidenceChain` a compact canonical join of protocol, trace, freshness, and
+   assessment receipts plus one coordinate. A later handler validates each full snapshot chain
+   once and supplies a shared canonical `HarnessEvidenceSnapshotIndex` projection;
+   `analyze_model_harness()` performs deterministic one-pass receipt joins. No chain or cell
+   recursively embeds snapshots.
+4. Preserve exact protocol/task/model/harness/partition/validator/checker joins, trace uniqueness,
+   inventory-grounded freshness and reward validity, all declared comparisons, and fail-closed
+   confounds. Add an 8-by-8 regression and a 256-cell/24,512-comparison performance gate with a
+   documented generous wall-clock threshold.
+
+### TDD and verification
+
+- [x] Witness RED for 24 evidence receipts per diagnostic exceeding the old assessment bound.
+- [x] Witness RED for oversized decimal coefficient, exponent, canonical bytes, reward bytes, and
+  trace bytes.
+- [x] Witness RED for compact receipt-only chain construction and the shared snapshot arguments.
+- [x] Record the current 8-by-8 baseline and witness the maximum-shape runtime test fail or time out
+  against recursive chains.
+- [x] Implement the minimal aggregate, numeric, byte, and shared-index contracts.
+- [x] Run focused harness, campaign, protected leakage, strict parsing, Phase A, Ruff, strict mypy,
+  authority scan, `git diff --check`, and both performance probes.
+
 ## Global Constraints
 
 - Preserve protected-evaluation and `HarnessCampaign` behavior.

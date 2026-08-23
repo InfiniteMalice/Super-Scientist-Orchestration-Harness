@@ -8,6 +8,10 @@ from itertools import product
 import pytest
 from pydantic import ValidationError
 
+from super_scientist.domain.harness_eval.evidence_chains import (
+    HarnessEvidenceSnapshotIndex,
+    HarnessEvidenceSnapshotRecord,
+)
 from super_scientist.domain.harness_eval.guidance import EvaluationMetricVector
 from super_scientist.domain.harness_eval.matrix import (
     HarnessIdentity,
@@ -160,12 +164,12 @@ def _cell(
     trace_current: bool = True,
     reward_valid: bool = True,
 ) -> ModelHarnessCell:
-    chain = _validated_evidence(protocol, coordinate)
+    evidence = _validated_evidence(protocol, coordinate)
     from super_scientist.domain.harness_eval.evidence_chains import (
         harness_cell_evidence_chain_receipt,
     )
 
-    chain_receipt = harness_cell_evidence_chain_receipt(chain)
+    chain_receipt = harness_cell_evidence_chain_receipt(evidence.chain)  # type: ignore[union-attr]
     if not trace_current:
         chain_receipt = EvidenceReceipt(
             record_id=chain_receipt.record_id,
@@ -211,18 +215,41 @@ def _validated_evidence(
     )
 
 
-def _evidence_chains(protocol: ModelHarnessProtocol) -> tuple[object, ...]:
+def _evidence_fixtures(protocol: ModelHarnessProtocol) -> tuple[object, ...]:
     return tuple(_validated_evidence(protocol, coordinate) for coordinate in protocol.expected_grid)
+
+
+@lru_cache(maxsize=32)
+def _evidence_index(protocol: ModelHarnessProtocol) -> HarnessEvidenceSnapshotIndex:
+    evidence = _evidence_fixtures(protocol)
+    return HarnessEvidenceSnapshotIndex.build(
+        records=tuple(
+            sorted(
+                (
+                    HarnessEvidenceSnapshotRecord.from_snapshots(
+                        chain=item.chain,  # type: ignore[union-attr]
+                        trace=item.trace,  # type: ignore[union-attr]
+                        freshness=item.freshness,  # type: ignore[union-attr]
+                        assessment=item.assessment,  # type: ignore[union-attr]
+                    )
+                    for item in evidence
+                ),
+                key=lambda item: item.chain_receipt.record_id,
+            )
+        ),
+    )
 
 
 def analyze_model_harness(
     protocol: ModelHarnessProtocol,
     cells: tuple[ModelHarnessCell, ...],
 ) -> ModelHarnessAnalysis:
+    evidence = _evidence_fixtures(protocol)
     return analyze_model_harness_contract(
         protocol,
         cells,
-        evidence_chains=_evidence_chains(protocol),  # type: ignore[arg-type]
+        evidence_chains=tuple(item.chain for item in evidence),  # type: ignore[union-attr]
+        evidence_index=_evidence_index(protocol),
     )
 
 

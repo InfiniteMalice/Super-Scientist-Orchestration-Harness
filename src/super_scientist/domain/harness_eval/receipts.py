@@ -165,8 +165,14 @@ def require_resolved_evidence(
     receipt: EvidenceReceipt,
     kind: ResolvedEvidenceKind,
 ) -> ResolvedEvidenceRecord:
-    validated_inventory = ResolvedEvidenceInventory.model_validate(inventory)
-    validated_receipt = EvidenceReceipt.model_validate(receipt)
+    validated_inventory = (
+        inventory
+        if type(inventory) is ResolvedEvidenceInventory
+        else ResolvedEvidenceInventory.model_validate(inventory)
+    )
+    validated_receipt = (
+        receipt if type(receipt) is EvidenceReceipt else EvidenceReceipt.model_validate(receipt)
+    )
     match = next(
         (
             item

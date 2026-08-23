@@ -27,7 +27,10 @@ from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
 from super_scientist.domain.primitives import Sha256Hex, UtcTimestamp
 
 if TYPE_CHECKING:
-    from super_scientist.domain.harness_eval.evidence_chains import HarnessCellEvidenceChain
+    from super_scientist.domain.harness_eval.evidence_chains import (
+        HarnessCellEvidenceChain,
+        HarnessEvidenceSnapshotIndex,
+    )
 
 # The 256-cell grid reaches this maximum at 128 models x 2 harnesses x 1 partition
 # when all non-transfer comparison families are declared.
@@ -316,7 +319,7 @@ class ModelHarnessProtocol(_ModelHarnessProtocolPayload):
 class _ModelHarnessCellPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     cell_id: BoundedIdentifier
-    protocol: ModelHarnessProtocol
+    protocol_receipt: EvidenceReceipt
     protocol_id: BoundedIdentifier
     protocol_version: int = Field(
         strict=True,
@@ -354,11 +357,13 @@ class _ModelHarnessCellPayload(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_exact_protocol_binding(self) -> Self:
-        if self.protocol_id != self.protocol.protocol_id:
+        if self.protocol_id != self.protocol_receipt.record_id:
             raise ValueError("model-harness cell must bind the exact protocol identifier")
-        if self.protocol_version != self.protocol.version:
+        if self.protocol_receipt.schema_version != self.schema_version:
+            raise ValueError("model-harness cell must bind the exact protocol schema version")
+        if self.protocol_version < 1:
             raise ValueError("model-harness cell must bind the exact protocol version")
-        if self.protocol_hash != self.protocol.content_hash:
+        if self.protocol_hash != self.protocol_receipt.content_hash:
             raise ValueError("model-harness cell must bind the exact protocol hash")
         return self
 
@@ -385,7 +390,11 @@ class ModelHarnessCell(_ModelHarnessCellPayload):
         coordinate = ModelHarnessCoordinate.model_validate(values["coordinate"])
         budget_by_model = {binding.model: binding.budget for binding in validated.model_budgets}
         return cls.build(
-            protocol=validated,
+            protocol_receipt=EvidenceReceipt(
+                record_id=validated.protocol_id,
+                schema_version=validated.schema_version,
+                content_hash=validated.content_hash,
+            ),
             protocol_id=validated.protocol_id,
             protocol_version=validated.version,
             protocol_hash=validated.content_hash,
@@ -453,8 +462,8 @@ class ModelHarnessComparison(_ModelHarnessComparisonPayload):
     @classmethod
     def build(cls, **values: Any) -> Self:
         payload = _ModelHarnessComparisonPayload(**values)
-        return cls(
-            **payload.model_dump(mode="python"),
+        return cls.model_construct(
+            **payload.__dict__,
             content_hash=model_harness_comparison_hash(payload),
         )
 
@@ -531,8 +540,8 @@ class ModelHarnessAnalysis(_ModelHarnessAnalysisPayload):
     @classmethod
     def build(cls, **values: Any) -> Self:
         payload = _ModelHarnessAnalysisPayload(**values)
-        return cls(
-            **payload.model_dump(mode="python"),
+        return cls.model_construct(
+            **payload.__dict__,
             content_hash=model_harness_analysis_hash(payload),
         )
 
@@ -644,9 +653,11 @@ def validate_complete_matched_grid(
     cells: tuple[ModelHarnessCell, ...],
     *,
     evidence_chains: tuple[HarnessCellEvidenceChain, ...],
+    evidence_index: HarnessEvidenceSnapshotIndex,
 ) -> tuple[ModelHarnessConfoundCode, ...]:
     from super_scientist.domain.harness_eval.evidence_chains import (
         HarnessCellEvidenceChain,
+        HarnessEvidenceSnapshotIndex,
         harness_cell_evidence_chain_receipt,
     )
     from super_scientist.domain.harness_eval.rewards import (
@@ -661,13 +672,12 @@ def validate_complete_matched_grid(
     validated_chains = tuple(
         HarnessCellEvidenceChain.model_validate(item) for item in evidence_chains
     )
+    validated_index = HarnessEvidenceSnapshotIndex.model_validate(evidence_index)
     chain_ids = tuple(item.chain_id for item in validated_chains)
-    trace_ids = tuple(item.trace.trace_id for item in validated_chains)
     if len(chain_ids) != len(set(chain_ids)):
         raise ValueError("validated cell evidence chains must have unique identifiers")
-    if len(trace_ids) != len(set(trace_ids)):
-        raise ValueError("each validated matrix cell requires its own trace")
     chains_by_id = {item.chain_id: item for item in validated_chains}
+    snapshots_by_chain_id = {item.chain_receipt.record_id: item for item in validated_index.records}
     confounds: set[ModelHarnessConfoundCode] = set()
     cell_ids = tuple(item.cell_id for item in validated_cells)
     if len(cell_ids) != len(set(cell_ids)):
@@ -699,15 +709,31 @@ def validate_complete_matched_grid(
         if (
             chain is None
             or harness_cell_evidence_chain_receipt(chain) != cell.evidence_chain_receipt
-            or chain.protocol != validated_protocol
+            or chain.protocol_receipt
+            != EvidenceReceipt(
+                record_id=validated_protocol.protocol_id,
+                schema_version=validated_protocol.schema_version,
+                content_hash=validated_protocol.content_hash,
+            )
             or chain.coordinate != cell.coordinate
         ):
             confounds.add(ModelHarnessConfoundCode.TRACE_RECEIPT_MISMATCH)
             confounds.add(ModelHarnessConfoundCode.REWARD_RECEIPT_MISMATCH)
             continue
-        if chain.freshness.status is not TraceFreshnessStatus.CURRENT:
+        snapshot = snapshots_by_chain_id.get(chain.chain_id)
+        if (
+            snapshot is None
+            or snapshot.chain_receipt != harness_cell_evidence_chain_receipt(chain)
+            or snapshot.trace_receipt != chain.trace_receipt
+            or snapshot.freshness_receipt != chain.freshness_receipt
+            or snapshot.assessment_receipt != chain.assessment_receipt
+        ):
+            confounds.add(ModelHarnessConfoundCode.TRACE_RECEIPT_MISMATCH)
+            confounds.add(ModelHarnessConfoundCode.REWARD_RECEIPT_MISMATCH)
+            continue
+        if snapshot.freshness_status is not TraceFreshnessStatus.CURRENT:
             confounds.add(ModelHarnessConfoundCode.STALE_TRACE)
-        if chain.assessment.status is not RewardValidityStatus.VALID:
+        if snapshot.assessment_status is not RewardValidityStatus.VALID:
             confounds.add(ModelHarnessConfoundCode.INVALID_REWARD)
     return tuple(sorted(confounds, key=_CONFOUND_ORDER.__getitem__))
 
@@ -837,6 +863,7 @@ def analyze_model_harness(
     cells: tuple[ModelHarnessCell, ...],
     *,
     evidence_chains: tuple[HarnessCellEvidenceChain, ...],
+    evidence_index: HarnessEvidenceSnapshotIndex,
 ) -> ModelHarnessAnalysis:
     validated_protocol = ModelHarnessProtocol.model_validate(protocol)
     validated_cells = tuple(ModelHarnessCell.model_validate(item) for item in cells)
@@ -845,11 +872,25 @@ def analyze_model_harness(
         validated_protocol,
         ordered_cells,
         evidence_chains=evidence_chains,
+        evidence_index=evidence_index,
     )
     comparisons_out = (
         () if confounds else _build_declared_comparisons(validated_protocol, validated_cells)
     )
-    return ModelHarnessAnalysis.build(
+    analysis_values: dict[str, object] = {
+        "schema_version": 1,
+        "protocol": validated_protocol,
+        "protocol_id": validated_protocol.protocol_id,
+        "protocol_version": validated_protocol.version,
+        "protocol_hash": validated_protocol.content_hash,
+        "cell_ids": tuple(cell.cell_id for cell in ordered_cells),
+        "cell_hashes": tuple(cell.content_hash for cell in ordered_cells),
+        "comparisons": comparisons_out,
+        "confounds": confounds,
+        "causal_claim_permitted": False,
+    }
+    return ModelHarnessAnalysis.model_construct(
+        schema_version=1,
         protocol=validated_protocol,
         protocol_id=validated_protocol.protocol_id,
         protocol_version=validated_protocol.version,
@@ -859,6 +900,7 @@ def analyze_model_harness(
         comparisons=comparisons_out,
         confounds=confounds,
         causal_claim_permitted=False,
+        content_hash=model_harness_analysis_hash(analysis_values),
     )
 
 

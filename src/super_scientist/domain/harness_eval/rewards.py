@@ -90,6 +90,16 @@ class VerificationOutcomeStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+# Exact maximum unique receipts admitted by two verification snapshots, ten
+# diagnostics, coverage provenance, and one reward observation.
+MAX_REWARD_ACCEPTED_EVIDENCE = (
+    2 * (3 + MAX_REWARD_EVIDENCE)
+    + len(RewardHackingFamily) * (2 + MAX_REWARD_EVIDENCE)
+    + MAX_REWARD_EVIDENCE
+    + 1
+)
+
+
 _REASON_ORDER = {item: index for index, item in enumerate(RewardInvalidationReason)}
 
 
@@ -520,7 +530,7 @@ class _RewardValidityAssessmentPayload(_StrictFrozenModel):
         min_length=len(RewardHackingFamily),
         max_length=len(RewardHackingFamily),
     )
-    evidence_receipts: tuple[EvidenceReceipt, ...] = Field(max_length=MAX_REWARD_EVIDENCE)
+    evidence_receipts: tuple[EvidenceReceipt, ...] = Field(max_length=MAX_REWARD_ACCEPTED_EVIDENCE)
     expectation: TraceExpectation
     verification: VerificationOutcomeEvidence
     diagnostic_coverage: RewardHackingCoverageAttestation
@@ -628,8 +638,8 @@ class RewardValidityAssessment(_RewardValidityAssessmentPayload):
     @classmethod
     def build(cls, **values: Any) -> Self:
         payload = _RewardValidityAssessmentPayload(**values)
-        return cls(
-            **payload.model_dump(mode="python"),
+        return cls.model_construct(
+            **payload.__dict__,
             content_hash=reward_assessment_hash(payload),
         )
 

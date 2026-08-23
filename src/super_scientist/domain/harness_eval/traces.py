@@ -43,6 +43,11 @@ MAX_CATEGORICAL_REWARD_LENGTH = 200
 MAX_TRACE_ARTIFACT_SIZE_BYTES = 1_073_741_824
 MAX_TOKEN_ID = 2_147_483_647
 MAX_HARNESS_RESOURCE_INTEGER = (1 << 1000) - 1
+MAX_DECIMAL_COEFFICIENT_DIGITS = 256
+MAX_DECIMAL_ABS_EXPONENT = 1024
+MAX_DECIMAL_CANONICAL_BYTES = 260
+MAX_REWARD_OBSERVATION_CANONICAL_BYTES = 2_048
+MAX_HARNESS_TRACE_CANONICAL_BYTES = 262_144
 
 BoundedTraceIdentifier = Annotated[
     StableIdentifier,
@@ -107,6 +112,31 @@ def _canonical_identifier_tuple(values: tuple[str, ...], field_name: str) -> tup
     if len(values) != len(set(values)) or values != tuple(sorted(values)):
         raise ValueError(f"{field_name} must be unique and canonically ordered")
     return values
+
+
+def _require_bounded_decimal(value: Decimal) -> Decimal:
+    if not value.is_finite():
+        raise ValueError("decimal value must be finite")
+    decimal_tuple = value.as_tuple()
+    if len(decimal_tuple.digits) > MAX_DECIMAL_COEFFICIENT_DIGITS:
+        raise ValueError("decimal coefficient exceeds bound")
+    if isinstance(decimal_tuple.exponent, str) or (
+        abs(decimal_tuple.exponent) > MAX_DECIMAL_ABS_EXPONENT
+    ):
+        raise ValueError("decimal exponent exceeds bound")
+    if len(str(value).encode("ascii")) > MAX_DECIMAL_CANONICAL_BYTES:
+        raise ValueError("decimal canonical bytes exceed bound")
+    return value
+
+
+def _require_canonical_byte_limit(
+    record: BaseModel,
+    *,
+    maximum: int,
+    error: str,
+) -> None:
+    if len(canonical_json_bytes(record.model_dump(mode="json"))) > maximum:
+        raise ValueError(error)
 
 
 class MetadataAvailability(StrEnum):
@@ -399,8 +429,8 @@ class _GenerationMetadataPayload(_StrictFrozenModel):
             if self.token_count.value != len(self.token_ids.value):
                 raise ValueError("available token IDs must match the observed token count")
         if self.log_probabilities.value is not None:
-            if any(not item.is_finite() for item in self.log_probabilities.value):
-                raise ValueError("log probabilities must be finite")
+            for item in self.log_probabilities.value:
+                _require_bounded_decimal(item)
             if self.token_ids.value is None or len(self.log_probabilities.value) != len(
                 self.token_ids.value
             ):
@@ -453,8 +483,8 @@ class _RewardObservationPayload(_StrictFrozenModel):
         cls,
         value: Decimal | str | None,
     ) -> Decimal | str | None:
-        if isinstance(value, Decimal) and not value.is_finite():
-            raise ValueError("numeric reward must be finite")
+        if isinstance(value, Decimal):
+            return _require_bounded_decimal(value)
         if isinstance(value, str):
             normalized = value.strip()
             if not normalized:
@@ -466,6 +496,11 @@ class _RewardObservationPayload(_StrictFrozenModel):
     def require_reward_evidence(self) -> Self:
         if (self.value is None) != (self.evidence_id is None):
             raise ValueError("reward value and evidence must be present together")
+        _require_canonical_byte_limit(
+            self,
+            maximum=MAX_REWARD_OBSERVATION_CANONICAL_BYTES,
+            error="reward observation canonical bytes exceed bound",
+        )
         return self
 
 
@@ -501,7 +536,7 @@ class _TraceBindingPayload(_StrictFrozenModel):
     )
     protocol_hash: Sha256Hex
     guidance_protocol: GuidanceEvaluationProtocol | None
-    model_harness_protocol: ModelHarnessProtocol | None
+    model_harness_protocol_receipt: EvidenceReceipt | None
     guidance_condition: GuidanceCondition | None
     task_id: BoundedTraceIdentifier
     task_input_hash: Sha256Hex
@@ -543,10 +578,10 @@ class _TraceBindingPayload(_StrictFrozenModel):
     def require_exact_protocol_artifact_authorization(self) -> Self:
         if len(self.artifact_ids) != len(self.artifact_hashes):
             raise ValueError("artifact identities and hashes must be exactly aligned")
-        if (self.guidance_protocol is None) == (self.model_harness_protocol is None):
+        if (self.guidance_protocol is None) == (self.model_harness_protocol_receipt is None):
             raise ValueError("trace binding requires exactly one Task 6 protocol snapshot")
         if self.guidance_protocol is not None:
-            if self.model_harness_protocol is not None or self.guidance_condition is None:
+            if self.model_harness_protocol_receipt is not None or self.guidance_condition is None:
                 raise ValueError("guidance trace binding requires one exact guidance protocol")
             guidance_protocol = self.guidance_protocol
             authorized = guidance_protocol.artifact_ids
@@ -581,31 +616,15 @@ class _TraceBindingPayload(_StrictFrozenModel):
             )
             if not all(guidance_fields_match):
                 raise ValueError("trace binding must derive exact guidance protocol fields")
-        elif self.model_harness_protocol is not None:
+        elif self.model_harness_protocol_receipt is not None:
             if self.guidance_condition is not None:
                 raise ValueError("matrix trace binding cannot declare a guidance condition")
-            matrix_protocol = self.model_harness_protocol
-            if self.authorized_artifact_ids != matrix_protocol.artifact_ids:
-                raise ValueError("trace binding must declare exact authorized matrix artifacts")
             if self.partition is None:
                 raise ValueError("matrix trace binding requires an exact partition")
-            coordinate = ModelHarnessCoordinate(
-                model=self.model,
-                harness=self.harness,
-                partition=self.partition,
-            )
             matrix_fields_match = (
-                coordinate in matrix_protocol.expected_grid,
-                self.protocol_id == matrix_protocol.protocol_id,
-                self.protocol_version == matrix_protocol.version,
-                self.protocol_hash == matrix_protocol.content_hash,
-                self.task_id == matrix_protocol.task_set_id,
-                self.task_input_hash == matrix_protocol.task_set_hash,
-                self.validator_id == matrix_protocol.verifier_id,
-                self.validator_version == matrix_protocol.verifier_version,
-                self.checker_id == matrix_protocol.checker_id,
-                self.checker_version == matrix_protocol.checker_version,
-                self.output_schema_hash == matrix_protocol.output_schema_hash,
+                self.protocol_id == self.model_harness_protocol_receipt.record_id,
+                self.protocol_hash == self.model_harness_protocol_receipt.content_hash,
+                self.model_harness_protocol_receipt.schema_version == self.schema_version,
             )
             if not all(matrix_fields_match):
                 raise ValueError("trace binding must derive exact matrix protocol fields")
@@ -658,7 +677,7 @@ class TraceBinding(_TraceBindingPayload):
             "protocol_version": validated.version,
             "protocol_hash": validated.content_hash,
             "guidance_protocol": validated,
-            "model_harness_protocol": None,
+            "model_harness_protocol_receipt": None,
             "guidance_condition": validated_condition,
             "task_id": validated.task_id,
             "task_input_hash": validated.task_input_hash,
@@ -709,7 +728,11 @@ class TraceBinding(_TraceBindingPayload):
             "protocol_version": validated.version,
             "protocol_hash": validated.content_hash,
             "guidance_protocol": None,
-            "model_harness_protocol": validated,
+            "model_harness_protocol_receipt": EvidenceReceipt(
+                record_id=validated.protocol_id,
+                schema_version=validated.schema_version,
+                content_hash=validated.content_hash,
+            ),
             "guidance_condition": None,
             "task_id": validated.task_set_id,
             "task_input_hash": validated.task_set_hash,
@@ -945,8 +968,8 @@ class TraceFreshness(_TraceFreshnessPayload):
     @classmethod
     def build(cls, **values: Any) -> Self:
         payload = _TraceFreshnessPayload(**values)
-        return cls(
-            **payload.model_dump(mode="python"),
+        return cls.model_construct(
+            **payload.__dict__,
             content_hash=trace_freshness_hash(payload),
         )
 
@@ -1180,6 +1203,11 @@ class _HarnessExecutionTracePayload(_StrictFrozenModel):
             {"evidence_ids": list(self.provenance_evidence_ids)}
         ):
             raise ValueError("provenance hash mismatch")
+        _require_canonical_byte_limit(
+            self,
+            maximum=MAX_HARNESS_TRACE_CANONICAL_BYTES,
+            error="harness trace canonical bytes exceed bound",
+        )
         return self
 
 
@@ -1261,8 +1289,8 @@ def _observed_receipt_groups(binding: TraceBinding) -> tuple[object, ...]:
     protocol_schema_version = (
         binding.guidance_protocol.schema_version
         if binding.guidance_protocol is not None
-        else binding.model_harness_protocol.schema_version
-        if binding.model_harness_protocol is not None
+        else binding.model_harness_protocol_receipt.schema_version
+        if binding.model_harness_protocol_receipt is not None
         else 1
     )
     return (

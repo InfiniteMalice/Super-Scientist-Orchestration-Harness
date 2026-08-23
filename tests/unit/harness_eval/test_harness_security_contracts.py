@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 from itertools import product
+from time import perf_counter
 
 import pytest
 from pydantic import ValidationError
@@ -9,6 +11,8 @@ from pydantic import ValidationError
 import super_scientist.domain.harness_eval as harness_eval
 from super_scientist.domain.harness_eval.evidence_chains import (
     HarnessCellEvidenceChain,
+    HarnessEvidenceSnapshotIndex,
+    HarnessEvidenceSnapshotRecord,
     harness_cell_evidence_chain_receipt,
 )
 from super_scientist.domain.harness_eval.guidance import (
@@ -49,9 +53,12 @@ from super_scientist.domain.harness_eval.rewards import (
     verification_result_status_snapshot_hash,
 )
 from super_scientist.domain.harness_eval.traces import (
+    AvailableValue,
     EnvironmentEvent,
     EnvironmentEventKind,
+    GenerationMetadata,
     HarnessExecutionTrace,
+    MetadataAvailability,
     ObservableArtifactRef,
     RewardObservation,
     TraceBinding,
@@ -74,6 +81,7 @@ from tests.unit.harness_eval.test_traces import (
     HASH_D,
     attested_trace_expectation_bundle,
     resolved_evidence_inventory,
+    reward_observation,
     trace_expectation,
     trace_expectation_bundle,
     valid_trace,
@@ -647,6 +655,239 @@ def test_coordinated_verifier_status_remint_fails_original_inventory() -> None:
         )
 
 
+def test_reward_evidence_components_compose_to_260_receipts() -> None:
+    trace = valid_trace()
+    observation = trace.reward_observation
+    assert observation is not None
+    findings = tuple(
+        RewardHackingFinding.build(
+            finding_id=f"wide-diagnostic-{index:02d}",
+            family=family,
+            status=RewardHackingFindingStatus.CLEARED,
+            trace_id=trace.trace_id,
+            trace_hash=trace.content_hash,
+            observation_id=observation.observation_id,
+            observation_hash=observation.content_hash,
+            evidence_ids=tuple(
+                f"wide-evidence-{index:02d}-{evidence_index:02d}" for evidence_index in range(24)
+            ),
+        )
+        for index, family in enumerate(RewardHackingFamily)
+    )
+    expectation, expectation_inventory = trace_expectation_bundle()
+    verification = _verification_evidence(trace)
+    coverage = _diagnostic_coverage(trace, findings)
+    inventory = _accepted_inventory(
+        expectation_inventory,
+        verification,
+        coverage,
+        observation,
+    )
+
+    assessment = assess_reward_validity(
+        observation,
+        trace,
+        findings,
+        expectation=expectation,
+        verification=verification,
+        diagnostic_coverage=coverage,
+        inventory=inventory,
+    )
+
+    assert len(assessment.evidence_receipts) == 260
+
+
+def test_reward_evidence_accepts_exact_3355_receipt_worst_case_and_rejects_overflow() -> None:
+    trace = valid_trace()
+    observation = trace.reward_observation
+    assert observation is not None
+    findings = tuple(
+        RewardHackingFinding.build(
+            finding_id=f"max-diagnostic-{index:02d}",
+            family=family,
+            status=RewardHackingFindingStatus.CLEARED,
+            trace_id=trace.trace_id,
+            trace_hash=trace.content_hash,
+            observation_id=observation.observation_id,
+            observation_hash=observation.content_hash,
+            evidence_ids=tuple(
+                f"m{index:02d}-e{evidence_index:03d}" for evidence_index in range(256)
+            ),
+        )
+        for index, family in enumerate(RewardHackingFamily)
+    )
+    diagnostics: list[ResolvedRewardHackingDiagnostic] = []
+    for index, finding in enumerate(findings):
+        values: dict[str, object] = {
+            "family": finding.family,
+            "status": finding.status,
+            "observable_evidence": tuple(
+                _receipt(evidence_id, HASH_C) for evidence_id in finding.evidence_ids
+            ),
+            "resolver": _receipt(f"max-diagnostic-resolver-{index:02d}", HASH_B),
+        }
+        values["source"] = _receipt(
+            f"max-diagnostic-source-{index:02d}",
+            reward_hacking_diagnostic_status_snapshot_hash(values),
+        )
+        diagnostics.append(ResolvedRewardHackingDiagnostic.build(**values))
+    coverage = RewardHackingCoverageAttestation.build(
+        attestation_id="max-diagnostic-coverage",
+        trace=_receipt(trace.trace_id, trace.content_hash),
+        observation=_receipt(observation.observation_id, observation.content_hash),
+        diagnostics=tuple(diagnostics),
+        provenance=tuple(
+            _receipt(f"max-coverage-provenance-{index:03d}", HASH_D) for index in range(256)
+        ),
+    )
+    observed = trace.observed_binding
+    verifier = _receipt(observed.validator_id, observed.validator_hash)
+    checker = _receipt(observed.checker_id, observed.checker_hash)
+    verification_results: list[ResolvedVerificationResultSnapshot] = []
+    for label, executor, result_id, result_hash in (
+        ("verifier", verifier, trace.verifier_result_id, trace.verifier_result_hash),
+        ("checker", checker, trace.checker_result_id, trace.checker_result_hash),
+    ):
+        values = {
+            "snapshot_id": f"max-{label}-result",
+            "executor": executor,
+            "result": _receipt(result_id, result_hash),
+            "status": VerificationOutcomeStatus.SUCCEEDED,
+            "observable_evidence": tuple(
+                _receipt(f"max-{label}-evidence-{index:03d}", HASH_A) for index in range(256)
+            ),
+            "resolver": _receipt(f"max-{label}-resolver", HASH_D),
+        }
+        values["source"] = _receipt(
+            f"max-{label}-result",
+            verification_result_status_snapshot_hash(values),
+        )
+        verification_results.append(ResolvedVerificationResultSnapshot.build(**values))
+    verification = VerificationOutcomeEvidence.build(
+        outcome_id="max-verification-outcome",
+        verifier=verifier,
+        verifier_result=verification_results[0],
+        checker=checker,
+        checker_result=verification_results[1],
+    )
+    expectation, expectation_inventory = trace_expectation_bundle()
+    inventory = _accepted_inventory(
+        expectation_inventory,
+        verification,
+        coverage,
+        observation,
+        suffix="max-evidence",
+    )
+
+    assessment = assess_reward_validity(
+        observation,
+        trace,
+        findings,
+        expectation=expectation,
+        verification=verification,
+        diagnostic_coverage=coverage,
+        inventory=inventory,
+    )
+    assert len(assessment.evidence_receipts) == 3_355
+
+    overflow = findings[0].model_dump(mode="python", exclude={"content_hash"})
+    overflow["evidence_ids"] = (*findings[0].evidence_ids, "overflow-evidence")
+    with pytest.raises(ValidationError):
+        RewardHackingFinding.build(**overflow)
+
+
+def test_numeric_reward_coefficient_has_an_exact_digit_bound() -> None:
+    accepted = reward_observation(value=Decimal("9" * 256))
+    assert accepted.value == Decimal("9" * 256)
+
+    with pytest.raises(ValidationError, match="decimal coefficient exceeds bound"):
+        reward_observation(value=Decimal("9" * 257))
+
+
+def test_numeric_reward_exponent_and_canonical_bytes_are_bounded() -> None:
+    assert reward_observation(value=Decimal("1e1024")).value == Decimal("1e1024")
+
+    with pytest.raises(ValidationError, match="decimal exponent exceeds bound"):
+        reward_observation(value=Decimal("1e1025"))
+
+    wide = Decimal((0, tuple(range(1, 10)) * 28 + (1, 2, 3, 4), -1024))
+    assert len(wide.as_tuple().digits) == 256
+    with pytest.raises(ValidationError, match="decimal canonical bytes exceed bound"):
+        reward_observation(value=wide)
+
+
+def test_generation_log_probabilities_reject_oversized_decimal() -> None:
+    with pytest.raises(ValidationError, match="decimal coefficient exceeds bound"):
+        GenerationMetadata.build(
+            token_ids=AvailableValue(
+                status=MetadataAvailability.AVAILABLE,
+                value=(1,),
+                evidence_id="token-evidence",
+            ),
+            token_count=AvailableValue(
+                status=MetadataAvailability.AVAILABLE,
+                value=1,
+                evidence_id="count-evidence",
+            ),
+            log_probabilities=AvailableValue(
+                status=MetadataAvailability.AVAILABLE,
+                value=(Decimal("9" * 257),),
+                evidence_id="logprob-evidence",
+            ),
+            sampling_parameters_hash=AvailableValue(
+                status=MetadataAvailability.UNAVAILABLE, value=None, evidence_id=None
+            ),
+            stop_reason=AvailableValue(
+                status=MetadataAvailability.UNAVAILABLE, value=None, evidence_id=None
+            ),
+            provider_request_id=AvailableValue(
+                status=MetadataAvailability.UNAVAILABLE, value=None, evidence_id=None
+            ),
+        )
+
+
+def test_reward_observation_rejects_oversized_canonical_payload() -> None:
+    long_id = "x" * 200
+    with pytest.raises(ValidationError, match="reward observation canonical bytes exceed bound"):
+        RewardObservation.build(
+            observation_id=long_id,
+            task_id=long_id,
+            task_input_hash=HASH_A,
+            verifier_id=long_id,
+            verifier_version=long_id,
+            checker_id=long_id,
+            checker_version=long_id,
+            checker_result_id=long_id,
+            checker_result_hash=HASH_B,
+            evaluator_id=long_id,
+            evaluator_version=long_id,
+            value="x" * 200,
+            evidence_id=long_id,
+            observed_at=valid_trace().observed_at,
+        )
+
+
+def test_harness_trace_rejects_oversized_canonical_payload() -> None:
+    artifacts = tuple(
+        ObservableArtifactRef.build(
+            artifact_id=f"a{index:03d}-" + "x" * 195,
+            sha256=HASH_A,
+            size_bytes=1,
+            media_type="m" * 200,
+        )
+        for index in range(192)
+    )
+    trace = valid_trace(context_artifacts_override=artifacts)
+    values = trace.model_dump(
+        mode="python",
+        exclude={"content_hash", "provenance_hash"},
+    )
+    values["provenance_evidence_ids"] = tuple(f"p{index:03d}-" + "x" * 195 for index in range(256))
+
+    with pytest.raises(ValidationError, match="harness trace canonical bytes exceed bound"):
+        HarnessExecutionTrace.build(**values)
+
+
 def test_reward_assessment_binds_the_exact_freshness_hash() -> None:
     trace = valid_trace()
     expectation, expectation_inventory = trace_expectation_bundle()
@@ -714,13 +955,43 @@ def test_resolved_inventory_contracts_are_publicly_exported() -> None:
     assert harness_eval.ResolvedEvidenceRecord.__name__ == "ResolvedEvidenceRecord"
 
 
+@dataclass(frozen=True)
+class _MatrixEvidenceFixture:
+    chain: HarnessCellEvidenceChain
+    trace: HarnessExecutionTrace
+    freshness: TraceFreshness
+    assessment: RewardValidityAssessment
+
+
+def _snapshot_index(
+    evidence: tuple[_MatrixEvidenceFixture, ...],
+) -> HarnessEvidenceSnapshotIndex:
+    return HarnessEvidenceSnapshotIndex.build(
+        records=tuple(
+            sorted(
+                (
+                    HarnessEvidenceSnapshotRecord.from_snapshots(
+                        chain=item.chain,
+                        trace=item.trace,
+                        freshness=item.freshness,
+                        assessment=item.assessment,
+                    )
+                    for item in evidence
+                ),
+                key=lambda item: item.chain_receipt.record_id,
+            )
+        ),
+    )
+
+
 def _matrix_evidence_chain(
     protocol: ModelHarnessProtocol,
     coordinate: ModelHarnessCoordinate,
     index: int,
     *,
     stale_environment: bool = False,
-) -> HarnessCellEvidenceChain:
+    binding_updates: dict[str, object] | None = None,
+) -> _MatrixEvidenceFixture:
     artifact = ObservableArtifactRef.build(
         artifact_id="artifact-a",
         sha256=HASH_A,
@@ -746,9 +1017,12 @@ def _matrix_evidence_chain(
         validator_hash=HASH_C,
         checker_hash=HASH_D,
     )
-    if stale_environment:
+    if stale_environment or binding_updates:
         binding_values = expected_binding.model_dump(mode="python", exclude={"content_hash"})
-        binding_values["environment_hash"] = HASH_D
+        if stale_environment:
+            binding_values["environment_hash"] = HASH_D
+        if binding_updates:
+            binding_values.update(binding_updates)
         binding = TraceBinding.build(**binding_values)
     else:
         binding = expected_binding
@@ -798,9 +1072,14 @@ def _matrix_evidence_chain(
         diagnostic_coverage=coverage,
         inventory=inventory,
     )
-    return HarnessCellEvidenceChain.build(
-        protocol=protocol,
-        coordinate=coordinate,
+    return _MatrixEvidenceFixture(
+        chain=HarnessCellEvidenceChain.from_snapshots(
+            protocol=protocol,
+            coordinate=coordinate,
+            trace=trace,
+            freshness=freshness,
+            assessment=assessment,
+        ),
         trace=trace,
         freshness=freshness,
         assessment=assessment,
@@ -810,6 +1089,46 @@ def _matrix_evidence_chain(
 def test_matrix_cell_rejects_boolean_evidence_shortcuts() -> None:
     assert "trace_current" not in ModelHarnessCell.model_fields
     assert "reward_valid" not in ModelHarnessCell.model_fields
+    assert "protocol" not in ModelHarnessCell.model_fields
+    assert "protocol_receipt" in ModelHarnessCell.model_fields
+
+
+def test_cell_evidence_chain_is_a_compact_receipt_join() -> None:
+    from tests.unit.harness_eval.test_model_harness_matrix import _protocol
+
+    protocol = _protocol()
+    full = _matrix_evidence_chain(protocol, protocol.expected_grid[0], 0)
+    compact = HarnessCellEvidenceChain.build(
+        protocol_receipt=_receipt(protocol.protocol_id, protocol.content_hash),
+        coordinate=protocol.expected_grid[0],
+        trace_receipt=_receipt(full.trace.trace_id, full.trace.content_hash),
+        freshness_receipt=_receipt(
+            full.freshness.freshness_id,
+            full.freshness.content_hash,
+        ),
+        assessment_receipt=_receipt(
+            full.assessment.assessment_id,
+            full.assessment.content_hash,
+        ),
+    )
+
+    assert compact.trace_receipt.record_id == full.trace.trace_id
+    assert "trace" not in HarnessCellEvidenceChain.model_fields
+    assert "freshness" not in HarnessCellEvidenceChain.model_fields
+    assert "assessment" not in HarnessCellEvidenceChain.model_fields
+
+
+def test_compact_chain_rejects_trace_scalar_mismatch_behind_valid_protocol_receipt() -> None:
+    from tests.unit.harness_eval.test_model_harness_matrix import _protocol
+
+    protocol = _protocol()
+    with pytest.raises(ValueError, match="exact protocol"):
+        _matrix_evidence_chain(
+            protocol,
+            protocol.expected_grid[0],
+            0,
+            binding_updates={"validator_id": "attacker-validator"},
+        )
 
 
 def test_matrix_rejects_unrelated_trace_evidence_reused_for_every_cell() -> None:
@@ -823,7 +1142,7 @@ def test_matrix_rejects_unrelated_trace_evidence_reused_for_every_cell() -> None
             protocol=protocol,
             coordinate=coordinate,
             metrics=_metrics(),
-            evidence_chain_receipt=harness_cell_evidence_chain_receipt(chain),
+            evidence_chain_receipt=harness_cell_evidence_chain_receipt(chain.chain),
             observed_at=valid_trace().observed_at,
         )
         for index, coordinate in enumerate(protocol.expected_grid)
@@ -832,7 +1151,8 @@ def test_matrix_rejects_unrelated_trace_evidence_reused_for_every_cell() -> None
     analysis = analyze_model_harness(
         protocol,
         cells,
-        evidence_chains=(chain,),
+        evidence_chains=(chain.chain,),
+        evidence_index=_snapshot_index((chain,)),
     )
 
     assert analysis.comparisons == ()
@@ -859,7 +1179,7 @@ def test_cell_evidence_chain_rejects_freshness_or_assessment_substitution(
     values[substitute] = getattr(second, substitute)
 
     with pytest.raises(ValueError, match="exact trace"):
-        HarnessCellEvidenceChain.build(**values)
+        HarnessCellEvidenceChain.from_snapshots(**values)  # type: ignore[arg-type]
 
 
 def test_matrix_receipt_spoof_suppresses_analysis() -> None:
@@ -877,9 +1197,9 @@ def test_matrix_receipt_spoof_suppresses_analysis() -> None:
             coordinate=coordinate,
             metrics=_metrics(),
             evidence_chain_receipt=(
-                _receipt(chains[index].chain_id, HASH_D)
+                _receipt(chains[index].chain.chain_id, HASH_D)
                 if index == 0
-                else harness_cell_evidence_chain_receipt(chains[index])
+                else harness_cell_evidence_chain_receipt(chains[index].chain)
             ),
             observed_at=chains[index].trace.observed_at,
         )
@@ -889,7 +1209,8 @@ def test_matrix_receipt_spoof_suppresses_analysis() -> None:
     analysis = analyze_model_harness(
         protocol,
         cells,
-        evidence_chains=chains,
+        evidence_chains=tuple(item.chain for item in chains),
+        evidence_index=_snapshot_index(chains),
     )
 
     assert analysis.comparisons == ()
@@ -915,7 +1236,7 @@ def test_matrix_rejects_exactly_receipted_stale_and_invalid_snapshots() -> None:
             protocol=protocol,
             coordinate=coordinate,
             metrics=_metrics(),
-            evidence_chain_receipt=harness_cell_evidence_chain_receipt(chains[index]),
+            evidence_chain_receipt=harness_cell_evidence_chain_receipt(chains[index].chain),
             observed_at=chains[index].trace.observed_at,
         )
         for index, coordinate in enumerate(protocol.expected_grid)
@@ -924,7 +1245,8 @@ def test_matrix_rejects_exactly_receipted_stale_and_invalid_snapshots() -> None:
     analysis = analyze_model_harness(
         protocol,
         cells,
-        evidence_chains=chains,
+        evidence_chains=tuple(item.chain for item in chains),
+        evidence_index=_snapshot_index(chains),
     )
 
     assert ModelHarnessConfoundCode.STALE_TRACE in analysis.confounds
@@ -973,6 +1295,7 @@ def test_eight_by_eight_valid_matrix_fits_declared_comparison_bound() -> None:
         ),
         governing_policy_hash="a" * 64,
     )
+    started = perf_counter()
     chains = tuple(
         _matrix_evidence_chain(protocol, coordinate, index) for index, coordinate in enumerate(grid)
     )
@@ -982,7 +1305,7 @@ def test_eight_by_eight_valid_matrix_fits_declared_comparison_bound() -> None:
             protocol=protocol,
             coordinate=coordinate,
             metrics=_metrics(),
-            evidence_chain_receipt=harness_cell_evidence_chain_receipt(chains[index]),
+            evidence_chain_receipt=harness_cell_evidence_chain_receipt(chains[index].chain),
             observed_at=chains[index].trace.observed_at,
         )
         for index, coordinate in enumerate(grid)
@@ -991,8 +1314,79 @@ def test_eight_by_eight_valid_matrix_fits_declared_comparison_bound() -> None:
     analysis = analyze_model_harness(
         protocol,
         cells,
-        evidence_chains=chains,
+        evidence_chains=tuple(item.chain for item in chains),
+        evidence_index=_snapshot_index(chains),
     )
 
     assert analysis.confounds == ()
     assert len(analysis.comparisons) == 1_232
+    assert perf_counter() - started < 60.0
+
+
+def test_maximum_shape_matrix_emits_24512_comparisons_within_runtime_bound() -> None:
+    models = tuple(
+        ModelIdentity(model_id=f"max-model-{index:03d}", model_version="v1") for index in range(128)
+    )
+    harnesses = tuple(
+        HarnessIdentity(harness_id=f"max-harness-{index}", harness_version="v1")
+        for index in range(2)
+    )
+    partition = HarnessPartition.HARNESS_DISCOVERY_TASKS
+    grid = tuple(
+        ModelHarnessCoordinate(model=model, harness=harness, partition=partition)
+        for model, harness in product(models, harnesses)
+    )
+    model_budgets = tuple(
+        ModelBudgetBinding.build(model=model, budget=_budget(model)) for model in models
+    )
+    protocol = ModelHarnessProtocol.build(
+        protocol_id="matrix-maximum-shape",
+        version=1,
+        models=models,
+        harnesses=harnesses,
+        partitions=(partition,),
+        task_set_id="task-set-a",
+        task_set_hash=HASH_A,
+        verifier_id="verifier-a",
+        verifier_version="v1",
+        checker_id="checker-a",
+        checker_version="v1",
+        artifact_ids=("artifact-a",),
+        random_seed=7,
+        output_schema_hash=HASH_A,
+        model_budgets=model_budgets,
+        matched_resource_envelope_hash=evaluation_resource_envelope_hash(_budget(models[0])),
+        expected_grid=grid,
+        comparison_kinds=(
+            ModelHarnessComparisonKind.MODEL_HELD_CONSTANT,
+            ModelHarnessComparisonKind.HARNESS_HELD_CONSTANT,
+            ModelHarnessComparisonKind.INTERACTION_DESCRIPTIVE,
+        ),
+        governing_policy_hash=HASH_A,
+    )
+    started = perf_counter()
+    evidence = tuple(
+        _matrix_evidence_chain(protocol, coordinate, index) for index, coordinate in enumerate(grid)
+    )
+    cells = tuple(
+        ModelHarnessCell.from_protocol(
+            cell_id=f"max-cell-{index:03d}",
+            protocol=protocol,
+            coordinate=coordinate,
+            metrics=_metrics(),
+            evidence_chain_receipt=harness_cell_evidence_chain_receipt(evidence[index].chain),
+            observed_at=evidence[index].trace.observed_at,
+        )
+        for index, coordinate in enumerate(grid)
+    )
+    analysis = analyze_model_harness(
+        protocol,
+        cells,
+        evidence_chains=tuple(item.chain for item in evidence),
+        evidence_index=_snapshot_index(evidence),
+    )
+    elapsed = perf_counter() - started
+
+    assert analysis.confounds == ()
+    assert len(analysis.comparisons) == 24_512
+    assert elapsed < 180.0

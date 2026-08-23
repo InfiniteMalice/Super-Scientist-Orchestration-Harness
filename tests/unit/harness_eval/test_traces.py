@@ -468,7 +468,7 @@ def test_rehashed_binding_cannot_self_authorize_without_a_task_6_protocol() -> N
     trace = valid_trace()
     payload = trace.observed_binding.model_dump(mode="python") | {
         "guidance_protocol": None,
-        "model_harness_protocol": None,
+        "model_harness_protocol_receipt": None,
         "guidance_condition": None,
         "authorized_artifact_ids": ("rogue-context",),
         "artifact_ids": ("rogue-context",),

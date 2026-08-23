@@ -2,6 +2,8 @@
 
 from super_scientist.domain.harness_eval.evidence_chains import (
     HarnessCellEvidenceChain,
+    HarnessEvidenceSnapshotIndex,
+    HarnessEvidenceSnapshotRecord,
     harness_cell_evidence_chain_receipt,
 )
 from super_scientist.domain.harness_eval.guidance import (
@@ -166,6 +168,8 @@ __all__ = [
     "HarnessConfoundCode",
     "HarnessDecision",
     "HarnessDecisionStatus",
+    "HarnessEvidenceSnapshotIndex",
+    "HarnessEvidenceSnapshotRecord",
     "HarnessExecutionTrace",
     "HarnessIdentity",
     "HarnessPartition",
