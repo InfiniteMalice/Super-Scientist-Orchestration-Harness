@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 from pydantic import ValidationError
@@ -17,6 +17,7 @@ from super_scientist.domain.collaboration import (
     initial_collaboration_state,
     next_peer,
 )
+from super_scientist.domain.collaboration.models import exact_usage_snapshot
 from super_scientist.domain.improvement.models import ResourceUsage
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 
@@ -60,6 +61,17 @@ def _contribution(
     }
     values.update(changes)
     return PeerContribution.build(**values)
+
+
+def _cost_usage(value: float) -> ResourceUsage:
+    return ResourceUsage(
+        cost_usd=value,
+        compute_units=0.0,
+        tokens=0,
+        elapsed_seconds=0.0,
+        tool_calls=0,
+        human_interventions=0,
+    )
 
 
 def test_next_peer_uses_canonical_eligible_actor_order(
@@ -474,6 +486,113 @@ def test_remaining_budget_is_derived_from_original_usage_history(
 
     assert state.usage.cost_usd == 1.0
     assert session.remaining_resources(state.usage_history).cost_usd == 0.9999999999999999
+
+
+def test_mixed_scale_decimal_addition_cannot_hide_a_budget_overrun(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    session = session_factory(
+        "peer-a",
+        "peer-b",
+        completion_count=8,
+        resource_cost_usd=999_999_999_999.9,
+    )
+    state = advance_collaboration(
+        session,
+        initial_collaboration_state(session),
+        _request(session, "peer-a"),
+        _contribution(session, "peer-a"),
+        _cost_usage(999_999_999_999.9),
+    )
+
+    with pytest.raises(ValueError, match="resource budget"):
+        advance_collaboration(
+            session,
+            state,
+            _request(
+                session,
+                "peer-b",
+                sequence=2,
+                sender_id="peer-a",
+                remaining_budget=session.remaining_resources(state.usage_history),
+            ),
+            _contribution(session, "peer-b", sequence=2),
+            _cost_usage(1e-17),
+        )
+
+
+def test_exact_semantic_hashes_ignore_ambient_decimal_precision(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    final_hashes: list[str] = []
+    exact_cost_snapshots: list[str] = []
+    with localcontext() as ambient:
+        ambient.prec = 2
+        for values in ((0.1, 0.9), (0.1, 0.91)):
+            session = session_factory("peer-a", "peer-b", completion_count=8)
+            state = initial_collaboration_state(session)
+            for sequence, (recipient, sender, value) in enumerate(
+                zip(("peer-a", "peer-b"), (None, "peer-a"), values, strict=True),
+                start=1,
+            ):
+                state = advance_collaboration(
+                    session,
+                    state,
+                    _request(
+                        session,
+                        recipient,
+                        sequence=sequence,
+                        sender_id=sender,
+                        remaining_budget=session.remaining_resources(
+                            state.usage_history
+                        ),
+                    ),
+                    _contribution(session, recipient, sequence=sequence),
+                    _cost_usage(value),
+                )
+            final_hashes.append(state.observed_state_hashes[-1])
+            exact_cost_snapshots.append(
+                exact_usage_snapshot(tuple(_cost_usage(value) for value in values))[0]
+            )
+        assert ambient.prec == 2
+
+    assert exact_cost_snapshots == ["1", "1.01"]
+    assert final_hashes[0] != final_hashes[1]
+
+
+def test_collaboration_replay_is_stable_across_ambient_decimal_contexts(
+    session_factory: Callable[..., CollaborationSession],
+) -> None:
+    with localcontext() as ambient:
+        ambient.prec = 2
+        session = session_factory("peer-a", "peer-b", completion_count=8)
+        state = initial_collaboration_state(session)
+        for sequence, (recipient, sender, value) in enumerate(
+            zip(("peer-a", "peer-b"), (None, "peer-a"), (0.1, 0.91), strict=True),
+            start=1,
+        ):
+            state = advance_collaboration(
+                session,
+                state,
+                _request(
+                    session,
+                    recipient,
+                    sequence=sequence,
+                    sender_id=sender,
+                    remaining_budget=session.remaining_resources(state.usage_history),
+                ),
+                _contribution(session, recipient, sequence=sequence),
+                _cost_usage(value),
+            )
+        serialized = state.model_dump_json()
+        assert ambient.prec == 2
+
+    with localcontext() as ambient:
+        ambient.prec = 50
+        replayed = CollaborationState.model_validate_json(serialized)
+        assert ambient.prec == 50
+
+    assert replayed == state
 
 
 def test_candidate_content_parser_exhaustion_is_a_closed_validation_failure(

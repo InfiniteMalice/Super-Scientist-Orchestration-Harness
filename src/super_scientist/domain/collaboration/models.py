@@ -4,7 +4,15 @@ import json
 import re
 from collections import Counter
 from datetime import datetime
-from decimal import Decimal
+from decimal import (
+    ROUND_HALF_EVEN,
+    Context,
+    Decimal,
+    DivisionByZero,
+    InvalidOperation,
+    Overflow,
+    localcontext,
+)
 from enum import StrEnum
 from typing import Annotated, Any, Literal, NoReturn, Self
 
@@ -57,9 +65,51 @@ RESOURCE_FIELDS = (
 )
 ExactUsageSnapshot = tuple[str, str, int, str, int, int]
 
+# A bounded resource value may be as small as the minimum binary64 subnormal
+# (5e-324) or as large as 1e12, and a state retains at most 256 entries. The
+# resulting exact coefficient needs fewer than 340 digits; 384 leaves margin
+# while keeping every operation independent of the caller's Decimal context.
+_EXACT_RESOURCE_CONTEXT = Context(
+    prec=384,
+    rounding=ROUND_HALF_EVEN,
+    Emin=-999_999,
+    Emax=999_999,
+    capitals=1,
+    clamp=0,
+    flags=[],
+    traps=[InvalidOperation, DivisionByZero, Overflow],
+)
+
+
+def _resource_decimal(value: Decimal | float | int | str) -> Decimal:
+    with localcontext(_EXACT_RESOURCE_CONTEXT) as context:
+        return context.create_decimal(str(value))
+
+
+def _decimal_add(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext(_EXACT_RESOURCE_CONTEXT) as context:
+        return context.add(left, right)
+
+
+def _decimal_subtract(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext(_EXACT_RESOURCE_CONTEXT) as context:
+        return context.subtract(left, right)
+
+
+def _decimal_multiply(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext(_EXACT_RESOURCE_CONTEXT) as context:
+        return context.multiply(left, right)
+
+
+def _decimal_compare(left: Decimal, right: Decimal) -> int:
+    with localcontext(_EXACT_RESOURCE_CONTEXT) as context:
+        return int(context.compare(left, right))
+
 
 def _canonical_decimal_text(value: Decimal) -> str:
-    return str(value.normalize()) if value else "0"
+    with localcontext(_EXACT_RESOURCE_CONTEXT) as context:
+        normalized = context.normalize(value)
+        return "0" if context.is_zero(normalized) else str(normalized)
 
 
 def _strip_text(value: object) -> object:
@@ -164,7 +214,11 @@ def _require_bounded_resources(
     resources: ResourceBudget | ResourceUsage,
 ) -> ResourceBudget | ResourceUsage:
     if any(
-        Decimal(str(getattr(resources, field_name))) > MAX_RESOURCE_SCALAR
+        _decimal_compare(
+            _resource_decimal(getattr(resources, field_name)),
+            _resource_decimal(MAX_RESOURCE_SCALAR),
+        )
+        > 0
         for field_name in RESOURCE_FIELDS
     ):
         raise ValueError("Phase A resource fields exceed bounded limits")
@@ -307,18 +361,27 @@ def _zero_usage() -> ResourceUsage:
 
 class _UsageAccumulator:
     def __init__(self) -> None:
-        self.cost_usd = Decimal("0")
-        self.compute_units = Decimal("0")
+        self.cost_usd = _resource_decimal(0)
+        self.compute_units = _resource_decimal(0)
         self.tokens = 0
-        self.elapsed_seconds = Decimal("0")
+        self.elapsed_seconds = _resource_decimal(0)
         self.tool_calls = 0
         self.human_interventions = 0
 
     def add(self, usage: ResourceUsage) -> None:
-        self.cost_usd += Decimal(str(usage.cost_usd))
-        self.compute_units += Decimal(str(usage.compute_units))
+        self.cost_usd = _decimal_add(
+            self.cost_usd,
+            _resource_decimal(usage.cost_usd),
+        )
+        self.compute_units = _decimal_add(
+            self.compute_units,
+            _resource_decimal(usage.compute_units),
+        )
         self.tokens += usage.tokens
-        self.elapsed_seconds += Decimal(str(usage.elapsed_seconds))
+        self.elapsed_seconds = _decimal_add(
+            self.elapsed_seconds,
+            _resource_decimal(usage.elapsed_seconds),
+        )
         self.tool_calls += usage.tool_calls
         self.human_interventions += usage.human_interventions
 
@@ -344,10 +407,18 @@ class _UsageAccumulator:
 
     def within_budget(self, budget: ResourceBudget) -> bool:
         return (
-            self.cost_usd <= Decimal(str(budget.cost_usd))
-            and self.compute_units <= Decimal(str(budget.compute_units))
+            _decimal_compare(self.cost_usd, _resource_decimal(budget.cost_usd)) <= 0
+            and _decimal_compare(
+                self.compute_units,
+                _resource_decimal(budget.compute_units),
+            )
+            <= 0
             and self.tokens <= budget.tokens
-            and self.elapsed_seconds <= Decimal(str(budget.elapsed_seconds))
+            and _decimal_compare(
+                self.elapsed_seconds,
+                _resource_decimal(budget.elapsed_seconds),
+            )
+            <= 0
             and self.tool_calls <= budget.tool_calls
             and self.human_interventions <= budget.human_interventions
         )
@@ -356,13 +427,24 @@ class _UsageAccumulator:
         if not self.within_budget(budget):
             raise ValueError("usage exceeds collaboration resource budget")
         return ResourceBudget(
-            cost_usd=float(Decimal(str(budget.cost_usd)) - self.cost_usd),
+            cost_usd=float(
+                _decimal_subtract(
+                    _resource_decimal(budget.cost_usd),
+                    self.cost_usd,
+                )
+            ),
             compute_units=float(
-                Decimal(str(budget.compute_units)) - self.compute_units
+                _decimal_subtract(
+                    _resource_decimal(budget.compute_units),
+                    self.compute_units,
+                )
             ),
             tokens=budget.tokens - self.tokens,
             elapsed_seconds=float(
-                Decimal(str(budget.elapsed_seconds)) - self.elapsed_seconds
+                _decimal_subtract(
+                    _resource_decimal(budget.elapsed_seconds),
+                    self.elapsed_seconds,
+                )
             ),
             tool_calls=budget.tool_calls - self.tool_calls,
             human_interventions=(
@@ -409,8 +491,11 @@ def usage_matches(
         and left.tool_calls == right.tool_calls
         and left.human_interventions == right.human_interventions
         and all(
-            Decimal(str(getattr(left, field_name)))
-            == Decimal(str(getattr(right, field_name)))
+            _decimal_compare(
+                _resource_decimal(getattr(left, field_name)),
+                _resource_decimal(getattr(right, field_name)),
+            )
+            == 0
             for field_name in ("cost_usd", "compute_units", "elapsed_seconds")
         )
     )
@@ -1389,10 +1474,11 @@ def _termination_reason_from_summary(
         return CollaborationTerminationReason.REPEATED_STATE_LOOP
     if topology_churn_count >= budget.max_topology_churn:
         return CollaborationTerminationReason.TOPOLOGY_CHURN
-    total = Decimal(contribution_count)
-    share_bound = Decimal(str(budget.max_peer_contribution_share))
+    total = _resource_decimal(contribution_count)
+    share_bound = _resource_decimal(budget.max_peer_contribution_share)
+    maximum_peer_count = _decimal_multiply(share_bound, total)
     if contribution_count and any(
-        Decimal(count) / total > share_bound
+        _decimal_compare(_resource_decimal(count), maximum_peer_count) > 0
         for count in peer_contribution_counts.values()
     ):
         return CollaborationTerminationReason.CONTRIBUTION_MONOPOLY
