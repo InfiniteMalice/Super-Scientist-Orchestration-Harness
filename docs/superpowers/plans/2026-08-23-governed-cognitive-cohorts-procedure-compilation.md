@@ -1468,6 +1468,8 @@ def _normalize_json_proposal_value(
         )
     if origin in (Union, UnionType):
         base_options = tuple(_base_json_annotation(option) for option in arguments)
+        if value is None and type(None) in base_options:
+            return None
         if Decimal in base_options and str in base_options:
             if (
                 type(value) is not dict
@@ -1761,7 +1763,8 @@ declared enum, and nested objects recursively to strict field mappings. Each arr
 mapping, recursion level, decimal string, and the complete serialized proposal has an
 explicit bound. The reward-value union additionally requires the exact two-key tagged
 wire form: `{"kind":"numeric","value":"..."}` becomes `Decimal`, while
-`{"kind":"categorical","value":"..."}` remains exact text. Untagged or mistyped
+`{"kind":"categorical","value":"..."}` remains exact text. An exact JSON `null` is
+preserved only when `None` is an explicit union member. Otherwise, untagged or mistyped
 numeric values—and every other non-object shape—are rejected before generic union
 fallback, so bare numeric-looking or categorical strings cannot cross either branch. All
 decimal text passes through the bounded conversion helper. The helper catches decimal and

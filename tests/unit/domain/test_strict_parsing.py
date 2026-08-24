@@ -685,12 +685,40 @@ def test_task_8_reward_json_requires_exact_tag_before_union_fallback() -> None:
         if type(proposal).__name__ == "RecordRewardAssessment"
     )
 
-    for bare_value in ("0.9", "PASS", 0.9, None, ["numeric", "0.9"]):
+    for bare_value in ("0.9", "PASS", 0.9, ["numeric", "0.9"]):
         payload = reward.model_dump(mode="json")
         payload["observation"]["value"] = bare_value
         with pytest.raises(_ProposalBoundaryValidationError) as error:
             namespace["parse_untrusted_proposal_json"](json.dumps(payload))
         _assert_detached_proposal_boundary_error(error.value)
+
+    with pytest.raises(ValueError, match="exact tagged object"):
+        namespace["_normalize_json_proposal_value"](None, Decimal | str)
+
+
+def test_task_8_null_reward_observation_round_trips_in_trace_proposal() -> None:
+    namespace = _task_8_and_13_namespace()
+    from tests.unit.harness_eval.test_traces import reward_observation, valid_trace
+
+    observation = reward_observation(value=None)
+    trace = valid_trace(observation=observation)
+    proposal = namespace["RecordHarnessExecutionTrace"](
+        proposal_id="null-reward-trace",
+        idempotency_key="null-reward-trace-key",
+        proposer=_actor(),
+        envelope=namespace["HarnessExecutionTraceEnvelope"](
+            metadata=namespace["HarnessTraceRecordMetadata"](
+                received_at=NOW,
+                source_id="null-reward-round-trip",
+            ),
+            trace=trace,
+        ),
+    )
+
+    parsed = namespace["parse_untrusted_proposal_json"](proposal.model_dump_json())
+
+    assert parsed == proposal
+    assert parsed.envelope.trace.reward_observation.value is None
 
 
 def test_task_8_decimal_json_failures_are_safely_detached() -> None:
