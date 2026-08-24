@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import suppress
 from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict
@@ -80,7 +79,7 @@ class ProcedureBindingReadCapability(Protocol):
 class _CompilationContext(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    active_policy: PolicySnapshot
+    active_policy: PolicySnapshot | None
     envelope_valid: bool
     result: ProcedureCompilationResult | None
     request: ProcedureCompilationRequest | None
@@ -103,14 +102,9 @@ class _MethodDirectionContext(BaseModel):
 class _BindingContext(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-    active_policy: PolicySnapshot
-    compilation: ProcedureCompilationRecord | None
-    receipt_compilation: ProcedureCompilationRecord | None
-    request: ProcedureCompilationRequest | None
-    sources_current: bool
-    existing_binding: CompiledProgressPlanBinding | None
-    progress_proposal: RecordProgressPlan
-    progress_context: ProgressPlanAdmissionContext
+    preliminary_decision: TransactionDecision | None
+    progress_proposal: RecordProgressPlan | None
+    progress_context: ProgressPlanAdmissionContext | None
 
 
 class RecordProcedureCompilationHandler:
@@ -134,7 +128,25 @@ class RecordProcedureCompilationHandler:
             envelope_valid = True
         except ProcedureBoundaryValidationError:
             pass
+        if not envelope_valid or result is None or request is None:
+            return _CompilationContext(
+                active_policy=None,
+                envelope_valid=False,
+                result=None,
+                request=None,
+                sources_current=False,
+                existing_compilation=None,
+            )
         sources_current = request is not None and capability.procedure_sources_are_current(request)
+        if not sources_current:
+            return _CompilationContext(
+                active_policy=None,
+                envelope_valid=True,
+                result=result,
+                request=request,
+                sources_current=False,
+                existing_compilation=None,
+            )
         return _CompilationContext(
             active_policy=capability.policy_snapshot(),
             envelope_valid=envelope_valid,
@@ -162,6 +174,12 @@ class RecordProcedureCompilationHandler:
                 proposal.proposal_id,
                 RejectionCode.STALE_REFERENCE,
                 "procedure compilation sources are absent, mismatched, or stale",
+            )
+        if context.active_policy is None:
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.STALE_REFERENCE,
+                "procedure compilation policy authority is unavailable",
             )
         expected = compile_method(context.request)
         if expected != context.result:
@@ -289,18 +307,84 @@ class BindCompiledProgressPlanHandler:
     ) -> _BindingContext:
         capability = cast(ProcedureBindingReadCapability, reads)
         compilation = capability.get_compilation(proposal.binding.compilation_id)
-        request: ProcedureCompilationRequest | None = None
-        if compilation is not None:
-            with suppress(ProcedureBoundaryValidationError):
-                request = parse_untrusted_procedure_compilation_result(
-                    compilation.result
-                ).parse_request()
-        sources_current = request is not None and capability.procedure_sources_are_current(request)
-        receipt_compilation = (
-            capability.resolve_compilation_receipt(proposal.compilation_receipt)
-            if sources_current
-            else None
+        if compilation is None:
+            return _binding_rejection_context(
+                proposal.proposal_id,
+                RejectionCode.INVALID_PROCEDURE,
+                "compiled progress binding requires a valid stored compilation",
+            )
+        try:
+            result = parse_untrusted_procedure_compilation_result(compilation.result)
+            request = result.parse_request()
+        except ProcedureBoundaryValidationError:
+            return _binding_rejection_context(
+                proposal.proposal_id,
+                RejectionCode.INVALID_PROCEDURE,
+                "compiled progress binding requires a valid stored compilation",
+            )
+        if not capability.procedure_sources_are_current(request):
+            return _binding_rejection_context(
+                proposal.proposal_id,
+                RejectionCode.STALE_REFERENCE,
+                "compiled progress binding sources are absent, mismatched, or stale",
+            )
+        receipt_compilation = capability.resolve_compilation_receipt(proposal.compilation_receipt)
+        if receipt_compilation != compilation:
+            return _binding_rejection_context(
+                proposal.proposal_id,
+                RejectionCode.STALE_REFERENCE,
+                "compiled progress binding receipt does not resolve exactly",
+            )
+        if compile_method(request) != result:
+            return _binding_rejection_context(
+                proposal.proposal_id,
+                RejectionCode.DERIVATION_MISMATCH,
+                "stored procedure compilation does not match recomputation",
+            )
+        if result.report.status is not ProcedureValidationStatus.VALID:
+            return _binding_rejection_context(
+                proposal.proposal_id,
+                RejectionCode.INVALID_PROCEDURE,
+                "only a valid procedure compilation can create a progress plan",
+            )
+        active_policy = capability.policy_snapshot()
+        binding = proposal.binding
+        procedure = result.procedure
+        if (
+            compilation.governing_policy_hash != active_policy.policy_hash
+            or binding.governing_policy_hash != active_policy.policy_hash
+            or binding.compilation_receipt != proposal.compilation_receipt
+            or binding.compilation_id != compilation.compilation_id
+            or binding.compilation_hash != compilation.content_hash
+            or binding.procedure_id != procedure.procedure_id
+            or binding.procedure_hash != procedure.content_hash
+            or binding.plan != proposal.plan
+        ):
+            return _binding_rejection_context(
+                proposal.proposal_id,
+                RejectionCode.STALE_REFERENCE,
+                "compiled progress binding does not match current compilation authority",
+            )
+        if capability.get_binding(binding.binding_id) is not None:
+            return _binding_rejection_context(
+                proposal.proposal_id,
+                RejectionCode.ENTITY_ALREADY_EXISTS,
+                "compiled progress plan binding already exists",
+            )
+        expected_plan = procedure_to_progress_plan(
+            result,
+            run_id=proposal.plan.run_id,
+            plan_version_id=proposal.plan.plan_version_id,
+            version=proposal.plan.version,
+            created_at=proposal.plan.created_at,
+            governing_policy_hash=active_policy.policy_hash,
         )
+        if expected_plan != proposal.plan:
+            return _binding_rejection_context(
+                proposal.proposal_id,
+                RejectionCode.DERIVATION_MISMATCH,
+                "compiled progress plan does not match deterministic mapping",
+            )
         progress_proposal = RecordProgressPlan(
             proposal_id=proposal.proposal_id,
             idempotency_key=proposal.idempotency_key,
@@ -310,12 +394,7 @@ class BindCompiledProgressPlanHandler:
         )
         progress_reads = capability.progress_capability()
         return _BindingContext(
-            active_policy=capability.policy_snapshot(),
-            compilation=compilation,
-            receipt_compilation=receipt_compilation,
-            request=request,
-            sources_current=sources_current,
-            existing_binding=capability.get_binding(proposal.binding.binding_id),
+            preliminary_decision=None,
             progress_proposal=progress_proposal,
             progress_context=self._progress_handler.build_context(
                 progress_proposal,
@@ -328,73 +407,13 @@ class BindCompiledProgressPlanHandler:
         proposal: BindCompiledProgressPlan,
         context: _BindingContext,
     ) -> TransactionDecision:
-        compilation = context.compilation
-        if compilation is None or context.request is None:
+        if context.preliminary_decision is not None:
+            return context.preliminary_decision
+        if context.progress_proposal is None or context.progress_context is None:
             return _rejected(
                 proposal.proposal_id,
                 RejectionCode.INVALID_PROCEDURE,
-                "compiled progress binding requires a valid stored compilation",
-            )
-        if not context.sources_current:
-            return _rejected(
-                proposal.proposal_id,
-                RejectionCode.STALE_REFERENCE,
-                "compiled progress binding sources are absent, mismatched, or stale",
-            )
-        if context.receipt_compilation != compilation:
-            return _rejected(
-                proposal.proposal_id,
-                RejectionCode.STALE_REFERENCE,
-                "compiled progress binding receipt does not resolve exactly",
-            )
-        if compile_method(context.request) != compilation.result:
-            return _rejected(
-                proposal.proposal_id,
-                RejectionCode.DERIVATION_MISMATCH,
-                "stored procedure compilation does not match recomputation",
-            )
-        if compilation.result.report.status is not ProcedureValidationStatus.VALID:
-            return _rejected(
-                proposal.proposal_id,
-                RejectionCode.INVALID_PROCEDURE,
-                "only a valid procedure compilation can create a progress plan",
-            )
-        binding = proposal.binding
-        procedure = compilation.result.procedure
-        if (
-            compilation.governing_policy_hash != context.active_policy.policy_hash
-            or binding.governing_policy_hash != context.active_policy.policy_hash
-            or binding.compilation_receipt != proposal.compilation_receipt
-            or binding.compilation_id != compilation.compilation_id
-            or binding.compilation_hash != compilation.content_hash
-            or binding.procedure_id != procedure.procedure_id
-            or binding.procedure_hash != procedure.content_hash
-            or binding.plan != proposal.plan
-        ):
-            return _rejected(
-                proposal.proposal_id,
-                RejectionCode.STALE_REFERENCE,
-                "compiled progress binding does not match current compilation authority",
-            )
-        if context.existing_binding is not None:
-            return _rejected(
-                proposal.proposal_id,
-                RejectionCode.ENTITY_ALREADY_EXISTS,
-                "compiled progress plan binding already exists",
-            )
-        expected_plan = procedure_to_progress_plan(
-            compilation.result,
-            run_id=proposal.plan.run_id,
-            plan_version_id=proposal.plan.plan_version_id,
-            version=proposal.plan.version,
-            created_at=proposal.plan.created_at,
-            governing_policy_hash=context.active_policy.policy_hash,
-        )
-        if expected_plan != proposal.plan:
-            return _rejected(
-                proposal.proposal_id,
-                RejectionCode.DERIVATION_MISMATCH,
-                "compiled progress plan does not match deterministic mapping",
+                "compiled progress binding context is incomplete",
             )
         return self._progress_handler.decide(
             context.progress_proposal,
@@ -424,6 +443,18 @@ def _missing_reference(proposal_id: str, label: str) -> TransactionDecision:
         proposal_id,
         RejectionCode.MISSING_ENTITY,
         f"{label} reference does not exist",
+    )
+
+
+def _binding_rejection_context(
+    proposal_id: str,
+    code: RejectionCode,
+    message: str,
+) -> _BindingContext:
+    return _BindingContext(
+        preliminary_decision=_rejected(proposal_id, code, message),
+        progress_proposal=None,
+        progress_context=None,
     )
 
 

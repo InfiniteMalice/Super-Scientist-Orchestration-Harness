@@ -48,6 +48,7 @@ from super_scientist.providers.storage.domain_records import (
 from super_scientist.providers.storage.procedure_sources import (
     AcceptedProcedureSourceReceiptReader,
     ArtifactCatalogSnapshotRepository,
+    ProcedureSourceSnapshot,
     ProcedureSourceSnapshotRepository,
     ToolCatalogSnapshotRepository,
     ValidatorCatalogSnapshotRepository,
@@ -112,9 +113,23 @@ class _ProcedureSourceReaders:
             (reference.source_snapshot_id, reference.source_snapshot_hash)
             for reference in references
         }
+        snapshots: dict[tuple[str, str], ProcedureSourceSnapshot] = {}
         for snapshot_id, snapshot_hash in snapshot_keys:
             snapshot = self.snapshots.resolve_exact(snapshot_id, snapshot_hash)
             if snapshot is None or not self.snapshots.is_current(snapshot_id, snapshot_hash):
+                return False
+            snapshots[(snapshot_id, snapshot_hash)] = snapshot
+        for reference, _kind, _entries, _complete in catalog_items:
+            snapshot = snapshots[(reference.source_snapshot_id, reference.source_snapshot_hash)]
+            matching_bindings = tuple(
+                binding
+                for binding in snapshot.source_bindings
+                if binding.source_record_id == reference.source_record_id
+            )
+            if (
+                len(matching_bindings) != 1
+                or matching_bindings[0].source_content_hash != reference.source_content_hash
+            ):
                 return False
         for reference, grounded in capability_items:
             retained = self.profiles.resolve(reference)

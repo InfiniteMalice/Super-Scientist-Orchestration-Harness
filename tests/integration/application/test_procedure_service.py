@@ -83,7 +83,7 @@ def test_fixed_procedure_handler_set_is_closed_and_unique() -> None:
 
 
 @pytest.mark.integration
-def test_concrete_capability_resolves_exact_task10_sources(v2_runtime) -> None:
+def test_capability_evidence_snapshot_avoids_circular_profile_self_binding(v2_runtime) -> None:
     with v2_runtime.uow_factory() as unit_of_work:
         connection = unit_of_work.connection
         assert connection is not None
@@ -121,6 +121,90 @@ def test_concrete_capability_resolves_exact_task10_sources(v2_runtime) -> None:
         )
 
     assert decision.accepted is True
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("snapshot_case", ("empty", "unrelated", "mismatched"))
+def test_compilation_rejects_catalog_sources_not_exactly_bound_by_current_snapshot(
+    v2_runtime,
+    snapshot_case: str,
+) -> None:
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        repositories = unit_of_work.repositories()
+        request = _retain_exact_sources(
+            repositories,
+            connection,
+            v2_runtime.artifact_store,
+            v2_runtime.policy.policy_hash,
+        )
+        catalog_receipts = (
+            request.artifact_catalog_receipt,
+            request.tool_catalog_receipt,
+            request.validator_catalog_receipt,
+        )
+        if snapshot_case == "empty":
+            source_bindings = ()
+        elif snapshot_case == "unrelated":
+            source_bindings = (
+                ProcedureSourceBinding(
+                    source_record_id="unrelated-catalog-source",
+                    source_content_hash="f" * 64,
+                ),
+            )
+        else:
+            source_bindings = tuple(
+                sorted(
+                    (
+                        ProcedureSourceBinding(
+                            source_record_id=receipt.source_record_id,
+                            source_content_hash="f" * 64,
+                        )
+                        for receipt in catalog_receipts
+                    ),
+                    key=lambda item: item.source_record_id,
+                )
+            )
+        snapshot_id, snapshot_hash = _retain_source_snapshot(
+            repositories,
+            v2_runtime.artifact_store,
+            snapshot_id=f"unbound-{snapshot_case}-catalog-snapshot",
+            bindings=source_bindings,
+        )
+        forged_request = _retarget_catalog_receipts(
+            request,
+            snapshot_id=snapshot_id,
+            snapshot_hash=snapshot_hash,
+        )
+        result = compile_method(forged_request)
+        proposal = RecordProcedureCompilation(
+            proposal_id=f"unbound-{snapshot_case}-compilation",
+            idempotency_key=f"unbound-{snapshot_case}-compilation",
+            proposer=v2_runtime.proposer,
+            compilation=OpaqueProcedureCompilationEnvelope.build(
+                compilation_id=f"unbound-{snapshot_case}-compilation",
+                result=result,
+                created_at=NOW,
+                governing_policy_hash=v2_runtime.policy.policy_hash,
+            ),
+        )
+        capabilities = procedure_capabilities(
+            proposal,
+            connection,
+            v2_runtime.policy,
+            v2_runtime.artifact_store,
+            current_transaction_created_at=NOW,
+        )
+        handler = RecordProcedureCompilationHandler()
+
+        decision = handler.decide(
+            proposal,
+            handler.build_context(proposal, capabilities),
+        )
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.STALE_REFERENCE
 
 
 @pytest.mark.integration
@@ -334,6 +418,25 @@ class _CompilationCapabilities:
         raise AssertionError(f"unexpected projection: {record!r}")
 
 
+@dataclass
+class _CompilationAuthoritySpy(_CompilationCapabilities):
+    calls: list[str] = field(default_factory=list)
+
+    def policy_snapshot(self) -> PolicySnapshot:
+        self.calls.append("policy")
+        return self.policy
+
+    def get_compilation(self, compilation_id: str) -> ProcedureCompilationRecord | None:
+        del compilation_id
+        self.calls.append("compilation")
+        return self.existing
+
+    def procedure_sources_are_current(self, request: object) -> bool:
+        del request
+        self.calls.append("sources")
+        return self.sources_current
+
+
 def _invalid_compilation_proposal(policy: PolicySnapshot) -> RecordProcedureCompilation:
     request = valid_request()
     forbidden = _rebuild_step(
@@ -402,6 +505,39 @@ def test_opaque_boundary_failure_returns_only_fixed_invalid_procedure(v2_runtime
     assert capabilities.records == []
 
 
+@pytest.mark.integration
+def test_opaque_boundary_failure_precedes_all_authority_reads(v2_runtime) -> None:
+    proposal = _invalid_compilation_proposal(v2_runtime.policy)
+    forged = proposal.model_copy(
+        update={
+            "compilation": proposal.compilation.model_copy(
+                update={"result_json_base64": "PRIVATE-COMPILATION-PAYLOAD"}
+            )
+        }
+    )
+    capabilities = _CompilationAuthoritySpy(v2_runtime.policy)
+    handler = RecordProcedureCompilationHandler()
+
+    decision = handler.decide(forged, handler.build_context(forged, capabilities))
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.INVALID_PROCEDURE
+    assert capabilities.calls == []
+
+
+@pytest.mark.integration
+def test_stale_compilation_sources_precede_policy_and_duplicate_reads(v2_runtime) -> None:
+    proposal = _invalid_compilation_proposal(v2_runtime.policy)
+    capabilities = _CompilationAuthoritySpy(v2_runtime.policy, sources_current=False)
+    handler = RecordProcedureCompilationHandler()
+
+    decision = handler.decide(proposal, handler.build_context(proposal, capabilities))
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.STALE_REFERENCE
+    assert capabilities.calls == ["sources"]
+
+
 @dataclass
 class _BindingCapabilities(_CompilationCapabilities):
     compilation: ProcedureCompilationRecord | None = None
@@ -428,6 +564,41 @@ class _BindingCapabilities(_CompilationCapabilities):
     def progress_capability(self) -> object:
         assert self.progress_reads is not None
         return self.progress_reads
+
+
+@dataclass
+class _BindingAuthoritySpy(_BindingCapabilities):
+    calls: list[str] = field(default_factory=list)
+
+    def policy_snapshot(self) -> PolicySnapshot:
+        self.calls.append("policy")
+        return self.policy
+
+    def get_compilation(self, compilation_id: str) -> ProcedureCompilationRecord | None:
+        self.calls.append("compilation")
+        return super().get_compilation(compilation_id)
+
+    def procedure_sources_are_current(self, request: object) -> bool:
+        del request
+        self.calls.append("sources")
+        return self.sources_current
+
+    def resolve_compilation_receipt(
+        self,
+        receipt: ProcedureCompilationReceiptRef,
+    ) -> ProcedureCompilationRecord | None:
+        del receipt
+        self.calls.append("receipt")
+        return self.receipt_compilation
+
+    def get_binding(self, binding_id: str) -> CompiledProgressPlanBinding | None:
+        del binding_id
+        self.calls.append("binding")
+        return self.existing_binding
+
+    def progress_capability(self) -> object:
+        self.calls.append("progress")
+        return super().progress_capability()
 
 
 @pytest.mark.integration
@@ -486,6 +657,66 @@ def test_binding_rejects_invalid_compilation_without_projecting_plan(v2_runtime)
     assert decision.accepted is False
     assert decision.reasons[0].code is RejectionCode.INVALID_PROCEDURE
     assert capabilities.records == []
+
+
+@pytest.mark.integration
+def test_stale_binding_sources_precede_receipt_policy_duplicate_and_progress_reads(
+    v2_runtime,
+) -> None:
+    compilation_proposal = _invalid_compilation_proposal(v2_runtime.policy)
+    compilation = ProcedureCompilationRecord.build_from_untrusted_envelope(
+        compilation_proposal.compilation
+    )
+    valid_result = compile_method(valid_request())
+    plan = procedure_to_progress_plan(
+        valid_result,
+        run_id="run-1",
+        plan_version_id="stale-source-plan",
+        version=1,
+        created_at=NOW,
+        governing_policy_hash=v2_runtime.policy.policy_hash,
+    )
+    receipt = ProcedureCompilationReceiptRef(
+        proposal_id=compilation_proposal.proposal_id,
+        proposal_hash="a" * 64,
+        audit_event_id="stale-source-audit",
+        audit_event_hash="b" * 64,
+    )
+    binding = CompiledProgressPlanBinding.build(
+        binding_id="stale-source-binding",
+        compilation_receipt=receipt,
+        compilation_id=compilation.compilation_id,
+        compilation_hash=compilation.content_hash,
+        procedure_id=compilation.result.procedure.procedure_id,
+        procedure_hash=compilation.result.procedure.content_hash,
+        plan=plan,
+        plan_hash=canonical_model_hash(plan),
+        created_at=NOW,
+        governing_policy_hash=v2_runtime.policy.policy_hash,
+    )
+    proposal = BindCompiledProgressPlan(
+        proposal_id="stale-source-binding-proposal",
+        idempotency_key="stale-source-binding-proposal",
+        proposer=v2_runtime.proposer,
+        approval=v2_runtime.approval(),
+        compilation_receipt=receipt,
+        binding=binding,
+        plan=plan,
+    )
+    capabilities = _BindingAuthoritySpy(
+        policy=v2_runtime.policy,
+        sources_current=False,
+        compilation=compilation,
+        receipt_compilation=compilation,
+        progress_reads=_ProgressReads(v2_runtime.policy, _research_run(v2_runtime)),
+    )
+    handler = BindCompiledProgressPlanHandler()
+
+    decision = handler.decide(proposal, handler.build_context(proposal, capabilities))
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.STALE_REFERENCE
+    assert capabilities.calls == ["compilation", "sources"]
 
 
 @dataclass
@@ -753,6 +984,29 @@ def _retain_source_snapshot(
     repositories.evidence.add(evidence)
     _persist_accepted(repositories, proposal, NOW)
     return snapshot_id, artifact.sha256
+
+
+def _retarget_catalog_receipts(
+    request: ProcedureCompilationRequest,
+    *,
+    snapshot_id: str,
+    snapshot_hash: str,
+) -> ProcedureCompilationRequest:
+    def retarget(receipt: AcceptedSourceReceiptRef) -> AcceptedSourceReceiptRef:
+        values = receipt.model_dump(mode="python", exclude={"content_hash"})
+        values.update(
+            source_snapshot_id=snapshot_id,
+            source_snapshot_hash=snapshot_hash,
+        )
+        return AcceptedSourceReceiptRef.build(**values)
+
+    values = request.model_dump(mode="python")
+    values.update(
+        artifact_catalog_receipt=retarget(request.artifact_catalog_receipt),
+        tool_catalog_receipt=retarget(request.tool_catalog_receipt),
+        validator_catalog_receipt=retarget(request.validator_catalog_receipt),
+    )
+    return ProcedureCompilationRequest.model_validate(values, strict=True)
 
 
 def _source_evidence(evidence_id: str, artifact) -> EvidenceRecord:

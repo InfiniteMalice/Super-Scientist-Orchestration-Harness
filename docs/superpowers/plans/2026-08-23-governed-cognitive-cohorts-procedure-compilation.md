@@ -2571,7 +2571,15 @@ progress binding:
 3. `ProcedureSourceSnapshotRepository.resolve_exact(source_snapshot_id,
    source_snapshot_hash)` must return one accepted snapshot artifact, and
    `is_current(source_snapshot_id, source_snapshot_hash)` must be true.
-4. A capability source must equal the retained profile, its accepted
+4. For each artifact, tool, or validator catalog reference, the resolved
+   `ProcedureSourceSnapshot.source_bindings` must contain exactly one binding whose
+   `source_record_id` and `source_content_hash` equal the reference. A missing,
+   duplicate, or content-mismatched catalog binding fails resolution. This membership
+   requirement does not apply to a capability-profile reference: the capability-profile
+   content hash includes its evidence snapshot hash, while the snapshot artifact hash
+   includes its source bindings, so profile self-membership would create a circular hash
+   dependency.
+5. A capability source must equal the retained profile, its accepted
    `RecordCapabilityProfile` payload, and the evidence snapshot used by the recomputed
    assessment. A catalog source must equal the request's complete ordered entries and
    completeness flag. The three catalog sources must resolve to the same current
