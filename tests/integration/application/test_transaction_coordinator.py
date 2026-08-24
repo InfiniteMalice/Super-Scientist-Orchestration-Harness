@@ -4,18 +4,40 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
-from sqlalchemy import Engine
+from sqlalchemy import Connection, Engine
 
 from super_scientist.application.kernel_service import KernelService
 from super_scientist.application.transactions import coordinator as coordinator_module
 from super_scientist.application.transactions.coordinator import TransactionCoordinator
+from super_scientist.application.transactions.router import ProposalRouter
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
 from super_scientist.domain.evidence.models import EvidenceRecord
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
-from super_scientist.kernel.transactions.models import AddEvidence
+from super_scientist.kernel.transactions.models import (
+    AddEvidence,
+    AppendGuidanceEvaluationCell,
+    AppendModelHarnessCell,
+    AppendPeerContribution,
+    AppendPeerRequest,
+    AppendTopologyEvent,
+    BindCompiledProgressPlan,
+    RecordCapabilityProfile,
+    RecordCohortPlan,
+    RecordCollaborationSession,
+    RecordCollaborationTermination,
+    RecordDiversityAssessment,
+    RecordGuidanceEvaluationProtocol,
+    RecordHarnessExecutionTrace,
+    RecordMethodDirectionOutcome,
+    RecordModelHarnessAnalysis,
+    RecordModelHarnessProtocol,
+    RecordProcedureCompilation,
+    RecordRewardAssessment,
+)
 from super_scientist.providers.storage.artifacts import FileArtifactStore
 from super_scientist.providers.storage.database import (
     DatabaseUnitOfWork,
@@ -24,6 +46,82 @@ from super_scientist.providers.storage.database import (
 )
 
 NOW = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+
+NEW_COGNITIVE_PROPOSAL_CLASSES = (
+    RecordCapabilityProfile,
+    RecordCohortPlan,
+    RecordDiversityAssessment,
+    RecordCollaborationSession,
+    AppendPeerRequest,
+    AppendPeerContribution,
+    AppendTopologyEvent,
+    RecordCollaborationTermination,
+    RecordProcedureCompilation,
+    RecordMethodDirectionOutcome,
+    BindCompiledProgressPlan,
+    RecordGuidanceEvaluationProtocol,
+    AppendGuidanceEvaluationCell,
+    RecordModelHarnessProtocol,
+    AppendModelHarnessCell,
+    RecordModelHarnessAnalysis,
+    RecordHarnessExecutionTrace,
+    RecordRewardAssessment,
+)
+NEW_COGNITIVE_PROPOSAL_TYPES = tuple(
+    proposal_class.model_fields["proposal_type"].default
+    for proposal_class in NEW_COGNITIVE_PROPOSAL_CLASSES
+)
+COGNITIVE_CAPABILITY_GROUPS = (
+    (
+        "cognition_capabilities",
+        (RecordCapabilityProfile, RecordCohortPlan, RecordDiversityAssessment),
+    ),
+    (
+        "collaboration_capabilities",
+        (
+            RecordCollaborationSession,
+            AppendPeerRequest,
+            AppendPeerContribution,
+            AppendTopologyEvent,
+            RecordCollaborationTermination,
+        ),
+    ),
+    (
+        "procedure_capabilities",
+        (RecordProcedureCompilation, RecordMethodDirectionOutcome, BindCompiledProgressPlan),
+    ),
+    (
+        "harness_extension_capabilities",
+        (
+            RecordGuidanceEvaluationProtocol,
+            AppendGuidanceEvaluationCell,
+            RecordModelHarnessProtocol,
+            AppendModelHarnessCell,
+            RecordModelHarnessAnalysis,
+            RecordHarnessExecutionTrace,
+            RecordRewardAssessment,
+        ),
+    ),
+)
+
+
+class _CapabilityObserved(RuntimeError):
+    pass
+
+
+class _CapabilityProbeHandler:
+    def __init__(self, proposal_type: str) -> None:
+        self.proposal_type = proposal_type
+
+    def build_context(self, proposal: object, reads: object) -> object:
+        del proposal, reads
+        raise _CapabilityObserved
+
+    def decide(self, proposal: object, context: object) -> object:
+        raise AssertionError("probe handler must stop during context construction")
+
+    def project(self, proposal: object, decision: object, writes: object) -> None:
+        raise AssertionError("probe handler must not project")
 
 
 class FixedClock:
@@ -197,6 +295,72 @@ def test_compatibility_router_declares_the_resolved_proposal_type(runtime: Runti
         )
         == proposal_types
     )
+
+
+@pytest.mark.integration
+def test_every_new_cognitive_proposal_has_one_fixed_route(runtime: Runtime) -> None:
+    assert len(NEW_COGNITIVE_PROPOSAL_TYPES) == 18
+
+    assert (
+        tuple(
+            runtime.coordinator.router.resolve(proposal_type).proposal_type
+            for proposal_type in NEW_COGNITIVE_PROPOSAL_TYPES
+        )
+        == NEW_COGNITIVE_PROPOSAL_TYPES
+    )
+
+
+@pytest.mark.integration
+def test_each_new_proposal_uses_only_its_focused_capability_factory(
+    runtime: Runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[str, type[Any]]] = []
+
+    def capability_factory(factory_name: str) -> Callable[..., object]:
+        def observe(proposal: object, *args: object, **kwargs: object) -> object:
+            del args, kwargs
+            observed.append((factory_name, type(proposal)))
+            return object()
+
+        return observe
+
+    for factory_name, _ in COGNITIVE_CAPABILITY_GROUPS:
+        monkeypatch.setattr(
+            coordinator_module,
+            factory_name,
+            capability_factory(factory_name),
+        )
+
+    with runtime.uow_factory() as unit_of_work:
+        repositories = unit_of_work.repositories()
+        connection = unit_of_work.connection
+        assert isinstance(connection, Connection)
+        for _, proposal_classes in COGNITIVE_CAPABILITY_GROUPS:
+            for proposal_class in proposal_classes:
+                proposal_type = proposal_class.model_fields["proposal_type"].default
+                runtime.coordinator._router = ProposalRouter(
+                    (  # type: ignore[arg-type]
+                        (proposal_type, _CapabilityProbeHandler(proposal_type)),
+                    )
+                )
+                proposal = proposal_class.model_construct(
+                    proposal_id=f"probe-{proposal_type}",
+                    idempotency_key=f"probe-key-{proposal_type}",
+                    proposer=runtime.actor,
+                )
+                with pytest.raises(_CapabilityObserved):
+                    runtime.coordinator._submit_locked(
+                        proposal,
+                        repositories,
+                        connection,
+                    )
+
+    assert observed == [
+        (factory_name, proposal_class)
+        for factory_name, proposal_classes in COGNITIVE_CAPABILITY_GROUPS
+        for proposal_class in proposal_classes
+    ]
 
 
 @pytest.mark.integration

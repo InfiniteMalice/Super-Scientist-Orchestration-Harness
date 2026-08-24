@@ -8,19 +8,35 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 from sqlalchemy import Connection
 
 from super_scientist.application.evidence_verification import verify_artifact_binding
+from super_scientist.application.harness_eval import fixed_harness_extension_handlers
 from super_scientist.application.harness_eval.service import fixed_harness_eval_handlers
 from super_scientist.application.transactions.adaptation import (
     adaptation_capabilities,
     fixed_adaptation_handlers,
+)
+from super_scientist.application.transactions.cognition import (
+    cognition_capabilities,
+    fixed_cognition_handlers,
+)
+from super_scientist.application.transactions.collaboration import (
+    collaboration_capabilities,
+    fixed_collaboration_handlers,
 )
 from super_scientist.application.transactions.contracts import (
     HandlerReadCapability,
     HandlerWriteCapability,
 )
 from super_scientist.application.transactions.harness_eval import harness_eval_capabilities
+from super_scientist.application.transactions.harness_extensions import (
+    harness_extension_capabilities,
+)
 from super_scientist.application.transactions.hypotheses import (
     fixed_hypothesis_handlers,
     hypothesis_capabilities,
+)
+from super_scientist.application.transactions.procedures import (
+    fixed_procedure_handlers,
+    procedure_capabilities,
 )
 from super_scientist.application.transactions.progress import (
     fixed_progress_handlers,
@@ -30,7 +46,7 @@ from super_scientist.application.transactions.representations import (
     fixed_representation_handlers,
     representation_capabilities,
 )
-from super_scientist.application.transactions.router import ProposalRouter
+from super_scientist.application.transactions.router import ProposalRouter, RoutedHandler
 from super_scientist.application.transactions.rules import (
     fixed_rule_handlers,
     rule_capabilities,
@@ -56,7 +72,13 @@ from super_scientist.kernel.transactions.models import (
     AddEvidence,
     AdmitHypothesis,
     AdmitPrimitiveVersion,
+    AppendGuidanceEvaluationCell,
+    AppendModelHarnessCell,
+    AppendPeerContribution,
+    AppendPeerRequest,
     AppendProgressEvent,
+    AppendTopologyEvent,
+    BindCompiledProgressPlan,
     BindReportSentence,
     ConsolidateBehavioralRule,
     CreateHarnessCampaign,
@@ -74,13 +96,25 @@ from super_scientist.kernel.transactions.models import (
     ProposeGovernancePolicyTransition,
     ProposeHypothesisVersion,
     ProposePrimitiveVersion,
+    RecordCapabilityProfile,
+    RecordCohortPlan,
+    RecordCollaborationSession,
+    RecordCollaborationTermination,
     RecordCounterexample,
+    RecordDiversityAssessment,
     RecordEvidenceTrailVersion,
+    RecordGuidanceEvaluationProtocol,
     RecordHarnessConfound,
+    RecordHarnessExecutionTrace,
     RecordHarnessIteration,
     RecordHarnessProtectedResult,
+    RecordMethodDirectionOutcome,
+    RecordModelHarnessAnalysis,
+    RecordModelHarnessProtocol,
     RecordPrimitiveEvaluation,
+    RecordProcedureCompilation,
     RecordProgressPlan,
+    RecordRewardAssessment,
     RecordRuleIncident,
     RecordRunBudget,
     RecordRunCheckpoint,
@@ -220,6 +254,15 @@ class TransactionCoordinator:
         harness_eval_handlers = tuple(
             (handler.proposal_type, handler) for handler in fixed_harness_eval_handlers()
         )
+        cognitive_handlers: tuple[tuple[str, RoutedHandler], ...] = tuple(
+            (handler.proposal_type, cast(RoutedHandler, handler))
+            for handler in (
+                *fixed_cognition_handlers(),
+                *fixed_collaboration_handlers(),
+                *fixed_procedure_handlers(),
+                *fixed_harness_extension_handlers(),
+            )
+        )
         self._router = ProposalRouter(
             (
                 *compatibility_handlers,
@@ -230,6 +273,7 @@ class TransactionCoordinator:
                 *representation_handlers,
                 *hypothesis_handlers,
                 *harness_eval_handlers,
+                *cognitive_handlers,
             )
         )
 
@@ -552,6 +596,77 @@ class TransactionCoordinator:
                 )
                 reads = harness_eval_io
                 writes = harness_eval_io
+            elif isinstance(
+                admitted_proposal,
+                (
+                    RecordCapabilityProfile,
+                    RecordCohortPlan,
+                    RecordDiversityAssessment,
+                ),
+            ):
+                cognition_io = cognition_capabilities(
+                    admitted_proposal,
+                    connection,
+                    stored_policy,
+                    current_transaction_created_at=transaction_created_at,
+                )
+                reads = cognition_io
+                writes = cognition_io
+            elif isinstance(
+                admitted_proposal,
+                (
+                    RecordCollaborationSession,
+                    AppendPeerRequest,
+                    AppendPeerContribution,
+                    AppendTopologyEvent,
+                    RecordCollaborationTermination,
+                ),
+            ):
+                collaboration_io = collaboration_capabilities(
+                    admitted_proposal,
+                    connection,
+                    stored_policy,
+                    current_transaction_created_at=transaction_created_at,
+                )
+                reads = collaboration_io
+                writes = collaboration_io
+            elif isinstance(
+                admitted_proposal,
+                (
+                    RecordProcedureCompilation,
+                    RecordMethodDirectionOutcome,
+                    BindCompiledProgressPlan,
+                ),
+            ):
+                procedure_io = procedure_capabilities(
+                    admitted_proposal,
+                    connection,
+                    stored_policy,
+                    self._artifact_store,
+                    current_transaction_created_at=transaction_created_at,
+                )
+                reads = procedure_io
+                writes = procedure_io
+            elif isinstance(
+                admitted_proposal,
+                (
+                    RecordGuidanceEvaluationProtocol,
+                    AppendGuidanceEvaluationCell,
+                    RecordModelHarnessProtocol,
+                    AppendModelHarnessCell,
+                    RecordModelHarnessAnalysis,
+                    RecordHarnessExecutionTrace,
+                    RecordRewardAssessment,
+                ),
+            ):
+                harness_extension_io = harness_extension_capabilities(
+                    admitted_proposal,
+                    connection,
+                    stored_policy,
+                    current_transaction_created_at=transaction_created_at,
+                )
+                reads = harness_extension_io
+                writes = harness_extension_io
             else:
                 adaptation_io = adaptation_capabilities(
                     admitted_proposal,

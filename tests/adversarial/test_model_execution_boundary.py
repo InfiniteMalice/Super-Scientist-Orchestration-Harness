@@ -29,6 +29,7 @@ OWNED_RUNTIME = (
     ROOT / "src" / "super_scientist" / "application" / "hypothesis_testing",
     ROOT / "src" / "super_scientist" / "application" / "transactions" / "hypotheses.py",
 )
+COGNITIVE_ORCHESTRATION_RUNTIME = (ROOT / "src" / "super_scientist" / "application" / "cognitive",)
 FORBIDDEN_IMPORT_ROOTS = frozenset(
     {
         "asyncio",
@@ -170,3 +171,28 @@ def test_registry_accepts_no_user_defined_simulator_or_callable() -> None:
         SimulatorRegistry({"untrusted": lambda value: value})  # type: ignore[call-arg]
     with pytest.raises((AttributeError, TypeError)):
         registry.simulators = {"untrusted": object()}  # type: ignore[misc]
+
+
+def test_cognitive_orchestration_contains_no_execution_or_reflection_dispatch() -> None:
+    violations: list[str] = []
+    for owned_path in COGNITIVE_ORCHESTRATION_RUNTIME:
+        paths = (owned_path,) if owned_path.is_file() else tuple(sorted(owned_path.glob("*.py")))
+        for path in paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        root = alias.name.split(".", 1)[0]
+                        if root in FORBIDDEN_IMPORT_ROOTS:
+                            violations.append(f"{path.name}:{node.lineno}:import {root}")
+                elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                    root = node.module.split(".", 1)[0]
+                    if root in FORBIDDEN_IMPORT_ROOTS:
+                        violations.append(f"{path.name}:{node.lineno}:from {root}")
+                elif (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id in FORBIDDEN_CALLS
+                ):
+                    violations.append(f"{path.name}:{node.lineno}:call {node.func.id}")
+    assert violations == []
