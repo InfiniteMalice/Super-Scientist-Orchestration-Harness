@@ -136,6 +136,19 @@ def _require_bounded_actor_identity(actor: ActorIdentity) -> ActorIdentity:
     return actor
 
 
+def _strict_actor_identity_snapshot(actor: ActorIdentity) -> ActorIdentity:
+    if type(actor) is not ActorIdentity:
+        raise ValueError("session actor identity snapshots must be exact ActorIdentity values")
+    try:
+        parsed = ActorIdentity.model_validate_json(
+            actor.model_dump_json(warnings=False),
+            strict=True,
+        )
+    except (PydanticValidationError, TypeError, ValueError):
+        raise ValueError("session actor identity snapshots must be valid") from None
+    return _require_bounded_actor_identity(parsed)
+
+
 def _require_strict_actor_identity_input(
     value: object,
     info: ValidationInfo,
@@ -711,11 +724,31 @@ class _CollaborationSessionPayload(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_fixed_declared_envelope(self) -> Self:
-        peer_ids = tuple(peer.actor_id for peer in self.peers)
+        peers = tuple(_strict_actor_identity_snapshot(peer) for peer in self.peers)
+        peer_ids = tuple(peer.actor_id for peer in peers)
         _canonical_unique(peer_ids, "peers")
         member_ids = tuple(sorted(member.actor_id for member in self.cohort_plan.members))
         if peer_ids != member_ids:
             raise ValueError("session peers must exactly match the cohort plan members")
+        profile_actors = tuple(
+            _strict_actor_identity_snapshot(profile.actor)
+            for profile in self.cohort_plan.resolved_candidate_profiles
+        )
+        profile_actor_ids = tuple(actor.actor_id for actor in profile_actors)
+        _canonical_unique(profile_actor_ids, "cohort profile actor identities")
+        profile_actor_by_id = dict(zip(profile_actor_ids, profile_actors, strict=True))
+        peer_by_id = dict(zip(peer_ids, peers, strict=True))
+        if not set(member_ids).issubset(profile_actor_by_id):
+            raise ValueError(
+                "session peer identities must exactly match selected cohort profile actors"
+            )
+        selected_profile_actor_by_id = {
+            actor_id: profile_actor_by_id[actor_id] for actor_id in member_ids
+        }
+        if peer_by_id != selected_profile_actor_by_id:
+            raise ValueError(
+                "session peer identities must exactly match selected cohort profile actors"
+            )
         if self.task_id != self.cohort_plan.task_id:
             raise ValueError("session task must match the cohort plan task")
         if self.governing_policy_hash != self.cohort_plan.governing_policy_hash:

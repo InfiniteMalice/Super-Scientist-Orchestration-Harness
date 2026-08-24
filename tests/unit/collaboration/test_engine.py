@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from decimal import Decimal, localcontext
 
@@ -18,10 +19,11 @@ from super_scientist.domain.collaboration import (
     next_peer,
 )
 from super_scientist.domain.collaboration.models import exact_usage_snapshot
+from super_scientist.domain.identity import ActorKind
 from super_scientist.domain.improvement.models import ResourceUsage
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 
-from .conftest import artifact, unit_usage
+from .conftest import NOW, artifact, unit_usage
 
 
 def _request(
@@ -92,6 +94,52 @@ def test_collaboration_session_round_trips_through_strict_json(
     )
 
     assert parsed == session
+
+
+@pytest.mark.parametrize("entrypoint", ("build", "direct_parse"))
+@pytest.mark.parametrize(
+    ("identity_field", "substitution"),
+    (
+        ("provider_id", "provider-substitute"),
+        ("model_id", "model-substitute"),
+        ("adapter_id", "adapter-substitute"),
+        ("configuration_hash", "d" * 64),
+        ("kind", ActorKind.SERVICE),
+        ("created_at", NOW.replace(second=1)),
+    ),
+)
+def test_collaboration_session_rejects_same_id_peer_identity_substitution(
+    session_factory: Callable[..., CollaborationSession],
+    entrypoint: str,
+    identity_field: str,
+    substitution: object,
+) -> None:
+    session = session_factory("peer-a")
+    substituted_peer = session.peers[0].model_copy(
+        update={identity_field: substitution}
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="peer identities must exactly match selected cohort profile actors",
+    ):
+        if entrypoint == "build":
+            values = session.model_dump(mode="python", exclude={"content_hash"})
+            values["peers"] = (substituted_peer,)
+            CollaborationSession.build(**values)
+        else:
+            payload = session.model_dump(mode="json")
+            payload["peers"] = [substituted_peer.model_dump(mode="json")]
+            session_payload = {
+                key: value for key, value in payload.items() if key != "content_hash"
+            }
+            payload["content_hash"] = sha256_hex(
+                canonical_json_bytes(session_payload)
+            )
+            CollaborationSession.model_validate_json(
+                json.dumps(payload),
+                strict=True,
+            )
 
 
 def test_single_peer_requires_declared_edge_after_initial_exchange(
