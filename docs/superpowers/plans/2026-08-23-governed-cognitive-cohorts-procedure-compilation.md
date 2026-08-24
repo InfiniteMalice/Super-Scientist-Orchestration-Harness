@@ -683,12 +683,18 @@ def test_unavailable_log_probabilities_cannot_carry_values() -> None:
 
 
 def test_high_invalid_reward_is_excluded() -> None:
+    trace, expectation, inventory, verification, diagnostic_coverage, findings = stale_reward_bundle()
+    freshness = trace_freshness(expectation, trace, inventory=inventory)
     assessment = assess_reward_validity(
-        reward_observation(value=Decimal("1000")),
-        stale_trace(),
-        findings=(),
-        verifier_succeeded=True,
+        trace.reward_observation,
+        trace,
+        findings,
+        expectation=expectation,
+        verification=verification,
+        diagnostic_coverage=diagnostic_coverage,
+        inventory=inventory,
     )
+    assert freshness.status is TraceFreshnessStatus.STALE
     assert assessment.status is RewardValidityStatus.INVALID
     assert RewardInvalidationReason.STALE_HARNESS_TRACE in assessment.reasons
     assert valid_reward_evidence((assessment,)) == ()
@@ -739,19 +745,15 @@ def assess_reward_validity(
     trace: HarnessExecutionTrace,
     findings: tuple[RewardHackingFinding, ...],
     *,
-    verifier_succeeded: bool | None,
+    expectation: TraceExpectation,
+    verification: VerificationOutcomeEvidence,
+    diagnostic_coverage: RewardHackingCoverageAttestation,
+    inventory: ResolvedEvidenceInventory,
 ) -> RewardValidityAssessment:
-    reasons = ordered_invalidation_reasons(observation, trace, findings, verifier_succeeded)
-    status = reward_status(reasons, verifier_succeeded)
-    return RewardValidityAssessment(
-        assessment_id=reward_assessment_id(observation, trace, findings),
-        observation=observation,
-        finding_ids=tuple(item.finding_id for item in findings),
-        trace_id=trace.trace_id,
-        status=status,
-        reasons=reasons,
-        freshness_hash=trace.content_hash,
-    )
+    freshness = trace_freshness(expectation, trace, inventory=inventory)
+    # Strictly validate all inputs, resolve evidence receipts through inventory, then build the
+    # canonical assessment using freshness, verification, diagnostic_coverage, and inventory.
+    ...
 ```
 
 Run: `python -m pytest tests/unit/harness_eval/test_traces.py tests/unit/harness_eval/test_rewards.py tests/adversarial/test_protected_holdout_leakage.py -v`
@@ -1445,12 +1447,24 @@ class AppendGuidanceEvaluationCellHandler:
         return reject_existing_or_accept(proposal, context.existing_cell)
 ```
 
-Protocol handlers require exact model/harness/verifier/task/budget identities. At the external trace
-proposal boundary, the handler passes bounded JSON text or bytes through
-`parse_untrusted_harness_execution_trace()` before it constructs the proposal; direct
-`HarnessExecutionTrace.model_validate*()` calls are reserved for trusted internal records and must
-not parse request payloads. Analysis handlers recompute `analyze_model_harness()` and compare
+Protocol handlers require exact model/harness/verifier/task/budget identities. A dedicated
+`HarnessTraceProposalAdapter` is the only actor that receives raw bounded JSON text or exact bytes:
+it calls `parse_untrusted_harness_execution_trace()` and constructs a typed
+`RecordHarnessExecutionTraceProposal` before the handler runs. The handler consumes only that typed
+proposal; direct `HarnessExecutionTrace.model_validate*()` calls are trusted/internal and must not
+parse request payloads. Analysis handlers recompute `analyze_model_harness()` and compare
 canonically. No handler creates or changes a `HarnessCampaign` decision.
+
+```python
+class HarnessTraceProposalAdapter:
+    def from_untrusted_payload(
+        self, payload: str | bytes, metadata: RecordTraceMetadata
+    ) -> RecordHarnessExecutionTraceProposal:
+        return RecordHarnessExecutionTraceProposal(
+            trace=parse_untrusted_harness_execution_trace(payload),
+            metadata=metadata,
+        )
+```
 
 - [ ] **Step 4: Recompute trace freshness and reward validity**
 
@@ -1463,16 +1477,30 @@ class RecordRewardAssessmentHandler:
             return rejected(proposal, RejectionCode.MISSING_ENTITY)
         if context.trace.reward_observation != proposal.observation:
             return rejected(proposal, RejectionCode.DERIVATION_MISMATCH)
+        freshness = trace_freshness(
+            proposal.expectation,
+            context.trace,
+            inventory=context.inventory,
+        )
+        if freshness != proposal.freshness:
+            return rejected(proposal, RejectionCode.DERIVATION_MISMATCH)
         expected = assess_reward_validity(
             proposal.observation,
             context.trace,
             proposal.findings,
-            verifier_succeeded=context.verifier_succeeded,
+            expectation=proposal.expectation,
+            verification=proposal.verification,
+            diagnostic_coverage=proposal.diagnostic_coverage,
+            inventory=context.inventory,
         )
         if expected != proposal.assessment:
             return rejected(proposal, RejectionCode.DERIVATION_MISMATCH)
         return reject_existing_or_accept(proposal, context.existing_assessment)
 ```
+
+After the handler stores the exact assessment, only
+`valid_reward_evidence((expected,))` feeds a positive evidence selector. Invalid and inconclusive
+assessments remain historical records but contribute an empty tuple to that selector.
 
 Run: `python -m pytest tests/integration/application/test_harness_eval_extensions.py tests/integration/application/test_harness_eval_service.py tests/unit/harness_eval -v`
 

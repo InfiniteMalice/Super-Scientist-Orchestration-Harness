@@ -1251,22 +1251,23 @@ def _raise_untrusted_harness_trace_error() -> NoReturn:
 
 
 def parse_untrusted_harness_execution_trace(
-    payload: str | bytes | bytearray,
+    payload: str | bytes,
 ) -> HarnessExecutionTrace:
     """Parse bounded external JSON without exposing parser or validation internals."""
     try:
-        if isinstance(payload, str):
-            encoded_payload = payload.encode("utf-8")
-            json_payload: str | bytes = payload
-        elif isinstance(payload, (bytes, bytearray)):
+        if type(payload) is str:
             if len(payload) > MAX_HARNESS_TRACE_CANONICAL_BYTES:
                 raise ValueError("untrusted harness trace payload exceeds canonical byte bound")
-            encoded_payload = bytes(payload)
-            json_payload = encoded_payload
+            encoded_payload = payload.encode("utf-8")
+            json_payload: str | bytes = payload
+            if len(encoded_payload) > MAX_HARNESS_TRACE_CANONICAL_BYTES:
+                raise ValueError("untrusted harness trace payload exceeds canonical byte bound")
+        elif type(payload) is bytes:
+            if len(payload) > MAX_HARNESS_TRACE_CANONICAL_BYTES:
+                raise ValueError("untrusted harness trace payload exceeds canonical byte bound")
+            json_payload = payload
         else:
             raise TypeError("untrusted harness trace payload must be JSON text or bytes")
-        if len(encoded_payload) > MAX_HARNESS_TRACE_CANONICAL_BYTES:
-            raise ValueError("untrusted harness trace payload exceeds canonical byte bound")
         return HarnessExecutionTrace.model_validate_json(json_payload, strict=False)
     except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
         pass

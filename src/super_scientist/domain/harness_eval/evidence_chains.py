@@ -71,14 +71,27 @@ def _chain_id(
     freshness_receipt: EvidenceReceipt,
     assessment_receipt: EvidenceReceipt,
 ) -> str:
+    validated_protocol_receipt = _strictly_revalidate_snapshot(protocol_receipt, EvidenceReceipt)
+    validated_coordinate = _strictly_revalidate_snapshot(coordinate, ModelHarnessCoordinate)
+    validated_trace_receipt = _strictly_revalidate_snapshot(trace_receipt, EvidenceReceipt)
+    validated_freshness_receipt = _strictly_revalidate_snapshot(freshness_receipt, EvidenceReceipt)
+    validated_assessment_receipt = _strictly_revalidate_snapshot(
+        assessment_receipt, EvidenceReceipt
+    )
     return "cell-evidence-" + sha256_hex(
         canonical_json_bytes(
             {
-                "protocol_receipt": protocol_receipt.model_dump(mode="json"),
-                "coordinate": coordinate.model_dump(mode="json"),
-                "trace_receipt": trace_receipt.model_dump(mode="json"),
-                "freshness_receipt": freshness_receipt.model_dump(mode="json"),
-                "assessment_receipt": assessment_receipt.model_dump(mode="json"),
+                "protocol_receipt": validated_protocol_receipt.model_dump(
+                    mode="json", warnings=False
+                ),
+                "coordinate": validated_coordinate.model_dump(mode="json", warnings=False),
+                "trace_receipt": validated_trace_receipt.model_dump(mode="json", warnings=False),
+                "freshness_receipt": validated_freshness_receipt.model_dump(
+                    mode="json", warnings=False
+                ),
+                "assessment_receipt": validated_assessment_receipt.model_dump(
+                    mode="json", warnings=False
+                ),
             }
         )
     )

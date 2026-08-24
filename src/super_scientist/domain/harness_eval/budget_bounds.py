@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Self
+from typing import NoReturn, Self
 
 from pydantic import Field, field_validator, model_validator
 
@@ -16,6 +16,11 @@ from super_scientist.domain.harness_eval.models import EvaluationBudget
 from super_scientist.domain.primitives import StableIdentifier
 
 MAX_EVALUATION_BUDGET_CANONICAL_BYTES = 65_536
+
+
+def _raise_evaluation_budget_error() -> NoReturn:
+    """Raise only after unsafe DTO serialization or validation has unwound."""
+    raise ValueError("evaluation budget requires canonical validated budget")
 
 
 class PhaseAEvaluationBudget(EvaluationBudget):
@@ -76,8 +81,12 @@ class PhaseAEvaluationBudget(EvaluationBudget):
     @classmethod
     def from_evaluation_budget(cls, budget: EvaluationBudget | Self) -> Self:
         if type(budget) not in (EvaluationBudget, cls):
-            raise TypeError("evaluation budget requires the exact released or Phase A DTO")
-        return cls.model_validate(budget.model_dump(mode="python"), strict=True)
+            _raise_evaluation_budget_error()
+        try:
+            return cls.model_validate(budget.model_dump(mode="python", warnings=False), strict=True)
+        except (AttributeError, TypeError, ValueError):
+            pass
+        _raise_evaluation_budget_error()
 
 
 __all__ = ["PhaseAEvaluationBudget"]

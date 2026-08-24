@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import warnings
 from datetime import UTC, datetime
 from decimal import ROUND_DOWN, ROUND_UP, Decimal, localcontext
 
 import pytest
 from pydantic import ValidationError
 
+from super_scientist.domain.harness_eval.budget_bounds import PhaseAEvaluationBudget
 from super_scientist.domain.harness_eval.guidance import (
     EvaluationConfoundCode,
     EvaluationMetricComponent,
@@ -143,19 +145,19 @@ def test_guidance_task_score_rejects_oversized_decimal_coefficient() -> None:
 
 
 def test_guidance_budget_rejects_oversized_decimal_integer_and_tool_inventory() -> None:
-    with pytest.raises(ValidationError, match="decimal coefficient exceeds bound"):
+    with pytest.raises(ValidationError, match="canonical validated budget"):
         _protocol(evaluation_budget=_budget(cost_limit=Decimal("0." + "1" * 10_000)))
 
-    with pytest.raises(ValidationError, match="evaluation budget integers exceed bound"):
+    with pytest.raises(ValidationError, match="canonical validated budget"):
         _protocol(evaluation_budget=_budget(token_limit=1 << 10_000))
 
-    with pytest.raises(ValidationError, match="evaluation budget tools exceed bound"):
+    with pytest.raises(ValidationError, match="canonical validated budget"):
         _protocol(evaluation_budget=_budget(tool_ids=_long_ids("t", 1_000)))
 
 
 def test_guidance_strictly_revalidates_copied_released_budget_and_usage() -> None:
     copied_budget = _budget().model_copy(update={"token_limit": 1 << 10_000})
-    with pytest.raises(ValidationError, match="evaluation budget integers exceed bound"):
+    with pytest.raises(ValidationError, match="canonical validated budget"):
         _protocol(evaluation_budget=copied_budget)
 
     copied_usage = _usage().model_copy(update={"tokens": 1 << 10_000})
@@ -163,6 +165,20 @@ def test_guidance_strictly_revalidates_copied_released_budget_and_usage() -> Non
     values["resource_usage"] = copied_usage
     with pytest.raises(ValidationError, match="resource usage integers exceed bound"):
         EvaluationMetricVector.model_validate(values)
+
+
+def test_phase_a_budget_revalidation_sanitizes_copied_serializer_failure() -> None:
+    copied_budget = _budget().model_copy(update={"token_limit": "budget-marker"})
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(
+            ValueError, match="evaluation budget requires canonical validated budget"
+        ) as raised:
+            PhaseAEvaluationBudget.from_evaluation_budget(copied_budget)
+    assert "budget-marker" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
 
 
 def test_guidance_resource_and_event_count_deltas_reject_oversized_integers() -> None:

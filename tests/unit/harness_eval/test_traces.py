@@ -503,6 +503,34 @@ def test_safe_trace_parser_accepts_bounded_json_and_hides_untrusted_failures() -
     assert raised.value.__context__ is None
 
 
+def test_safe_trace_parser_rejects_oversized_and_subclass_payloads_before_conversion() -> None:
+    parser = getattr(harness_eval, "parse_untrusted_harness_execution_trace", None)
+    assert callable(parser)
+    payload = json.dumps(valid_trace().model_dump(mode="json"))
+
+    class MarkerString(str):
+        def encode(self, *args: object, **kwargs: object) -> bytes:
+            raise RuntimeError("string-subclass-marker")
+
+    class MarkerBytes(bytes):
+        pass
+
+    class MarkerBytearray(bytearray):
+        pass
+
+    for untrusted_payload in (
+        "x" * 300_000,
+        MarkerString(payload),
+        MarkerBytes(payload.encode("utf-8")),
+        MarkerBytearray(payload.encode("utf-8")),
+    ):
+        with pytest.raises(ValueError, match="untrusted harness execution trace") as raised:
+            parser(untrusted_payload)
+        assert "marker" not in str(raised.value)
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
+
 def test_trace_binding_consumes_exact_guidance_and_matrix_protocol_contracts() -> None:
     guidance = guidance_protocol()
     guidance_artifact = ObservableArtifactRef.build(

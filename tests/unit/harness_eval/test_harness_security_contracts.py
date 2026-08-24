@@ -1119,6 +1119,30 @@ def test_cell_evidence_chain_is_a_compact_receipt_join() -> None:
     assert "assessment" not in HarnessCellEvidenceChain.model_fields
 
 
+def test_compact_chain_builder_sanitizes_copied_receipt_serializer_failure() -> None:
+    from tests.unit.harness_eval.test_model_harness_matrix import _protocol
+
+    protocol = _protocol()
+    evidence = _matrix_evidence_chain(protocol, protocol.expected_grid[0], 0)
+    copied_receipt = evidence.chain.protocol_receipt.model_copy(
+        update={"schema_version": "receipt-marker"}
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(ValueError, match="canonical validated snapshots") as raised:
+            HarnessCellEvidenceChain.build(
+                protocol_receipt=copied_receipt,
+                coordinate=protocol.expected_grid[0],
+                trace_receipt=evidence.chain.trace_receipt,
+                freshness_receipt=evidence.chain.freshness_receipt,
+                assessment_receipt=evidence.chain.assessment_receipt,
+            )
+    assert "receipt-marker" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
 def test_compact_chain_rejects_trace_scalar_mismatch_behind_valid_protocol_receipt() -> None:
     from tests.unit.harness_eval.test_model_harness_matrix import _protocol
 
@@ -1345,7 +1369,7 @@ def test_matrix_budget_binding_strictly_revalidates_copied_released_budget() -> 
     model = ModelIdentity(model_id="copied-budget-model", model_version="v1")
     copied = _budget(model).model_copy(update={"token_limit": 1 << 10_000})
 
-    with pytest.raises(ValidationError, match="evaluation budget integers exceed bound"):
+    with pytest.raises(ValueError, match="canonical validated budget"):
         ModelBudgetBinding.build(model=model, budget=copied)
 
 
