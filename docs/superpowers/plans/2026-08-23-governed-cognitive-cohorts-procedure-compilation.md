@@ -848,7 +848,7 @@ class BindCompiledProgressPlan(ProposalBase):
     plan: ProgressPlan
 
 
-<!-- task-8-13-trace-contract:start -->
+# <!-- task-8-13-trace-contract:start -->
 class HarnessTraceRecordMetadata(BaseModel):
     schema_version: Literal[1] = 1
     received_at: UtcTimestamp
@@ -870,7 +870,7 @@ class RecordRewardAssessment(ProposalBase):
     observation: RewardObservation
     findings: tuple[RewardHackingFinding, ...]
     assessment: RewardValidityAssessment
-<!-- task-8-13-trace-contract:end -->
+# <!-- task-8-13-trace-contract:end -->
 
 
 MAX_PROPOSAL_BYTES = 8 * 1_024 * 1_024

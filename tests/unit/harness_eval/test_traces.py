@@ -43,6 +43,7 @@ from super_scientist.domain.harness_eval.traces import (
     artifact_collection_hash,
     context_transformation_hash,
     generation_metadata_hash,
+    reward_observation_hash,
     trace_binding_hash,
     trace_expectation_snapshot_hash,
     trace_freshness,
@@ -551,6 +552,46 @@ def test_safe_trace_parser_rejects_ambiguous_or_type_tampered_reward_wire_values
             parser(json.dumps(raw_payload))
         assert raised.value.__cause__ is None
         assert raised.value.__context__ is None
+
+
+@pytest.mark.parametrize("value", (Decimal("0.9"), "PASS", "0.9", None))
+def test_reward_observation_hash_is_identical_for_model_and_python_mapping(
+    value: Decimal | str | None,
+) -> None:
+    observation = reward_observation(value=value)
+    python_payload = observation.model_dump(mode="python", exclude={"content_hash"})
+    tagged_payload = observation.model_dump(mode="json", exclude={"content_hash"})
+
+    assert reward_observation_hash(observation) == observation.content_hash
+    assert reward_observation_hash(python_payload) == observation.content_hash
+    assert reward_observation_hash(tagged_payload) == observation.content_hash
+
+
+@pytest.mark.parametrize("value", (Decimal("0.9"), "PASS", "0.9", None))
+def test_trace_hash_is_identical_for_model_and_nested_python_mapping(
+    value: Decimal | str | None,
+) -> None:
+    trace = valid_trace(observation=reward_observation(value=value))
+    python_payload = trace.model_dump(mode="python", exclude={"content_hash"})
+
+    assert trace_hash(trace) == trace.content_hash
+    assert trace_hash(python_payload) == trace.content_hash
+
+
+def test_hash_mapping_rejects_malformed_tagged_reward_values() -> None:
+    observation = reward_observation(value=Decimal("0.9"))
+    observation_payload = observation.model_dump(mode="python", exclude={"content_hash"})
+    observation_payload["value"] = {"kind": "numeric", "value": 0.9}
+    trace = valid_trace(observation=observation)
+    trace_payload = trace.model_dump(mode="python", exclude={"content_hash"})
+    nested_reward = trace_payload["reward_observation"]
+    assert isinstance(nested_reward, dict)
+    nested_reward["value"] = {"kind": "categorical", "value": "0.9", "extra": "tampered"}
+
+    with pytest.raises(ValueError, match="reward trace wire value tag and payload must match"):
+        reward_observation_hash(observation_payload)
+    with pytest.raises(ValueError, match="explicit tagged object"):
+        trace_hash(trace_payload)
 
 
 def test_safe_trace_parser_rejects_oversized_and_subclass_payloads_before_conversion() -> None:

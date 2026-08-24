@@ -319,6 +319,20 @@ def test_valid_reward_requires_current_complete_observable_evidence() -> None:
     assert valid_reward_evidence((assessment,)) == (trace.reward_observation,)
 
 
+def test_reward_assessment_hash_is_identical_for_model_and_nested_python_mapping() -> None:
+    trace = valid_trace(observation=reward_observation(value="0.9"))
+    assessment = assess_reward_validity(
+        trace.reward_observation,
+        trace,
+        findings=(),
+        verifier_succeeded=True,
+    )
+    python_payload = assessment.model_dump(mode="python", exclude={"content_hash"})
+
+    assert reward_assessment_hash(assessment) == assessment.content_hash
+    assert reward_assessment_hash(python_payload) == assessment.content_hash
+
+
 @pytest.mark.parametrize(
     ("trace", "verifier_succeeded", "reason"),
     (

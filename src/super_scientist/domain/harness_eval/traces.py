@@ -93,9 +93,10 @@ def _canonical_record_hash(
     exclude_fields: set[str] | None = None,
 ) -> str:
     if isinstance(record, BaseModel):
-        payload = record.model_dump(mode="json", warnings=False)
+        payload = record.model_dump(mode="python", warnings=False)
     else:
-        payload = to_jsonable_python(dict(record))
+        payload = dict(record)
+    payload = to_jsonable_python(_canonicalize_hash_mapping(payload))
     for field_name in {"content_hash", *(exclude_fields or set())}:
         payload.pop(field_name, None)
     return sha256_hex(canonical_json_bytes(payload))
@@ -502,6 +503,40 @@ class RewardObservation(_RewardObservationPayload):
 
 def reward_observation_hash(record: BaseModel | Mapping[str, object]) -> str:
     return _canonical_record_hash(record)
+
+
+def _canonicalize_hash_mapping(record: Mapping[str, object]) -> dict[str, object]:
+    """Apply the reward wire form only to exact reward-observation record mappings."""
+    payload = {key: _canonicalize_hash_value(value) for key, value in record.items()}
+    reward_fields = frozenset(_RewardObservationPayload.model_fields)
+    if frozenset(payload) in (reward_fields, reward_fields | {"content_hash"}):
+        payload["value"] = _canonicalize_reward_wire_value(payload["value"])
+    return payload
+
+
+def _canonicalize_hash_value(value: object) -> object:
+    if isinstance(value, BaseModel):
+        return _canonicalize_hash_mapping(value.model_dump(mode="python", warnings=False))
+    if isinstance(value, Mapping):
+        return _canonicalize_hash_mapping(value)
+    if isinstance(value, tuple):
+        return tuple(_canonicalize_hash_value(item) for item in value)
+    if isinstance(value, list):
+        return [_canonicalize_hash_value(item) for item in value]
+    return value
+
+
+def _canonicalize_reward_wire_value(value: object) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return {"kind": "numeric", "value": str(value)}
+    if type(value) is str:
+        return {"kind": "categorical", "value": value}
+    if isinstance(value, Mapping):
+        decoded = _normalize_json_reward_observation_value(dict(value))
+        return _canonicalize_reward_wire_value(decoded)
+    raise ValueError("reward trace wire value must be numeric, categorical, or null")
 
 
 class _TraceBindingPayload(_StrictFrozenModel):
