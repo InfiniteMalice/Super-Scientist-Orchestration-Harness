@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel
@@ -20,6 +21,10 @@ from super_scientist.application.harness_eval.extensions import (
     RewardAssessmentCapabilities,
 )
 from super_scientist.application.transactions.harness_extensions import (
+    HarnessTraceCapabilities,
+    _guidance_cell_evidence_is_current,
+    _guidance_cell_evidence_matches,
+    _receipt_is_current,
     harness_extension_capabilities,
 )
 from super_scientist.config.models import PolicySnapshot
@@ -32,6 +37,7 @@ from super_scientist.domain.harness_eval.matrix import (
     ModelHarnessCell,
     ModelHarnessProtocol,
 )
+from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
 from super_scientist.domain.harness_eval.rewards import (
     RewardValidityAssessment,
     RewardValidityStatus,
@@ -151,6 +157,7 @@ class _Capabilities:
     trace: HarnessExecutionTrace | None = None
     reward: RewardValidityAssessment | None = None
     current: bool = True
+    matched: bool = True
     projected: list[BaseModel] = field(default_factory=list)
 
     def policy_snapshot(self) -> PolicySnapshot:
@@ -169,6 +176,10 @@ class _Capabilities:
     def guidance_cell_evidence_is_current(self, cell: GuidanceEvaluationCell) -> bool:
         del cell
         return self.current
+
+    def guidance_cell_evidence_matches(self, cell: GuidanceEvaluationCell) -> bool:
+        del cell
+        return self.matched
 
     def get_model_harness_protocol(self, protocol_id: str) -> ModelHarnessProtocol | None:
         if self.matrix_protocol is not None and self.matrix_protocol.protocol_id == protocol_id:
@@ -276,6 +287,163 @@ def test_guidance_protocol_and_cell_require_exact_current_protocol() -> None:
     assert stale.reasons[0].code is RejectionCode.STALE_REFERENCE
     assert accepted.accepted is True
     assert accepted_capabilities.projected == [cell]
+
+
+def test_guidance_cell_rejects_cross_protocol_evidence_as_unmatched() -> None:
+    protocol = guidance_protocol()
+    cell = guidance_cell(protocol=protocol)
+    proposal = _proposal(
+        AppendGuidanceEvaluationCell,
+        record_id="cross-protocol-guidance-cell",
+        cell=cell,
+    )
+
+    decision = _run(
+        AppendGuidanceEvaluationCellHandler(),
+        proposal,
+        _Capabilities(guidance_protocol=protocol, matched=False),
+    )
+
+    assert decision.reasons[0].code is RejectionCode.UNMATCHED_EVALUATION
+
+
+class _LookupRepository:
+    def __init__(self, values: dict[str, object]) -> None:
+        self._values = values
+
+    def get(self, record_id: str) -> object | None:
+        return self._values.get(record_id)
+
+
+def test_guidance_cell_currentness_rejects_a_trace_from_another_protocol() -> None:
+    cell = guidance_cell(protocol=guidance_protocol(protocol_id="another-protocol"))
+    trace = valid_trace(trace_id=cell.trace_id or "unexpected-missing-trace")
+    retained = _LookupRepository(
+        {
+            cell.output_artifact_id or "unexpected-missing-output": SimpleNamespace(),
+            cell.verifier_result_id or "unexpected-missing-verifier": SimpleNamespace(),
+        }
+    )
+
+    current = _guidance_cell_evidence_is_current(
+        cell,
+        traces=_LookupRepository({trace.trace_id: trace}),
+        rewards=_LookupRepository(
+            {cell.reward_assessment_id or "unexpected-missing-reward": SimpleNamespace()}
+        ),
+        evidence=retained,
+    )
+
+    assert trace.observed_binding.protocol_id != cell.protocol_id
+    assert current is False
+
+
+def _matched_guidance_cell_evidence() -> tuple[
+    GuidanceEvaluationCell,
+    HarnessExecutionTrace,
+    RewardValidityAssessment,
+]:
+    trace = valid_trace()
+    assert trace.observed_binding.guidance_protocol is not None
+    assessment = assess_reward_validity(
+        trace.reward_observation,
+        trace,
+        (),
+        verifier_succeeded=True,
+    )
+    original = guidance_cell(protocol=trace.observed_binding.guidance_protocol)
+    values = original.model_dump(mode="python", exclude={"content_hash"})
+    values.update(
+        output_artifact_id=trace.output_artifacts[0].artifact_id,
+        trace_id=trace.trace_id,
+        verifier_result_id=trace.verifier_result_id,
+        reward_assessment_id=assessment.assessment_id,
+    )
+    return GuidanceEvaluationCell.build(**values), trace, assessment
+
+
+def _guidance_evidence_current(
+    cell: GuidanceEvaluationCell,
+    trace: HarnessExecutionTrace,
+    assessments: tuple[RewardValidityAssessment, ...],
+) -> bool:
+    evidence_ids = tuple(
+        item for item in (cell.output_artifact_id, cell.verifier_result_id) if item is not None
+    )
+    return _guidance_cell_evidence_is_current(
+        cell,
+        traces=_LookupRepository({trace.trace_id: trace}),
+        rewards=_LookupRepository({item.assessment_id: item for item in assessments}),
+        evidence=_LookupRepository(
+            {item: SimpleNamespace(content_hash="a" * 64) for item in evidence_ids}
+        ),
+    )
+
+
+def test_guidance_cell_rejects_output_from_outside_its_trace() -> None:
+    cell, trace, assessment = _matched_guidance_cell_evidence()
+    values = cell.model_dump(mode="python", exclude={"content_hash"})
+    values["output_artifact_id"] = "other-output"
+    mismatched = GuidanceEvaluationCell.build(**values)
+
+    assert _guidance_evidence_current(mismatched, trace, (assessment,)) is False
+
+
+def test_guidance_cell_rejects_verifier_result_from_outside_its_trace() -> None:
+    cell, trace, assessment = _matched_guidance_cell_evidence()
+    values = cell.model_dump(mode="python", exclude={"content_hash"})
+    values["verifier_result_id"] = "other-verifier-result"
+    mismatched = GuidanceEvaluationCell.build(**values)
+
+    assert _guidance_evidence_current(mismatched, trace, (assessment,)) is False
+
+
+def test_guidance_cell_rejects_reward_assessment_for_another_trace() -> None:
+    cell, trace, assessment = _matched_guidance_cell_evidence()
+    other_trace = valid_trace(trace_id="other-trace")
+    other_assessment = assess_reward_validity(
+        other_trace.reward_observation,
+        other_trace,
+        (),
+        verifier_succeeded=True,
+    )
+    values = cell.model_dump(mode="python", exclude={"content_hash"})
+    values["reward_assessment_id"] = other_assessment.assessment_id
+    mismatched = GuidanceEvaluationCell.build(**values)
+
+    assert (
+        _guidance_evidence_current(
+            mismatched,
+            trace,
+            (assessment, other_assessment),
+        )
+        is False
+    )
+
+
+def test_guidance_cell_treats_a_missing_reward_record_as_stale_not_unmatched() -> None:
+    cell, trace, _assessment = _matched_guidance_cell_evidence()
+    missing_rewards = _LookupRepository({})
+
+    matched = _guidance_cell_evidence_matches(
+        cell,
+        traces=_LookupRepository({trace.trace_id: trace}),
+        rewards=missing_rewards,
+    )
+    current = _guidance_cell_evidence_is_current(
+        cell,
+        traces=_LookupRepository({trace.trace_id: trace}),
+        rewards=missing_rewards,
+        evidence=_LookupRepository(
+            {
+                cell.output_artifact_id or "unexpected-output": SimpleNamespace(),
+                cell.verifier_result_id or "unexpected-verifier": SimpleNamespace(),
+            }
+        ),
+    )
+
+    assert matched is True
+    assert current is False
 
 
 def test_matrix_analysis_is_recomputed_from_current_complete_evidence() -> None:
@@ -408,6 +576,132 @@ def test_trace_handler_rejects_tools_outside_the_exact_protocol_budget() -> None
     )
 
     assert decision.reasons[0].code is RejectionCode.UNMATCHED_BUDGETS
+
+
+def _complete_trace_evidence(trace: HarnessExecutionTrace) -> dict[str, object]:
+    binding = trace.observed_binding
+    exact_hashes = {
+        binding.task_id: binding.task_input_hash,
+        binding.model.model_id: binding.model_hash,
+        binding.harness.harness_id: binding.harness_hash,
+        binding.procedure_id: binding.procedure_hash,
+        binding.environment_id: binding.environment_hash,
+        binding.context_id: binding.context_hash,
+        binding.validator_id: binding.validator_hash,
+        binding.checker_id: binding.checker_hash,
+        binding.output_schema_id: binding.output_schema_hash,
+        trace.verifier_result_id: trace.verifier_result_hash,
+        trace.checker_result_id: trace.checker_result_hash,
+        **dict(zip(binding.artifact_ids, binding.artifact_hashes, strict=True)),
+        **{item.artifact_id: item.sha256 for item in trace.output_artifacts},
+        **{
+            item.evidence_id: item.response_hash.value
+            for item in trace.tool_observations
+            if item.response_hash.value is not None
+        },
+    }
+    if trace.reward_observation is not None:
+        exact_hashes[trace.reward_observation.observation_id] = (
+            trace.reward_observation.content_hash
+        )
+    sampling_hash = trace.generation_metadata.sampling_parameters_hash
+    if sampling_hash.evidence_id is not None and sampling_hash.value is not None:
+        exact_hashes[sampling_hash.evidence_id] = sampling_hash.value
+    retained = {
+        record_id: SimpleNamespace(content_hash=content_hash)
+        for record_id, content_hash in exact_hashes.items()
+    }
+    id_only = (
+        "artifact-integrity",
+        "boundary-monitor",
+        "capture-validity-evidence",
+        "compaction-evidence",
+        "environment-event-0",
+        "environment-event-1",
+        "evaluator-run",
+        "fixture-run",
+        "protocol-receipt",
+        "reserialization-evidence",
+        "response-envelope",
+        "reward-evidence",
+        "usage-meter",
+    )
+    for record_id in id_only:
+        retained.setdefault(record_id, SimpleNamespace(content_hash="a" * 64))
+    return retained
+
+
+@pytest.mark.parametrize(
+    "missing_evidence_id",
+    (
+        "artifact-integrity",
+        "boundary-monitor",
+        "candidate-output",
+        "capture-validity-evidence",
+        "compaction-evidence",
+        "environment-event-0",
+        "environment-event-1",
+        "evaluator-run",
+        "fixture-run",
+        "protocol-receipt",
+        "request-envelope",
+        "reserialization-evidence",
+        "response-envelope",
+        "reward-evidence",
+        "reward-observation-1",
+        "tool-call-1",
+        "usage-meter",
+    ),
+)
+def test_trace_currentness_requires_every_present_evidence_reference(
+    missing_evidence_id: str,
+) -> None:
+    trace = valid_trace(with_transformations=True)
+    retained = _complete_trace_evidence(trace)
+    retained.pop(missing_evidence_id)
+    capability = SimpleNamespace(evidence=_LookupRepository(retained))
+
+    assert HarnessTraceCapabilities.trace_evidence_is_current(capability, trace) is False
+
+
+def test_trace_currentness_accepts_complete_retained_evidence() -> None:
+    trace = valid_trace(with_transformations=True)
+    capability = SimpleNamespace(evidence=_LookupRepository(_complete_trace_evidence(trace)))
+
+    assert HarnessTraceCapabilities.trace_evidence_is_current(capability, trace) is True
+
+
+@pytest.mark.parametrize(
+    "mismatched_evidence_id",
+    (
+        "candidate-output",
+        "request-envelope",
+        "reward-observation-1",
+        "tool-call-1",
+    ),
+)
+def test_trace_currentness_requires_exact_hashes_for_hash_bound_evidence(
+    mismatched_evidence_id: str,
+) -> None:
+    trace = valid_trace(with_transformations=True)
+    retained = _complete_trace_evidence(trace)
+    retained[mismatched_evidence_id] = SimpleNamespace(content_hash="f" * 64)
+    capability = SimpleNamespace(evidence=_LookupRepository(retained))
+
+    assert HarnessTraceCapabilities.trace_evidence_is_current(capability, trace) is False
+
+
+def test_evidence_receipt_resolution_requires_the_exact_schema_version() -> None:
+    receipt = EvidenceReceipt(
+        record_id="retained-evidence",
+        schema_version=2,
+        content_hash="a" * 64,
+    )
+    evidence = _LookupRepository(
+        {"retained-evidence": SimpleNamespace(content_hash=receipt.content_hash)}
+    )
+
+    assert _receipt_is_current(receipt, evidence=evidence) is False
 
 
 def test_invalid_reward_is_retained_but_excluded_from_positive_evidence() -> None:

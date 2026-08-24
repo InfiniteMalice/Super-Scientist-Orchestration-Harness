@@ -105,7 +105,11 @@ def _receipt_is_current(
     rewards: RewardAssessmentRepository | None = None,
 ) -> bool:
     retained = evidence.get(receipt.record_id)
-    if retained is not None and retained.content_hash == receipt.content_hash:
+    if (
+        receipt.schema_version == 1
+        and retained is not None
+        and retained.content_hash == receipt.content_hash
+    ):
         return True
     candidates: tuple[object | None, ...] = (
         None if guidance_protocols is None else guidance_protocols.get(receipt.record_id),
@@ -124,6 +128,81 @@ def _receipt_is_current(
     return False
 
 
+def _evidence_id_is_current(evidence: EvidenceRepository, record_id: str) -> bool:
+    return evidence.get(record_id) is not None
+
+
+def _evidence_hash_is_current(
+    evidence: EvidenceRepository,
+    record_id: str,
+    content_hash: str,
+) -> bool:
+    retained = evidence.get(record_id)
+    return retained is not None and retained.content_hash == content_hash
+
+
+def _trace_hash_bound_evidence(trace: HarnessExecutionTrace) -> tuple[tuple[str, str], ...]:
+    binding = trace.observed_binding
+    evidence = (
+        (binding.task_id, binding.task_input_hash),
+        (binding.model.model_id, binding.model_hash),
+        (binding.harness.harness_id, binding.harness_hash),
+        (binding.procedure_id, binding.procedure_hash),
+        (binding.environment_id, binding.environment_hash),
+        (binding.context_id, binding.context_hash),
+        (binding.validator_id, binding.validator_hash),
+        (binding.checker_id, binding.checker_hash),
+        (binding.output_schema_id, binding.output_schema_hash),
+        (trace.verifier_result_id, trace.verifier_result_hash),
+        (trace.checker_result_id, trace.checker_result_hash),
+        *zip(binding.artifact_ids, binding.artifact_hashes, strict=True),
+        *((item.artifact_id, item.sha256) for item in trace.output_artifacts),
+        *(
+            (item.evidence_id, item.response_hash.value)
+            for item in trace.tool_observations
+            if item.response_hash.value is not None
+        ),
+    )
+    if trace.reward_observation is not None:
+        evidence = (
+            *evidence,
+            (trace.reward_observation.observation_id, trace.reward_observation.content_hash),
+        )
+    sampling_hash = trace.generation_metadata.sampling_parameters_hash
+    if sampling_hash.evidence_id is not None and sampling_hash.value is not None:
+        evidence = (*evidence, (sampling_hash.evidence_id, sampling_hash.value))
+    return evidence
+
+
+def _trace_id_only_evidence(trace: HarnessExecutionTrace) -> tuple[str, ...]:
+    available_values = (
+        trace.reward_observation_hash,
+        trace.capture_reward_validity,
+        trace.generation_metadata.token_ids,
+        trace.generation_metadata.token_count,
+        trace.generation_metadata.log_probabilities,
+        trace.generation_metadata.sampling_parameters_hash,
+        trace.generation_metadata.stop_reason,
+        trace.generation_metadata.provider_request_id,
+        trace.artifact_integrity,
+        trace.protected_boundary_crossed,
+        trace.evaluator_succeeded,
+    )
+    reward_evidence = (
+        ()
+        if trace.reward_observation is None or trace.reward_observation.evidence_id is None
+        else (trace.reward_observation.evidence_id,)
+    )
+    return (
+        *(item.evidence_id for item in trace.context_transformations),
+        *(item.evidence_id for item in trace.tool_observations),
+        *(item.evidence_id for item in trace.environment_events),
+        *trace.provenance_evidence_ids,
+        *(value.evidence_id for value in available_values if value.evidence_id is not None),
+        *reward_evidence,
+    )
+
+
 def _guidance_cell_evidence_is_current(
     cell: GuidanceEvaluationCell,
     *,
@@ -137,7 +216,53 @@ def _guidance_cell_evidence_is_current(
         cell.verifier_result_id is None or evidence.get(cell.verifier_result_id) is not None,
         cell.reward_assessment_id is None or rewards.get(cell.reward_assessment_id) is not None,
     )
-    return all(checks)
+    return all(checks) and _guidance_cell_evidence_matches(
+        cell,
+        traces=traces,
+        rewards=rewards,
+    )
+
+
+def _guidance_cell_evidence_matches(
+    cell: GuidanceEvaluationCell,
+    *,
+    traces: HarnessExecutionTraceRepository,
+    rewards: RewardAssessmentRepository,
+) -> bool:
+    trace = None if cell.trace_id is None else traces.get(cell.trace_id)
+    assessment = (
+        None if cell.reward_assessment_id is None else rewards.get(cell.reward_assessment_id)
+    )
+    trace_dependent_references_exist = any(
+        item is not None
+        for item in (
+            cell.output_artifact_id,
+            cell.verifier_result_id,
+            cell.reward_assessment_id,
+        )
+    )
+    if trace is None:
+        if cell.trace_id is not None:
+            return True
+        return not trace_dependent_references_exist
+    binding = trace.observed_binding
+    if (
+        binding.guidance_protocol != cell.protocol
+        or binding.protocol_id != cell.protocol_id
+        or binding.protocol_version != cell.protocol_version
+        or binding.protocol_hash != cell.protocol_hash
+        or binding.guidance_condition is not cell.condition
+    ):
+        return False
+    if cell.output_artifact_id is not None and cell.output_artifact_id not in {
+        item.artifact_id for item in trace.output_artifacts
+    }:
+        return False
+    if cell.verifier_result_id is not None and cell.verifier_result_id != trace.verifier_result_id:
+        return False
+    return assessment is None or (
+        assessment.trace_id == trace.trace_id and assessment.trace_hash == trace.content_hash
+    )
 
 
 def _resolved_chain_for_cell(
@@ -216,6 +341,13 @@ class GuidanceCellCapabilities:
 
     def get_guidance_cell(self, cell_id: str) -> GuidanceEvaluationCell | None:
         return self.cells.get(cell_id)
+
+    def guidance_cell_evidence_matches(self, cell: GuidanceEvaluationCell) -> bool:
+        return _guidance_cell_evidence_matches(
+            cell,
+            traces=self.traces,
+            rewards=self.rewards,
+        )
 
     def guidance_cell_evidence_is_current(self, cell: GuidanceEvaluationCell) -> bool:
         return _guidance_cell_evidence_is_current(
@@ -396,65 +528,15 @@ class HarnessTraceCapabilities:
         return self.traces.get(trace_id)
 
     def trace_evidence_is_current(self, trace: HarnessExecutionTrace) -> bool:
-        binding = trace.observed_binding
-        receipts = (
-            EvidenceReceipt(
-                record_id=binding.task_id, schema_version=1, content_hash=binding.task_input_hash
-            ),
-            EvidenceReceipt(
-                record_id=binding.model.model_id,
-                schema_version=binding.model.schema_version,
-                content_hash=binding.model_hash,
-            ),
-            EvidenceReceipt(
-                record_id=binding.harness.harness_id,
-                schema_version=binding.harness.schema_version,
-                content_hash=binding.harness_hash,
-            ),
-            EvidenceReceipt(
-                record_id=binding.procedure_id,
-                schema_version=1,
-                content_hash=binding.procedure_hash,
-            ),
-            EvidenceReceipt(
-                record_id=binding.environment_id,
-                schema_version=1,
-                content_hash=binding.environment_hash,
-            ),
-            EvidenceReceipt(
-                record_id=binding.context_id, schema_version=1, content_hash=binding.context_hash
-            ),
-            EvidenceReceipt(
-                record_id=binding.validator_id,
-                schema_version=1,
-                content_hash=binding.validator_hash,
-            ),
-            EvidenceReceipt(
-                record_id=binding.checker_id, schema_version=1, content_hash=binding.checker_hash
-            ),
-            EvidenceReceipt(
-                record_id=binding.output_schema_id,
-                schema_version=1,
-                content_hash=binding.output_schema_hash,
-            ),
-            EvidenceReceipt(
-                record_id=trace.verifier_result_id,
-                schema_version=1,
-                content_hash=trace.verifier_result_hash,
-            ),
-            EvidenceReceipt(
-                record_id=trace.checker_result_id,
-                schema_version=1,
-                content_hash=trace.checker_result_hash,
-            ),
-            *(
-                EvidenceReceipt(record_id=artifact_id, schema_version=1, content_hash=artifact_hash)
-                for artifact_id, artifact_hash in zip(
-                    binding.artifact_ids, binding.artifact_hashes, strict=True
-                )
-            ),
+        if not all(
+            _evidence_hash_is_current(self.evidence, record_id, content_hash)
+            for record_id, content_hash in _trace_hash_bound_evidence(trace)
+        ):
+            return False
+        return all(
+            _evidence_id_is_current(self.evidence, record_id)
+            for record_id in _trace_id_only_evidence(trace)
         )
-        return all(_receipt_is_current(item, evidence=self.evidence) for item in receipts)
 
     def append_authoritative(self, record: BaseModel) -> None:
         _require_exact_record(record, self.proposal.envelope.trace, HarnessExecutionTrace)

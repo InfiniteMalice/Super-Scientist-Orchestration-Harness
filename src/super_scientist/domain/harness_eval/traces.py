@@ -63,16 +63,19 @@ MAX_HARNESS_TRACE_CANONICAL_BYTES = 262_144
 UNTRUSTED_HARNESS_TRACE_ERROR = "untrusted harness execution trace is invalid"
 
 
-def _reject_nul_identifier(value: str) -> str:
+def _reject_unsafe_trace_identifier(value: str) -> str:
     if "\x00" in value:
         raise ValueError("Phase A identifier must not contain NUL")
+    lowered = value.casefold()
+    if "protected://" in lowered or "artifact://" in lowered:
+        raise ValueError("Phase A identifier must not contain a reversible location")
     return value
 
 
 BoundedTraceIdentifier = Annotated[
     StableIdentifier,
     Field(max_length=MAX_TRACE_IDENTIFIER_LENGTH),
-    AfterValidator(_reject_nul_identifier),
+    AfterValidator(_reject_unsafe_trace_identifier),
 ]
 BoundedCategoricalReward = Annotated[
     str,

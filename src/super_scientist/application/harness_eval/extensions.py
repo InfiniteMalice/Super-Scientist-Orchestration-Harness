@@ -82,6 +82,7 @@ class _GuidanceProtocolContext(_StrictContext):
 class _GuidanceCellContext(_StrictContext):
     protocol: GuidanceEvaluationProtocol | None
     existing: GuidanceEvaluationCell | None
+    evidence_matched: bool
     evidence_current: bool
 
 
@@ -124,6 +125,8 @@ class _GuidanceProtocolReads(Protocol):
 
 class _GuidanceCellReads(_GuidanceProtocolReads, Protocol):
     def get_guidance_cell(self, cell_id: str) -> GuidanceEvaluationCell | None: ...
+
+    def guidance_cell_evidence_matches(self, cell: GuidanceEvaluationCell) -> bool: ...
 
     def guidance_cell_evidence_is_current(self, cell: GuidanceEvaluationCell) -> bool: ...
 
@@ -244,6 +247,7 @@ class AppendGuidanceEvaluationCellHandler:
         return _GuidanceCellContext(
             protocol=capability.get_guidance_protocol(proposal.cell.protocol_id),
             existing=capability.get_guidance_cell(proposal.cell.cell_id),
+            evidence_matched=capability.guidance_cell_evidence_matches(proposal.cell),
             evidence_current=capability.guidance_cell_evidence_is_current(proposal.cell),
         )
 
@@ -263,6 +267,12 @@ class AppendGuidanceEvaluationCellHandler:
                 proposal.proposal_id,
                 RejectionCode.UNMATCHED_EVALUATION,
                 "guidance cell does not match the accepted protocol",
+            )
+        if not context.evidence_matched:
+            return _rejected(
+                proposal.proposal_id,
+                RejectionCode.UNMATCHED_EVALUATION,
+                "guidance cell evidence does not match the exact protocol execution",
             )
         if not context.evidence_current:
             return _rejected(

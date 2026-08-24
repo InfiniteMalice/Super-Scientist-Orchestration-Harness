@@ -98,13 +98,33 @@ def test_unavailable_log_probabilities_cannot_carry_values() -> None:
         )
 
 
-def test_trace_identifiers_cannot_encode_reversible_locations() -> None:
+@pytest.mark.parametrize(
+    "evidence_id",
+    (
+        "protected://store/answer",
+        "PROTECTED://store/answer",
+        "artifact://store/answer",
+        "ArTiFaCt://store/answer",
+    ),
+)
+def test_trace_identifiers_cannot_encode_reversible_locations(evidence_id: str) -> None:
     with pytest.raises(ValidationError):
         AvailableValue[str](
             status=MetadataAvailability.AVAILABLE,
             value=HASH_A,
-            evidence_id="protected://store/answer",
+            evidence_id=evidence_id,
         )
+
+
+@pytest.mark.parametrize("evidence_id", ("fixture/path", "evidence-Δ"))
+def test_trace_identifiers_retain_opaque_slashes_and_unicode(evidence_id: str) -> None:
+    value = AvailableValue[str](
+        status=MetadataAvailability.AVAILABLE,
+        value=HASH_A,
+        evidence_id=evidence_id,
+    )
+
+    assert value.evidence_id == evidence_id
 
 
 def test_observable_artifact_conversion_discards_reversible_location() -> None:
