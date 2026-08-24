@@ -11,6 +11,7 @@ from typing import cast
 import pytest
 from sqlalchemy import Engine, text
 
+from super_scientist.application.harness_eval import fixed_harness_extension_handlers
 from super_scientist.application.harness_eval.service import (
     HarnessEvaluationService,
     _campaign_matches_record,
@@ -86,6 +87,26 @@ from super_scientist.providers.storage.protected_evaluation import (
 
 NOW = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
 SECRET = b"integration-held-out-answer-task-15"
+
+
+def test_extension_handlers_are_evidence_only_and_disjoint_from_campaign_authority() -> None:
+    extension_routes = tuple(
+        handler.proposal_type for handler in fixed_harness_extension_handlers()
+    )
+
+    assert extension_routes == (
+        "record_guidance_evaluation_protocol",
+        "append_guidance_evaluation_cell",
+        "record_model_harness_protocol",
+        "append_model_harness_cell",
+        "record_model_harness_analysis",
+        "record_harness_execution_trace",
+        "record_reward_assessment",
+    )
+    assert not {
+        "create_harness_campaign",
+        "decide_harness_campaign",
+    }.intersection(extension_routes)
 
 
 class _Clock:
@@ -169,13 +190,14 @@ class Runtime:
         identifier_field = identifier_fields[table]
         with self.engine.begin() as connection:
             connection.exec_driver_sql(f"DROP TRIGGER {table}_no_update")
-            row = connection.execute(
-                text(
-                    f"SELECT record_json FROM {table} "
-                    f"WHERE {identifier_field} = :record_id"
-                ),
-                {"record_id": record_id},
-            ).mappings().one()
+            row = (
+                connection.execute(
+                    text(f"SELECT record_json FROM {table} WHERE {identifier_field} = :record_id"),
+                    {"record_id": record_id},
+                )
+                .mappings()
+                .one()
+            )
             record = json.loads(str(row["record_json"]))
             record.update(values)
             connection.execute(
@@ -238,9 +260,7 @@ def test_harness_observation_tampering_invalidates_workspace(runtime: Runtime) -
         values={"candidate_output_hash": "0" * 64},
     )
     with runtime.uow_factory() as unit_of_work:
-        assert (
-            verify_workspace(unit_of_work.repositories(), runtime.artifacts).valid is False
-        )
+        assert verify_workspace(unit_of_work.repositories(), runtime.artifacts).valid is False
 
 
 @pytest.mark.integration

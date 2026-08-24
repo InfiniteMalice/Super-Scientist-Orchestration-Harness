@@ -10,6 +10,10 @@ from super_scientist.application.harness_eval.capabilities import (
     PublicTaskInputReader,
     create_candidate_execution_context,
 )
+from super_scientist.application.harness_eval.extensions import (
+    HarnessTraceProposalAdapter,
+    fixed_harness_extension_handlers,
+)
 from super_scientist.application.harness_eval.service import (
     HarnessEvaluationService,
     campaign_export_bytes,
@@ -23,6 +27,7 @@ __all__ = [
     "DecisionAuthorityCapability",
     "EvaluatorExecutorCapability",
     "HarnessEvaluationService",
+    "HarnessTraceProposalAdapter",
     "InMemoryPublicTaskInputReader",
     "OutputOnlyEvaluatorExecutor",
     "PublicTaskInputReader",
@@ -30,4 +35,5 @@ __all__ = [
     "compare_budgets",
     "create_candidate_execution_context",
     "decide_campaign",
+    "fixed_harness_extension_handlers",
 ]
