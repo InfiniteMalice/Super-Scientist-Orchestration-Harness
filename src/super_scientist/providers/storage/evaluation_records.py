@@ -34,6 +34,7 @@ from super_scientist.kernel.transactions.models import (
 from super_scientist.providers.storage.cognitive_records import (
     BoundedStorageIdentifier,
     GovernedAppendOnlyRecordRepository,
+    _GovernedProvenanceSnapshot,
     _require_proposal_transaction,
     _StrictGovernedStorageEnvelope,
 )
@@ -307,6 +308,12 @@ class HarnessExecutionTraceRepository:
     def list_all(self) -> tuple[HarnessExecutionTrace, ...]:
         return tuple(item.record for item in self._records.list_all())
 
+    def _list_all_with_provenance(
+        self,
+        snapshot: _GovernedProvenanceSnapshot,
+    ) -> tuple[HarnessExecutionTrace, ...]:
+        return tuple(item.record for item in self._records._list_all_with_provenance(snapshot))
+
     def list_for_protocol(self, protocol_id: str) -> tuple[HarnessExecutionTrace, ...]:
         return tuple(
             item.record for item in self._records._list_by_relationship("protocol_id", protocol_id)
@@ -355,6 +362,12 @@ class RewardAssessmentRepository:
 
     def list_all(self) -> tuple[RewardValidityAssessment, ...]:
         return tuple(item.record for item in self._records.list_all())
+
+    def _list_all_with_provenance(
+        self,
+        snapshot: _GovernedProvenanceSnapshot,
+    ) -> tuple[RewardValidityAssessment, ...]:
+        return tuple(item.record for item in self._records._list_all_with_provenance(snapshot))
 
     def list_for_trace(self, trace_id: str) -> tuple[RewardValidityAssessment, ...]:
         return tuple(

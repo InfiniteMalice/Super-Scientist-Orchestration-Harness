@@ -775,6 +775,28 @@ class TransactionRepository:
         )
         return None if row is None else _decode_transaction_row(dict(row))
 
+    def get_many_by_proposal_ids(
+        self,
+        proposal_ids: tuple[str, ...],
+    ) -> tuple[StoredTransaction, ...]:
+        exact_ids = tuple(sorted(set(proposal_ids)))
+        if not exact_ids:
+            return ()
+        rows = self._connection.execute(
+            select(
+                transactions.c.proposal_id,
+                transactions.c.idempotency_key,
+                transactions.c.intent_fingerprint,
+                transactions.c.proposal_json,
+                transactions.c.proposal_hash,
+                transactions.c.decision_json,
+                transactions.c.created_at,
+            )
+            .where(transactions.c.proposal_id.in_(exact_ids))
+            .order_by(transactions.c.proposal_id)
+        ).mappings()
+        return tuple(_decode_transaction_row(dict(row)) for row in rows)
+
     def list_all(self) -> tuple[StoredTransaction, ...]:
         rows = self._connection.execute(
             select(
@@ -1192,25 +1214,52 @@ class RepositorySet:
             PeerRequestRepository,
             ProcedureCompilationRepository,
             TopologyEventRepository,
+            _load_governed_provenance_snapshot,
         )
 
+        provenance = _load_governed_provenance_snapshot(self._connection)
         return CognitiveIntegritySnapshot(
-            capability_profiles=CapabilityProfileRepository(self._connection).list_all(),
-            cohort_plans=CohortPlanRepository(self._connection).list_all(),
-            diversity_assessments=DiversityAssessmentRepository(self._connection).list_all(),
-            collaboration_sessions=CollaborationSessionRepository(self._connection).list_all(),
-            peer_requests=PeerRequestRepository(self._connection).list_all(),
-            peer_contributions=PeerContributionRepository(self._connection).list_all(),
-            topology_events=TopologyEventRepository(self._connection).list_all(),
-            terminations=CollaborationTerminationRepository(self._connection).list_all(),
-            compilations=ProcedureCompilationRepository(self._connection).list_all(),
-            method_outcomes=MethodDirectionOutcomeRepository(self._connection).list_all(),
-            bindings=CompiledProgressPlanBindingRepository(self._connection).list_all(),
+            capability_profiles=CapabilityProfileRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            cohort_plans=CohortPlanRepository(self._connection)._list_all_with_provenance(
+                provenance
+            ),
+            diversity_assessments=DiversityAssessmentRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            collaboration_sessions=CollaborationSessionRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            peer_requests=PeerRequestRepository(self._connection)._list_all_with_provenance(
+                provenance
+            ),
+            peer_contributions=PeerContributionRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            topology_events=TopologyEventRepository(self._connection)._list_all_with_provenance(
+                provenance
+            ),
+            terminations=CollaborationTerminationRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            compilations=ProcedureCompilationRepository(self._connection)._list_all_with_provenance(
+                provenance
+            ),
+            method_outcomes=MethodDirectionOutcomeRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            bindings=CompiledProgressPlanBindingRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
         )
 
     def evaluation_extension_integrity_snapshot(
         self,
     ) -> EvaluationExtensionIntegritySnapshot:
+        from super_scientist.providers.storage.cognitive_records import (
+            _load_governed_provenance_snapshot,
+        )
         from super_scientist.providers.storage.evaluation_records import (
             GuidanceCellRepository,
             GuidanceEvaluationProtocolRepository,
@@ -1221,14 +1270,29 @@ class RepositorySet:
             RewardAssessmentRepository,
         )
 
+        provenance = _load_governed_provenance_snapshot(self._connection)
         return EvaluationExtensionIntegritySnapshot(
-            guidance_protocols=GuidanceEvaluationProtocolRepository(self._connection).list_all(),
-            guidance_cells=GuidanceCellRepository(self._connection).list_all(),
-            model_harness_protocols=ModelHarnessProtocolRepository(self._connection).list_all(),
-            model_harness_cells=ModelHarnessCellRepository(self._connection).list_all(),
-            model_harness_analyses=ModelHarnessAnalysisRepository(self._connection).list_all(),
-            harness_execution_traces=HarnessExecutionTraceRepository(self._connection).list_all(),
-            reward_assessments=RewardAssessmentRepository(self._connection).list_all(),
+            guidance_protocols=GuidanceEvaluationProtocolRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            guidance_cells=GuidanceCellRepository(self._connection)._list_all_with_provenance(
+                provenance
+            ),
+            model_harness_protocols=ModelHarnessProtocolRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            model_harness_cells=ModelHarnessCellRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            model_harness_analyses=ModelHarnessAnalysisRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            harness_execution_traces=HarnessExecutionTraceRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            reward_assessments=RewardAssessmentRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
         )
 
     def has_durable_state(self) -> bool:

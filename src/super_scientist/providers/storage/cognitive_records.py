@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
+from types import MappingProxyType
 from typing import Annotated, Never, Self
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, model_validator
-from sqlalchemy import Connection, insert
+from sqlalchemy import Connection, insert, select
 
 from super_scientist.domain.cognition.models import (
     CapabilityProfile,
@@ -41,6 +43,7 @@ from super_scientist.kernel.transactions.models import (
     AppendTopologyEvent,
     BindCompiledProgressPlan,
     GovernedProposalBase,
+    Proposal,
     RecordCapabilityProfile,
     RecordCohortPlan,
     RecordCollaborationSession,
@@ -183,10 +186,110 @@ class MethodDirectionOutcomeStorageEnvelope(_StrictGovernedStorageEnvelope):
         return self
 
 
+@dataclass(frozen=True, slots=True)
+class _ParsedTransactionAuditBinding:
+    proposal: Proposal
+    proposal_hash: str
+    decision: TransactionDecision
+    intent_fingerprint: str | None
+    governing_policy_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class _GovernedProvenanceBinding:
+    transaction: StoredTransaction
+    exact_audit_policy_hashes: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _GovernedProvenanceSnapshot:
+    bindings: Mapping[str, _GovernedProvenanceBinding]
+
+
 class GovernedAppendOnlyRecordRepository[RecordT: BaseModel](AppendOnlyRecordRepository[RecordT]):
     """Append-only storage for one fixed governed table and model."""
 
     _record_decoder: Callable[[str], RecordT] | None = None
+
+    def get(self, record_id: str) -> RecordT | None:
+        row = (
+            self._connection.execute(
+                select(self._table).where(self._table.c[self._identifier_field] == record_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        exact_row = dict(row)
+        snapshot = _load_governed_provenance_snapshot(
+            self._connection,
+            (_exact_string(exact_row.get("transaction_id")),),
+        )
+        return self._decode_row_with_provenance(exact_row, snapshot)
+
+    def list_all(self) -> tuple[RecordT, ...]:
+        rows = tuple(
+            dict(row)
+            for row in self._connection.execute(
+                select(self._table).order_by(self._table.c[self._identifier_field])
+            ).mappings()
+        )
+        return self._decode_rows_with_new_provenance_snapshot(rows)
+
+    def _list_by_relationship(
+        self,
+        column_name: str,
+        value: str | int,
+    ) -> tuple[RecordT, ...]:
+        _require_storage(
+            column_name in self._relationship_fields,
+            "unknown relationship column",
+        )
+        rows = tuple(
+            dict(row)
+            for row in self._connection.execute(
+                select(self._table)
+                .where(self._table.c[column_name] == value)
+                .order_by(self._table.c[self._identifier_field])
+            ).mappings()
+        )
+        return self._decode_rows_with_new_provenance_snapshot(rows)
+
+    def _get_many(self, record_ids: tuple[str, ...]) -> tuple[RecordT, ...]:
+        if not record_ids:
+            return ()
+        rows = tuple(
+            dict(row)
+            for row in self._connection.execute(
+                select(self._table)
+                .where(self._table.c[self._identifier_field].in_(record_ids))
+                .order_by(self._table.c[self._identifier_field])
+            ).mappings()
+        )
+        return self._decode_rows_with_new_provenance_snapshot(rows)
+
+    def _list_all_with_provenance(
+        self,
+        snapshot: _GovernedProvenanceSnapshot,
+    ) -> tuple[RecordT, ...]:
+        rows = self._connection.execute(
+            select(self._table).order_by(self._table.c[self._identifier_field])
+        ).mappings()
+        return tuple(self._decode_row_with_provenance(dict(row), snapshot) for row in rows)
+
+    def _decode_rows_with_new_provenance_snapshot(
+        self,
+        rows: tuple[dict[str, object], ...],
+    ) -> tuple[RecordT, ...]:
+        if not rows:
+            return ()
+        transaction_ids = tuple(_exact_string(row.get("transaction_id")) for row in rows)
+        snapshot = _load_governed_provenance_snapshot(
+            self._connection,
+            transaction_ids,
+        )
+        return tuple(self._decode_row_with_provenance(row, snapshot) for row in rows)
 
     def add(  # type: ignore[override]
         self,
@@ -259,6 +362,17 @@ class GovernedAppendOnlyRecordRepository[RecordT: BaseModel](AppendOnlyRecordRep
         self._connection.execute(insert(self._table).values(**values))
 
     def _decode_row(self, row: Mapping[str, object]) -> RecordT:
+        snapshot = _load_governed_provenance_snapshot(
+            self._connection,
+            (_exact_string(row.get("transaction_id")),),
+        )
+        return self._decode_row_with_provenance(row, snapshot)
+
+    def _decode_row_with_provenance(
+        self,
+        row: Mapping[str, object],
+        snapshot: _GovernedProvenanceSnapshot,
+    ) -> RecordT:
         try:
             record_json = _exact_string(row.get("record_json"))
             content_hash = _exact_string(row.get("content_hash"))
@@ -331,7 +445,7 @@ class GovernedAppendOnlyRecordRepository[RecordT: BaseModel](AppendOnlyRecordRep
                 "governing_policy_hash does not match record_json",
             )
         _require_matching_accepted_transaction(
-            self._connection,
+            snapshot,
             _exact_string(transaction_id),
             _exact_string(governing_policy_hash),
             record,
@@ -395,40 +509,66 @@ def _require_proposal_transaction(
 
 
 def _require_matching_accepted_transaction(
-    connection: Connection,
+    snapshot: _GovernedProvenanceSnapshot,
     transaction_id: str,
     governing_policy_hash: str,
     record: BaseModel,
 ) -> None:
-    try:
-        transaction = TransactionRepository(connection).get_by_proposal_id(transaction_id)
-        audit_events = AuditRepository(connection).list_all()
-    except StorageIntegrityError:
-        transaction_lookup_failed = True
-        transaction = None
-        audit_events = ()
-    else:
-        transaction_lookup_failed = False
+    binding = snapshot.bindings.get(transaction_id)
     if (
-        transaction_lookup_failed
-        or transaction is None
-        or not transaction.decision.accepted
-        or not _proposal_projection_matches(transaction.proposal, record)
+        binding is None
+        or not binding.transaction.decision.accepted
+        or not _proposal_projection_matches(binding.transaction.proposal, record)
     ):
         _raise_storage_integrity("transaction provenance does not match record_json")
-    matching_policy_hashes = tuple(
-        policy_hash
-        for event in audit_events
-        if (policy_hash := _exact_transaction_audit_policy(event, transaction)) is not None
-    )
-    if matching_policy_hashes != (governing_policy_hash,):
+    if binding.exact_audit_policy_hashes != (governing_policy_hash,):
         _raise_storage_integrity("governing_policy_hash does not match transaction audit")
 
 
-def _exact_transaction_audit_policy(
+def _load_governed_provenance_snapshot(
+    connection: Connection,
+    transaction_ids: tuple[str, ...] | None = None,
+) -> _GovernedProvenanceSnapshot:
+    try:
+        transaction_repository = TransactionRepository(connection)
+        transactions = (
+            transaction_repository.list_all()
+            if transaction_ids is None
+            else transaction_repository.get_many_by_proposal_ids(transaction_ids)
+        )
+        audit_events = AuditRepository(connection).list_all()
+    except StorageIntegrityError:
+        invalid_provenance_storage = True
+        transactions = ()
+        audit_events = ()
+    else:
+        invalid_provenance_storage = False
+    if invalid_provenance_storage:
+        _raise_storage_integrity("transaction provenance does not match record_json")
+
+    audits_by_proposal_id: dict[str, list[_ParsedTransactionAuditBinding]] = {}
+    for event in audit_events:
+        parsed = _parse_transaction_audit_binding(event)
+        if parsed is not None:
+            audits_by_proposal_id.setdefault(parsed.proposal.proposal_id, []).append(parsed)
+
+    bindings: dict[str, _GovernedProvenanceBinding] = {}
+    for transaction in transactions:
+        exact_audits = tuple(
+            audit
+            for audit in audits_by_proposal_id.get(transaction.proposal.proposal_id, ())
+            if _audit_binding_matches_transaction(audit, transaction)
+        )
+        bindings[transaction.proposal.proposal_id] = _GovernedProvenanceBinding(
+            transaction=transaction,
+            exact_audit_policy_hashes=tuple(audit.governing_policy_hash for audit in exact_audits),
+        )
+    return _GovernedProvenanceSnapshot(bindings=MappingProxyType(bindings))
+
+
+def _parse_transaction_audit_binding(
     event: AuditEvent,
-    transaction: StoredTransaction,
-) -> str | None:
+) -> _ParsedTransactionAuditBinding | None:
     if event.event_type != "transaction_decision":
         return None
     payload = json_compatible_payload(event.payload)
@@ -462,19 +602,33 @@ def _exact_transaction_audit_policy(
         return None
     if (
         payload.get("transaction_persisted") is not True
-        or audited_proposal != transaction.proposal
-        or audited_proposal.proposal_id != transaction.proposal.proposal_id
-        or audited_decision != transaction.decision
-        or audited_decision.proposal_id != transaction.proposal.proposal_id
-        or sha256_hex(
-            canonical_json_bytes(audited_proposal.model_dump(mode="json", warnings=False))
-        )
-        != transaction.proposal_hash
-        or audited_intent_fingerprint != transaction.intent_fingerprint
         or stored_policy_hash != policy_hash
+        or audited_decision.proposal_id != audited_proposal.proposal_id
     ):
         return None
-    return policy_hash
+    return _ParsedTransactionAuditBinding(
+        proposal=audited_proposal,
+        proposal_hash=sha256_hex(
+            canonical_json_bytes(audited_proposal.model_dump(mode="json", warnings=False))
+        ),
+        decision=audited_decision,
+        intent_fingerprint=audited_intent_fingerprint,
+        governing_policy_hash=policy_hash,
+    )
+
+
+def _audit_binding_matches_transaction(
+    audit: _ParsedTransactionAuditBinding,
+    transaction: StoredTransaction,
+) -> bool:
+    return (
+        audit.proposal == transaction.proposal
+        and audit.proposal.proposal_id == transaction.proposal.proposal_id
+        and audit.proposal_hash == transaction.proposal_hash
+        and audit.decision == transaction.decision
+        and audit.decision.proposal_id == transaction.proposal.proposal_id
+        and audit.intent_fingerprint == transaction.intent_fingerprint
+    )
 
 
 def _proposal_projection_matches(proposal: object, record: BaseModel) -> bool:
@@ -690,6 +844,12 @@ class CollaborationSessionRepository:
     def list_all(self) -> tuple[CollaborationSession, ...]:
         return tuple(item.record for item in self._records.list_all())
 
+    def _list_all_with_provenance(
+        self,
+        snapshot: _GovernedProvenanceSnapshot,
+    ) -> tuple[CollaborationSession, ...]:
+        return tuple(item.record for item in self._records._list_all_with_provenance(snapshot))
+
     def list_for_cohort_plan(self, cohort_plan_id: str) -> tuple[CollaborationSession, ...]:
         return tuple(
             item.record
@@ -836,6 +996,12 @@ class CollaborationTerminationRepository:
     def list_all(self) -> tuple[CollaborationTermination, ...]:
         return tuple(item.record for item in self._records.list_all())
 
+    def _list_all_with_provenance(
+        self,
+        snapshot: _GovernedProvenanceSnapshot,
+    ) -> tuple[CollaborationTermination, ...]:
+        return tuple(item.record for item in self._records._list_all_with_provenance(snapshot))
+
 
 class ProcedureCompilationRepository(
     GovernedAppendOnlyRecordRepository[ProcedureCompilationRecord]
@@ -917,6 +1083,12 @@ class MethodDirectionOutcomeRepository:
 
     def list_all(self) -> tuple[MethodDirectionOutcome, ...]:
         return tuple(item.record for item in self._records.list_all())
+
+    def _list_all_with_provenance(
+        self,
+        snapshot: _GovernedProvenanceSnapshot,
+    ) -> tuple[MethodDirectionOutcome, ...]:
+        return tuple(item.record for item in self._records._list_all_with_provenance(snapshot))
 
     def list_for_compilation(self, compilation_id: str) -> tuple[MethodDirectionOutcome, ...]:
         return tuple(

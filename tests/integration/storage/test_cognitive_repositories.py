@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy.engine import Connection
 
 from super_scientist.config.loader import policy_hash
@@ -37,6 +38,7 @@ from super_scientist.kernel.transactions.models import (
     RejectionCode,
     TransactionDecision,
 )
+from super_scientist.providers.storage import repositories as repositories_module
 from super_scientist.providers.storage.cognitive_records import (
     CapabilityProfileRepository,
     CohortPlanRepository,
@@ -410,6 +412,88 @@ def _assert_detached_integrity_error(error: StorageIntegrityError, sentinel: str
     assert error.__cause__ is None
     assert error.__context__ is None
     assert sentinel not in str(error)
+
+
+@pytest.mark.integration
+def test_bulk_reads_build_one_operation_scoped_provenance_snapshot(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'bulk-provenance.db').as_posix()}"
+    upgrade_database(database_url)
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection, connection.begin():
+            repositories = RepositorySet(connection)
+            repository = CapabilityProfileRepository(connection)
+            for index in range(8):
+                record = profile(f"peer-{index}")
+                proposal = RecordCapabilityProfile(
+                    proposal_id=f"proposal-profile-{index}",
+                    idempotency_key=f"proposal-profile-{index}",
+                    proposer=actor("coordinator"),
+                    profile=record,
+                )
+                _persist_accepted_with_audit(repositories, proposal, POLICY_HASH)
+                repository.add_from_proposal(
+                    proposal,
+                    created_at=NOW,
+                    transaction_id=proposal.proposal_id,
+                    governing_policy_hash=POLICY_HASH,
+                )
+
+            statements: list[str] = []
+
+            def record_statement(
+                _connection,
+                _cursor,
+                statement: str,
+                _parameters,
+                _context,
+                _executemany,
+            ) -> None:
+                statements.append(statement.lower())
+
+            verification_count = 0
+            real_verify_chain = repositories_module.verify_chain
+
+            def count_verify_chain(events):
+                nonlocal verification_count
+                verification_count += 1
+                return real_verify_chain(events)
+
+            monkeypatch.setattr(repositories_module, "verify_chain", count_verify_chain)
+            sqlalchemy_event.listen(connection, "before_cursor_execute", record_statement)
+            try:
+                assert len(repository.list_all()) == 8
+                assert sum("from audit_events" in item for item in statements) == 1
+                assert sum("from transactions" in item for item in statements) == 1
+                assert verification_count == 1
+
+                new_record = profile("peer-after-first-read")
+                new_proposal = RecordCapabilityProfile(
+                    proposal_id="proposal-profile-after-first-read",
+                    idempotency_key="proposal-profile-after-first-read",
+                    proposer=actor("coordinator"),
+                    profile=new_record,
+                )
+                _persist_accepted_with_audit(repositories, new_proposal, POLICY_HASH)
+                repository.add_from_proposal(
+                    new_proposal,
+                    created_at=NOW,
+                    transaction_id=new_proposal.proposal_id,
+                    governing_policy_hash=POLICY_HASH,
+                )
+                statements.clear()
+                verification_count = 0
+                assert len(repositories.cognitive_integrity_snapshot().capability_profiles) == 9
+                assert sum("from audit_events" in item for item in statements) == 1
+                assert sum("from transactions" in item for item in statements) == 1
+                assert verification_count == 1
+            finally:
+                sqlalchemy_event.remove(connection, "before_cursor_execute", record_statement)
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.integration
