@@ -218,8 +218,29 @@ def _task_8_and_13_namespace() -> dict[str, object]:
     return namespace
 
 
-def _assert_detached_proposal_boundary_error(error: BaseException) -> None:
-    assert type(error) is _ProposalBoundaryValidationError
+def _runtime_task_8_namespace() -> dict[str, object]:
+    return dict(vars(transaction_models))
+
+
+@pytest.fixture(params=("plan", "runtime"))
+def task_8_namespace(request: pytest.FixtureRequest) -> dict[str, object]:
+    if request.param == "plan":
+        return _task_8_and_13_namespace()
+    return _runtime_task_8_namespace()
+
+
+def _boundary_error_type(namespace: dict[str, object]) -> type[ValueError]:
+    boundary_error = namespace["ProposalBoundaryValidationError"]
+    assert isinstance(boundary_error, type)
+    assert issubclass(boundary_error, ValueError)
+    return boundary_error
+
+
+def _assert_detached_proposal_boundary_error(
+    error: BaseException,
+    expected_type: type[ValueError] = _ProposalBoundaryValidationError,
+) -> None:
+    assert type(error) is expected_type
     assert str(error) == "transaction proposal failed validation"
     assert error.__cause__ is None
     assert error.__context__ is None
@@ -552,8 +573,10 @@ def test_task_8_declares_every_governed_proposal_and_bounds_each_collection() ->
         }
 
 
-def test_task_8_all_governed_proposals_round_trip_through_fixed_parser() -> None:
-    namespace = _task_8_and_13_namespace()
+def test_task_8_all_governed_proposals_round_trip_through_fixed_parser(
+    task_8_namespace: dict[str, object],
+) -> None:
+    namespace = task_8_namespace
     proposals = _governed_proposal_examples(namespace)
 
     assert tuple(type(proposal).__name__ for proposal in proposals) == (
@@ -616,8 +639,104 @@ def test_task_8_runtime_parser_rejects_unknown_governed_field_with_detached_erro
     assert error.value.__context__ is None
 
 
-def test_task_8_reward_proposal_json_round_trip_preserves_tagged_value_kind() -> None:
-    namespace = _task_8_and_13_namespace()
+def test_task_8_parser_rejects_nested_governed_extras(
+    task_8_namespace: dict[str, object],
+) -> None:
+    namespace = task_8_namespace
+    boundary_error = _boundary_error_type(namespace)
+    proposal = _governed_proposal_examples(namespace)[0]
+    payload = proposal.model_dump(mode="json")
+    payload["profile"]["unexpected"] = True
+
+    with pytest.raises(boundary_error) as error:
+        namespace["parse_untrusted_proposal_json"](canonical_json_bytes(payload))
+
+    _assert_detached_proposal_boundary_error(error.value, boundary_error)
+
+
+def test_task_8_runtime_parser_exact_gate_and_resource_bounds_avoid_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_adapter = transaction_models.PROPOSAL_ADAPTER
+    validated_values: list[str | bytes] = []
+
+    class RecordingAdapter:
+        def validate_json(self, value: str | bytes) -> Proposal:
+            validated_values.append(value)
+            return real_adapter.validate_json(value)
+
+        def validate_python(self, value: object, *, strict: bool) -> Proposal:
+            return real_adapter.validate_python(value, strict=strict)
+
+    monkeypatch.setattr(transaction_models, "PROPOSAL_ADAPTER", RecordingAdapter())
+    proposal = _evidence_proposal()
+    text_payload = proposal.model_dump_json()
+    bytes_payload = text_payload.encode("utf-8")
+
+    assert transaction_models.parse_untrusted_proposal_json(text_payload) == proposal
+    assert transaction_models.parse_untrusted_proposal_json(bytes_payload) == proposal
+    assert validated_values == [text_payload, bytes_payload]
+
+    hooks: list[str] = []
+
+    class HostileStr(str):
+        def __len__(self) -> int:
+            hooks.append("str-len")
+            return super().__len__()
+
+    class HostileBytes(bytes):
+        def __len__(self) -> int:
+            hooks.append("bytes-len")
+            return super().__len__()
+
+    class HostileByteArray(bytearray):
+        def __len__(self) -> int:
+            hooks.append("bytearray-len")
+            return super().__len__()
+
+    class HookedMeta(type):
+        def __getattribute__(cls, name: str) -> object:
+            hooks.append(f"metaclass-{name}")
+            return super().__getattribute__(name)
+
+    class MetaclassBacked(metaclass=HookedMeta):
+        pass
+
+    oversized_multibyte = "\N{EURO SIGN}" * (transaction_models.MAX_PROPOSAL_BYTES // 3 + 1)
+    over_depth = (
+        "[" * (transaction_models.MAX_PROPOSAL_JSON_DEPTH + 1)
+        + "0"
+        + "]" * (transaction_models.MAX_PROPOSAL_JSON_DEPTH + 1)
+    )
+    over_nodes = json.dumps([0] * transaction_models.MAX_PROPOSAL_JSON_NODES)
+    over_container = json.dumps([0] * (transaction_models.MAX_PROPOSAL_JSON_CONTAINER_ITEMS + 1))
+    rejected_values = (
+        HostileStr(text_payload),
+        HostileBytes(bytes_payload),
+        HostileByteArray(bytes_payload),
+        MetaclassBacked,
+        oversized_multibyte,
+        over_depth,
+        over_nodes,
+        over_container,
+    )
+
+    for rejected in rejected_values:
+        with pytest.raises(transaction_models.ProposalBoundaryValidationError) as error:
+            transaction_models.parse_untrusted_proposal_json(rejected)
+        _assert_detached_proposal_boundary_error(
+            error.value,
+            transaction_models.ProposalBoundaryValidationError,
+        )
+
+    assert hooks == []
+    assert validated_values == [text_payload, bytes_payload]
+
+
+def test_task_8_reward_proposal_json_round_trip_preserves_tagged_value_kind(
+    task_8_namespace: dict[str, object],
+) -> None:
+    namespace = task_8_namespace
     from tests.unit.harness_eval.test_rewards import (
         assess_reward_validity as valid_assessment,
     )
@@ -652,8 +771,11 @@ def test_task_8_reward_proposal_json_round_trip_preserves_tagged_value_kind() ->
         assert type(parsed.observation.value) is type(reward_value)
 
 
-def test_task_8_governed_json_normalizer_bounds_collections() -> None:
-    namespace = _task_8_and_13_namespace()
+def test_task_8_governed_json_normalizer_bounds_collections(
+    task_8_namespace: dict[str, object],
+) -> None:
+    namespace = task_8_namespace
+    boundary_error = _boundary_error_type(namespace)
     normalize = namespace["_normalize_json_proposal_value"]
     maximum = namespace["MAX_PROPOSAL_RECONSTRUCTION_ITEMS"]
     exact_array = ["item"] * maximum
@@ -680,13 +802,16 @@ def test_task_8_governed_json_normalizer_bounds_collections() -> None:
 
     excessive_payload = maximum_proposal.model_dump(mode="json")
     excessive_payload["profile_receipts"].append(receipt.model_dump(mode="json"))
-    with pytest.raises(_ProposalBoundaryValidationError) as error:
+    with pytest.raises(boundary_error) as error:
         namespace["parse_untrusted_proposal_json"](json.dumps(excessive_payload))
-    _assert_detached_proposal_boundary_error(error.value)
+    _assert_detached_proposal_boundary_error(error.value, boundary_error)
 
 
-def test_task_8_governed_parser_detaches_coercive_and_oversized_json() -> None:
-    namespace = _task_8_and_13_namespace()
+def test_task_8_governed_parser_detaches_coercive_and_oversized_json(
+    task_8_namespace: dict[str, object],
+) -> None:
+    namespace = task_8_namespace
+    boundary_error = _boundary_error_type(namespace)
     proposals = {
         type(proposal).__name__: proposal for proposal in _governed_proposal_examples(namespace)
     }
@@ -719,9 +844,9 @@ def test_task_8_governed_parser_detaches_coercive_and_oversized_json() -> None:
     mutations.append(oversized_collection)
 
     for payload in mutations:
-        with pytest.raises(_ProposalBoundaryValidationError) as error:
+        with pytest.raises(boundary_error) as error:
             namespace["parse_untrusted_proposal_json"](json.dumps(payload))
-        _assert_detached_proposal_boundary_error(error.value)
+        _assert_detached_proposal_boundary_error(error.value, boundary_error)
 
     with pytest.raises(ValidationError):
         namespace["RecordGuidanceEvaluationProtocol"].model_validate(
@@ -730,8 +855,11 @@ def test_task_8_governed_parser_detaches_coercive_and_oversized_json() -> None:
         )
 
 
-def test_task_8_reward_json_requires_exact_tag_before_union_fallback() -> None:
-    namespace = _task_8_and_13_namespace()
+def test_task_8_reward_json_requires_exact_tag_before_union_fallback(
+    task_8_namespace: dict[str, object],
+) -> None:
+    namespace = task_8_namespace
+    boundary_error = _boundary_error_type(namespace)
     reward = next(
         proposal
         for proposal in _governed_proposal_examples(namespace)
@@ -741,16 +869,18 @@ def test_task_8_reward_json_requires_exact_tag_before_union_fallback() -> None:
     for bare_value in ("0.9", "PASS", 0.9, ["numeric", "0.9"]):
         payload = reward.model_dump(mode="json")
         payload["observation"]["value"] = bare_value
-        with pytest.raises(_ProposalBoundaryValidationError) as error:
+        with pytest.raises(boundary_error) as error:
             namespace["parse_untrusted_proposal_json"](json.dumps(payload))
-        _assert_detached_proposal_boundary_error(error.value)
+        _assert_detached_proposal_boundary_error(error.value, boundary_error)
 
     with pytest.raises(ValueError, match="exact tagged object"):
         namespace["_normalize_json_proposal_value"](None, Decimal | str)
 
 
-def test_task_8_null_reward_observation_round_trips_in_trace_proposal() -> None:
-    namespace = _task_8_and_13_namespace()
+def test_task_8_null_reward_observation_round_trips_in_trace_proposal(
+    task_8_namespace: dict[str, object],
+) -> None:
+    namespace = task_8_namespace
     from tests.unit.harness_eval.test_traces import reward_observation, valid_trace
 
     observation = reward_observation(value=None)
@@ -774,8 +904,11 @@ def test_task_8_null_reward_observation_round_trips_in_trace_proposal() -> None:
     assert parsed.envelope.trace.reward_observation.value is None
 
 
-def test_task_8_decimal_json_failures_are_safely_detached() -> None:
-    namespace = _task_8_and_13_namespace()
+def test_task_8_decimal_json_failures_are_safely_detached(
+    task_8_namespace: dict[str, object],
+) -> None:
+    namespace = task_8_namespace
+    boundary_error = _boundary_error_type(namespace)
     normalize = namespace["_normalize_json_proposal_value"]
 
     with pytest.raises(ValueError) as direct_error:
@@ -798,13 +931,15 @@ def test_task_8_decimal_json_failures_are_safely_detached() -> None:
     }
 
     for payload in (guidance_payload, matrix_payload, reward_payload):
-        with pytest.raises(_ProposalBoundaryValidationError) as error:
+        with pytest.raises(boundary_error) as error:
             namespace["parse_untrusted_proposal_json"](json.dumps(payload))
-        _assert_detached_proposal_boundary_error(error.value)
+        _assert_detached_proposal_boundary_error(error.value, boundary_error)
 
 
-def test_task_8_proposal_json_depth_checker_is_iterative_bounded_and_exact() -> None:
-    namespace = _task_8_and_13_namespace()
+def test_task_8_proposal_json_depth_checker_is_iterative_bounded_and_exact(
+    task_8_namespace: dict[str, object],
+) -> None:
+    namespace = task_8_namespace
     checker = namespace["proposal_json_is_within_depth_limit"]
     maximum_depth = namespace["MAX_PROPOSAL_JSON_DEPTH"]
     maximum_nodes = namespace["MAX_PROPOSAL_JSON_NODES"]
@@ -846,8 +981,10 @@ def test_task_8_proposal_json_depth_checker_is_iterative_bounded_and_exact() -> 
     assert hooks == []
 
 
-def test_task_8_governed_identifier_boundary_rejects_raw_string_subclasses() -> None:
-    namespace = _task_8_and_13_namespace()
+def test_task_8_governed_identifier_boundary_rejects_raw_string_subclasses(
+    task_8_namespace: dict[str, object],
+) -> None:
+    namespace = task_8_namespace
     proposal_base = namespace["GovernedProposalBase"]
     assert (
         proposal_base(
@@ -1151,6 +1288,174 @@ def test_task_13_trace_adapter_freshly_reconstructs_proposer_identity() -> None:
     assert hooks == []
 
 
+def test_task_8_runtime_fresh_helpers_reject_copied_and_injected_state_without_hooks() -> None:
+    from tests.unit.harness_eval.test_rewards import assess_reward_validity as valid_assessment
+    from tests.unit.harness_eval.test_traces import valid_trace
+
+    trace = valid_trace()
+    assessment = valid_assessment(
+        trace.reward_observation,
+        trace,
+        findings=(),
+        verifier_succeeded=True,
+    )
+    actor = _actor()
+    approval = Approval(approver=_actor(), approved_at=NOW)
+    proposal = transaction_models.RecordRewardAssessment(
+        proposal_id="runtime-fresh-reward",
+        idempotency_key="runtime-fresh-reward-key",
+        proposer=actor,
+        approval=approval,
+        observation=assessment.observation,
+        findings=assessment.findings,
+        assessment=assessment,
+    )
+    fresh = transaction_models._fresh_reward_assessment_proposal(proposal)
+
+    assert fresh == proposal
+    assert fresh is not proposal
+    assert fresh.proposer is not actor
+    assert fresh.approval is not approval
+    assert fresh.approval is not None
+    assert fresh.approval.approver is not approval.approver
+    assert fresh.observation is not proposal.observation
+    assert fresh.assessment is not proposal.assessment
+    assert all(
+        fresh_finding is not original_finding
+        for fresh_finding, original_finding in zip(
+            fresh.findings,
+            proposal.findings,
+            strict=True,
+        )
+    )
+
+    metadata = transaction_models.HarnessTraceRecordMetadata(
+        received_at=NOW,
+        source_id="runtime-fresh-metadata",
+    )
+    fresh_metadata = transaction_models._fresh_harness_trace_metadata(metadata)
+    assert fresh_metadata == metadata
+    assert fresh_metadata is not metadata
+
+    hooks: list[str] = []
+
+    class HostileIdentifier(str):
+        def __len__(self) -> int:
+            hooks.append("identifier-len")
+            return super().__len__()
+
+        def __iter__(self):
+            hooks.append("identifier-iter")
+            return super().__iter__()
+
+    class HostileDateTime(datetime):
+        def utcoffset(self):
+            hooks.append("datetime-utcoffset")
+            return super().utcoffset()
+
+    class HostileSerializer:
+        def to_python(self, *args: object, **kwargs: object) -> object:
+            hooks.append("serializer")
+            raise AssertionError("injected serializer must not run")
+
+    copied_metadata = metadata.model_copy(update={"source_id": HostileIdentifier("hostile-source")})
+    injected_metadata = metadata.model_copy()
+    object.__setattr__(
+        injected_metadata,
+        "__pydantic_serializer__",
+        HostileSerializer(),
+    )
+    injected_proposer = actor.model_copy()
+    object.__setattr__(
+        injected_proposer,
+        "__pydantic_serializer__",
+        HostileSerializer(),
+    )
+    injected_approval = approval.model_copy()
+    object.__setattr__(
+        injected_approval,
+        "__pydantic_serializer__",
+        HostileSerializer(),
+    )
+    copied_proposer = actor.model_copy(update={"actor_id": HostileIdentifier("hostile-actor")})
+    copied_approval = approval.model_copy(
+        update={"approved_at": HostileDateTime(2026, 7, 13, 15, 0, tzinfo=UTC)}
+    )
+    copied_observation = assessment.observation.model_copy(
+        update={"observation_id": HostileIdentifier("hostile-observation")}
+    )
+    copied_finding = assessment.findings[0].model_copy(
+        update={"finding_id": HostileIdentifier("hostile-finding")}
+    )
+    copied_assessment = assessment.model_copy(
+        update={"findings": (copied_finding, *assessment.findings[1:])}
+    )
+    injected_assessment = assessment.model_copy()
+    object.__setattr__(
+        injected_assessment,
+        "__pydantic_serializer__",
+        HostileSerializer(),
+    )
+    injected_proposal = proposal.model_copy()
+    object.__setattr__(
+        injected_proposal,
+        "__pydantic_serializer__",
+        HostileSerializer(),
+    )
+
+    hostile_metadata = (copied_metadata, injected_metadata)
+    hostile_proposals = (
+        proposal.model_copy(update={"proposer": copied_proposer}),
+        proposal.model_copy(update={"proposer": injected_proposer}),
+        proposal.model_copy(update={"approval": copied_approval}),
+        proposal.model_copy(update={"approval": injected_approval}),
+        proposal.model_copy(update={"observation": copied_observation}),
+        proposal.model_copy(
+            update={
+                "findings": (copied_finding, *assessment.findings[1:]),
+                "assessment": copied_assessment,
+            }
+        ),
+        proposal.model_copy(update={"assessment": injected_assessment}),
+        injected_proposal,
+    )
+
+    hooks.clear()
+    for hostile in hostile_metadata:
+        with pytest.raises(ValueError):
+            transaction_models._fresh_harness_trace_metadata(hostile)
+    for hostile in hostile_proposals:
+        with pytest.raises(ValueError):
+            transaction_models._fresh_reward_assessment_proposal(hostile)
+    assert hooks == []
+
+
+def test_task_8_runtime_invalid_reward_decision_is_fixed_and_total_without_hooks() -> None:
+    hooks: list[str] = []
+
+    class HookedMeta(type):
+        def __getattribute__(cls, name: str) -> object:
+            hooks.append(f"metaclass-{name}")
+            return super().__getattribute__(name)
+
+    class MetaclassBacked(metaclass=HookedMeta):
+        pass
+
+    for value in (object(), 1, None, MetaclassBacked):
+        decision = transaction_models._invalid_reward_decision(value)
+        assert type(decision) is transaction_models.TransactionDecision
+        assert decision.proposal_id == "invalid-reward-proposal"
+        assert decision.accepted is False
+        assert decision.reasons == (
+            transaction_models.RejectionReason(
+                code=transaction_models.RejectionCode.INVALID_REWARD,
+                message="reward assessment proposal is invalid",
+            ),
+        )
+
+    assert hooks == []
+
+
 def test_task_13_reward_handler_executes_with_focused_capabilities() -> None:
     plan = _phase_a_plan()
     namespace = _task_8_and_13_namespace()
@@ -1386,8 +1691,10 @@ def test_task_13_invalid_reward_decision_is_total_without_hooks() -> None:
     assert hooks == []
 
 
-def test_task_8_recursive_proposal_reconstruction_bounds_containers() -> None:
-    namespace = _task_8_and_13_namespace()
+def test_task_8_recursive_proposal_reconstruction_bounds_containers(
+    task_8_namespace: dict[str, object],
+) -> None:
+    namespace = task_8_namespace
     fresh_exact_value = namespace["_fresh_exact_value"]
     maximum = namespace["MAX_PROPOSAL_RECONSTRUCTION_ITEMS"]
     exact_tuple = ("item",) * maximum
