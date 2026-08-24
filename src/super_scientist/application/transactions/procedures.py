@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 from sqlalchemy import Connection
 
 from super_scientist.application.procedures.service import (
@@ -14,7 +14,7 @@ from super_scientist.application.transactions.contracts import ProposalHandler
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.cognition.grounding import assess_capability
 from super_scientist.domain.evidence.models import ArtifactRef
-from super_scientist.domain.primitives import UtcTimestamp
+from super_scientist.domain.primitives import Sha256Hex, UtcTimestamp
 from super_scientist.domain.procedures import (
     CompiledProgressPlanBinding,
     MethodDirectionOutcome,
@@ -60,6 +60,8 @@ from super_scientist.providers.storage.repositories import (
 )
 
 type FixedProcedureHandler = ProposalHandler[BaseModel, BaseModel]
+
+_SHA256_ADAPTER: TypeAdapter[Sha256Hex] = TypeAdapter(Sha256Hex)
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,7 +284,12 @@ class ProcedureBindingCapabilities:
             for event in self.audit.list_all()
             if event.event_id == receipt.audit_event_id
             and event.event_hash == receipt.audit_event_hash
-            and _audit_event_matches_compilation(event, transaction.proposal, transaction.decision)
+            and _audit_event_matches_compilation(
+                event,
+                transaction.proposal,
+                transaction.decision,
+                self.active_policy.policy_hash,
+            )
         )
         if len(matching_events) != 1:
             return None
@@ -345,15 +352,29 @@ def _audit_event_matches_compilation(
     event: AuditEvent,
     proposal: RecordProcedureCompilation,
     decision: TransactionDecision,
+    expected_policy_hash: str,
 ) -> bool:
     if event.event_type != "transaction_decision":
         return False
     payload = json_compatible_payload(event.payload)
+    try:
+        exact_expected_policy_hash = _SHA256_ADAPTER.validate_python(
+            expected_policy_hash,
+            strict=True,
+        )
+        policy_hash = _SHA256_ADAPTER.validate_python(payload["policy_hash"], strict=True)
+        stored_policy_hash = _SHA256_ADAPTER.validate_python(
+            payload["stored_policy_hash"],
+            strict=True,
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
     return (
         payload.get("transaction_persisted") is True
         and payload.get("proposal") == proposal.model_dump(mode="json")
         and payload.get("decision") == decision.model_dump(mode="json")
-        and payload.get("policy_hash") == payload.get("stored_policy_hash")
+        and policy_hash == exact_expected_policy_hash
+        and stored_policy_hash == exact_expected_policy_hash
     )
 
 

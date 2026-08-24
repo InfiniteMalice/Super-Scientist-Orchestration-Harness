@@ -2639,7 +2639,11 @@ class BindCompiledProgressPlanHandler:
 The binding handler repeats complete accepted-source resolution against the stored
 compilation request before it validates the compilation receipt or calls
 `procedure_to_progress_plan()`. A source that became stale after compilation acceptance
-therefore cannot produce a progress plan. The synthetic `RecordProgressPlan` uses the
+therefore cannot produce a progress plan. The compilation receipt's exact audit event
+must contain `policy_hash` and `stored_policy_hash` as strict SHA-256 values, and both
+must equal the active policy hash. Missing, empty, wrong-but-equal, or divergent policy
+hashes make the receipt stale before policy, duplicate-binding, or progress authority
+is read. The synthetic `RecordProgressPlan` uses the
 binding proposal's proposal ID, proposer, approval, and exact plan. It does not submit a
 nested transaction. Both plan and binding roll back together.
 

@@ -14,6 +14,7 @@ from super_scientist.application.procedures.service import (
 )
 from super_scientist.application.progress.service import RecordProgressPlanHandler
 from super_scientist.application.transactions.procedures import (
+    _audit_event_matches_compilation,
     fixed_procedure_handlers,
     procedure_capabilities,
 )
@@ -405,6 +406,87 @@ def test_valid_binding_projects_plan_and_binding_in_one_unit_of_work(v2_runtime)
 
         assert ProgressPlanRepository(connection).get(plan.plan_version_id) == plan
         assert CompiledProgressPlanBindingRepository(connection).get(binding.binding_id) == binding
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("policy_case", "accepted"),
+    (
+        ("current", True),
+        ("missing", False),
+        ("empty", False),
+        ("wrong-equal", False),
+        ("divergent", False),
+    ),
+    ids=(
+        "current-policy",
+        "missing-both-policy-hashes",
+        "empty-both-policy-hashes",
+        "wrong-equal-policy-hashes",
+        "divergent-policy-hashes",
+    ),
+)
+def test_compilation_receipt_audit_requires_exact_current_policy(
+    v2_runtime,
+    policy_case: str,
+    accepted: bool,
+) -> None:
+    active_policy_hash = v2_runtime.policy.policy_hash
+    wrong_policy_hash = "e" * 64 if active_policy_hash != "e" * 64 else "d" * 64
+    audit_policy_fields: dict[str, object]
+    if policy_case == "current":
+        audit_policy_fields = {
+            "policy_hash": active_policy_hash,
+            "stored_policy_hash": active_policy_hash,
+        }
+    elif policy_case == "missing":
+        audit_policy_fields = {}
+    elif policy_case == "empty":
+        audit_policy_fields = {"policy_hash": "", "stored_policy_hash": ""}
+    elif policy_case == "wrong-equal":
+        audit_policy_fields = {
+            "policy_hash": wrong_policy_hash,
+            "stored_policy_hash": wrong_policy_hash,
+        }
+    else:
+        audit_policy_fields = {
+            "policy_hash": active_policy_hash,
+            "stored_policy_hash": wrong_policy_hash,
+        }
+    result = compile_method(valid_request())
+    proposal = RecordProcedureCompilation(
+        proposal_id="receipt-policy-compilation-proposal",
+        idempotency_key="receipt-policy-compilation-proposal",
+        proposer=v2_runtime.proposer,
+        compilation=OpaqueProcedureCompilationEnvelope.build(
+            compilation_id="receipt-policy-compilation",
+            result=result,
+            created_at=NOW,
+            governing_policy_hash=v2_runtime.policy.policy_hash,
+        ),
+    )
+    decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+    event = append_event(
+        None,
+        "transaction_decision",
+        {
+            "proposal": proposal.model_dump(mode="json"),
+            "decision": decision.model_dump(mode="json"),
+            "transaction_persisted": True,
+            **audit_policy_fields,
+        },
+        NOW,
+    )
+
+    assert (
+        _audit_event_matches_compilation(
+            event,
+            proposal,
+            decision,
+            active_policy_hash,
+        )
+        is accepted
+    )
 
 
 @pytest.mark.integration
@@ -821,6 +903,76 @@ def test_stale_binding_sources_precede_receipt_policy_duplicate_and_progress_rea
     assert decision.accepted is False
     assert decision.reasons[0].code is RejectionCode.STALE_REFERENCE
     assert capabilities.calls == ["compilation", "sources"]
+
+
+@pytest.mark.integration
+def test_unresolved_binding_receipt_stops_before_policy_duplicate_and_progress_reads(
+    v2_runtime,
+) -> None:
+    result = compile_method(valid_request())
+    compilation_proposal = RecordProcedureCompilation(
+        proposal_id="unresolved-receipt-compilation-proposal",
+        idempotency_key="unresolved-receipt-compilation-proposal",
+        proposer=v2_runtime.proposer,
+        compilation=OpaqueProcedureCompilationEnvelope.build(
+            compilation_id="unresolved-receipt-compilation",
+            result=result,
+            created_at=NOW,
+            governing_policy_hash=v2_runtime.policy.policy_hash,
+        ),
+    )
+    compilation = ProcedureCompilationRecord.build_from_untrusted_envelope(
+        compilation_proposal.compilation
+    )
+    receipt = ProcedureCompilationReceiptRef(
+        proposal_id=compilation_proposal.proposal_id,
+        proposal_hash="a" * 64,
+        audit_event_id="unresolved-receipt-audit",
+        audit_event_hash="b" * 64,
+    )
+    plan = procedure_to_progress_plan(
+        result,
+        run_id="run-1",
+        plan_version_id="unresolved-receipt-plan",
+        version=1,
+        created_at=NOW,
+        governing_policy_hash=v2_runtime.policy.policy_hash,
+    )
+    binding = CompiledProgressPlanBinding.build(
+        binding_id="unresolved-receipt-binding",
+        compilation_receipt=receipt,
+        compilation_id=compilation.compilation_id,
+        compilation_hash=compilation.content_hash,
+        procedure_id=result.procedure.procedure_id,
+        procedure_hash=result.procedure.content_hash,
+        plan=plan,
+        plan_hash=canonical_model_hash(plan),
+        created_at=NOW,
+        governing_policy_hash=v2_runtime.policy.policy_hash,
+    )
+    proposal = BindCompiledProgressPlan(
+        proposal_id="unresolved-receipt-binding-proposal",
+        idempotency_key="unresolved-receipt-binding-proposal",
+        proposer=v2_runtime.proposer,
+        approval=v2_runtime.approval(),
+        compilation_receipt=receipt,
+        binding=binding,
+        plan=plan,
+    )
+    capabilities = _BindingAuthoritySpy(
+        policy=v2_runtime.policy,
+        sources_current=True,
+        compilation=compilation,
+        receipt_compilation=None,
+        progress_reads=_ProgressReads(v2_runtime.policy, _research_run(v2_runtime)),
+    )
+    handler = BindCompiledProgressPlanHandler()
+
+    decision = handler.decide(proposal, handler.build_context(proposal, capabilities))
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is RejectionCode.STALE_REFERENCE
+    assert capabilities.calls == ["compilation", "sources", "receipt"]
 
 
 @dataclass
