@@ -178,6 +178,11 @@ def test_capability_profile_repository_round_trips_and_checks_provenance(tmp_pat
                 proposer=actor("coordinator"),
                 profile=record,
             )
+            RepositorySet(connection).transactions.add(
+                proposal,
+                TransactionDecision(proposal_id=proposal.proposal_id, accepted=True),
+                NOW,
+            )
             repository = CapabilityProfileRepository(connection)
             repository.add_from_proposal(
                 proposal,
@@ -375,6 +380,12 @@ def _tamper_column_and_require_failure(
     )
 
 
+def _assert_detached_integrity_error(error: StorageIntegrityError, sentinel: str) -> None:
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert sentinel not in str(error)
+
+
 @pytest.mark.integration
 def test_all_18_governed_repositories_real_add_get_and_relationship_tamper(tmp_path) -> None:
     assert len(ALL_18_GOVERNED_REPOSITORY_CASES) == 18
@@ -386,6 +397,7 @@ def test_all_18_governed_repositories_real_add_get_and_relationship_tamper(tmp_p
     try:
         with engine.connect() as connection, connection.begin():
             repositories = RepositorySet(connection)
+            stored_records: list[tuple[GovernedRepositoryCase, Any, str]] = []
             for case, proposal in zip(
                 ALL_18_GOVERNED_REPOSITORY_CASES,
                 proposals,
@@ -424,6 +436,33 @@ def test_all_18_governed_repositories_real_add_get_and_relationship_tamper(tmp_p
                         record_id,
                         column_name,
                     )
+                stored_records.append((case, repository, record_id))
+
+            for index, (case, repository, record_id) in enumerate(stored_records):
+                wrong_transaction_id = proposals[(index + 1) % len(proposals)].proposal_id
+                connection.execute(
+                    text(
+                        f"UPDATE {case.table_name} SET transaction_id = :transaction_id "
+                        f"WHERE {case.identifier_column} = :record_id"
+                    ),
+                    {"transaction_id": wrong_transaction_id, "record_id": record_id},
+                )
+                with pytest.raises(
+                    StorageIntegrityError,
+                    match="transaction provenance does not match record_json",
+                ) as captured:
+                    repository.get(record_id)
+                _assert_detached_integrity_error(captured.value, "proposal-")
+                connection.execute(
+                    text(
+                        f"UPDATE {case.table_name} SET transaction_id = :transaction_id "
+                        f"WHERE {case.identifier_column} = :record_id"
+                    ),
+                    {
+                        "transaction_id": proposals[index].proposal_id,
+                        "record_id": record_id,
+                    },
+                )
             assert repositories.has_durable_state()
             cognitive = repositories.cognitive_integrity_snapshot()
             evaluation = repositories.evaluation_extension_integrity_snapshot()
@@ -461,5 +500,147 @@ def test_all_18_governed_repositories_real_add_get_and_relationship_tamper(tmp_p
                 )
                 == 7
             )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_governed_repository_requires_exact_canonical_created_at_and_detached_errors(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'canonical-row.db').as_posix()}"
+    upgrade_database(database_url)
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection, connection.begin():
+            proposal = _governed_examples()[0]
+            record, record_id = _proposal_record_and_id(proposal)
+            repositories = RepositorySet(connection)
+            sentinel = "SECRET-ADD-SENTINEL"
+            invalid_proposal = proposal.model_copy(update={"profile": {"unknown": sentinel}})
+            with pytest.raises(
+                StorageIntegrityError,
+                match="invalid governed proposal",
+            ) as captured:
+                CapabilityProfileRepository(connection).add_from_proposal(
+                    invalid_proposal,
+                    created_at=NOW,
+                    transaction_id=proposal.proposal_id,
+                    governing_policy_hash=_record_policy_hash(record),
+                )
+            _assert_detached_integrity_error(captured.value, sentinel)
+            repositories.transactions.add(
+                proposal,
+                TransactionDecision(proposal_id=proposal.proposal_id, accepted=True),
+                NOW,
+            )
+            repository = CapabilityProfileRepository(connection)
+            repository.add_from_proposal(
+                proposal,
+                created_at=NOW,
+                transaction_id=proposal.proposal_id,
+                governing_policy_hash=_record_policy_hash(record),
+            )
+            connection.exec_driver_sql("DROP TRIGGER capability_profiles_no_update")
+            connection.execute(
+                text(
+                    "UPDATE capability_profiles SET created_at = :created_at "
+                    "WHERE profile_id = :record_id"
+                ),
+                {"created_at": "2026-08-23T12:00:00Z", "record_id": record_id},
+            )
+            with pytest.raises(
+                StorageIntegrityError,
+                match="created_at must use canonical",
+            ) as captured:
+                repository.get(record_id)
+            _assert_detached_integrity_error(captured.value, "2026-08-23")
+
+            sentinel = "SECRET-CORRUPT-SENTINEL"
+            corrupt_json = '{"sentinel":"' + sentinel + '"}'
+            connection.execute(
+                text(
+                    "UPDATE capability_profiles "
+                    "SET record_json = :record_json, content_hash = :content_hash, "
+                    "created_at = :created_at WHERE profile_id = :record_id"
+                ),
+                {
+                    "record_json": corrupt_json,
+                    "content_hash": sha256_hex(corrupt_json.encode()),
+                    "created_at": NOW.isoformat(),
+                    "record_id": record_id,
+                },
+            )
+            with pytest.raises(StorageIntegrityError, match="invalid record JSON") as captured:
+                repository.get(record_id)
+            _assert_detached_integrity_error(captured.value, sentinel)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_governed_transaction_requires_exact_canonical_proposal_json(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'canonical-transaction.db').as_posix()}"
+    upgrade_database(database_url)
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection, connection.begin():
+            proposal = _governed_examples()[0]
+            repositories = RepositorySet(connection)
+            repositories.transactions.add(
+                proposal,
+                TransactionDecision(proposal_id=proposal.proposal_id, accepted=True),
+                NOW,
+            )
+            proposal_json = connection.execute(
+                text("SELECT proposal_json FROM transactions WHERE proposal_id = :proposal_id"),
+                {"proposal_id": proposal.proposal_id},
+            ).scalar_one()
+            connection.exec_driver_sql("DROP TRIGGER transactions_no_update")
+            noncanonical_json = " " + proposal_json
+            connection.execute(
+                text(
+                    "UPDATE transactions SET proposal_json = :proposal_json "
+                    "WHERE proposal_id = :proposal_id"
+                ),
+                {"proposal_json": noncanonical_json, "proposal_id": proposal.proposal_id},
+            )
+            with pytest.raises(
+                StorageIntegrityError, match="invalid transaction record"
+            ) as captured:
+                repositories.transactions.get_by_proposal_id(proposal.proposal_id)
+            _assert_detached_integrity_error(captured.value, proposal.proposal_id)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("case_index", range(18))
+def test_has_durable_state_with_exactly_one_governed_table_populated(
+    tmp_path,
+    case_index: int,
+) -> None:
+    case = ALL_18_GOVERNED_REPOSITORY_CASES[case_index]
+    proposal = _governed_examples()[case_index]
+    record, _ = _proposal_record_and_id(proposal)
+    database_url = f"sqlite+pysqlite:///{(tmp_path / f'durable-{case_index}.db').as_posix()}"
+    upgrade_database(database_url)
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection, connection.begin():
+            case.repository_type(connection).add_from_proposal(
+                proposal,
+                created_at=NOW,
+                transaction_id=proposal.proposal_id,
+                governing_policy_hash=_record_policy_hash(record),
+            )
+            populated = tuple(
+                candidate.table_name
+                for candidate in ALL_18_GOVERNED_REPOSITORY_CASES
+                if connection.execute(text(f"SELECT 1 FROM {candidate.table_name} LIMIT 1")).first()
+                is not None
+            )
+            assert populated == (case.table_name,)
+            assert RepositorySet(connection).has_durable_state()
     finally:
         engine.dispose()

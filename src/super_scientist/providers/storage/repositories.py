@@ -378,6 +378,7 @@ def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
     proposal_json = _stored_str(row, "proposal_json")
     decision_json = _stored_str(row, "decision_json")
     created_at = _stored_str(row, "created_at")
+    governed_proposal = False
     try:
         intent_fingerprint = (
             None
@@ -389,6 +390,7 @@ def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
             isinstance(raw_proposal, dict)
             and raw_proposal.get("proposal_type") in _GOVERNED_PROPOSAL_TYPES
         ):
+            governed_proposal = True
             proposal = parse_untrusted_proposal_json(proposal_json)
         elif (
             isinstance(raw_proposal, dict)
@@ -399,10 +401,16 @@ def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
             proposal = PROPOSAL_ADAPTER.validate_python(_decode_storage_value(raw_proposal))
         decision = TransactionDecision.model_validate_json(decision_json)
         validated_created_at = _validated_timestamp(datetime.fromisoformat(created_at))
-    except (TypeError, ValueError) as error:
-        raise StorageIntegrityError(
-            "storage integrity error: invalid transaction record"
-        ) from error
+    except (TypeError, ValueError):
+        invalid_transaction = True
+    else:
+        invalid_transaction = False
+    if invalid_transaction:
+        raise StorageIntegrityError("storage integrity error: invalid transaction record") from None
+    if governed_proposal and proposal_json != canonical_json_bytes(
+        proposal.model_dump(mode="json", warnings="none")
+    ).decode("utf-8"):
+        raise StorageIntegrityError("storage integrity error: invalid transaction record") from None
     _require_integrity(
         stored_hash == _proposal_hash(proposal),
         "proposal_hash does not match canonical proposal JSON",

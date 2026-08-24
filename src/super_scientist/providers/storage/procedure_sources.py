@@ -9,7 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 from sqlalchemy import Connection
 
 from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord
-from super_scientist.domain.primitives import Sha256Hex, UtcTimestamp, canonical_json_bytes
+from super_scientist.domain.primitives import (
+    Sha256Hex,
+    UtcTimestamp,
+    canonical_json_bytes,
+    sha256_hex,
+)
 from super_scientist.domain.procedures.models import (
     MAX_PROCEDURE_ITEMS,
     AcceptedSourceReceiptRef,
@@ -246,8 +251,16 @@ class _FixedCatalogSnapshotRepository[EntryT: BaseModel, CatalogSourceT]:
             or proposal_evidence.artifact.sha256 != reference.source_content_hash
         ):
             return None
+        artifact = proposal_evidence.artifact
+        if artifact.size_bytes > _MAX_SOURCE_ARTIFACT_BYTES:
+            return None
         try:
-            artifact_bytes = self._artifacts.read(proposal_evidence.artifact)
+            artifact_bytes = self._artifacts.read(artifact)
+            if (
+                len(artifact_bytes) != artifact.size_bytes
+                or sha256_hex(artifact_bytes) != artifact.sha256
+            ):
+                return None
             entries, complete = self._decode(artifact_bytes)
         except (MemoryError, OSError, OverflowError, RecursionError, TypeError, ValueError):
             return None
@@ -280,7 +293,10 @@ class _FixedCatalogSnapshotRepository[EntryT: BaseModel, CatalogSourceT]:
             raise ValueError("catalog artifact has the wrong kind")
         if type(decoded["entries"]) is not list or type(decoded["complete"]) is not bool:
             raise ValueError("catalog artifact has invalid field types")
-        entries = self._entry_adapter.validate_python(tuple(decoded["entries"]), strict=True)
+        entries = self._entry_adapter.validate_json(
+            canonical_json_bytes(decoded["entries"]),
+            strict=True,
+        )
         if len(entries) > MAX_PROCEDURE_ITEMS:
             raise ValueError("catalog artifact contains too many entries")
         if canonical_json_bytes(decoded) != artifact_bytes:
@@ -334,14 +350,24 @@ class ValidatorCatalogSnapshotRepository(
 
 
 class ProcedureSourceBinding(BaseModel):
-    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    model_config = ConfigDict(
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        hide_input_in_errors=True,
+    )
 
     source_record_id: BoundedIdentifier
     source_content_hash: Sha256Hex
 
 
 class ProcedureSourceSnapshot(BaseModel):
-    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    model_config = ConfigDict(
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        hide_input_in_errors=True,
+    )
 
     schema_version: Literal[1] = 1
     snapshot_family_id: BoundedIdentifier
@@ -456,9 +482,16 @@ class ProcedureSourceSnapshotRepository:
         return tuple(item for item in accepted if item.snapshot.snapshot_id not in duplicate_ids)
 
     def _decode_snapshot(self, artifact: ArtifactRef) -> ProcedureSourceSnapshot | None:
+        if artifact.size_bytes > _MAX_SOURCE_ARTIFACT_BYTES:
+            return None
         try:
             artifact_bytes = self._artifacts.read(artifact)
-            if not artifact_bytes or len(artifact_bytes) > _MAX_SOURCE_ARTIFACT_BYTES:
+            if (
+                not artifact_bytes
+                or len(artifact_bytes) > _MAX_SOURCE_ARTIFACT_BYTES
+                or len(artifact_bytes) != artifact.size_bytes
+                or sha256_hex(artifact_bytes) != artifact.sha256
+            ):
                 return None
             snapshot = ProcedureSourceSnapshot.model_validate_json(artifact_bytes, strict=True)
             if (

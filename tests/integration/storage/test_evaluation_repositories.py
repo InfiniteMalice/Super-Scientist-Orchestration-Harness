@@ -9,12 +9,14 @@ from super_scientist.domain.harness_eval.guidance import GuidanceCondition
 from super_scientist.kernel.transactions.models import (
     AppendGuidanceEvaluationCell,
     RecordGuidanceEvaluationProtocol,
+    TransactionDecision,
 )
 from super_scientist.providers.storage.database import upgrade_database
 from super_scientist.providers.storage.evaluation_records import (
     GuidanceCellRepository,
     GuidanceEvaluationProtocolRepository,
 )
+from super_scientist.providers.storage.repositories import RepositorySet
 from tests.unit.collaboration.conftest import actor
 from tests.unit.harness_eval.test_guidance import _cell, _protocol
 
@@ -34,6 +36,11 @@ def test_guidance_protocol_repository_round_trips_real_proposal(tmp_path) -> Non
                 idempotency_key="proposal-guidance",
                 proposer=actor("coordinator"),
                 protocol=record,
+            )
+            RepositorySet(connection).transactions.add(
+                proposal,
+                TransactionDecision(proposal_id=proposal.proposal_id, accepted=True),
+                NOW,
             )
             repository = GuidanceEvaluationProtocolRepository(connection)
             repository.add_from_proposal(
@@ -62,6 +69,15 @@ def test_guidance_cells_are_returned_in_canonical_identity_order(tmp_path) -> No
                 proposer=actor("coordinator"),
                 protocol=protocol,
             )
+            transactions = RepositorySet(connection).transactions
+            transactions.add(
+                protocol_proposal,
+                TransactionDecision(
+                    proposal_id=protocol_proposal.proposal_id,
+                    accepted=True,
+                ),
+                NOW,
+            )
             GuidanceEvaluationProtocolRepository(connection).add_from_proposal(
                 protocol_proposal,
                 created_at=NOW,
@@ -79,6 +95,11 @@ def test_guidance_cells_are_returned_in_canonical_identity_order(tmp_path) -> No
                     idempotency_key=f"proposal-{cell.cell_id}",
                     proposer=actor("coordinator"),
                     cell=cell,
+                )
+                transactions.add(
+                    proposal,
+                    TransactionDecision(proposal_id=proposal.proposal_id, accepted=True),
+                    NOW,
                 )
                 repository.add_from_proposal(
                     proposal,

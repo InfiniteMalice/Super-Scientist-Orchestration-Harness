@@ -33,6 +33,8 @@ from super_scientist.domain.procedures.models import (
     ProcedureEvidenceSourceKind,
 )
 from super_scientist.kernel.transactions.models import (
+    AppendGuidanceEvaluationCell,
+    AppendModelHarnessCell,
     AppendPeerContribution,
     AppendPeerRequest,
     AppendTopologyEvent,
@@ -43,14 +45,22 @@ from super_scientist.kernel.transactions.models import (
     RecordCollaborationSession,
     RecordCollaborationTermination,
     RecordDiversityAssessment,
+    RecordGuidanceEvaluationProtocol,
+    RecordHarnessExecutionTrace,
     RecordMethodDirectionOutcome,
+    RecordModelHarnessAnalysis,
+    RecordModelHarnessProtocol,
     RecordProcedureCompilation,
+    RecordRewardAssessment,
 )
 from super_scientist.providers.storage.append_only import AppendOnlyRecordRepository
 from super_scientist.providers.storage.procedure_sources import (
     AcceptedProcedureSourceReceiptReader,
 )
-from super_scientist.providers.storage.repositories import StorageIntegrityError
+from super_scientist.providers.storage.repositories import (
+    StorageIntegrityError,
+    TransactionRepository,
+)
 from super_scientist.providers.storage.schema import (
     capability_profiles,
     cohort_plans,
@@ -102,7 +112,12 @@ BoundedStorageIdentifier = Annotated[
 
 
 class _StrictGovernedStorageEnvelope(BaseModel):
-    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    model_config = ConfigDict(
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        hide_input_in_errors=True,
+    )
 
 
 class CollaborationSessionStorageEnvelope(_StrictGovernedStorageEnvelope):
@@ -184,10 +199,12 @@ class GovernedAppendOnlyRecordRepository[RecordT: BaseModel](AppendOnlyRecordRep
             validated_created_at = _TIMESTAMP_ADAPTER.validate_python(created_at)
             validated_transaction_id = _require_canonical_storage_identifier(transaction_id)
             validated_policy_hash = _SHA256_ADAPTER.validate_python(governing_policy_hash)
-        except (TypeError, ValueError) as error:
-            raise StorageIntegrityError(
-                "storage integrity error: invalid governed append-only record"
-            ) from error
+        except (TypeError, ValueError):
+            invalid_record = True
+        else:
+            invalid_record = False
+        if invalid_record:
+            _raise_storage_integrity("invalid governed append-only record")
         _require_storage(
             type(record_id) is str,
             "record identifier must be a string",
@@ -255,9 +272,19 @@ class GovernedAppendOnlyRecordRepository[RecordT: BaseModel](AppendOnlyRecordRep
                 record.model_dump(mode="json", warnings=False)
             ).decode("utf-8")
             created_at = _exact_string(row.get("created_at"))
-            _TIMESTAMP_ADAPTER.validate_python(datetime.fromisoformat(created_at))
-        except (TypeError, ValueError) as error:
-            raise StorageIntegrityError("storage integrity error: invalid record JSON") from error
+            validated_created_at = _TIMESTAMP_ADAPTER.validate_python(
+                datetime.fromisoformat(created_at)
+            )
+        except (TypeError, ValueError):
+            invalid_record_json = True
+        else:
+            invalid_record_json = False
+        if invalid_record_json:
+            _raise_storage_integrity("invalid record JSON")
+        _require_storage(
+            validated_created_at.isoformat() == created_at,
+            "created_at must use canonical isoformat",
+        )
         stored_identifier = _exact_string(row.get(self._identifier_field))
         _require_storage(
             getattr(record, self._identifier_field) == stored_identifier,
@@ -286,22 +313,31 @@ class GovernedAppendOnlyRecordRepository[RecordT: BaseModel](AppendOnlyRecordRep
         try:
             _require_canonical_storage_identifier(_exact_string(transaction_id))
             _SHA256_ADAPTER.validate_python(governing_policy_hash)
-        except (TypeError, ValueError) as error:
-            raise StorageIntegrityError(
-                "storage integrity error: invalid row provenance"
-            ) from error
+        except (TypeError, ValueError):
+            invalid_provenance = True
+        else:
+            invalid_provenance = False
+        if invalid_provenance:
+            _raise_storage_integrity("invalid row provenance")
         record_policy_hash = _record_governing_policy_hash(record)
         if record_policy_hash is not None:
             _require_storage(
                 governing_policy_hash == record_policy_hash,
                 "governing_policy_hash does not match record_json",
             )
+        _require_matching_accepted_transaction(
+            self._connection,
+            _exact_string(transaction_id),
+            record,
+        )
         return record
 
 
 def _exact_string(value: object) -> str:
     if type(value) is not str:
-        raise StorageIntegrityError("storage integrity error: stored value must be exact text")
+        raise StorageIntegrityError(
+            "storage integrity error: stored value must be exact text"
+        ) from None
     return value
 
 
@@ -327,7 +363,11 @@ def _model_field_value(record: BaseModel, field_name: str) -> object:
 
 def _require_storage(condition: bool, detail: str) -> None:
     if not condition:
-        raise StorageIntegrityError(f"storage integrity error: {detail}")
+        _raise_storage_integrity(detail)
+
+
+def _raise_storage_integrity(detail: str) -> None:
+    raise StorageIntegrityError(f"storage integrity error: {detail}") from None
 
 
 def _require_proposal_transaction(
@@ -336,12 +376,105 @@ def _require_proposal_transaction(
 ) -> None:
     try:
         proposal.__class__.model_validate(proposal.model_dump(mode="python", warnings=False))
-    except (TypeError, ValueError) as error:
-        raise StorageIntegrityError("storage integrity error: invalid governed proposal") from error
+    except (TypeError, ValueError):
+        invalid_proposal = True
+    else:
+        invalid_proposal = False
+    if invalid_proposal:
+        _raise_storage_integrity("invalid governed proposal")
     _require_storage(
         transaction_id == proposal.proposal_id,
         "transaction_id does not match accepted proposal",
     )
+
+
+def _require_matching_accepted_transaction(
+    connection: Connection,
+    transaction_id: str,
+    record: BaseModel,
+) -> None:
+    try:
+        transaction = TransactionRepository(connection).get_by_proposal_id(transaction_id)
+    except StorageIntegrityError:
+        transaction_lookup_failed = True
+        transaction = None
+    else:
+        transaction_lookup_failed = False
+    if (
+        transaction_lookup_failed
+        or transaction is None
+        or not transaction.decision.accepted
+        or not _proposal_projection_matches(transaction.proposal, record)
+    ):
+        _raise_storage_integrity("transaction provenance does not match record_json")
+
+
+def _proposal_projection_matches(proposal: object, record: BaseModel) -> bool:
+    if isinstance(proposal, RecordCapabilityProfile):
+        return record == proposal.profile
+    if isinstance(proposal, RecordCohortPlan):
+        return record == proposal.plan
+    if isinstance(proposal, RecordDiversityAssessment):
+        return record == proposal.assessment
+    if isinstance(proposal, RecordCollaborationSession):
+        return record == CollaborationSessionStorageEnvelope.from_collaboration_session(
+            proposal.session
+        )
+    if isinstance(proposal, AppendPeerRequest):
+        return record == proposal.request
+    if isinstance(proposal, AppendPeerContribution):
+        return record == proposal.contribution
+    if isinstance(proposal, AppendTopologyEvent):
+        return record == proposal.event
+    if isinstance(proposal, RecordCollaborationTermination):
+        return (
+            record
+            == CollaborationTerminationStorageEnvelope.from_collaboration_termination_proposal(
+                proposal
+            )
+        )
+    if isinstance(proposal, RecordProcedureCompilation):
+        try:
+            expected_compilation = ProcedureCompilationRecord.build_from_untrusted_envelope(
+                proposal.compilation
+            )
+        except (TypeError, ValueError):
+            return False
+        return record == expected_compilation
+    if isinstance(proposal, RecordMethodDirectionOutcome):
+        return (
+            record
+            == MethodDirectionOutcomeStorageEnvelope.from_method_direction_outcome_proposal(
+                proposal
+            )
+        )
+    if isinstance(proposal, BindCompiledProgressPlan):
+        return record == proposal.binding
+    if isinstance(proposal, RecordGuidanceEvaluationProtocol):
+        return record == proposal.protocol
+    if isinstance(proposal, AppendGuidanceEvaluationCell):
+        return record == proposal.cell
+    if isinstance(proposal, RecordModelHarnessProtocol):
+        return record == proposal.protocol
+    if isinstance(proposal, AppendModelHarnessCell):
+        return record == proposal.cell
+    if isinstance(proposal, RecordModelHarnessAnalysis):
+        return record == proposal.analysis
+    if isinstance(proposal, RecordHarnessExecutionTrace):
+        from super_scientist.providers.storage.evaluation_records import (
+            HarnessExecutionTraceStorageEnvelope,
+        )
+
+        return record == HarnessExecutionTraceStorageEnvelope.from_harness_execution_trace(
+            proposal.envelope.trace
+        )
+    if isinstance(proposal, RecordRewardAssessment):
+        from super_scientist.providers.storage.evaluation_records import (
+            RewardAssessmentStorageEnvelope,
+        )
+
+        return record == RewardAssessmentStorageEnvelope.from_reward_assessment(proposal.assessment)
+    return False
 
 
 class CapabilityProfileRepository(GovernedAppendOnlyRecordRepository[CapabilityProfile]):
@@ -658,10 +791,12 @@ class ProcedureCompilationRepository(
         _require_proposal_transaction(proposal, transaction_id)
         try:
             record = ProcedureCompilationRecord.build_from_untrusted_envelope(proposal.compilation)
-        except (TypeError, ValueError) as error:
-            raise StorageIntegrityError(
-                "storage integrity error: invalid procedure compilation envelope"
-            ) from error
+        except (TypeError, ValueError):
+            invalid_compilation = True
+        else:
+            invalid_compilation = False
+        if invalid_compilation:
+            _raise_storage_integrity("invalid procedure compilation envelope")
         self.add(
             record.compilation_id,
             record,
