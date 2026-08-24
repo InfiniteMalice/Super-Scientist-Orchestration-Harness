@@ -5,10 +5,10 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Annotated
+from typing import Annotated, Self
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus, EvidenceLink
 from super_scientist.domain.cognition import (
@@ -21,8 +21,10 @@ from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord, 
 from super_scientist.domain.harness_eval import (
     EvidenceReceipt,
     HarnessExecutionTrace,
+    RewardHackingFamily,
     RewardHackingFinding,
     RewardValidityAssessment,
+    TraceFreshness,
     assess_reward_validity,
     parse_untrusted_harness_execution_trace,
     reward_validity_receipt,
@@ -72,6 +74,7 @@ class _RejectionCode(StrEnum):
     MISSING_ENTITY = "MISSING_ENTITY"
     DERIVATION_MISMATCH = "DERIVATION_MISMATCH"
     STALE_REFERENCE = "STALE_REFERENCE"
+    INVALID_REWARD = "INVALID_REWARD"
 
 
 def _task_8_and_13_namespace() -> dict[str, object]:
@@ -85,17 +88,27 @@ def _task_8_and_13_namespace() -> dict[str, object]:
         "ActorIdentity": ActorIdentity,
         "Annotated": Annotated,
         "BaseModel": BaseModel,
+        "CapabilityProfileReceiptRef": object,
+        "CohortPlan": object,
+        "CohortRequest": object,
+        "CompiledProgressPlanBinding": object,
         "ConfigDict": ConfigDict,
         "Field": Field,
         "HarnessExecutionTrace": HarnessExecutionTrace,
         "Literal": __import__("typing").Literal,
+        "OpaqueProcedureCompilationEnvelope": object,
+        "ProcedureCompilationReceiptRef": object,
+        "ProgressPlan": object,
         "ProposalBase": ProposalBase,
         "ProposalBoundaryValidationError": _ProposalBoundaryValidationError,
+        "RewardHackingFamily": RewardHackingFamily,
+        "Self": Self,
         "StableIdentifier": StableIdentifier,
         "UtcTimestamp": UtcTimestamp,
         "RewardObservation": RewardObservation,
         "RewardHackingFinding": RewardHackingFinding,
         "RewardValidityAssessment": RewardValidityAssessment,
+        "model_validator": model_validator,
         "parse_untrusted_harness_execution_trace": parse_untrusted_harness_execution_trace,
         "suppress": __import__("contextlib").suppress,
     }
@@ -122,6 +135,9 @@ def test_task_8_and_13_trace_boundary_contract_revalidates_untrusted_inputs() ->
     assert isinstance(metadata_type, type)
     assert isinstance(envelope_type, type)
     metadata = metadata_type(received_at=NOW, source_id="harness-adapter")
+    assert metadata_type(received_at=NOW, source_id="s" * 200).source_id == "s" * 200
+    with pytest.raises(ValidationError):
+        metadata_type(received_at=NOW, source_id="s" * 201)
     proposal = namespace["HarnessTraceProposalAdapter"]().from_untrusted_payload(
         trace.model_dump_json(),
         metadata,
@@ -187,6 +203,58 @@ def test_task_8_and_13_trace_boundary_contract_revalidates_untrusted_inputs() ->
     _assert_detached_proposal_boundary_error(trace_error.value)
 
 
+def test_task_13_trace_adapter_rejects_nonexact_metadata_without_hooks() -> None:
+    namespace = _task_8_and_13_namespace()
+
+    from tests.unit.harness_eval.test_traces import valid_trace
+
+    trace_json = valid_trace().model_dump_json()
+    metadata_type = namespace["HarnessTraceRecordMetadata"]
+    adapter = namespace["HarnessTraceProposalAdapter"]()
+    hooks: list[str] = []
+
+    class MetadataSubclass(metadata_type):
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            hooks.append("subclass-model-dump")
+            return super().model_dump(*args, **kwargs)
+
+    class HookedMeta(type):
+        def __getattribute__(cls, name: str) -> object:
+            hooks.append(f"metaclass-{name}")
+            return super().__getattribute__(name)
+
+    class MetaclassBacked(metaclass=HookedMeta):
+        pass
+
+    exact_metadata = metadata_type(received_at=NOW, source_id="exact-metadata")
+    injected_metadata = exact_metadata.model_copy()
+
+    def injected_model_dump(*args: object, **kwargs: object) -> dict[str, object]:
+        hooks.append("injected-model-dump")
+        return {}
+
+    object.__setattr__(injected_metadata, "model_dump", injected_model_dump)
+    hostile_values = (
+        MetadataSubclass(received_at=NOW, source_id="subclass-metadata"),
+        MetaclassBacked,
+        injected_metadata,
+    )
+
+    hooks.clear()
+    for index, hostile in enumerate(hostile_values):
+        with pytest.raises(_ProposalBoundaryValidationError) as error:
+            adapter.from_untrusted_payload(
+                trace_json,
+                hostile,
+                f"hostile-proposal-{index}",
+                f"hostile-idempotency-{index}",
+                _actor(),
+            )
+        _assert_detached_proposal_boundary_error(error.value)
+
+    assert hooks == []
+
+
 def test_task_13_reward_handler_executes_with_focused_capabilities() -> None:
     plan = _phase_a_plan()
     namespace = _task_8_and_13_namespace()
@@ -198,6 +266,7 @@ def test_task_13_reward_handler_executes_with_focused_capabilities() -> None:
             "EvidenceReceipt": EvidenceReceipt,
             "RejectionCode": _RejectionCode,
             "TransactionDecision": object,
+            "TraceFreshness": TraceFreshness,
             "assess_reward_validity": assess_reward_validity,
             "reject_existing_or_accept": lambda proposal, existing: (
                 "accepted",
@@ -288,6 +357,123 @@ def test_task_13_reward_handler_executes_with_focused_capabilities() -> None:
         "rejected",
         _RejectionCode.STALE_REFERENCE,
     )
+
+    other_trace = valid_trace(observed_binding_updates={"harness_hash": "d" * 64})
+    other_assessment = valid_assessment(
+        other_trace.reward_observation,
+        other_trace,
+        findings=(),
+        verifier_succeeded=True,
+    )
+    cross_trace_findings = (other_assessment.findings[0], *assessment.findings[1:])
+    invalid_finding_sets = (
+        cross_trace_findings,
+        (),
+        (*assessment.findings, assessment.findings[0]),
+    )
+    for findings in invalid_finding_sets:
+        copied = proposal.model_copy(update={"findings": findings})
+        result = namespace["RecordRewardAssessmentHandler"]().decide(
+            copied,
+            FocusedContext(capabilities),
+        )
+        assert result == ("rejected", _RejectionCode.INVALID_REWARD)
+
+
+def test_task_8_reward_proposal_bounds_identifiers_and_findings() -> None:
+    namespace = _task_8_and_13_namespace()
+
+    from tests.unit.harness_eval.test_rewards import assess_reward_validity as valid_assessment
+    from tests.unit.harness_eval.test_traces import valid_trace
+
+    trace = valid_trace()
+    assessment = valid_assessment(
+        trace.reward_observation,
+        trace,
+        findings=(),
+        verifier_succeeded=True,
+    )
+    proposal_type = namespace["RecordRewardAssessment"]
+
+    def values() -> dict[str, object]:
+        return {
+            "proposal_id": "p" * 200,
+            "idempotency_key": "i" * 200,
+            "proposer": _actor(),
+            "observation": assessment.observation,
+            "findings": assessment.findings,
+            "assessment": assessment,
+        }
+
+    proposal = proposal_type(**values())
+    assert len(proposal.findings) == len(RewardHackingFamily)
+    for class_name in (
+        "RecordCohortPlan",
+        "RecordProcedureCompilation",
+        "BindCompiledProgressPlan",
+        "RecordHarnessExecutionTrace",
+        "RecordRewardAssessment",
+    ):
+        assert issubclass(namespace[class_name], namespace["GovernedProposalBase"])
+
+    for field_name in ("proposal_id", "idempotency_key"):
+        with pytest.raises(ValidationError):
+            proposal_type(**(values() | {field_name: "x" * 201}))
+
+    with pytest.raises(ValidationError):
+        proposal_type(**(values() | {"findings": ()}))
+    with pytest.raises(ValidationError):
+        proposal_type(**(values() | {"findings": (*assessment.findings, assessment.findings[0])}))
+
+    metadata = namespace["HarnessTraceRecordMetadata"](
+        received_at=NOW,
+        source_id="bounded-adapter",
+    )
+    adapter = namespace["HarnessTraceProposalAdapter"]()
+    trace_json = trace.model_dump_json()
+    assert (
+        adapter.from_untrusted_payload(
+            trace_json,
+            metadata,
+            "p" * 200,
+            "i" * 200,
+            _actor(),
+        ).proposal_id
+        == "p" * 200
+    )
+    for proposal_id, idempotency_key in (
+        ("p" * 201, "i" * 200),
+        ("p" * 200, "i" * 201),
+    ):
+        with pytest.raises(_ProposalBoundaryValidationError) as error:
+            adapter.from_untrusted_payload(
+                trace_json,
+                metadata,
+                proposal_id,
+                idempotency_key,
+                _actor(),
+            )
+        _assert_detached_proposal_boundary_error(error.value)
+
+    other_trace = valid_trace(observed_binding_updates={"harness_hash": "d" * 64})
+    other_assessment = valid_assessment(
+        other_trace.reward_observation,
+        other_trace,
+        findings=(),
+        verifier_succeeded=True,
+    )
+    with pytest.raises(ValidationError):
+        proposal_type(
+            **(
+                values()
+                | {
+                    "findings": (
+                        other_assessment.findings[0],
+                        *assessment.findings[1:],
+                    )
+                }
+            )
+        )
 
 
 def test_task_8_untrusted_proposal_parser_rejects_non_exact_text_without_hooks() -> None:
