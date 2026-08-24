@@ -22,9 +22,16 @@ from super_scientist.domain.primitives import (
 )
 from super_scientist.kernel.audit.chain import append_event, verify_chain
 from super_scientist.kernel.audit.models import AuditEvent
-from super_scientist.kernel.transactions.models import Proposal, TransactionDecision
+from super_scientist.kernel.transactions.models import (
+    GOVERNED_PROPOSAL_CLASSES,
+    Proposal,
+    TransactionDecision,
+    parse_untrusted_proposal_json,
+)
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
+    CognitiveIntegritySnapshot,
+    EvaluationExtensionIntegritySnapshot,
     HandbookIntegritySnapshot,
     HarnessIntegritySnapshot,
     HypothesisIntegritySnapshot,
@@ -40,11 +47,17 @@ from super_scientist.providers.storage.schema import (
     behavioral_rule_version_incidents,
     behavioral_rule_version_supersessions,
     behavioral_rule_versions,
+    capability_profiles,
     claim_heads,
     claim_versions,
+    cohort_plans,
+    collaboration_sessions,
+    collaboration_terminations,
+    compiled_progress_plan_bindings,
     completion_decisions,
     configuration_versions,
     counterexample_records,
+    diversity_assessments,
     evaluator_audits,
     evaluator_collapse_records,
     evaluator_heads,
@@ -60,12 +73,15 @@ from super_scientist.providers.storage.schema import (
     executable_model_specs,
     governance_policies,
     governance_state,
+    guidance_cells,
+    guidance_protocols,
     handbook_verification_records,
     harness_budgets,
     harness_campaign_heads,
     harness_campaigns,
     harness_confounds,
     harness_decisions,
+    harness_execution_traces,
     harness_metrics,
     harness_observations,
     harness_partition_manifests,
@@ -73,9 +89,16 @@ from super_scientist.providers.storage.schema import (
     hypothesis_heads,
     hypothesis_revisions,
     hypothesis_versions,
+    method_direction_outcomes,
+    model_harness_analyses,
+    model_harness_cells,
+    model_harness_protocols,
+    peer_contributions,
+    peer_requests,
     primitive_evaluations,
     primitive_heads,
     primitive_versions,
+    procedure_compilations,
     progress_events,
     progress_heads,
     progress_plans,
@@ -87,6 +110,7 @@ from super_scientist.providers.storage.schema import (
     reviewer_assessment_incidents,
     reviewer_assessment_rule_versions,
     reviewer_assessments,
+    reward_assessments,
     rule_consolidation_assessments,
     rule_consolidation_decisions,
     rule_consolidation_incidents,
@@ -97,6 +121,7 @@ from super_scientist.providers.storage.schema import (
     run_checkpoints,
     self_improvement_measurements,
     simulation_results,
+    topology_events,
     transactions,
     verification_mechanism_specs,
     verification_results,
@@ -152,6 +177,11 @@ _STRICT_JSON_PROPOSAL_TYPES = frozenset(
         "admit_hypothesis",
     }
 )
+_GOVERNED_PROPOSAL_TYPES = frozenset(
+    proposal_type.model_fields["proposal_type"].default
+    for proposal_type in GOVERNED_PROPOSAL_CLASSES
+)
+_STRICT_JSON_PROPOSAL_TYPES |= _GOVERNED_PROPOSAL_TYPES
 
 
 class StorageIntegrityError(ValueError):
@@ -356,6 +386,11 @@ def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
         )
         raw_proposal = json.loads(proposal_json)
         if (
+            isinstance(raw_proposal, dict)
+            and raw_proposal.get("proposal_type") in _GOVERNED_PROPOSAL_TYPES
+        ):
+            proposal = parse_untrusted_proposal_json(proposal_json)
+        elif (
             isinstance(raw_proposal, dict)
             and raw_proposal.get("proposal_type") in _STRICT_JSON_PROPOSAL_TYPES
         ):
@@ -1136,6 +1171,58 @@ class RepositorySet:
             heads=HypothesisHeadRepository(self._connection).list_all(),
         )
 
+    def cognitive_integrity_snapshot(self) -> CognitiveIntegritySnapshot:
+        from super_scientist.providers.storage.cognitive_records import (
+            CapabilityProfileRepository,
+            CohortPlanRepository,
+            CollaborationSessionRepository,
+            CollaborationTerminationRepository,
+            CompiledProgressPlanBindingRepository,
+            DiversityAssessmentRepository,
+            MethodDirectionOutcomeRepository,
+            PeerContributionRepository,
+            PeerRequestRepository,
+            ProcedureCompilationRepository,
+            TopologyEventRepository,
+        )
+
+        return CognitiveIntegritySnapshot(
+            capability_profiles=CapabilityProfileRepository(self._connection).list_all(),
+            cohort_plans=CohortPlanRepository(self._connection).list_all(),
+            diversity_assessments=DiversityAssessmentRepository(self._connection).list_all(),
+            collaboration_sessions=CollaborationSessionRepository(self._connection).list_all(),
+            peer_requests=PeerRequestRepository(self._connection).list_all(),
+            peer_contributions=PeerContributionRepository(self._connection).list_all(),
+            topology_events=TopologyEventRepository(self._connection).list_all(),
+            terminations=CollaborationTerminationRepository(self._connection).list_all(),
+            compilations=ProcedureCompilationRepository(self._connection).list_all(),
+            method_outcomes=MethodDirectionOutcomeRepository(self._connection).list_all(),
+            bindings=CompiledProgressPlanBindingRepository(self._connection).list_all(),
+        )
+
+    def evaluation_extension_integrity_snapshot(
+        self,
+    ) -> EvaluationExtensionIntegritySnapshot:
+        from super_scientist.providers.storage.evaluation_records import (
+            GuidanceCellRepository,
+            GuidanceEvaluationProtocolRepository,
+            HarnessExecutionTraceRepository,
+            ModelHarnessAnalysisRepository,
+            ModelHarnessCellRepository,
+            ModelHarnessProtocolRepository,
+            RewardAssessmentRepository,
+        )
+
+        return EvaluationExtensionIntegritySnapshot(
+            guidance_protocols=GuidanceEvaluationProtocolRepository(self._connection).list_all(),
+            guidance_cells=GuidanceCellRepository(self._connection).list_all(),
+            model_harness_protocols=ModelHarnessProtocolRepository(self._connection).list_all(),
+            model_harness_cells=ModelHarnessCellRepository(self._connection).list_all(),
+            model_harness_analyses=ModelHarnessAnalysisRepository(self._connection).list_all(),
+            harness_execution_traces=HarnessExecutionTraceRepository(self._connection).list_all(),
+            reward_assessments=RewardAssessmentRepository(self._connection).list_all(),
+        )
+
     def has_durable_state(self) -> bool:
         tables = (
             governance_policies,
@@ -1204,6 +1291,24 @@ class RepositorySet:
             harness_confounds,
             harness_decisions,
             harness_campaign_heads,
+            capability_profiles,
+            cohort_plans,
+            diversity_assessments,
+            collaboration_sessions,
+            peer_requests,
+            peer_contributions,
+            topology_events,
+            collaboration_terminations,
+            procedure_compilations,
+            method_direction_outcomes,
+            compiled_progress_plan_bindings,
+            guidance_protocols,
+            guidance_cells,
+            model_harness_protocols,
+            model_harness_cells,
+            model_harness_analyses,
+            harness_execution_traces,
+            reward_assessments,
         )
         return any(
             self._connection.execute(select(table).limit(1)).first() is not None for table in tables
