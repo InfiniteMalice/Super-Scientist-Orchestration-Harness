@@ -73,6 +73,8 @@ from super_scientist.domain.procedures import (
     MethodDirectionOutcome,
     OpaqueProcedureCompilationEnvelope,
     ProcedureCompilationReceiptRef,
+    ProcedureCompilationRecord,
+    parse_untrusted_procedure_compilation_result,
 )
 from super_scientist.domain.progress.models import ProgressPlan
 from super_scientist.kernel.transactions import models as transaction_models
@@ -599,16 +601,36 @@ def test_task_8_relationship_proposals_bind_exact_bounded_parent_identifiers(
     by_name = {
         type(proposal).__name__: proposal for proposal in _governed_proposal_examples(namespace)
     }
-    expected = {
-        "RecordCollaborationTermination": ("session_id", "session-a"),
-        "RecordMethodDirectionOutcome": ("compilation_id", "round-trip-compilation"),
+    relationships = {
+        "RecordCollaborationTermination": "session_id",
+        "RecordMethodDirectionOutcome": "compilation_id",
     }
 
-    for class_name, (field_name, expected_value) in expected.items():
+    for class_name, field_name in relationships.items():
         proposal = by_name[class_name]
-        assert getattr(proposal, field_name) == expected_value
-        payload = proposal.model_dump(mode="python")
-        for invalid in ("", "contains/slash", "contains space", "x" * 201):
+        for edge_id in ("会話/session id:識別", "界" * 200):
+            if class_name == "RecordCollaborationTermination":
+                session = by_name["RecordCollaborationSession"].session
+                parent_payload = session.model_dump(mode="python", exclude={"content_hash"})
+                parent_payload["session_id"] = edge_id
+                parent = CollaborationSession.build(**parent_payload)
+                expected_value = parent.session_id
+            else:
+                envelope = by_name["RecordProcedureCompilation"].compilation
+                parent = ProcedureCompilationRecord.build(
+                    compilation_id=edge_id,
+                    result=parse_untrusted_procedure_compilation_result(envelope),
+                    created_at=envelope.created_at,
+                    governing_policy_hash=envelope.governing_policy_hash,
+                )
+                expected_value = parent.compilation_id
+            payload = proposal.model_dump(mode="python")
+            payload[field_name] = expected_value
+            parsed = namespace[class_name].model_validate(payload, strict=True)
+            assert getattr(parsed, field_name) == edge_id
+
+        for invalid in ("", " outer-space ", "x" * 201, "contains\x00nul"):
+            payload = proposal.model_dump(mode="python")
             payload[field_name] = invalid
             with pytest.raises(ValidationError):
                 namespace[class_name].model_validate(payload, strict=True)

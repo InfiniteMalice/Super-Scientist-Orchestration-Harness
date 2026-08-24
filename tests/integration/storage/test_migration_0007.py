@@ -83,11 +83,45 @@ PARENT_SCOPED_PRIMARY_IDS = {
     "collaboration_terminations": "session-1",
     "model_harness_analyses": "model-protocol-1",
 }
+MAX_RECORD_JSON_BYTES = 8 * 1024 * 1024
+OVERSIZED_RECORD_JSON = "x" * (MAX_RECORD_JSON_BYTES + 1)
+OVERSIZED_UTF8_RECORD_JSON = "é" * (MAX_RECORD_JSON_BYTES // 2 + 1)
 
 
 @pytest.fixture
 def database_url(tmp_path: Path) -> str:
     return f"sqlite+pysqlite:///{(tmp_path / 'migration-0007.db').as_posix()}"
+
+
+def test_task_10_plan_declares_all_fixed_relationship_envelopes_and_real_round_trips() -> None:
+    plan = (
+        Path(__file__).parents[3]
+        / "docs"
+        / "superpowers"
+        / "plans"
+        / "2026-08-23-governed-cognitive-cohorts-procedure-compilation.md"
+    ).read_text(encoding="utf-8")
+    task_10 = plan.split("### Task 10:", maxsplit=1)[1].split("### Task 11:", maxsplit=1)[0]
+
+    assert "ALL_18_GOVERNED_REPOSITORY_CASES" in task_10
+    assert "each_relationship_tamper" in task_10
+    for envelope_name in (
+        "CollaborationSessionStorageEnvelope",
+        "CollaborationTerminationStorageEnvelope",
+        "MethodDirectionOutcomeStorageEnvelope",
+        "HarnessExecutionTraceStorageEnvelope",
+        "RewardAssessmentStorageEnvelope",
+    ):
+        assert envelope_name in task_10
+    for constructor_name in (
+        "from_collaboration_session",
+        "from_collaboration_termination_proposal",
+        "from_method_direction_outcome_proposal",
+        "from_harness_execution_trace",
+        "from_reward_assessment",
+    ):
+        assert constructor_name in task_10
+    assert 'ConfigDict(frozen=True, strict=True, extra="forbid")' in task_10
 
 
 @pytest.mark.integration
@@ -437,9 +471,34 @@ def test_0007_relationship_columns_are_sourced_from_actual_governed_proposals(
 
 
 @pytest.mark.integration
-def test_0007_accepts_canonical_colon_delimited_domain_identifiers(
+@pytest.mark.parametrize(
+    ("session_id", "compilation_id"),
+    (("会話/session id:識別", "procedure/compilation id:識別"), ("𐍈" * 200, "界" * 200)),
+)
+def test_0007_round_trips_canonical_domain_and_proposal_relationship_identifiers(
     database_url: str,
+    session_id: str,
+    compilation_id: str,
 ) -> None:
+    from tests.unit.domain.test_strict_parsing import _governed_proposal_examples
+
+    proposals = {
+        type(proposal).__name__: proposal
+        for proposal in _governed_proposal_examples(dict(vars(transaction_models)))
+    }
+    termination_payload = proposals["RecordCollaborationTermination"].model_dump(mode="python")
+    termination_payload["session_id"] = session_id
+    termination = transaction_models.RecordCollaborationTermination.model_validate(
+        termination_payload,
+        strict=True,
+    )
+    outcome_payload = proposals["RecordMethodDirectionOutcome"].model_dump(mode="python")
+    outcome_payload["compilation_id"] = compilation_id
+    outcome = transaction_models.RecordMethodDirectionOutcome.model_validate(
+        outcome_payload,
+        strict=True,
+    )
+
     _upgrade_to(database_url, REVISION)
     engine = create_database_engine(database_url)
     try:
@@ -454,10 +513,41 @@ def test_0007_accepts_canonical_colon_delimited_domain_identifiers(
             )
             _insert_record(
                 connection,
-                "diversity_assessments",
-                "diversity_assessment_id",
-                "request-1:plan:diversity",
+                "collaboration_sessions",
+                "session_id",
+                termination.session_id,
                 cohort_plan_id="request-1:plan",
+            )
+            _insert_record(
+                connection,
+                "collaboration_terminations",
+                "session_id",
+                termination.session_id,
+            )
+            _insert_record(
+                connection,
+                "procedure_compilations",
+                "compilation_id",
+                outcome.compilation_id,
+            )
+            _insert_record(
+                connection,
+                "method_direction_outcomes",
+                "outcome_id",
+                outcome.outcome.outcome_id,
+                compilation_id=outcome.compilation_id,
+            )
+            assert (
+                connection.execute(
+                    text("SELECT session_id FROM collaboration_terminations")
+                ).scalar_one()
+                == termination.session_id
+            )
+            assert (
+                connection.execute(
+                    text("SELECT compilation_id FROM method_direction_outcomes")
+                ).scalar_one()
+                == outcome.compilation_id
             )
     finally:
         engine.dispose()
@@ -482,9 +572,52 @@ def test_0007_rejects_unsafe_identifier_storage_classes_for_every_identifier_col
                     "",
                     "contains\x00nul",
                     "x" * 201,
-                    "-leading-punctuation",
-                    "contains/slash",
                 ):
+                    values = _valid_record_values(table_name)
+                    values[column_name] = invalid
+                    with (
+                        connection.begin_nested(),
+                        pytest.raises(
+                            IntegrityError,
+                            match=f"ck_{table_name}_{column_name}",
+                        ),
+                    ):
+                        _insert_values(connection, table_name, values)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("table_name", tuple(TABLE_SPECS))
+def test_0007_rejects_unsafe_shared_scalar_storage_for_every_table(
+    database_url: str,
+    table_name: str,
+) -> None:
+    _upgrade_to(database_url, REVISION)
+    engine = create_database_engine(database_url)
+    invalid_values = {
+        "schema_version": (b"1", 1.5, "not-an-integer"),
+        "record_json": (
+            b"{}",
+            "",
+            "contains\x00nul",
+            OVERSIZED_RECORD_JSON,
+            OVERSIZED_UTF8_RECORD_JSON,
+        ),
+        "created_at": (
+            b"2026-08-23T00:00:00+00:00",
+            "",
+            "contains\x00nul",
+            "x" * 41,
+            "é" * 21,
+        ),
+    }
+    try:
+        with engine.begin() as connection:
+            _insert_shared_references(connection)
+            _insert_parent_rows(connection, table_name)
+            for column_name, invalid_column_values in invalid_values.items():
+                for invalid in invalid_column_values:
                     values = _valid_record_values(table_name)
                     values[column_name] = invalid
                     with (

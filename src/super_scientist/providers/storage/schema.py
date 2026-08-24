@@ -1879,10 +1879,8 @@ def _governed_record_table(
             CheckConstraint(
                 f"typeof({column.name}) = 'text' "
                 f"AND length({column.name}) BETWEEN 1 AND 200 "
-                f"AND length(CAST({column.name} AS BLOB)) = length({column.name}) "
-                f"AND instr({column.name}, char(0)) = 0 "
-                f"AND substr({column.name}, 1, 1) GLOB '[A-Za-z0-9]' "
-                f"AND {column.name} NOT GLOB '*[^A-Za-z0-9_.:-]*'",
+                f"AND length(CAST({column.name} AS BLOB)) BETWEEN 1 AND 800 "
+                f"AND instr({column.name}, char(0)) = 0",
                 name=f"ck_{name}_{column.name}",
             )
             for column in identifier_columns
@@ -1890,14 +1888,21 @@ def _governed_record_table(
         CheckConstraint(
             "typeof(transaction_id) = 'text' "
             "AND length(transaction_id) BETWEEN 1 AND 200 "
-            "AND length(CAST(transaction_id AS BLOB)) = length(transaction_id) "
-            "AND instr(transaction_id, char(0)) = 0 "
-            "AND substr(transaction_id, 1, 1) GLOB '[A-Za-z0-9]' "
-            "AND transaction_id NOT GLOB '*[^A-Za-z0-9_.:-]*'",
+            "AND length(CAST(transaction_id AS BLOB)) BETWEEN 1 AND 800 "
+            "AND instr(transaction_id, char(0)) = 0",
             name=f"ck_{name}_transaction_id",
         ),
-        CheckConstraint("schema_version = 1", name=f"ck_{name}_schema_version"),
-        CheckConstraint("length(record_json) > 0", name=f"ck_{name}_record_json"),
+        CheckConstraint(
+            "typeof(schema_version) = 'integer' AND schema_version = 1",
+            name=f"ck_{name}_schema_version",
+        ),
+        CheckConstraint(
+            "typeof(record_json) = 'text' "
+            "AND length(record_json) BETWEEN 1 AND 8388608 "
+            "AND length(CAST(record_json AS BLOB)) BETWEEN 1 AND 8388608 "
+            "AND instr(record_json, char(0)) = 0",
+            name=f"ck_{name}_record_json",
+        ),
         CheckConstraint(
             "typeof(content_hash) = 'text' "
             "AND length(content_hash) = 64 "
@@ -1914,7 +1919,13 @@ def _governed_record_table(
             "AND governing_policy_hash NOT GLOB '*[^0-9a-f]*'",
             name=f"ck_{name}_governing_policy_hash",
         ),
-        CheckConstraint("length(created_at) > 0", name=f"ck_{name}_created_at"),
+        CheckConstraint(
+            "typeof(created_at) = 'text' "
+            "AND length(created_at) BETWEEN 1 AND 40 "
+            "AND length(CAST(created_at AS BLOB)) BETWEEN 1 AND 40 "
+            "AND instr(created_at, char(0)) = 0",
+            name=f"ck_{name}_created_at",
+        ),
     )
 
 

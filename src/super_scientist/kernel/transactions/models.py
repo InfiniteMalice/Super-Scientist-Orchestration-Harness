@@ -618,6 +618,18 @@ def _fresh_governed_identifier(value: object) -> str:
     return value
 
 
+def _fresh_domain_record_identifier(value: object) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value) > MAX_GOVERNED_PROPOSAL_IDENTIFIER_LENGTH
+        or "\x00" in value
+    ):
+        raise ValueError("domain record identifier must be exact bounded nonblank text")
+    return value
+
+
 def _fresh_utc_timestamp(value: object) -> datetime:
     if type(value) is not datetime:
         raise ValueError("timestamp must be an exact datetime")
@@ -694,6 +706,10 @@ BoundedGovernedProposalIdentifier = Annotated[
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
     ),
 ]
+BoundedDomainRecordIdentifier = Annotated[
+    str,
+    Field(strict=True, min_length=1, max_length=MAX_GOVERNED_PROPOSAL_IDENTIFIER_LENGTH),
+]
 BoundedHarnessTraceRecordIdentifier = Annotated[
     StableIdentifier,
     Field(
@@ -763,13 +779,13 @@ class AppendTopologyEvent(GovernedProposalBase):
 
 class RecordCollaborationTermination(GovernedProposalBase):
     proposal_type: Literal["record_collaboration_termination"] = "record_collaboration_termination"
-    session_id: BoundedGovernedProposalIdentifier
+    session_id: BoundedDomainRecordIdentifier
     termination: CollaborationTermination
 
     @field_validator("session_id", mode="before")
     @classmethod
     def require_exact_raw_session_id(cls, value: object) -> str:
-        return _fresh_governed_identifier(value)
+        return _fresh_domain_record_identifier(value)
 
 
 class RecordProcedureCompilation(GovernedProposalBase):
@@ -779,13 +795,13 @@ class RecordProcedureCompilation(GovernedProposalBase):
 
 class RecordMethodDirectionOutcome(GovernedProposalBase):
     proposal_type: Literal["record_method_direction_outcome"] = "record_method_direction_outcome"
-    compilation_id: BoundedGovernedProposalIdentifier
+    compilation_id: BoundedDomainRecordIdentifier
     outcome: MethodDirectionOutcome
 
     @field_validator("compilation_id", mode="before")
     @classmethod
     def require_exact_raw_compilation_id(cls, value: object) -> str:
-        return _fresh_governed_identifier(value)
+        return _fresh_domain_record_identifier(value)
 
 
 class BindCompiledProgressPlan(GovernedProposalBase):

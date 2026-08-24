@@ -891,6 +891,18 @@ def _fresh_governed_identifier(value: object) -> str:
     return value
 
 
+def _fresh_domain_record_identifier(value: object) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value) > MAX_GOVERNED_PROPOSAL_IDENTIFIER_LENGTH
+        or "\x00" in value
+    ):
+        raise ValueError("domain record identifier must be exact bounded nonblank text")
+    return value
+
+
 def _fresh_utc_timestamp(value: object) -> datetime:
     if type(value) is not datetime:
         raise ValueError("timestamp must be an exact datetime")
@@ -972,6 +984,10 @@ BoundedGovernedProposalIdentifier = Annotated[
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
     ),
 ]
+BoundedDomainRecordIdentifier = Annotated[
+    str,
+    Field(strict=True, min_length=1, max_length=MAX_GOVERNED_PROPOSAL_IDENTIFIER_LENGTH),
+]
 BoundedHarnessTraceRecordIdentifier = Annotated[
     StableIdentifier,
     Field(
@@ -1043,13 +1059,13 @@ class RecordCollaborationTermination(GovernedProposalBase):
     proposal_type: Literal["record_collaboration_termination"] = (
         "record_collaboration_termination"
     )
-    session_id: BoundedGovernedProposalIdentifier
+    session_id: BoundedDomainRecordIdentifier
     termination: CollaborationTermination
 
     @field_validator("session_id", mode="before")
     @classmethod
     def require_exact_raw_session_id(cls, value: object) -> str:
-        return _fresh_governed_identifier(value)
+        return _fresh_domain_record_identifier(value)
 
 
 class RecordProcedureCompilation(GovernedProposalBase):
@@ -1061,13 +1077,13 @@ class RecordMethodDirectionOutcome(GovernedProposalBase):
     proposal_type: Literal["record_method_direction_outcome"] = (
         "record_method_direction_outcome"
     )
-    compilation_id: BoundedGovernedProposalIdentifier
+    compilation_id: BoundedDomainRecordIdentifier
     outcome: MethodDirectionOutcome
 
     @field_validator("compilation_id", mode="before")
     @classmethod
     def require_exact_raw_compilation_id(cls, value: object) -> str:
-        return _fresh_governed_identifier(value)
+        return _fresh_domain_record_identifier(value)
 
 
 class BindCompiledProgressPlan(GovernedProposalBase):
@@ -1883,9 +1899,13 @@ def _create_record_table(
             for column in (id_column, *relationship_columns)
         ),
         _identifier_constraint("transaction_id", name),
-        sa.CheckConstraint("schema_version = 1"),
+        sa.CheckConstraint(
+            "typeof(schema_version) = 'integer' AND schema_version = 1"
+        ),
+        _bounded_text_constraint("record_json", name, maximum=8 * 1024 * 1024),
         _hash_constraint("content_hash", name),
         _hash_constraint("governing_policy_hash", name),
+        _bounded_text_constraint("created_at", name, maximum=40),
     )
     _create_append_only_triggers(name)
 ```
@@ -1897,11 +1917,15 @@ cells/analyses, and trace/observation IDs for reward records. In particular,
 `RecordMethodDirectionOutcome.compilation_id` are the authoritative proposal fields
 for their relationship columns.
 
-`_identifier_constraint()` requires SQLite TEXT storage, 1-200 ASCII characters,
-no NUL, an ASCII alphanumeric first character, and the remaining domain identifier
-alphabet `A-Za-z0-9_.:-`. The colon is required by canonical derived cohort and
-diversity identifiers. `_hash_constraint()` requires
+`_identifier_constraint()` requires SQLite TEXT storage, 1-200 Unicode code points,
+at most 800 UTF-8 bytes, and no NUL. It deliberately permits every canonical Phase A
+`BoundedIdentifier`, including Unicode, slash, internal space, and colon.
+`_hash_constraint()` requires
 SQLite TEXT storage, exactly 64 characters and 64 bytes, no NUL, and lowercase hex.
+`schema_version` requires SQLite INTEGER storage and the exact value `1`. `record_json`
+requires nonempty NUL-free SQLite TEXT bounded to 8 MiB in both characters and UTF-8
+bytes. `created_at` requires nonempty NUL-free SQLite TEXT bounded to 40 characters and
+40 UTF-8 bytes.
 Both provenance foreign keys are `DEFERRABLE INITIALLY DEFERRED`, so the coordinator
 may persist the child before its accepted transaction and policy rows within one
 database transaction; unresolved parents still fail at commit. The downgrade drops
@@ -1978,7 +2002,34 @@ def test_procedure_source_reader_rejects_any_receipt_or_snapshot_mismatch(runtim
     reference = runtime.accepted_artifact_catalog_reference()
     for forged in runtime.each_single_field_source_forgery(reference):
         assert runtime.procedure_sources.resolve(forged) is None
+
+
+@pytest.mark.parametrize("case", ALL_18_GOVERNED_REPOSITORY_CASES)
+def test_every_governed_repository_real_add_get_and_relationship_tamper(
+    runtime, case
+) -> None:
+    repository = case.repository(runtime.connection)
+    repository.add_from_proposal(
+        case.proposal,
+        created_at=runtime.created_at,
+        transaction_id=case.proposal.proposal_id,
+        governing_policy_hash=case.governing_policy_hash,
+    )
+    assert repository.get(case.record_id) == case.record
+    for tampered in case.each_relationship_tamper():
+        runtime.insert_raw_governed_row(tampered)
+        with pytest.raises(StorageIntegrityError, match="does not match record_json"):
+            case.repository(runtime.connection).get(tampered.record_id)
 ```
+
+`ALL_18_GOVERNED_REPOSITORY_CASES` contains one real Task 8 proposal and domain
+record for every Task 9 table. It is not a raw-row-only shape fixture. The tamper
+variants change each stored primary/relationship column independently while retaining
+the original canonical `record_json` and content hash. The five indirect cases must
+include `CollaborationSession.cohort_plan.cohort_plan_id`, termination proposal
+`session_id`, method-direction proposal `compilation_id`,
+`HarnessExecutionTrace.observed_binding.protocol_id`, and
+`RewardValidityAssessment.observation.observation_id`.
 
 - [ ] **Step 2: Run repository tests**
 
@@ -2007,6 +2058,145 @@ class PeerContributionRepository(
     def list_for_session(self, session_id: str) -> tuple[PeerContribution, ...]:
         return self._list_by_relationship("session_id", session_id)
 ```
+
+Use these five explicit storage envelopes for relationships that are absent from or
+nested inside the public domain record. They are fixed models, not a dynamic model
+registry or locator:
+
+```python
+def _require_canonical_storage_identifier(value: str) -> str:
+    if value != value.strip() or "\x00" in value:
+        raise ValueError("storage envelope identifier must already be canonical")
+    return value
+
+
+BoundedStorageIdentifier = Annotated[
+    str,
+    Field(strict=True, min_length=1, max_length=200),
+    AfterValidator(_require_canonical_storage_identifier),
+]
+
+
+class _StrictGovernedStorageEnvelope(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+
+class CollaborationSessionStorageEnvelope(_StrictGovernedStorageEnvelope):
+    session_id: BoundedStorageIdentifier
+    cohort_plan_id: BoundedStorageIdentifier
+    record: CollaborationSession
+
+    @classmethod
+    def from_collaboration_session(cls, record: CollaborationSession) -> Self:
+        return cls(
+            session_id=record.session_id,
+            cohort_plan_id=record.cohort_plan.cohort_plan_id,
+            record=record,
+        )
+
+    @model_validator(mode="after")
+    def require_exact_relationships(self) -> Self:
+        if (
+            self.session_id != self.record.session_id
+            or self.cohort_plan_id != self.record.cohort_plan.cohort_plan_id
+        ):
+            raise ValueError("collaboration session storage relationship mismatch")
+        return self
+
+
+class CollaborationTerminationStorageEnvelope(_StrictGovernedStorageEnvelope):
+    session_id: BoundedStorageIdentifier
+    record: CollaborationTermination
+
+    @classmethod
+    def from_collaboration_termination_proposal(
+        cls, proposal: RecordCollaborationTermination
+    ) -> Self:
+        return cls(session_id=proposal.session_id, record=proposal.termination)
+
+
+class MethodDirectionOutcomeStorageEnvelope(_StrictGovernedStorageEnvelope):
+    outcome_id: BoundedStorageIdentifier
+    compilation_id: BoundedStorageIdentifier
+    record: MethodDirectionOutcome
+
+    @classmethod
+    def from_method_direction_outcome_proposal(
+        cls, proposal: RecordMethodDirectionOutcome
+    ) -> Self:
+        return cls(
+            outcome_id=proposal.outcome.outcome_id,
+            compilation_id=proposal.compilation_id,
+            record=proposal.outcome,
+        )
+
+    @model_validator(mode="after")
+    def require_exact_outcome_id(self) -> Self:
+        if self.outcome_id != self.record.outcome_id:
+            raise ValueError("method direction storage identifier mismatch")
+        return self
+
+
+class HarnessExecutionTraceStorageEnvelope(_StrictGovernedStorageEnvelope):
+    trace_id: BoundedStorageIdentifier
+    protocol_id: BoundedStorageIdentifier
+    record: HarnessExecutionTrace
+
+    @classmethod
+    def from_harness_execution_trace(cls, record: HarnessExecutionTrace) -> Self:
+        return cls(
+            trace_id=record.trace_id,
+            protocol_id=record.observed_binding.protocol_id,
+            record=record,
+        )
+
+    @model_validator(mode="after")
+    def require_exact_relationships(self) -> Self:
+        if (
+            self.trace_id != self.record.trace_id
+            or self.protocol_id != self.record.observed_binding.protocol_id
+        ):
+            raise ValueError("harness trace storage relationship mismatch")
+        return self
+
+
+class RewardAssessmentStorageEnvelope(_StrictGovernedStorageEnvelope):
+    assessment_id: BoundedStorageIdentifier
+    trace_id: BoundedStorageIdentifier
+    observation_id: BoundedStorageIdentifier
+    record: RewardValidityAssessment
+
+    @classmethod
+    def from_reward_assessment(cls, record: RewardValidityAssessment) -> Self:
+        return cls(
+            assessment_id=record.assessment_id,
+            trace_id=record.trace_id,
+            observation_id=record.observation.observation_id,
+            record=record,
+        )
+
+    @model_validator(mode="after")
+    def require_exact_relationships(self) -> Self:
+        if (
+            self.assessment_id != self.record.assessment_id
+            or self.trace_id != self.record.trace_id
+            or self.observation_id != self.record.observation.observation_id
+        ):
+            raise ValueError("reward assessment storage relationship mismatch")
+        return self
+```
+
+The five repositories bind `AppendOnlyRecordRepository` to their fixed envelope model,
+with the envelope's direct ID and relationship fields. Their typed `add_from_proposal()`
+or `add()` signatures construct only the corresponding envelope above; their public
+`get()` methods unwrap `record` only after base decoding has verified canonical JSON,
+content hash, identifier equality, and every stored relationship equality. In
+particular, termination and method-direction repositories accept their exact Task 8
+proposal types so the missing parent IDs cannot be invented by a caller. The harness
+trace repository takes `RecordHarnessExecutionTrace` and extracts the nested trace;
+the reward repository takes `RecordRewardAssessment` and verifies the proposal's
+observation before wrapping its assessment. No generic extractor map, repository
+registry, or locator is permitted.
 
 Do not create a generic repository locator or dynamic model registry. Export explicit
 repository classes and explicit snapshot fields. Each `add()` requires the record ID,
@@ -2057,7 +2247,11 @@ a mutable catalog head, or repository authority to the procedure domain.
 
 Run: `python -m pytest tests/integration/storage/test_cognitive_repositories.py tests/integration/storage/test_evaluation_repositories.py tests/integration/storage/test_procedure_source_repositories.py tests/property/test_cognitive_append_only.py tests/integration/application/test_workspace_integrity.py -v`
 
-Expected: PASS for round trip, unknown field, content-hash corruption, derived-column mismatch, relationship ordering, append-only enforcement, and one-row-only durable-state detection for all 18 tables.
+Expected: PASS for real `add_from_proposal()`/`get()` round trips on all 18 tables,
+unknown fields, content-hash corruption, every primary/relationship-column tamper,
+relationship ordering, append-only enforcement, and one-row-only durable-state
+detection. The all-18 matrix explicitly includes the five fixed envelopes above; raw
+row insertion alone is not accepted as round-trip coverage.
 
 - [ ] **Step 5: Run static checks and commit**
 

@@ -12,6 +12,9 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 MAX_IDENTIFIER_LENGTH = 200
+MAX_IDENTIFIER_UTF8_BYTES = 800
+MAX_RECORD_JSON_BYTES = 8 * 1024 * 1024
+MAX_CREATED_AT_LENGTH = 40
 
 AUTHORITATIVE_TABLES = (
     "capability_profiles",
@@ -65,10 +68,24 @@ def _identifier_constraint(column_name: str, table_name: str) -> sa.CheckConstra
     return sa.CheckConstraint(
         f"typeof({column_name}) = 'text' "
         f"AND length({column_name}) BETWEEN 1 AND {MAX_IDENTIFIER_LENGTH} "
-        f"AND length(CAST({column_name} AS BLOB)) = length({column_name}) "
-        f"AND instr({column_name}, char(0)) = 0 "
-        f"AND substr({column_name}, 1, 1) GLOB '[A-Za-z0-9]' "
-        f"AND {column_name} NOT GLOB '*[^A-Za-z0-9_.:-]*'",
+        f"AND length(CAST({column_name} AS BLOB)) BETWEEN 1 "
+        f"AND {MAX_IDENTIFIER_UTF8_BYTES} "
+        f"AND instr({column_name}, char(0)) = 0",
+        name=f"ck_{table_name}_{column_name}",
+    )
+
+
+def _bounded_text_constraint(
+    column_name: str,
+    table_name: str,
+    *,
+    maximum: int,
+) -> sa.CheckConstraint:
+    return sa.CheckConstraint(
+        f"typeof({column_name}) = 'text' "
+        f"AND length({column_name}) BETWEEN 1 AND {maximum} "
+        f"AND length(CAST({column_name} AS BLOB)) BETWEEN 1 AND {maximum} "
+        f"AND instr({column_name}, char(0)) = 0",
         name=f"ck_{table_name}_{column_name}",
     )
 
@@ -113,11 +130,14 @@ def _create_record_table(
             for column in (id_column, *relationship_columns)
         ),
         _identifier_constraint("transaction_id", name),
-        sa.CheckConstraint("schema_version = 1", name=f"ck_{name}_schema_version"),
-        sa.CheckConstraint("length(record_json) > 0", name=f"ck_{name}_record_json"),
+        sa.CheckConstraint(
+            "typeof(schema_version) = 'integer' AND schema_version = 1",
+            name=f"ck_{name}_schema_version",
+        ),
+        _bounded_text_constraint("record_json", name, maximum=MAX_RECORD_JSON_BYTES),
         _hash_constraint("content_hash", name),
         _hash_constraint("governing_policy_hash", name),
-        sa.CheckConstraint("length(created_at) > 0", name=f"ck_{name}_created_at"),
+        _bounded_text_constraint("created_at", name, maximum=MAX_CREATED_AT_LENGTH),
     )
     for column_name in (
         *RELATIONSHIP_INDEXES.get(name, ()),
