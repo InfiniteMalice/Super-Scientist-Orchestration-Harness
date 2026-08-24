@@ -1058,17 +1058,73 @@ class CohortPlan(_CohortPlanPayload):
         by_alias: bool | None = None,
         by_name: bool | None = None,
     ) -> Self:
-        raw_size = len(json_data.encode("utf-8")) if isinstance(json_data, str) else len(json_data)
-        if raw_size > MAX_COHORT_PLAN_BYTES:
-            _reject_cohort_plan("cohort serialized plan exceeds the Phase A byte limit")
-        return super().model_validate_json(
-            json_data,
-            strict=strict,
-            extra=extra,
-            context=context,
-            by_alias=by_alias,
-            by_name=by_name,
-        )
+        if type(json_data) not in (str, bytes):
+            raise ValueError("cohort plan JSON input must be an exact str or bytes value")
+
+        normalized_json: str | None = None
+        normalization_failed = False
+        if isinstance(json_data, str):
+            if len(json_data) > MAX_COHORT_PLAN_BYTES:
+                raise ValueError("cohort serialized plan exceeds the Phase A byte limit")
+            try:
+                encoded_json = str.encode(json_data, "utf-8")
+            except _COGNITION_INPUT_FAILURES:
+                normalization_failed = True
+            if not normalization_failed:
+                if len(encoded_json) > MAX_COHORT_PLAN_BYTES:
+                    raise ValueError("cohort serialized plan exceeds the Phase A byte limit")
+                normalized_json = json_data
+        else:
+            assert isinstance(json_data, bytes)
+            if len(json_data) > MAX_COHORT_PLAN_BYTES:
+                raise ValueError("cohort serialized plan exceeds the Phase A byte limit")
+            try:
+                normalized_json = bytes.decode(json_data, "utf-8")
+            except _COGNITION_INPUT_FAILURES:
+                normalization_failed = True
+        if normalization_failed:
+            raise ValueError("cohort plan JSON input is invalid")
+        if normalized_json is None:
+            raise ValueError("cohort plan JSON input is invalid")
+
+        parsed: Self | None = None
+        schema_error: PydanticValidationError | None = None
+        json_failed = False
+        try:
+            parsed = super().model_validate_json(
+                normalized_json,
+                strict=strict,
+                extra=extra,
+                context=context,
+                by_alias=by_alias,
+                by_name=by_name,
+            )
+        except PydanticValidationError as error:
+            error_details_failed = False
+            try:
+                json_failed = any(
+                    detail.get("type") == "json_invalid"
+                    for detail in error.errors(
+                        include_url=False,
+                        include_context=False,
+                        include_input=False,
+                    )
+                )
+            except _COGNITION_INPUT_FAILURES:
+                error_details_failed = True
+            if error_details_failed:
+                json_failed = True
+            elif not json_failed:
+                schema_error = error
+        except _COGNITION_INPUT_FAILURES:
+            json_failed = True
+        if json_failed:
+            raise ValueError("cohort plan JSON input is invalid")
+        if schema_error is not None:
+            raise schema_error
+        if parsed is None:
+            raise ValueError("cohort plan JSON input is invalid")
+        return parsed
 
     @classmethod
     def build(cls, **values: Any) -> CohortPlan:

@@ -70,6 +70,26 @@ def _assert_sanitized_derivation_failure(
     assert not hasattr(error, "errors")
 
 
+def _assert_sanitized_cohort_json_failure(
+    value: object,
+    expected_message: str,
+) -> None:
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        with pytest.raises(ValueError) as caught:
+            CohortPlan.model_validate_json(value)  # type: ignore[arg-type]
+
+    error = caught.value
+    assert caught_warnings == []
+    assert type(error) is ValueError
+    assert str(error) == expected_message
+    assert PRIVATE_MARKER not in str(error)
+    assert PRIVATE_MARKER not in repr(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert not hasattr(error, "errors")
+
+
 def _requirement(requirement_id: str = "requirement-a") -> CapabilityRequirement:
     return CapabilityRequirement(
         requirement_id=requirement_id,
@@ -752,10 +772,113 @@ def test_cohort_plan_complete_serialized_byte_bound_is_exact_and_early() -> None
     payload["padding"] += "x"
     with pytest.raises(ValidationError, match="serialized plan exceeds"):
         CohortPlan.model_validate(payload)
-    with pytest.raises(ValidationError, match="serialized plan exceeds"):
-        CohortPlan.model_validate_json(
-            json.dumps(to_jsonable_python(payload), separators=(",", ":"))
+    _assert_sanitized_cohort_json_failure(
+        json.dumps(to_jsonable_python(payload), separators=(",", ":")),
+        "cohort serialized plan exceeds the Phase A byte limit",
+    )
+
+
+def test_cohort_plan_json_ingress_rejects_subclasses_without_invoking_hooks() -> None:
+    invoked_hooks: list[str] = []
+
+    class HookedStr(str):
+        def __len__(self) -> int:
+            invoked_hooks.append("str.__len__")
+            raise RuntimeError(PRIVATE_MARKER)
+
+        def encode(self, *args: object, **kwargs: object) -> bytes:
+            invoked_hooks.append("str.encode")
+            raise RuntimeError(PRIVATE_MARKER)
+
+    class HookedBytes(bytes):
+        def __len__(self) -> int:
+            invoked_hooks.append("bytes.__len__")
+            raise RuntimeError(PRIVATE_MARKER)
+
+        def decode(self, *args: object, **kwargs: object) -> str:
+            invoked_hooks.append("bytes.decode")
+            raise RuntimeError(PRIVATE_MARKER)
+
+    class HookedBytearray(bytearray):
+        def __len__(self) -> int:
+            invoked_hooks.append("bytearray.__len__")
+            raise RuntimeError(PRIVATE_MARKER)
+
+        def decode(self, *args: object, **kwargs: object) -> str:
+            invoked_hooks.append("bytearray.decode")
+            raise RuntimeError(PRIVATE_MARKER)
+
+    for value in (
+        HookedStr("{}"),
+        HookedBytes(b"{}"),
+        HookedBytearray(b"{}"),
+        bytearray(b"{}"),
+    ):
+        _assert_sanitized_cohort_json_failure(
+            value,
+            "cohort plan JSON input must be an exact str or bytes value",
         )
+
+    assert invoked_hooks == []
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ("ascii-str", "unicode-character-overrun", "unicode-byte-overrun", "bytes"),
+)
+def test_cohort_plan_json_ingress_rejects_oversized_exact_inputs(kind: str) -> None:
+    if kind == "ascii-str":
+        value: str | bytes = "x" * (PLAN_LIMIT_BYTES + 1)
+    elif kind == "unicode-character-overrun":
+        value = "\N{SNOWMAN}" * (PLAN_LIMIT_BYTES + 1)
+    elif kind == "unicode-byte-overrun":
+        value = "\N{SNOWMAN}" * ((PLAN_LIMIT_BYTES // 3) + 1)
+    else:
+        value = b"x" * (PLAN_LIMIT_BYTES + 1)
+    _assert_sanitized_cohort_json_failure(
+        value,
+        "cohort serialized plan exceeds the Phase A byte limit",
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        pytest.param(f'{{"private":"{PRIVATE_MARKER}"', id="malformed-json"),
+        pytest.param(f'"{PRIVATE_MARKER}\ud800"', id="unpaired-surrogate"),
+        pytest.param(
+            PRIVATE_MARKER.encode("utf-8") + b"\xff",
+            id="malformed-utf8",
+        ),
+        pytest.param(
+            "[" * 1_000 + f'"{PRIVATE_MARKER}"' + "]" * 1_000,
+            id="excessive-depth",
+        ),
+    ),
+)
+def test_cohort_plan_json_ingress_detaches_decode_parse_and_depth_failures(
+    value: str | bytes,
+) -> None:
+    _assert_sanitized_cohort_json_failure(
+        value,
+        "cohort plan JSON input is invalid",
+    )
+
+
+def test_cohort_plan_json_ingress_preserves_exact_roundtrips_and_strict_schema_errors() -> None:
+    plan = build_cohort(
+        _request(candidates=("peer-a",)),
+        (_profile("peer-a"),),
+    )
+    serialized = plan.model_dump_json(warnings=False)
+
+    assert CohortPlan.model_validate_json(serialized, strict=True) == plan
+    assert CohortPlan.model_validate_json(serialized.encode("utf-8"), strict=True) == plan
+
+    payload = plan.model_dump(mode="json", warnings=False)
+    payload["schema_version"] = "1"
+    with pytest.raises(ValidationError, match="schema_version"):
+        CohortPlan.model_validate_json(json.dumps(payload), strict=True)
 
 
 def test_cohort_request_rejects_more_than_sixty_four_total_requirements() -> None:
