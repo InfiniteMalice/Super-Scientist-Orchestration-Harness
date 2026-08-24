@@ -202,17 +202,18 @@ def test_progress_mapping_rejects_deep_request_json_safely() -> None:
     assert not hasattr(error, "errors")
 
 
-def test_progress_mapping_preserves_existing_false_finish_semantics() -> None:
+def test_unvalidated_procedure_weight_does_not_trigger_false_finish() -> None:
     plan = _plan()
     finding = detect_false_finish(
         voluntary_termination=True,
         claims_completion=True,
         final_validator_result=AssessmentOutcome.FAILED,
-        validated_weight=plan.subtasks[0].weight,
+        plan=plan,
+        events=(),
         unused_budget=True,
     )
 
-    assert finding.result is FalseFinishResult.FALSE_FINISH
+    assert finding.result is FalseFinishResult.NOT_FALSE_FINISH
 
 
 def test_compilation_record_receipt_and_binding_are_canonically_hashed() -> None:

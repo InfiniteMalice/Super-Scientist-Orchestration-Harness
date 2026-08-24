@@ -28,6 +28,12 @@ from super_scientist.domain.progress.models import (
     progress_actors_are_independent,
 )
 
+_PROGRESS_BOUNDARY_ERROR = "progress inputs failed canonical validation"
+
+
+class ProgressBoundaryValidationError(ValueError):
+    """Fixed failure for copied or malformed public progress inputs."""
+
 
 def calculate_progress(
     plan: ProgressPlan,
@@ -186,7 +192,7 @@ def is_canonical_artifact_ref(reference: ArtifactRef) -> bool:
     return reference.relative_path == f"sha256/{reference.sha256[:2]}/{reference.sha256}"
 
 
-def detect_false_finish(
+def _detect_false_finish_from_derived_weight(
     *,
     voluntary_termination: bool,
     claims_completion: bool,
@@ -194,8 +200,6 @@ def detect_false_finish(
     validated_weight: Decimal,
     unused_budget: bool,
 ) -> FalseFinishFinding:
-    """Classify a bounded weight derived by the trusted progress calculation path."""
-
     is_false_finish = (
         voluntary_termination
         and claims_completion
@@ -227,6 +231,66 @@ def detect_false_finish(
         ),
         unused_budget=unused_budget,
         reasons=(),
+    )
+
+
+def _strict_progress_inputs(
+    plan: ProgressPlan,
+    events: tuple[ProgressValidationEvent, ...],
+) -> tuple[ProgressPlan, tuple[ProgressValidationEvent, ...]]:
+    validated_plan: ProgressPlan | None = None
+    validated_events: tuple[ProgressValidationEvent, ...] | None = None
+    failed = False
+    try:
+        validated_plan = ProgressPlan.model_validate(
+            plan.model_dump(mode="python", warnings=False),
+            strict=True,
+        )
+        validated_events = tuple(
+            ProgressValidationEvent.model_validate(
+                event.model_dump(mode="python", warnings=False),
+                strict=True,
+            )
+            for event in events
+        )
+    except (
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        TypeError,
+        ValueError,
+    ):
+        failed = True
+    if (
+        failed
+        or validated_plan is None
+        or validated_events is None
+        or validated_plan != plan
+        or validated_events != events
+    ):
+        raise ProgressBoundaryValidationError(_PROGRESS_BOUNDARY_ERROR) from None
+    return validated_plan, validated_events
+
+
+def detect_false_finish(
+    *,
+    voluntary_termination: bool,
+    claims_completion: bool,
+    final_validator_result: AssessmentOutcome,
+    plan: ProgressPlan,
+    events: tuple[ProgressValidationEvent, ...],
+    unused_budget: bool,
+) -> FalseFinishFinding:
+    """Strictly recompute official progress before false-finish classification."""
+
+    validated_plan, validated_events = _strict_progress_inputs(plan, events)
+    summary = calculate_progress(validated_plan, validated_events)
+    return _detect_false_finish_from_derived_weight(
+        voluntary_termination=voluntary_termination,
+        claims_completion=claims_completion,
+        final_validator_result=final_validator_result,
+        validated_weight=summary.official_weight,
+        unused_budget=unused_budget,
     )
 
 

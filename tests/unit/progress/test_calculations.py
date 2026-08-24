@@ -3,6 +3,7 @@ from __future__ import annotations
 import tracemalloc
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, getcontext, localcontext
+from inspect import signature
 from time import perf_counter
 
 import pytest
@@ -17,7 +18,9 @@ from super_scientist.domain.improvement.models import (
     ResourceBudget,
     ResourceUsage,
 )
+from super_scientist.domain.progress._decimal_math import _derived_decimal_greater_than
 from super_scientist.domain.progress.calculations import (
+    ProgressBoundaryValidationError,
     calculate_progress,
     detect_false_finish,
     remaining_budget,
@@ -265,18 +268,28 @@ def test_progress_weight_arithmetic_is_independent_of_ambient_decimal_precision(
 
 def test_derived_wide_scale_progress_total_is_composable_across_contexts() -> None:
     plan = _wide_scale_plan()
+    events = tuple(
+        _event(
+            f"wide-event-{index}",
+            subtask.subtask_id,
+            ProgressStatus.VALIDATED,
+            NOW + timedelta(seconds=index),
+        ).model_copy(update={"plan_version_id": plan.plan_version_id})
+        for index, subtask in enumerate(plan.subtasks, start=1)
+    )
     original_context = getcontext().copy()
     outcomes = []
     for precision in (1, 2, 80):
         context = original_context.copy()
         context.prec = precision
         with localcontext(context):
-            summary = calculate_progress(plan, ())
+            summary = calculate_progress(plan, events)
             finding = detect_false_finish(
                 voluntary_termination=True,
                 claims_completion=True,
                 final_validator_result=AssessmentOutcome.FAILED,
-                validated_weight=summary.total_weight,
+                plan=plan,
+                events=events,
                 unused_budget=True,
             )
             outcomes.append((summary, finding))
@@ -285,6 +298,20 @@ def test_derived_wide_scale_progress_total_is_composable_across_contexts() -> No
     assert outcomes[0][0].total_weight == Decimal("1." + ("0" * 384))
     assert outcomes[0][1].result is FalseFinishResult.FALSE_FINISH
     assert len(plan.subtasks) == 64
+
+
+def test_false_finish_public_boundary_requires_plan_and_events_not_scalar() -> None:
+    parameters = signature(detect_false_finish).parameters
+
+    assert "plan" in parameters
+    assert "events" in parameters
+    assert "validated_weight" not in parameters
+
+
+def test_exact_1024_digit_trusted_derived_comparison_is_supported() -> None:
+    derived = Decimal((0, (1,) * 1_024, -384))
+
+    assert _derived_decimal_greater_than(derived, Decimal("0")) is True
 
 
 def test_progress_weight_rejects_compact_extreme_exponent_at_model_boundary() -> None:
@@ -356,22 +383,47 @@ def test_copied_extreme_progress_weight_fails_fast_without_large_allocation() ->
     "forged_weight",
     (
         Decimal("1E-500000000"),
-        Decimal((0, (1,) * 1_024, -384)),
+        Decimal("0." + ("1" * 129)),
     ),
 )
-def test_false_finish_public_path_rejects_forged_derived_weight(
+def test_false_finish_public_path_rejects_forged_plan_weight(
     forged_weight: Decimal,
 ) -> None:
-    with pytest.raises(ValueError) as caught:
+    plan = _plan()
+    forged_subtask = plan.subtasks[0].model_copy(update={"weight": forged_weight})
+    forged_plan = plan.model_copy(update={"subtasks": (forged_subtask, plan.subtasks[1])})
+
+    with pytest.raises(ProgressBoundaryValidationError) as caught:
         detect_false_finish(
             voluntary_termination=True,
             claims_completion=True,
             final_validator_result=AssessmentOutcome.FAILED,
-            validated_weight=forged_weight,
+            plan=forged_plan,
+            events=(),
             unused_budget=True,
         )
 
-    assert str(caught.value) == "progress decimal scalar exceeds deterministic arithmetic bounds"
+    assert str(caught.value) == "progress inputs failed canonical validation"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert not hasattr(caught.value, "errors")
+
+
+def test_model_copy_forged_summary_cannot_enter_false_finish_boundary() -> None:
+    plan = _plan()
+    summary = calculate_progress(plan, ())
+    forged_summary = summary.model_copy(update={"official_weight": Decimal("0." + ("1" * 129))})
+
+    with pytest.raises(TypeError):
+        detect_false_finish(
+            voluntary_termination=True,
+            claims_completion=True,
+            final_validator_result=AssessmentOutcome.FAILED,
+            plan=plan,
+            events=(),
+            unused_budget=True,
+            validated_weight=forged_summary.official_weight,  # type: ignore[call-arg]
+        )
 
 
 def test_remaining_budget_subtraction_is_independent_of_ambient_decimal_precision() -> None:

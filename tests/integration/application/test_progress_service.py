@@ -1306,7 +1306,8 @@ def _completion_transaction(
         voluntary_termination=voluntary,
         claims_completion=True,
         final_validator_result=final_result,
-        validated_weight=Decimal("1.00"),
+        plan=plan,
+        events=(_event_proposal(runtime, plan).event,),
         unused_budget=True,
     )
     decision = CompletionDecision(

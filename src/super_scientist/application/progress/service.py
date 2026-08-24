@@ -689,25 +689,25 @@ class DecideCompletionHandler:
                 RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
                 "completion requires the declared independent final validator",
             )
+        latest_budget = max(
+            context.budgets,
+            key=lambda item: (item.recorded_at, item.budget_id),
+        )
         try:
-            summary = calculate_progress(plan, context.events)
+            finding = detect_false_finish(
+                voluntary_termination=completion.voluntary_termination,
+                claims_completion=completion.claims_completion,
+                final_validator_result=final_validation.result,
+                plan=plan,
+                events=context.events,
+                unused_budget=has_unused_budget(latest_budget),
+            )
         except ValueError:
             return _rejected(
                 proposal.proposal_id,
                 RejectionCode.INVALID_DEPENDENCY,
                 "completion progress history is invalid",
             )
-        latest_budget = max(
-            context.budgets,
-            key=lambda item: (item.recorded_at, item.budget_id),
-        )
-        finding = detect_false_finish(
-            voluntary_termination=completion.voluntary_termination,
-            claims_completion=completion.claims_completion,
-            final_validator_result=final_validation.result,
-            validated_weight=summary.official_weight,
-            unused_budget=has_unused_budget(latest_budget),
-        )
         if decision.false_finish != finding:
             return _rejected(
                 proposal.proposal_id,

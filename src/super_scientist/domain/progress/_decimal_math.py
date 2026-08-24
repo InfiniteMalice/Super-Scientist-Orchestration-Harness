@@ -108,9 +108,9 @@ def _subtract_decimals(left: Decimal, right: Decimal) -> Decimal:
 def _derived_decimal_greater_than(left: Decimal, right: Decimal) -> bool:
     """Compare a trusted derived value with one bounded ingress scalar."""
 
-    validated = (_require_derived_decimal(left), _require_bounded_decimal(right))
-    context = _context_for_validated(validated)
-    return context.compare(left, right) == Decimal("1")
+    _require_derived_decimal(left)
+    _require_bounded_decimal(right)
+    return left > right
 
 
 __all__ = [

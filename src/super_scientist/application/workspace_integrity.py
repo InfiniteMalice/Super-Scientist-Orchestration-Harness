@@ -1260,13 +1260,10 @@ def _require_projection_consistency(
             )
             if completion_plan is None:  # pragma: no cover - narrowed by fail-closed check above
                 raise StorageIntegrityError("completion plan is unavailable")
-            completion_summary = calculate_progress(
-                completion_plan,
-                tuple(
-                    event
-                    for event in expected_progress_events.values()
-                    if event.plan_version_id == completion.plan_version_id
-                ),
+            completion_events = tuple(
+                event
+                for event in expected_progress_events.values()
+                if event.plan_version_id == completion.plan_version_id
             )
             completion_budgets = tuple(
                 budget
@@ -1285,7 +1282,8 @@ def _require_projection_consistency(
                 voluntary_termination=completion.voluntary_termination,
                 claims_completion=completion.claims_completion,
                 final_validator_result=final_validation.result,
-                validated_weight=completion_summary.official_weight,
+                plan=completion_plan,
+                events=completion_events,
                 unused_budget=has_unused_budget(latest_completion_budget),
             )
             _require(
@@ -2058,8 +2056,7 @@ def _require_projection_consistency(
         "behavioral rule heads do not match accepted transactions",
     )
     _require(
-        {record.campaign_id: record for record in harness.campaigns}
-        == expected_harness_campaigns,
+        {record.campaign_id: record for record in harness.campaigns} == expected_harness_campaigns,
         "harness campaign projections do not match accepted transactions",
     )
     _require(
@@ -2422,8 +2419,7 @@ def _replay_harness_projection(
     _require(
         report.campaign.campaign_id in campaigns
         and decision.campaign_id == report.campaign.campaign_id
-        and _harness_campaign_record(report.campaign)
-        == campaigns[report.campaign.campaign_id]
+        and _harness_campaign_record(report.campaign) == campaigns[report.campaign.campaign_id]
         and all(
             result_id in metrics for metric in report.metrics for result_id in metric.result_ids
         )
@@ -3009,11 +3005,7 @@ def _require_handbook_verification_consistency(
             and record.stale_locations == result.stale_locations
             and record.missing_symbols == result.missing_symbols
             and record.outcome
-            is (
-                AssessmentOutcome.PASSED
-                if result.valid
-                else AssessmentOutcome.FAILED
-            ),
+            is (AssessmentOutcome.PASSED if result.valid else AssessmentOutcome.FAILED),
             "handbook verification does not match its canonical source and manifest bindings",
         )
 
