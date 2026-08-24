@@ -503,6 +503,56 @@ def test_safe_trace_parser_accepts_bounded_json_and_hides_untrusted_failures() -
     assert raised.value.__context__ is None
 
 
+@pytest.mark.parametrize(
+    ("value", "wire_value", "value_type"),
+    (
+        (Decimal("0.9"), {"kind": "numeric", "value": "0.9"}, Decimal),
+        ("0.9", {"kind": "categorical", "value": "0.9"}, str),
+        ("PASS", {"kind": "categorical", "value": "PASS"}, str),
+    ),
+)
+def test_safe_trace_parser_preserves_the_tagged_reward_value_union(
+    value: Decimal | str,
+    wire_value: dict[str, str],
+    value_type: type[Decimal] | type[str],
+) -> None:
+    parser = getattr(harness_eval, "parse_untrusted_harness_execution_trace", None)
+    assert callable(parser)
+    trace = valid_trace(observation=reward_observation(value=value))
+    payload = trace.model_dump(mode="json")
+    reward = payload["reward_observation"]
+    assert isinstance(reward, dict)
+    assert reward["value"] == wire_value
+
+    parsed = parser(trace.model_dump_json())
+
+    assert parsed == trace
+    assert parsed.content_hash == trace.content_hash
+    assert parsed.reward_observation is not None
+    assert type(parsed.reward_observation.value) is value_type
+    assert parsed.reward_observation.value == value
+
+
+def test_safe_trace_parser_rejects_ambiguous_or_type_tampered_reward_wire_values() -> None:
+    parser = getattr(harness_eval, "parse_untrusted_harness_execution_trace", None)
+    assert callable(parser)
+    trace = valid_trace(observation=reward_observation(value=Decimal("0.9")))
+    type_tampered_payload = trace.model_dump(mode="json")
+    tampered_reward = type_tampered_payload["reward_observation"]
+    assert isinstance(tampered_reward, dict)
+    tampered_reward["value"] = {"kind": "categorical", "value": "0.9"}
+    legacy_payload = trace.model_dump(mode="json")
+    legacy_reward = legacy_payload["reward_observation"]
+    assert isinstance(legacy_reward, dict)
+    legacy_reward["value"] = "0.9"
+
+    for raw_payload in (type_tampered_payload, legacy_payload):
+        with pytest.raises(ValueError, match="untrusted harness execution trace") as raised:
+            parser(json.dumps(raw_payload))
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
+
 def test_safe_trace_parser_rejects_oversized_and_subclass_payloads_before_conversion() -> None:
     parser = getattr(harness_eval, "parse_untrusted_harness_execution_trace", None)
     assert callable(parser)

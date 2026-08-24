@@ -8,7 +8,14 @@ from enum import Enum, StrEnum
 from types import UnionType
 from typing import Annotated, Any, Literal, NoReturn, Self, Union, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 from pydantic_core import to_jsonable_python
 
 from super_scientist.domain.evidence.models import ArtifactRef
@@ -437,6 +444,16 @@ class _RewardObservationPayload(_StrictFrozenModel):
     value: Decimal | BoundedCategoricalReward | None
     evidence_id: BoundedTraceIdentifier | None
     observed_at: UtcTimestamp
+
+    @field_serializer("value", when_used="json")
+    def serialize_value_for_trace_wire(self, value: Decimal | str | None) -> dict[str, str] | None:
+        """Keep numeric and categorical reward values disjoint in untrusted JSON."""
+        if value is None:
+            return None
+        if isinstance(value, Decimal):
+            return {"kind": "numeric", "value": str(value)}
+        assert isinstance(value, str)
+        return {"kind": "categorical", "value": value}
 
     @field_validator("value")
     @classmethod
@@ -1253,6 +1270,21 @@ def _raise_untrusted_harness_trace_error() -> NoReturn:
     raise ValueError(UNTRUSTED_HARNESS_TRACE_ERROR)
 
 
+def _normalize_json_reward_observation_value(value: object) -> Decimal | str | None:
+    """Decode the versioned, type-disjoint reward wire representation only."""
+    if value is None:
+        return None
+    if type(value) is not dict or set(value) != {"kind", "value"}:
+        raise ValueError("reward trace wire value must be an explicit tagged object")
+    kind = value["kind"]
+    wire_value = value["value"]
+    if kind == "numeric" and type(wire_value) is str:
+        return Decimal(wire_value)
+    if kind == "categorical" and type(wire_value) is str:
+        return wire_value
+    raise ValueError("reward trace wire value tag and payload must match")
+
+
 def _normalize_json_trace_value(value: object, annotation: object) -> object:
     """Convert only JSON representations that strict trace models explicitly permit."""
     origin = get_origin(annotation)
@@ -1278,8 +1310,12 @@ def _normalize_json_trace_value(value: object, annotation: object) -> object:
         if type(value) is not dict:
             return value
         normalized = dict(value)
+        if issubclass(annotation, _RewardObservationPayload) and "value" in normalized:
+            normalized["value"] = _normalize_json_reward_observation_value(normalized["value"])
         for field_name, field in annotation.model_fields.items():
-            if field_name in normalized:
+            if field_name in normalized and not (
+                issubclass(annotation, _RewardObservationPayload) and field_name == "value"
+            ):
                 normalized[field_name] = _normalize_json_trace_value(
                     normalized[field_name], field.annotation
                 )

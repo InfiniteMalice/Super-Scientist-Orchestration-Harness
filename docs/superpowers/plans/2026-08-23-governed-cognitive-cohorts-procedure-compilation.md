@@ -863,7 +863,6 @@ class HarnessExecutionTraceEnvelope(BaseModel):
 class RecordHarnessExecutionTrace(ProposalBase):
     proposal_type: Literal["record_harness_execution_trace"] = "record_harness_execution_trace"
     envelope: HarnessExecutionTraceEnvelope
-<!-- task-8-13-trace-contract:end -->
 
 
 class RecordRewardAssessment(ProposalBase):
@@ -871,6 +870,7 @@ class RecordRewardAssessment(ProposalBase):
     observation: RewardObservation
     findings: tuple[RewardHackingFinding, ...]
     assessment: RewardValidityAssessment
+<!-- task-8-13-trace-contract:end -->
 
 
 MAX_PROPOSAL_BYTES = 8 * 1_024 * 1_024
@@ -1470,7 +1470,9 @@ Protocol handlers require exact model/harness/verifier/task/budget identities. A
 it calls `parse_untrusted_harness_execution_trace()` and constructs a typed
 `RecordHarnessExecutionTrace` before the handler runs. The handler consumes only that typed
 proposal; direct `HarnessExecutionTrace.model_validate*()` calls are trusted/internal and must not
-parse request payloads. Analysis handlers recompute `analyze_model_harness()` and compare
+parse request payloads. Its external reward-value JSON is tagged as either numeric or categorical;
+legacy bare strings are rejected so numeric-looking categorical values cannot be misclassified.
+Analysis handlers recompute `analyze_model_harness()` and compare
 canonically. No handler creates or changes a `HarnessCampaign` decision.
 
 ```python

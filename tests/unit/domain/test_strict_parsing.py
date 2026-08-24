@@ -1,9 +1,11 @@
+import ast
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus, EvidenceLink
 from super_scientist.domain.cognition import (
@@ -13,8 +15,18 @@ from super_scientist.domain.cognition import (
     DiversityFingerprint,
 )
 from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord, EvidenceSpan
+from super_scientist.domain.harness_eval import (
+    HarnessExecutionTrace,
+    parse_untrusted_harness_execution_trace,
+)
+from super_scientist.domain.harness_eval.traces import RewardObservation
 from super_scientist.domain.identity import ActorIdentity, ActorKind
-from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
+from super_scientist.domain.primitives import (
+    StableIdentifier,
+    UtcTimestamp,
+    canonical_json_bytes,
+    sha256_hex,
+)
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
     Proposal,
@@ -26,7 +38,21 @@ PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
 NOW = datetime(2026, 7, 13, 15, 0, tzinfo=UTC)
 
 
-def test_task_8_and_13_trace_boundary_contract_source_compiles() -> None:
+def _plan_python_block(plan: str, class_name: str) -> str:
+    blocks = re.findall(r"```python\n(.*?)```", plan, flags=re.DOTALL)
+    return next(block for block in blocks if f"class {class_name}" in block)
+
+
+def _attribute_path(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _attribute_path(node.value)
+        return f"{parent}.{node.attr}" if parent is not None else None
+    return None
+
+
+def test_task_8_and_13_trace_boundary_contract_executes_and_resolves_context_capabilities() -> None:
     plan = (
         Path(__file__).parents[3]
         / "docs"
@@ -36,18 +62,104 @@ def test_task_8_and_13_trace_boundary_contract_source_compiles() -> None:
     ).read_text(encoding="utf-8")
     start_marker = "<!-- task-8-13-trace-contract:start -->"
     end_marker = "<!-- task-8-13-trace-contract:end -->"
-    source = plan.split(start_marker, 1)[1].split(end_marker, 1)[0]
+    task_8_source = plan.split(start_marker, 1)[1].split(end_marker, 1)[0]
+    adapter_source = _plan_python_block(plan, "HarnessTraceProposalAdapter")
+    handler_source = _plan_python_block(plan, "RecordRewardAssessmentHandler")
 
-    compile(source, "task-8-13-trace-contract", "exec")
-    assert source.count("class HarnessTraceRecordMetadata") == 1
-    assert source.count("class HarnessExecutionTraceEnvelope") == 1
-    assert source.count("class RecordHarnessExecutionTrace") == 1
-    assert "RecordHarnessExecutionTraceProposal" not in plan
-    assert "-> RecordHarnessExecutionTrace" in plan
-    assert "envelope=HarnessExecutionTraceEnvelope" in plan
-    assert "proposal.expectation" not in plan
-    assert "proposal.verification" not in plan
-    assert "proposal.diagnostic_coverage" not in plan
+    class ProposalBase(BaseModel):
+        proposal_id: StableIdentifier
+        idempotency_key: StableIdentifier
+        proposer: ActorIdentity
+
+    namespace = {
+        "ActorIdentity": ActorIdentity,
+        "BaseModel": BaseModel,
+        "HarnessExecutionTrace": HarnessExecutionTrace,
+        "Literal": __import__("typing").Literal,
+        "ProposalBase": ProposalBase,
+        "StableIdentifier": StableIdentifier,
+        "UtcTimestamp": UtcTimestamp,
+        "RewardObservation": RewardObservation,
+        "RewardHackingFinding": object,
+        "RewardValidityAssessment": object,
+        "parse_untrusted_harness_execution_trace": parse_untrusted_harness_execution_trace,
+    }
+    exec(compile(task_8_source, "task-8-contract", "exec"), namespace)
+    exec(compile(adapter_source, "task-13-adapter-contract", "exec"), namespace)
+
+    from tests.unit.harness_eval.test_traces import valid_trace
+
+    trace = valid_trace()
+    metadata = namespace["HarnessTraceRecordMetadata"](
+        received_at=NOW,
+        source_id="harness-adapter",
+    )
+    proposal = namespace["HarnessTraceProposalAdapter"]().from_untrusted_payload(
+        trace.model_dump_json(),
+        metadata,
+        "trace-proposal",
+        "trace-idempotency",
+        _actor(),
+    )
+
+    assert type(proposal) is namespace["RecordHarnessExecutionTrace"]
+    assert type(proposal.envelope.metadata) is namespace["HarnessTraceRecordMetadata"]
+    assert type(proposal.envelope.trace) is HarnessExecutionTrace
+    assert proposal.envelope.trace == trace
+    assert set(namespace["RecordRewardAssessment"].model_fields) == {
+        "proposal_id",
+        "idempotency_key",
+        "proposer",
+        "proposal_type",
+        "observation",
+        "findings",
+        "assessment",
+    }
+
+    handler_tree = ast.parse(handler_source)
+    handler_class = next(
+        node
+        for node in handler_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "RecordRewardAssessmentHandler"
+    )
+    decide = next(
+        node
+        for node in handler_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "decide"
+    )
+    proposal_attributes = {
+        node.attr
+        for node in ast.walk(decide)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "proposal"
+    }
+    assert proposal_attributes == {"observation", "findings", "assessment"}
+
+    resolver = next(
+        node
+        for node in ast.walk(decide)
+        if isinstance(node, ast.Call)
+        and _attribute_path(node.func) == "context.resolve_reward_assessment_capabilities"
+    )
+    assert {keyword.arg for keyword in resolver.keywords} == {
+        "trace_receipt",
+        "assessment_receipt",
+    }
+    validity = next(
+        node
+        for node in ast.walk(decide)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "assess_reward_validity"
+    )
+    assert resolver.lineno < validity.lineno
+    assert {keyword.arg: _attribute_path(keyword.value) for keyword in validity.keywords} == {
+        "expectation": "capabilities.expectation",
+        "verification": "capabilities.verification",
+        "diagnostic_coverage": "capabilities.diagnostic_coverage",
+        "inventory": "capabilities.inventory",
+    }
 
 
 def _actor() -> ActorIdentity:
