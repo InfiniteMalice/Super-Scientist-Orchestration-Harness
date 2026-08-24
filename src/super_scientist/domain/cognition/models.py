@@ -1058,7 +1058,8 @@ class CohortPlan(_CohortPlanPayload):
         by_alias: bool | None = None,
         by_name: bool | None = None,
     ) -> Self:
-        if type(json_data) not in (str, bytes):
+        json_type = type(json_data)
+        if json_type is not str and json_type is not bytes:
             raise ValueError("cohort plan JSON input must be an exact str or bytes value")
 
         normalized_json: str | None = None

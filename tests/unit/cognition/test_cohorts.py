@@ -822,6 +822,25 @@ def test_cohort_plan_json_ingress_rejects_subclasses_without_invoking_hooks() ->
     assert invoked_hooks == []
 
 
+def test_cohort_plan_json_ingress_rejects_metaclass_without_equality_hook() -> None:
+    invoked_hooks: list[object] = []
+
+    class HookedMeta(type):
+        def __eq__(cls, other: object) -> bool:
+            invoked_hooks.append(other)
+            raise RuntimeError(PRIVATE_MARKER)
+
+    class HookedInput(metaclass=HookedMeta):
+        pass
+
+    _assert_sanitized_cohort_json_failure(
+        HookedInput(),
+        "cohort plan JSON input must be an exact str or bytes value",
+    )
+
+    assert invoked_hooks == []
+
+
 @pytest.mark.parametrize(
     "kind",
     ("ascii-str", "unicode-character-overrun", "unicode-byte-overrun", "bytes"),
