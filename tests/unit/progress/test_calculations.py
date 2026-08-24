@@ -17,11 +17,16 @@ from super_scientist.domain.improvement.models import (
     ResourceBudget,
     ResourceUsage,
 )
-from super_scientist.domain.progress.calculations import calculate_progress, remaining_budget
+from super_scientist.domain.progress.calculations import (
+    calculate_progress,
+    detect_false_finish,
+    remaining_budget,
+)
 from super_scientist.domain.progress.models import (
     BudgetAllocation,
     BudgetReserves,
     BudgetUsage,
+    FalseFinishResult,
     ProgressPlan,
     ProgressStatus,
     ProgressSubtask,
@@ -86,6 +91,39 @@ def _mixed_scale_plan() -> ProgressPlan:
                 plan_version_id="mixed-plan",
                 description=f"Complete step {index}",
                 dependency_ids=(() if index == 1 else (f"step-{index - 1}",)),
+                completion_criteria=("Independently accepted",),
+                validator=validator,
+                validator_version="validator-v1",
+                weight=weight,
+                evidence_requirements=("retained-evidence",),
+                order=index,
+            )
+            for index, weight in enumerate(weights, start=1)
+        ),
+        created_at=NOW,
+        governing_policy_hash=POLICY_HASH,
+    )
+
+
+def _wide_scale_plan() -> ProgressPlan:
+    validator = _actor("validator")
+    block_lengths = (6,) * 62 + (12,)
+    position = 0
+    weights = []
+    for length in block_lengths:
+        position += length
+        weights.append(Decimal(("9" * length) + f"E-{position}"))
+    weights.append(Decimal("1E-384"))
+    return ProgressPlan(
+        plan_version_id="wide-scale-plan",
+        run_id="run-1",
+        version=1,
+        subtasks=tuple(
+            ProgressSubtask(
+                subtask_id=f"wide-step-{index}",
+                plan_version_id="wide-scale-plan",
+                description=f"Complete wide step {index}",
+                dependency_ids=(),
                 completion_criteria=("Independently accepted",),
                 validator=validator,
                 validator_version="validator-v1",
@@ -225,6 +263,30 @@ def test_progress_weight_arithmetic_is_independent_of_ambient_decimal_precision(
     )
 
 
+def test_derived_wide_scale_progress_total_is_composable_across_contexts() -> None:
+    plan = _wide_scale_plan()
+    original_context = getcontext().copy()
+    outcomes = []
+    for precision in (1, 2, 80):
+        context = original_context.copy()
+        context.prec = precision
+        with localcontext(context):
+            summary = calculate_progress(plan, ())
+            finding = detect_false_finish(
+                voluntary_termination=True,
+                claims_completion=True,
+                final_validator_result=AssessmentOutcome.FAILED,
+                validated_weight=summary.total_weight,
+                unused_budget=True,
+            )
+            outcomes.append((summary, finding))
+
+    assert outcomes[0] == outcomes[1] == outcomes[2]
+    assert outcomes[0][0].total_weight == Decimal("1." + ("0" * 384))
+    assert outcomes[0][1].result is FalseFinishResult.FALSE_FINISH
+    assert len(plan.subtasks) == 64
+
+
 def test_progress_weight_rejects_compact_extreme_exponent_at_model_boundary() -> None:
     original = _plan().subtasks[0]
     payload = original.model_dump(mode="python")
@@ -288,6 +350,28 @@ def test_copied_extreme_progress_weight_fails_fast_without_large_allocation() ->
     }
     assert perf_counter() - started < 1.0
     assert peak_bytes < 2_000_000
+
+
+@pytest.mark.parametrize(
+    "forged_weight",
+    (
+        Decimal("1E-500000000"),
+        Decimal((0, (1,) * 1_024, -384)),
+    ),
+)
+def test_false_finish_public_path_rejects_forged_derived_weight(
+    forged_weight: Decimal,
+) -> None:
+    with pytest.raises(ValueError) as caught:
+        detect_false_finish(
+            voluntary_termination=True,
+            claims_completion=True,
+            final_validator_result=AssessmentOutcome.FAILED,
+            validated_weight=forged_weight,
+            unused_budget=True,
+        )
+
+    assert str(caught.value) == "progress decimal scalar exceeds deterministic arithmetic bounds"
 
 
 def test_remaining_budget_subtraction_is_independent_of_ambient_decimal_precision() -> None:

@@ -10,7 +10,7 @@ from super_scientist.domain.improvement.models import (
     ResourceBudget,
 )
 from super_scientist.domain.progress._decimal_math import (
-    _decimal_greater_than,
+    _derived_decimal_greater_than,
     _subtract_decimals,
     _sum_decimals,
 )
@@ -194,11 +194,13 @@ def detect_false_finish(
     validated_weight: Decimal,
     unused_budget: bool,
 ) -> FalseFinishFinding:
+    """Classify a bounded weight derived by the trusted progress calculation path."""
+
     is_false_finish = (
         voluntary_termination
         and claims_completion
         and final_validator_result is not AssessmentOutcome.PASSED
-        and _decimal_greater_than(validated_weight, Decimal("0"))
+        and _derived_decimal_greater_than(validated_weight, Decimal("0"))
         and unused_budget
     )
     if is_false_finish:
@@ -219,7 +221,10 @@ def detect_false_finish(
         voluntary_termination=voluntary_termination,
         claims_completion=claims_completion,
         final_validator_failed=final_validator_result is not AssessmentOutcome.PASSED,
-        meaningful_validated_progress=_decimal_greater_than(validated_weight, Decimal("0")),
+        meaningful_validated_progress=_derived_decimal_greater_than(
+            validated_weight,
+            Decimal("0"),
+        ),
         unused_budget=unused_budget,
         reasons=(),
     )

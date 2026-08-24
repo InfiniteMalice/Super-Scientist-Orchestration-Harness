@@ -529,6 +529,66 @@ def test_budget_aggregation_is_independent_of_ambient_decimal_precision() -> Non
     )
 
 
+def test_derived_subnormal_budget_total_has_deterministic_report() -> None:
+    request = valid_request()
+    budgets = (
+        ResourceBudget(
+            cost_usd=1.0,
+            compute_units=1.0,
+            tokens=0,
+            elapsed_seconds=1.0,
+            tool_calls=0,
+            human_interventions=0,
+        ),
+        ResourceBudget(
+            cost_usd=5e-324,
+            compute_units=5e-324,
+            tokens=0,
+            elapsed_seconds=5e-324,
+            tool_calls=0,
+            human_interventions=0,
+        ),
+    )
+    reserve = ResourceBudget(
+        cost_usd=1.0,
+        compute_units=1.0,
+        tokens=0,
+        elapsed_seconds=1.0,
+        tool_calls=0,
+        human_interventions=0,
+    )
+    for index, budget in enumerate(budgets):
+        request = _replace_step(
+            request,
+            index,
+            _rebuild_step(
+                request.candidate.stages[index],
+                progress_budget_category=ProgressBudgetCategory.EXPLORATION,
+                resource_budget=budget,
+            ),
+        )
+    request = request.model_copy(
+        update={
+            "budget_envelope": request.budget_envelope.model_copy(update={"exploration": reserve})
+        }
+    )
+
+    original_context = getcontext().copy()
+    results = []
+    for precision in (1, 2, 80):
+        context = original_context.copy()
+        context.prec = precision
+        with localcontext(context):
+            results.append(compile_method(request))
+
+    assert results[0] == results[1] == results[2]
+    assert len({result.result_hash for result in results}) == 1
+    assert results[0].report.status is ProcedureValidationStatus.INVALID
+    assert ProcedureFindingCode.BUDGET_EXCEEDED in {
+        finding.code for finding in results[0].report.findings
+    }
+
+
 def test_copied_extreme_progress_weight_fails_at_safe_compiler_boundary() -> None:
     request = valid_request()
     forged_step = request.candidate.stages[0].model_copy(

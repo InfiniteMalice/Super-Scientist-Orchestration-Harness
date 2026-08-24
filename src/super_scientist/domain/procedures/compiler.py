@@ -39,7 +39,7 @@ from super_scientist.domain.procedures.models import (
 )
 from super_scientist.domain.procedures.progress_binding import validate_progress_mapping
 from super_scientist.domain.progress._decimal_math import (
-    _decimal_greater_than,
+    _derived_decimal_greater_than,
     _sum_decimals,
 )
 
@@ -762,7 +762,7 @@ def _check_12_budgets(
     request: ProcedureCompilationRequest,
     procedure: ExecutableProcedure,
 ) -> tuple[ProcedureFinding, ...]:
-    totals: dict[ProgressBudgetCategory, dict[str, Decimal]] = {}
+    totals: dict[ProgressBudgetCategory, dict[str, list[Decimal]]] = {}
     findings: list[ProcedureFinding] = []
     for step in procedure.steps:
         category = step.progress_budget_category
@@ -779,19 +779,23 @@ def _check_12_budgets(
             continue
         category_totals = totals.setdefault(
             category,
-            {field_name: Decimal("0") for field_name in _resource_values(step.resource_budget)},
+            {field_name: [] for field_name in _resource_values(step.resource_budget)},
         )
         for field_name, value in _resource_values(step.resource_budget).items():
-            category_totals[field_name] = _sum_decimals((category_totals[field_name], value))
+            category_totals[field_name].append(value)
     for category, category_totals in totals.items():
         reserve = getattr(request.budget_envelope, category.value)
         reserve_values = _resource_values(reserve)
+        derived_totals = {
+            field_name: _sum_decimals(tuple(values))
+            for field_name, values in category_totals.items()
+        }
         if any(
-            _decimal_greater_than(
-                category_totals[field_name],
+            _derived_decimal_greater_than(
+                derived_totals[field_name],
                 reserve_values[field_name],
             )
-            for field_name in category_totals
+            for field_name in derived_totals
         ):
             findings.append(
                 _finding(
