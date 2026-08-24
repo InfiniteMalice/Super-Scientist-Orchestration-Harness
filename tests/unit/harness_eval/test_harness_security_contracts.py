@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 from decimal import Decimal
 from itertools import product
@@ -1433,6 +1434,46 @@ def test_chain_projection_rejects_nested_trace_model_copy_with_retained_hash() -
             freshness=evidence.freshness,
             assessment=evidence.assessment,
         )
+
+
+def test_projection_boundaries_hide_revalidation_markers_and_exception_context() -> None:
+    from tests.unit.harness_eval.test_model_harness_matrix import _protocol
+
+    protocol = _protocol()
+    evidence = _matrix_evidence_chain(protocol, protocol.expected_grid[0], 0)
+    attempts = (
+        lambda: HarnessCellEvidenceChain.from_snapshots(
+            protocol=protocol.model_copy(update={"content_hash": "projection-marker"}),
+            coordinate=protocol.expected_grid[0],
+            trace=evidence.trace,
+            freshness=evidence.freshness,
+            assessment=evidence.assessment,
+        ),
+        lambda: HarnessEvidenceSnapshotRecord.from_snapshots(
+            chain=HarnessCellEvidenceChain.model_construct(
+                **(evidence.chain.__dict__ | {"content_hash": "projection-marker"})
+            ),
+            trace=evidence.trace,
+            freshness=evidence.freshness,
+            assessment=evidence.assessment,
+        ),
+        lambda: project_harness_evidence_snapshots(
+            protocol=protocol,
+            coordinate=protocol.expected_grid[0],
+            trace=evidence.trace,
+            freshness=evidence.freshness.model_copy(update={"content_hash": "projection-marker"}),
+            assessment=evidence.assessment,
+        ),
+    )
+
+    for project in attempts:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(ValueError, match="canonical validated snapshots") as raised:
+                project()
+        assert "projection-marker" not in str(raised.value)
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
 
 
 def test_matrix_receipt_spoof_suppresses_analysis() -> None:

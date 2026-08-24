@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal, NoReturn, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import to_jsonable_python
@@ -49,6 +49,7 @@ MAX_TRACE_ARTIFACT_SIZE_BYTES = 1_073_741_824
 MAX_TOKEN_ID = 2_147_483_647
 MAX_REWARD_OBSERVATION_CANONICAL_BYTES = 2_048
 MAX_HARNESS_TRACE_CANONICAL_BYTES = 262_144
+UNTRUSTED_HARNESS_TRACE_ERROR = "untrusted harness execution trace is invalid"
 
 BoundedTraceIdentifier = Annotated[
     StableIdentifier,
@@ -69,6 +70,7 @@ class _StrictFrozenModel(BaseModel):
         strict=True,
         extra="forbid",
         revalidate_instances="always",
+        hide_input_in_errors=True,
     )
 
 
@@ -81,7 +83,7 @@ def _canonical_record_hash(
     exclude_fields: set[str] | None = None,
 ) -> str:
     if isinstance(record, BaseModel):
-        payload = record.model_dump(mode="json")
+        payload = record.model_dump(mode="json", warnings=False)
     else:
         payload = to_jsonable_python(dict(record))
     for field_name in {"content_hash", *(exclude_fields or set())}:
@@ -1168,6 +1170,8 @@ class _HarnessExecutionTracePayload(_StrictFrozenModel):
 
 
 class HarnessExecutionTrace(_HarnessExecutionTracePayload):
+    """Trusted internal trace model; use the safe parser for untrusted payloads."""
+
     content_hash: Sha256Hex
 
     @classmethod
@@ -1239,6 +1243,34 @@ class HarnessExecutionTrace(_HarnessExecutionTracePayload):
 
 def trace_hash(record: BaseModel | Mapping[str, object]) -> str:
     return _canonical_record_hash(record)
+
+
+def _raise_untrusted_harness_trace_error() -> NoReturn:
+    """Raise only after parser failures have unwound from the exception handler."""
+    raise ValueError(UNTRUSTED_HARNESS_TRACE_ERROR)
+
+
+def parse_untrusted_harness_execution_trace(
+    payload: str | bytes | bytearray,
+) -> HarnessExecutionTrace:
+    """Parse bounded external JSON without exposing parser or validation internals."""
+    try:
+        if isinstance(payload, str):
+            encoded_payload = payload.encode("utf-8")
+            json_payload: str | bytes = payload
+        elif isinstance(payload, (bytes, bytearray)):
+            if len(payload) > MAX_HARNESS_TRACE_CANONICAL_BYTES:
+                raise ValueError("untrusted harness trace payload exceeds canonical byte bound")
+            encoded_payload = bytes(payload)
+            json_payload = encoded_payload
+        else:
+            raise TypeError("untrusted harness trace payload must be JSON text or bytes")
+        if len(encoded_payload) > MAX_HARNESS_TRACE_CANONICAL_BYTES:
+            raise ValueError("untrusted harness trace payload exceeds canonical byte bound")
+        return HarnessExecutionTrace.model_validate_json(json_payload, strict=False)
+    except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
+        pass
+    _raise_untrusted_harness_trace_error()
 
 
 def _observed_receipt_groups(binding: TraceBinding) -> tuple[object, ...]:
@@ -1457,6 +1489,7 @@ __all__ = [
     "environment_event_hash",
     "generation_metadata_hash",
     "observable_artifact_hash",
+    "parse_untrusted_harness_execution_trace",
     "reward_observation_hash",
     "tool_observation_hash",
     "trace_binding_hash",

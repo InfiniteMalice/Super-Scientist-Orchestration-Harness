@@ -131,6 +131,7 @@ from super_scientist.domain.harness_eval.traces import (
     TraceExpectationResolutionAttestation,
     TraceFreshness,
     TraceFreshnessStatus,
+    parse_untrusted_harness_execution_trace,
     trace_freshness,
     trace_freshness_receipt,
 )
@@ -247,6 +248,7 @@ __all__ = [
     "model_harness_cell_hash",
     "model_harness_comparison_hash",
     "model_harness_protocol_hash",
+    "parse_untrusted_harness_execution_trace",
     "partition_manifest_hash",
     "project_harness_evidence_snapshots",
     "reward_hacking_diagnostic_status_snapshot_hash",

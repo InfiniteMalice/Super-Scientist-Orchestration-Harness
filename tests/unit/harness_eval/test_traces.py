@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -483,6 +484,23 @@ def test_trace_public_api_is_exported_from_harness_eval_package() -> None:
     assert harness_eval.HarnessExecutionTrace is HarnessExecutionTrace
     assert harness_eval.AvailableValue is AvailableValue
     assert harness_eval.trace_freshness is trace_freshness
+
+
+def test_safe_trace_parser_accepts_bounded_json_and_hides_untrusted_failures() -> None:
+    parser = getattr(harness_eval, "parse_untrusted_harness_execution_trace", None)
+    assert callable(parser)
+    trace = valid_trace()
+    payload = json.dumps(trace.model_dump(mode="json"))
+
+    assert parser(payload) == trace
+    assert parser(payload.encode("utf-8")) == trace
+
+    malformed = payload.replace(trace.trace_id, "untrusted-marker")
+    with pytest.raises(ValueError, match="untrusted harness execution trace") as raised:
+        parser(malformed)
+    assert "untrusted-marker" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
 
 
 def test_trace_binding_consumes_exact_guidance_and_matrix_protocol_contracts() -> None:

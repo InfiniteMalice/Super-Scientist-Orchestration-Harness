@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal, Self
+from typing import Any, Literal, NoReturn, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -32,20 +32,26 @@ class _StrictFrozenModel(BaseModel):
     )
 
 
+def _raise_projection_error() -> NoReturn:
+    """Raise the public projection failure after raw validation has unwound."""
+    raise ValueError("projection requires canonical validated snapshots")
+
+
 def _strictly_revalidate_snapshot[SnapshotT: BaseModel](
     record: object,
     expected_type: type[SnapshotT],
 ) -> SnapshotT:
     """Reject copied or constructed instances that bypassed canonical validators."""
     if type(record) is not expected_type:
-        raise ValueError("projection requires canonical validated snapshots")
+        _raise_projection_error()
     try:
         return expected_type.model_validate(
-            record.model_dump(mode="python"),
+            record.model_dump(mode="python", warnings=False),
             strict=True,
         )
-    except (TypeError, ValueError):
-        raise ValueError("projection requires canonical validated snapshots") from None
+    except (AttributeError, TypeError, ValueError):
+        pass
+    _raise_projection_error()
 
 
 class _HarnessCellEvidenceChainPayload(_StrictFrozenModel):
@@ -312,7 +318,11 @@ class HarnessEvidenceSnapshotRecord(_HarnessEvidenceSnapshotRecordPayload):
 
 
 def _snapshot_record_hash(record: BaseModel | Mapping[str, object]) -> str:
-    payload = record.model_dump(mode="json") if isinstance(record, BaseModel) else dict(record)
+    payload = (
+        record.model_dump(mode="json", warnings=False)
+        if isinstance(record, BaseModel)
+        else dict(record)
+    )
     payload.pop("content_hash", None)
     return sha256_hex(canonical_json_bytes(payload))
 
@@ -390,7 +400,11 @@ class HarnessEvidenceSnapshotIndex(_HarnessEvidenceSnapshotIndexPayload):
 
 
 def _snapshot_index_hash(record: BaseModel | Mapping[str, object]) -> str:
-    payload = record.model_dump(mode="json") if isinstance(record, BaseModel) else dict(record)
+    payload = (
+        record.model_dump(mode="json", warnings=False)
+        if isinstance(record, BaseModel)
+        else dict(record)
+    )
     payload.pop("content_hash", None)
     return sha256_hex(canonical_json_bytes(payload))
 
@@ -398,7 +412,11 @@ def _snapshot_index_hash(record: BaseModel | Mapping[str, object]) -> str:
 def harness_cell_evidence_chain_hash(
     record: BaseModel | Mapping[str, object],
 ) -> str:
-    payload = record.model_dump(mode="json") if isinstance(record, BaseModel) else dict(record)
+    payload = (
+        record.model_dump(mode="json", warnings=False)
+        if isinstance(record, BaseModel)
+        else dict(record)
+    )
     payload.pop("content_hash", None)
     return sha256_hex(canonical_json_bytes(payload))
 

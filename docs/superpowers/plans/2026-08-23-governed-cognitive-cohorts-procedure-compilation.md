@@ -1445,7 +1445,12 @@ class AppendGuidanceEvaluationCellHandler:
         return reject_existing_or_accept(proposal, context.existing_cell)
 ```
 
-Protocol handlers require exact model/harness/verifier/task/budget identities. Analysis handlers recompute `analyze_model_harness()` and compare canonically. No handler creates or changes a `HarnessCampaign` decision.
+Protocol handlers require exact model/harness/verifier/task/budget identities. At the external trace
+proposal boundary, the handler passes bounded JSON text or bytes through
+`parse_untrusted_harness_execution_trace()` before it constructs the proposal; direct
+`HarnessExecutionTrace.model_validate*()` calls are reserved for trusted internal records and must
+not parse request payloads. Analysis handlers recompute `analyze_model_harness()` and compare
+canonically. No handler creates or changes a `HarnessCampaign` decision.
 
 - [ ] **Step 4: Recompute trace freshness and reward validity**
 

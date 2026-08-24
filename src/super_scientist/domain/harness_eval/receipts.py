@@ -91,7 +91,11 @@ class ResolvedEvidenceRecord(_ResolvedEvidenceRecordPayload):
 
 
 def resolved_evidence_record_hash(record: BaseModel | Mapping[str, object]) -> str:
-    payload = record.model_dump(mode="json") if isinstance(record, BaseModel) else dict(record)
+    payload = (
+        record.model_dump(mode="json", warnings=False)
+        if isinstance(record, BaseModel)
+        else dict(record)
+    )
     payload.pop("content_hash", None)
     return sha256_hex(canonical_json_bytes(payload))
 
@@ -155,7 +159,11 @@ class ResolvedEvidenceInventory(_ResolvedEvidenceInventoryPayload):
 
 
 def resolved_evidence_inventory_hash(record: BaseModel | Mapping[str, object]) -> str:
-    payload = record.model_dump(mode="json") if isinstance(record, BaseModel) else dict(record)
+    payload = (
+        record.model_dump(mode="json", warnings=False)
+        if isinstance(record, BaseModel)
+        else dict(record)
+    )
     payload.pop("content_hash", None)
     return sha256_hex(canonical_json_bytes(payload))
 

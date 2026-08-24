@@ -67,7 +67,7 @@ def canonical_record_bytes(
     exclude_fields: set[str] | None = None,
 ) -> bytes:
     if isinstance(record, BaseModel):
-        payload = record.model_dump(mode="json")
+        payload = record.model_dump(mode="json", warnings=False)
     else:
         payload = to_jsonable_python(dict(record))
     for field_name in {"content_hash", *(exclude_fields or set())}:
@@ -127,7 +127,7 @@ class PhaseAResourceUsage(_StrictFrozenModel):
     def from_resource_usage(cls, usage: ResourceUsage | Self) -> Self:
         if type(usage) not in (ResourceUsage, cls):
             raise TypeError("resource usage requires the exact released or Phase A DTO")
-        return cls.model_validate(usage.model_dump(mode="python"), strict=True)
+        return cls.model_validate(usage.model_dump(mode="python", warnings=False), strict=True)
 
     @model_validator(mode="after")
     def require_bounded_outer_record(self) -> Self:
