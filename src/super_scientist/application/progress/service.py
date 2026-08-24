@@ -137,7 +137,9 @@ class CompletionReadCapability(Protocol):
     def has_retained_evidence(self, evidence_id: str) -> bool: ...
 
 
-class _ProgressPlanContext(BaseModel):
+class ProgressPlanAdmissionContext(BaseModel):
+    """Immutable snapshot used when another fixed handler composes plan admission."""
+
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     active_policy: PolicySnapshot
@@ -199,9 +201,9 @@ class RecordProgressPlanHandler:
         self,
         proposal: RecordProgressPlan,
         reads: HandlerReadCapability,
-    ) -> _ProgressPlanContext:
+    ) -> ProgressPlanAdmissionContext:
         capability = cast(ProgressPlanReadCapability, reads)
-        return _ProgressPlanContext(
+        return ProgressPlanAdmissionContext(
             active_policy=capability.policy_snapshot(),
             run=capability.get_run(proposal.plan.run_id),
             existing_plan=capability.get_plan(proposal.plan.plan_version_id),
@@ -217,7 +219,7 @@ class RecordProgressPlanHandler:
     def decide(
         self,
         proposal: RecordProgressPlan,
-        context: _ProgressPlanContext,
+        context: ProgressPlanAdmissionContext,
     ) -> TransactionDecision:
         authority_rejection = progress_authority_rejection(proposal, context.active_policy)
         if authority_rejection is not None:
