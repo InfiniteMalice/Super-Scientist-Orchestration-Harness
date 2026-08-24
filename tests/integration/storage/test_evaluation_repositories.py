@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import create_engine
 
 from super_scientist.domain.harness_eval.guidance import GuidanceCondition
+from super_scientist.kernel.audit.chain import append_event
 from super_scientist.kernel.transactions.models import (
     AppendGuidanceEvaluationCell,
     RecordGuidanceEvaluationProtocol,
@@ -21,6 +22,26 @@ from tests.unit.collaboration.conftest import actor
 from tests.unit.harness_eval.test_guidance import _cell, _protocol
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+POLICY_HASH = "f" * 64
+
+
+def _persist_accepted(repositories: RepositorySet, proposal) -> None:
+    decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+    repositories.transactions.add(proposal, decision, NOW)
+    repositories.audit.add(
+        append_event(
+            repositories.audit.last(),
+            "transaction_decision",
+            {
+                "proposal": proposal.model_dump(mode="json"),
+                "decision": decision.model_dump(mode="json"),
+                "policy_hash": POLICY_HASH,
+                "stored_policy_hash": POLICY_HASH,
+                "transaction_persisted": True,
+            },
+            NOW,
+        )
+    )
 
 
 @pytest.mark.integration
@@ -37,11 +58,7 @@ def test_guidance_protocol_repository_round_trips_real_proposal(tmp_path) -> Non
                 proposer=actor("coordinator"),
                 protocol=record,
             )
-            RepositorySet(connection).transactions.add(
-                proposal,
-                TransactionDecision(proposal_id=proposal.proposal_id, accepted=True),
-                NOW,
-            )
+            _persist_accepted(RepositorySet(connection), proposal)
             repository = GuidanceEvaluationProtocolRepository(connection)
             repository.add_from_proposal(
                 proposal,
@@ -69,15 +86,8 @@ def test_guidance_cells_are_returned_in_canonical_identity_order(tmp_path) -> No
                 proposer=actor("coordinator"),
                 protocol=protocol,
             )
-            transactions = RepositorySet(connection).transactions
-            transactions.add(
-                protocol_proposal,
-                TransactionDecision(
-                    proposal_id=protocol_proposal.proposal_id,
-                    accepted=True,
-                ),
-                NOW,
-            )
+            repositories = RepositorySet(connection)
+            _persist_accepted(repositories, protocol_proposal)
             GuidanceEvaluationProtocolRepository(connection).add_from_proposal(
                 protocol_proposal,
                 created_at=NOW,
@@ -96,11 +106,7 @@ def test_guidance_cells_are_returned_in_canonical_identity_order(tmp_path) -> No
                     proposer=actor("coordinator"),
                     cell=cell,
                 )
-                transactions.add(
-                    proposal,
-                    TransactionDecision(proposal_id=proposal.proposal_id, accepted=True),
-                    NOW,
-                )
+                _persist_accepted(repositories, proposal)
                 repository.add_from_proposal(
                     proposal,
                     created_at=NOW,

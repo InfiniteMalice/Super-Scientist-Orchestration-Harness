@@ -9,8 +9,11 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 
+from super_scientist.config.loader import policy_hash
+from super_scientist.config.models import GovernancePolicy, PolicySnapshot
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.domain.procedures.models import ProcedureCompilationRecord
+from super_scientist.kernel.audit.chain import append_event
 from super_scientist.kernel.transactions import models as transaction_models
 from super_scientist.kernel.transactions.models import (
     AppendGuidanceEvaluationCell,
@@ -31,6 +34,7 @@ from super_scientist.kernel.transactions.models import (
     RecordModelHarnessProtocol,
     RecordProcedureCompilation,
     RecordRewardAssessment,
+    RejectionCode,
     TransactionDecision,
 )
 from super_scientist.providers.storage.cognitive_records import (
@@ -178,10 +182,10 @@ def test_capability_profile_repository_round_trips_and_checks_provenance(tmp_pat
                 proposer=actor("coordinator"),
                 profile=record,
             )
-            RepositorySet(connection).transactions.add(
+            _persist_accepted_with_audit(
+                RepositorySet(connection),
                 proposal,
-                TransactionDecision(proposal_id=proposal.proposal_id, accepted=True),
-                NOW,
+                POLICY_HASH,
             )
             repository = CapabilityProfileRepository(connection)
             repository.add_from_proposal(
@@ -346,6 +350,28 @@ def _record_policy_hash(record: Any) -> str:
     return getattr(record, "governing_policy_hash", POLICY_HASH)
 
 
+def _persist_accepted_with_audit(
+    repositories: RepositorySet,
+    proposal: Any,
+    governing_policy_hash: str,
+) -> None:
+    decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+    repositories.transactions.add(proposal, decision, NOW)
+    event = append_event(
+        repositories.audit.last(),
+        "transaction_decision",
+        {
+            "proposal": proposal.model_dump(mode="json"),
+            "decision": decision.model_dump(mode="json"),
+            "policy_hash": governing_policy_hash,
+            "stored_policy_hash": governing_policy_hash,
+            "transaction_persisted": True,
+        },
+        NOW,
+    )
+    repositories.audit.add(event)
+
+
 def _tamper_column_and_require_failure(
     connection: Connection,
     case: GovernedRepositoryCase,
@@ -397,15 +423,37 @@ def test_all_18_governed_repositories_real_add_get_and_relationship_tamper(tmp_p
     try:
         with engine.connect() as connection, connection.begin():
             repositories = RepositorySet(connection)
-            stored_records: list[tuple[GovernedRepositoryCase, Any, str]] = []
+            tamper_policy = GovernancePolicy(required_claim_checks=("source_exists",))
+            tamper_policy_snapshot = PolicySnapshot(
+                policy_hash=policy_hash(tamper_policy),
+                policy=tamper_policy,
+            )
+            repositories.policies.add_and_activate(tamper_policy_snapshot, NOW)
+            connection.execute(
+                text(
+                    "INSERT INTO governance_policies "
+                    "(policy_hash, policy_json, created_at) VALUES "
+                    "(:policy_f, '{}', :created_at), "
+                    "(:policy_a, '{}', :created_at)"
+                ),
+                {
+                    "policy_f": "f" * 64,
+                    "policy_a": "a" * 64,
+                    "created_at": NOW.isoformat(),
+                },
+            )
+            stored_records: list[tuple[GovernedRepositoryCase, Any, Any, str]] = []
             for case, proposal in zip(
                 ALL_18_GOVERNED_REPOSITORY_CASES,
                 proposals,
                 strict=True,
             ):
                 record, record_id = _proposal_record_and_id(proposal)
-                decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
-                repositories.transactions.add(proposal, decision, NOW)
+                _persist_accepted_with_audit(
+                    repositories,
+                    proposal,
+                    _record_policy_hash(record),
+                )
                 stored_transaction = repositories.transactions.get_by_proposal_id(
                     proposal.proposal_id
                 )
@@ -436,9 +484,9 @@ def test_all_18_governed_repositories_real_add_get_and_relationship_tamper(tmp_p
                         record_id,
                         column_name,
                     )
-                stored_records.append((case, repository, record_id))
+                stored_records.append((case, repository, record, record_id))
 
-            for index, (case, repository, record_id) in enumerate(stored_records):
+            for index, (case, repository, _, record_id) in enumerate(stored_records):
                 wrong_transaction_id = proposals[(index + 1) % len(proposals)].proposal_id
                 connection.execute(
                     text(
@@ -460,6 +508,38 @@ def test_all_18_governed_repositories_real_add_get_and_relationship_tamper(tmp_p
                     ),
                     {
                         "transaction_id": proposals[index].proposal_id,
+                        "record_id": record_id,
+                    },
+                )
+            for case, repository, record, record_id in stored_records:
+                connection.execute(
+                    text(
+                        f"UPDATE {case.table_name} SET governing_policy_hash = :policy_hash "
+                        f"WHERE {case.identifier_column} = :record_id"
+                    ),
+                    {
+                        "policy_hash": tamper_policy_snapshot.policy_hash,
+                        "record_id": record_id,
+                    },
+                )
+                expected_error = (
+                    "governing_policy_hash does not match record_json"
+                    if "governing_policy_hash" in record.__class__.model_fields
+                    else "governing_policy_hash does not match transaction audit"
+                )
+                with pytest.raises(StorageIntegrityError, match=expected_error) as captured:
+                    repository.get(record_id)
+                _assert_detached_integrity_error(
+                    captured.value,
+                    tamper_policy_snapshot.policy_hash,
+                )
+                connection.execute(
+                    text(
+                        f"UPDATE {case.table_name} SET governing_policy_hash = :policy_hash "
+                        f"WHERE {case.identifier_column} = :record_id"
+                    ),
+                    {
+                        "policy_hash": _record_policy_hash(record),
                         "record_id": record_id,
                     },
                 )
@@ -500,6 +580,80 @@ def test_all_18_governed_repositories_real_add_get_and_relationship_tamper(tmp_p
                 )
                 == 7
             )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "audit_case",
+    ("missing", "duplicate", "stored-policy-mismatch", "decision-mismatch", "proposal-mismatch"),
+)
+def test_governed_read_requires_one_exact_transaction_decision_audit(
+    tmp_path,
+    audit_case: str,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{(tmp_path / f'audit-{audit_case}.db').as_posix()}"
+    upgrade_database(database_url)
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection, connection.begin():
+            repositories = RepositorySet(connection)
+            proposal = _governed_examples()[4]
+            _, record_id = _proposal_record_and_id(proposal)
+            decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+            repositories.transactions.add(proposal, decision, NOW)
+            PeerRequestRepository(connection).add_from_proposal(
+                proposal,
+                created_at=NOW,
+                transaction_id=proposal.proposal_id,
+                governing_policy_hash=POLICY_HASH,
+            )
+            if audit_case != "missing":
+                audited_proposal = (
+                    _governed_examples()[5] if audit_case == "proposal-mismatch" else proposal
+                )
+                audited_decision = (
+                    TransactionDecision(
+                        proposal_id=proposal.proposal_id,
+                        accepted=False,
+                        reasons=(
+                            {
+                                "code": RejectionCode.PERMISSION_DENIED,
+                                "message": "mismatched fixture decision",
+                            },
+                        ),
+                    )
+                    if audit_case == "decision-mismatch"
+                    else decision
+                )
+                payload = {
+                    "proposal": audited_proposal.model_dump(mode="json"),
+                    "decision": audited_decision.model_dump(mode="json"),
+                    "policy_hash": POLICY_HASH,
+                    "stored_policy_hash": (
+                        "e" * 64 if audit_case == "stored-policy-mismatch" else POLICY_HASH
+                    ),
+                    "transaction_persisted": True,
+                }
+                event = append_event(
+                    repositories.audit.last(),
+                    "transaction_decision",
+                    payload,
+                    NOW,
+                )
+                repositories.audit.add(event)
+                if audit_case == "duplicate":
+                    repositories.audit.add(
+                        append_event(event, "transaction_decision", payload, NOW)
+                    )
+
+            with pytest.raises(
+                StorageIntegrityError,
+                match="governing_policy_hash does not match transaction audit",
+            ) as captured:
+                PeerRequestRepository(connection).get(record_id)
+            _assert_detached_integrity_error(captured.value, proposal.proposal_id)
     finally:
         engine.dispose()
 

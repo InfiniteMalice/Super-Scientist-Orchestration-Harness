@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import datetime
-from typing import Annotated, Self
+from typing import Annotated, Never, Self
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 from sqlalchemy import Connection, insert
@@ -32,6 +32,7 @@ from super_scientist.domain.procedures.models import (
     ProcedureCompilationRecord,
     ProcedureEvidenceSourceKind,
 )
+from super_scientist.kernel.audit.models import AuditEvent, json_compatible_payload
 from super_scientist.kernel.transactions.models import (
     AppendGuidanceEvaluationCell,
     AppendModelHarnessCell,
@@ -52,13 +53,17 @@ from super_scientist.kernel.transactions.models import (
     RecordModelHarnessProtocol,
     RecordProcedureCompilation,
     RecordRewardAssessment,
+    TransactionDecision,
+    parse_untrusted_proposal_json,
 )
 from super_scientist.providers.storage.append_only import AppendOnlyRecordRepository
 from super_scientist.providers.storage.procedure_sources import (
     AcceptedProcedureSourceReceiptReader,
 )
 from super_scientist.providers.storage.repositories import (
+    AuditRepository,
     StorageIntegrityError,
+    StoredTransaction,
     TransactionRepository,
 )
 from super_scientist.providers.storage.schema import (
@@ -328,6 +333,7 @@ class GovernedAppendOnlyRecordRepository[RecordT: BaseModel](AppendOnlyRecordRep
         _require_matching_accepted_transaction(
             self._connection,
             _exact_string(transaction_id),
+            _exact_string(governing_policy_hash),
             record,
         )
         return record
@@ -366,7 +372,7 @@ def _require_storage(condition: bool, detail: str) -> None:
         _raise_storage_integrity(detail)
 
 
-def _raise_storage_integrity(detail: str) -> None:
+def _raise_storage_integrity(detail: str) -> Never:
     raise StorageIntegrityError(f"storage integrity error: {detail}") from None
 
 
@@ -391,13 +397,16 @@ def _require_proposal_transaction(
 def _require_matching_accepted_transaction(
     connection: Connection,
     transaction_id: str,
+    governing_policy_hash: str,
     record: BaseModel,
 ) -> None:
     try:
         transaction = TransactionRepository(connection).get_by_proposal_id(transaction_id)
+        audit_events = AuditRepository(connection).list_all()
     except StorageIntegrityError:
         transaction_lookup_failed = True
         transaction = None
+        audit_events = ()
     else:
         transaction_lookup_failed = False
     if (
@@ -407,6 +416,65 @@ def _require_matching_accepted_transaction(
         or not _proposal_projection_matches(transaction.proposal, record)
     ):
         _raise_storage_integrity("transaction provenance does not match record_json")
+    matching_policy_hashes = tuple(
+        policy_hash
+        for event in audit_events
+        if (policy_hash := _exact_transaction_audit_policy(event, transaction)) is not None
+    )
+    if matching_policy_hashes != (governing_policy_hash,):
+        _raise_storage_integrity("governing_policy_hash does not match transaction audit")
+
+
+def _exact_transaction_audit_policy(
+    event: AuditEvent,
+    transaction: StoredTransaction,
+) -> str | None:
+    if event.event_type != "transaction_decision":
+        return None
+    payload = json_compatible_payload(event.payload)
+    allowed_keys = {
+        "proposal",
+        "decision",
+        "policy_hash",
+        "stored_policy_hash",
+        "transaction_persisted",
+        "configured_policy_hash",
+        "intent_fingerprint",
+    }
+    if not set(payload).issubset(allowed_keys):
+        return None
+    try:
+        audited_proposal = parse_untrusted_proposal_json(canonical_json_bytes(payload["proposal"]))
+        audited_decision = TransactionDecision.model_validate_json(
+            canonical_json_bytes(payload["decision"]),
+            strict=True,
+        )
+        policy_hash = _SHA256_ADAPTER.validate_python(payload["policy_hash"])
+        stored_policy_hash = _SHA256_ADAPTER.validate_python(payload["stored_policy_hash"])
+        if "configured_policy_hash" in payload:
+            _SHA256_ADAPTER.validate_python(payload["configured_policy_hash"])
+        audited_intent_fingerprint = (
+            None
+            if "intent_fingerprint" not in payload
+            else _SHA256_ADAPTER.validate_python(payload["intent_fingerprint"])
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        payload.get("transaction_persisted") is not True
+        or audited_proposal != transaction.proposal
+        or audited_proposal.proposal_id != transaction.proposal.proposal_id
+        or audited_decision != transaction.decision
+        or audited_decision.proposal_id != transaction.proposal.proposal_id
+        or sha256_hex(
+            canonical_json_bytes(audited_proposal.model_dump(mode="json", warnings=False))
+        )
+        != transaction.proposal_hash
+        or audited_intent_fingerprint != transaction.intent_fingerprint
+        or stored_policy_hash != policy_hash
+    ):
+        return None
+    return policy_hash
 
 
 def _proposal_projection_matches(proposal: object, record: BaseModel) -> bool:
