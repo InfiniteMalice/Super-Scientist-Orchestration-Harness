@@ -58,25 +58,91 @@ def test_procedure_receipt_reader_returns_none_for_an_unknown_receipt(tmp_path) 
         engine.dispose()
 
 
-def _persist_accepted(repositories: RepositorySet, proposal, occurred_at: datetime):
+def _persist_accepted(
+    repositories: RepositorySet,
+    proposal,
+    occurred_at: datetime,
+    *,
+    audit_policy_fields: dict[str, object] | None = None,
+):
     decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
     repositories.transactions.add(proposal, decision, occurred_at)
     stored = repositories.transactions.get_by_proposal_id(proposal.proposal_id)
     assert stored is not None
+    policy_fields = (
+        {"policy_hash": POLICY_HASH, "stored_policy_hash": POLICY_HASH}
+        if audit_policy_fields is None
+        else audit_policy_fields
+    )
     event = append_event(
         repositories.audit.last(),
         "transaction_decision",
         {
             "proposal": proposal.model_dump(mode="json"),
             "decision": decision.model_dump(mode="json"),
-            "policy_hash": POLICY_HASH,
-            "stored_policy_hash": POLICY_HASH,
             "transaction_persisted": True,
+            **policy_fields,
         },
         occurred_at,
     )
     repositories.audit.add(event)
     return stored, event
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "audit_policy_fields",
+    (
+        {"policy_hash": POLICY_HASH},
+        {"policy_hash": POLICY_HASH, "stored_policy_hash": ""},
+        {"policy_hash": POLICY_HASH, "stored_policy_hash": "e" * 64},
+    ),
+    ids=("missing-stored-policy", "empty-stored-policy", "divergent-stored-policy"),
+)
+def test_source_snapshot_requires_exact_stored_policy_audit_provenance(
+    tmp_path,
+    audit_policy_fields: dict[str, object],
+) -> None:
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'snapshot-policy.db').as_posix()}"
+    upgrade_database(database_url)
+    engine = create_database_engine(database_url)
+    artifacts = FileArtifactStore(tmp_path / "snapshot-policy-artifacts")
+    try:
+        with engine.connect() as connection, connection.begin():
+            repositories = RepositorySet(connection)
+            snapshot = ProcedureSourceSnapshot(
+                snapshot_family_id="workspace-sources",
+                snapshot_id="snapshot-policy",
+                source_bindings=(),
+            )
+            artifact = artifacts.put(
+                canonical_json_bytes(snapshot.model_dump(mode="json")),
+                "application/json",
+            )
+            evidence = _evidence(
+                evidence_id=snapshot.snapshot_id,
+                artifact=artifact,
+                retrieved_at=NOW,
+            )
+            proposal = AddEvidence(
+                proposal_id="proposal-snapshot-policy",
+                idempotency_key="proposal-snapshot-policy",
+                proposer=actor("coordinator"),
+                evidence=evidence,
+            )
+            repositories.evidence.add(evidence)
+            _persist_accepted(
+                repositories,
+                proposal,
+                NOW,
+                audit_policy_fields=audit_policy_fields,
+            )
+            snapshots = ProcedureSourceSnapshotRepository(connection, artifacts)
+
+            assert snapshots.resolve_exact(snapshot.snapshot_id, artifact.sha256) is None
+            assert snapshots.is_current(snapshot.snapshot_id, artifact.sha256) is False
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.integration

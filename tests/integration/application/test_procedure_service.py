@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from super_scientist.application.procedures.service import (
     BindCompiledProgressPlanHandler,
+    ProcedureCompilationReadCapability,
     RecordMethodDirectionOutcomeHandler,
     RecordProcedureCompilationHandler,
 )
@@ -205,6 +206,109 @@ def test_compilation_rejects_catalog_sources_not_exactly_bound_by_current_snapsh
 
     assert decision.accepted is False
     assert decision.reasons[0].code is RejectionCode.STALE_REFERENCE
+
+
+@dataclass
+class _ConcreteSourceAuthoritySpy:
+    delegate: ProcedureCompilationReadCapability
+    calls: list[str] = field(default_factory=list)
+
+    def procedure_sources_are_current(self, request: ProcedureCompilationRequest) -> bool:
+        self.calls.append("sources")
+        return self.delegate.procedure_sources_are_current(request)
+
+    def policy_snapshot(self) -> PolicySnapshot:
+        self.calls.append("policy")
+        return self.delegate.policy_snapshot()
+
+    def get_compilation(self, compilation_id: str) -> ProcedureCompilationRecord | None:
+        self.calls.append("compilation")
+        return self.delegate.get_compilation(compilation_id)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "audit_policy_fields",
+    (
+        {"policy_hash": "f" * 64},
+        {"policy_hash": "f" * 64, "stored_policy_hash": ""},
+        {"policy_hash": "f" * 64, "stored_policy_hash": "e" * 64},
+    ),
+    ids=("missing-stored-policy", "empty-stored-policy", "divergent-stored-policy"),
+)
+def test_compilation_rejects_unbound_snapshot_audit_before_downstream_authority(
+    v2_runtime,
+    audit_policy_fields: dict[str, object],
+) -> None:
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        repositories = unit_of_work.repositories()
+        request = _retain_exact_sources(
+            repositories,
+            connection,
+            v2_runtime.artifact_store,
+            v2_runtime.policy.policy_hash,
+        )
+        catalog_receipts = (
+            request.artifact_catalog_receipt,
+            request.tool_catalog_receipt,
+            request.validator_catalog_receipt,
+        )
+        snapshot_id, snapshot_hash = _retain_source_snapshot(
+            repositories,
+            v2_runtime.artifact_store,
+            snapshot_id="unbound-policy-catalog-snapshot",
+            bindings=tuple(
+                sorted(
+                    (
+                        ProcedureSourceBinding(
+                            source_record_id=receipt.source_record_id,
+                            source_content_hash=receipt.source_content_hash,
+                        )
+                        for receipt in catalog_receipts
+                    ),
+                    key=lambda item: item.source_record_id,
+                )
+            ),
+            audit_policy_fields=audit_policy_fields,
+        )
+        forged_request = _retarget_catalog_receipts(
+            request,
+            snapshot_id=snapshot_id,
+            snapshot_hash=snapshot_hash,
+        )
+        result = compile_method(forged_request)
+        proposal = RecordProcedureCompilation(
+            proposal_id="unbound-policy-compilation",
+            idempotency_key="unbound-policy-compilation",
+            proposer=v2_runtime.proposer,
+            compilation=OpaqueProcedureCompilationEnvelope.build(
+                compilation_id="unbound-policy-compilation",
+                result=result,
+                created_at=NOW,
+                governing_policy_hash=v2_runtime.policy.policy_hash,
+            ),
+        )
+        concrete = procedure_capabilities(
+            proposal,
+            connection,
+            v2_runtime.policy,
+            v2_runtime.artifact_store,
+            current_transaction_created_at=NOW,
+        )
+        capabilities = _ConcreteSourceAuthoritySpy(concrete)
+        handler = RecordProcedureCompilationHandler()
+
+        decision = handler.decide(
+            proposal,
+            handler.build_context(proposal, capabilities),
+        )
+
+        assert decision.accepted is False
+        assert decision.reasons[0].code is RejectionCode.STALE_REFERENCE
+        assert capabilities.calls == ["sources"]
+        assert ProcedureCompilationRepository(connection).list_all() == ()
 
 
 @pytest.mark.integration
@@ -964,6 +1068,7 @@ def _retain_source_snapshot(
     *,
     snapshot_id: str,
     bindings: tuple[ProcedureSourceBinding, ...],
+    audit_policy_fields: dict[str, object] | None = None,
 ) -> tuple[str, str]:
     snapshot = ProcedureSourceSnapshot(
         snapshot_family_id=snapshot_id,
@@ -982,7 +1087,12 @@ def _retain_source_snapshot(
         evidence=evidence,
     )
     repositories.evidence.add(evidence)
-    _persist_accepted(repositories, proposal, NOW)
+    _persist_accepted_at_policy(
+        repositories,
+        proposal,
+        "f" * 64,
+        audit_policy_fields=audit_policy_fields,
+    )
     return snapshot_id, artifact.sha256
 
 
@@ -1022,20 +1132,30 @@ def _source_evidence(evidence_id: str, artifact) -> EvidenceRecord:
     )
 
 
-def _persist_accepted_at_policy(repositories, proposal, policy_hash: str):
+def _persist_accepted_at_policy(
+    repositories,
+    proposal,
+    policy_hash: str,
+    *,
+    audit_policy_fields: dict[str, object] | None = None,
+):
     decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
     repositories.transactions.add(proposal, decision, NOW)
     stored = repositories.transactions.get_by_proposal_id(proposal.proposal_id)
     assert stored is not None
+    policy_fields = (
+        {"policy_hash": policy_hash, "stored_policy_hash": policy_hash}
+        if audit_policy_fields is None
+        else audit_policy_fields
+    )
     event = append_event(
         repositories.audit.last(),
         "transaction_decision",
         {
             "proposal": proposal.model_dump(mode="json"),
             "decision": decision.model_dump(mode="json"),
-            "policy_hash": policy_hash,
-            "stored_policy_hash": policy_hash,
             "transaction_persisted": True,
+            **policy_fields,
         },
         NOW,
     )

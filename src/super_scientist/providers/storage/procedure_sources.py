@@ -167,6 +167,8 @@ def _audit_event_matches_transaction(
     payload = json_compatible_payload(event.payload)
     if payload.get("transaction_persisted") is not True:
         return False
+    if _audit_policy_hash(event) is None:
+        return False
     try:
         audited_proposal = _PROPOSAL_ADAPTER.validate_json(
             canonical_json_bytes(payload["proposal"])
@@ -174,7 +176,6 @@ def _audit_event_matches_transaction(
         audited_decision = TransactionDecision.model_validate_json(
             canonical_json_bytes(payload["decision"])
         )
-        _SHA256_ADAPTER.validate_python(payload["policy_hash"])
     except (KeyError, TypeError, ValueError):
         return False
     return (
