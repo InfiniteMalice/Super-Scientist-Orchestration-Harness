@@ -1841,8 +1841,9 @@ git commit -m "feat: add governed cognitive proposal contracts"
 
 **Interfaces:**
 - Consumes: migration head `0006_handbook_and_harness_evaluation` and the public append-only repository primitive.
-- Produces: 18 append-only tables, their reference indexes/constraints, and three
-  append-only triggers per table (54 total). Released tables are untouched.
+- Produces: 18 append-only SQLite `WITHOUT ROWID` tables, their reference
+  indexes/constraints, and three append-only triggers per table (54 total). Released
+  tables are untouched.
 
 - [ ] **Step 1: Write migration-shape and legacy-upgrade failures**
 
@@ -1923,6 +1924,7 @@ def _create_record_table(
         _hash_constraint("content_hash", name),
         _hash_constraint("governing_policy_hash", name),
         _bounded_text_constraint("created_at", name, maximum=40),
+        sqlite_with_rowid=False,
     )
     _create_append_only_triggers(name, str(id_column.name))
 ```
@@ -1957,8 +1959,14 @@ database transaction; unresolved parents still fail at commit. Each table has
 `BEFORE UPDATE` and `BEFORE DELETE` rejection triggers plus a primary-key-aware
 `BEFORE INSERT` guard. The insert guard raises `append-only table` whenever the
 primary key already exists, so `INSERT OR REPLACE` cannot erase immutable history
-even when SQLite `recursive_triggers` is disabled. The downgrade drops only the 54
-0007 triggers, indexes, and tables in reverse dependency order.
+even when SQLite `recursive_triggers` is disabled. Every governed table uses SQLite
+`WITHOUT ROWID`, so a caller cannot bypass the declared-primary-key guard by targeting
+the same hidden `rowid` with a different declared primary key. Migration-shape tests
+inspect `sqlite_master.sql` for `WITHOUT ROWID`. Adversarial tests execute that hidden
+`rowid` replacement attempt for all 18 tables with `recursive_triggers` disabled and
+verify that SQLite rejects `rowid` access while the original row remains byte-for-byte
+unchanged. The downgrade drops only the 54 0007 triggers, indexes, and tables in
+reverse dependency order.
 
 - [ ] **Step 4: Prove append-only behavior and exact migration chain**
 
@@ -1966,8 +1974,9 @@ Run: `python -m pytest tests/integration/storage/test_migration_0007.py tests/in
 
 Expected: PASS; update/delete and conflicting `INSERT OR REPLACE` on every 0007
 table raise `IntegrityError`, ordinary inserts with new primary keys still succeed,
-0001-0006 fixtures upgrade, and downgrade/upgrade returns the same schema with exactly
-54 append-only triggers.
+hidden-`rowid` replacement attempts fail on all 18 `WITHOUT ROWID` tables, 0001-0006
+fixtures upgrade, and downgrade/upgrade returns the same schema with exactly 54
+append-only triggers.
 
 - [ ] **Step 5: Run static checks and commit**
 

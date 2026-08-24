@@ -1934,6 +1934,7 @@ def _governed_record_table(
             "AND instr(created_at, char(0)) = 0",
             name=f"ck_{name}_created_at",
         ),
+        sqlite_with_rowid=False,
     )
 
 

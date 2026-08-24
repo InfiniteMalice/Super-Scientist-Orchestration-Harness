@@ -140,6 +140,7 @@ def _create_record_table(
         _hash_constraint("content_hash", name),
         _hash_constraint("governing_policy_hash", name),
         _bounded_text_constraint("created_at", name, maximum=MAX_CREATED_AT_LENGTH),
+        sqlite_with_rowid=False,
     )
     for column_name in (
         *RELATIONSHIP_INDEXES.get(name, ()),

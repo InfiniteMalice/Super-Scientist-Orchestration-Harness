@@ -9,7 +9,7 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from sqlalchemy import MetaData, create_engine, inspect, text
 from sqlalchemy.engine import Connection
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from alembic import command
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
@@ -133,6 +133,17 @@ def test_clean_upgrade_creates_exact_0007_tables_with_domain_keys_and_relationsh
             inspector = inspect(connection)
             assert set(inspector.get_table_names()) >= EXPECTED_0007_TABLES
             for table_name, (identifier, relationships) in TABLE_SPECS.items():
+                creation_sql = connection.execute(
+                    text(
+                        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :table_name"
+                    ),
+                    {"table_name": table_name},
+                ).scalar_one()
+                assert "WITHOUT ROWID" in creation_sql.upper()
+                assert (
+                    schema.metadata.tables[table_name].dialect_options["sqlite"]["with_rowid"]
+                    is False
+                )
                 columns = {column["name"]: column for column in inspector.get_columns(table_name)}
                 assert set(columns) == {identifier, *relationships, *SHARED_COLUMNS}
                 assert inspector.get_pk_constraint(table_name)["constrained_columns"] == [
@@ -342,6 +353,48 @@ def test_every_0007_table_rejects_insert_or_replace_without_recursive_triggers(
                     ).scalar_one()
                     == 1
                 )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_every_0007_table_has_no_hidden_rowid_replacement_path(
+    database_url: str,
+) -> None:
+    _upgrade_to(database_url, REVISION)
+    engine = create_database_engine(database_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("PRAGMA recursive_triggers = OFF"))
+            assert connection.execute(text("PRAGMA recursive_triggers")).scalar_one() == 0
+            _insert_shared_references(connection)
+            _insert_complete_record_graph(connection)
+
+            for table_name, identifier, record_id, _ in _record_graph_rows():
+                before = _stored_row_bytes(connection, table_name, identifier, record_id)
+                replacement = dict(
+                    connection.execute(
+                        text(f"SELECT * FROM {table_name} WHERE {identifier} = :record_id"),
+                        {"record_id": record_id},
+                    )
+                    .mappings()
+                    .one()
+                )
+                replacement[identifier] = f"{record_id}-rowid-replacement"
+                replacement["record_json"] = '{"rowid-replacement":true}'
+                replacement["content_hash"] = "e" * 64
+
+                with (
+                    connection.begin_nested(),
+                    pytest.raises(OperationalError, match="no column named rowid"),
+                ):
+                    _insert_or_replace_values(
+                        connection,
+                        table_name,
+                        {"rowid": 1, **replacement},
+                    )
+
+                assert _stored_row_bytes(connection, table_name, identifier, record_id) == before
     finally:
         engine.dispose()
 
@@ -1131,6 +1184,23 @@ def _schema_fingerprint(database_url: str) -> dict[str, Any]:
                         sorted(
                             (constraint["name"], constraint["sqltext"])
                             for constraint in inspector.get_check_constraints(table_name)
+                        )
+                    ),
+                    "create_sql": connection.execute(
+                        text(
+                            "SELECT sql FROM sqlite_master "
+                            "WHERE type = 'table' AND name = :table_name"
+                        ),
+                        {"table_name": table_name},
+                    ).scalar_one(),
+                    "triggers": tuple(
+                        connection.execute(
+                            text(
+                                "SELECT name, sql FROM sqlite_master "
+                                "WHERE type = 'trigger' AND tbl_name = :table_name "
+                                "ORDER BY name"
+                            ),
+                            {"table_name": table_name},
                         )
                     ),
                 }
