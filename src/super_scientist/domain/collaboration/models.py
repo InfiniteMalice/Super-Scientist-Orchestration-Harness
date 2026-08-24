@@ -129,9 +129,7 @@ BoundedPublicText = Annotated[
 
 def _require_bounded_actor_identity(actor: ActorIdentity) -> ActorIdentity:
     values = (actor.actor_id, actor.provider_id, actor.model_id, actor.adapter_id)
-    if any(
-        value is not None and len(value) > MAX_IDENTIFIER_LENGTH for value in values
-    ):
+    if any(value is not None and len(value) > MAX_IDENTIFIER_LENGTH for value in values):
         raise ValueError("Phase A actor identity fields must be bounded identifiers")
     return actor
 
@@ -168,9 +166,7 @@ def _require_strict_actor_identity_input(
         "configuration_hash",
     )
     if any(
-        field_name in raw
-        and raw[field_name] is not None
-        and not isinstance(raw[field_name], str)
+        field_name in raw and raw[field_name] is not None and not isinstance(raw[field_name], str)
         for field_name in string_fields
     ):
         raise ValueError("Phase A actor identity scalars must be strict")
@@ -206,9 +202,7 @@ def _require_bounded_artifact(artifact: ArtifactRef) -> ArtifactRef:
 
 def _require_strict_artifact_input(value: object) -> object:
     raw = (
-        value.model_dump(mode="python", warnings=False)
-        if isinstance(value, ArtifactRef)
-        else value
+        value.model_dump(mode="python", warnings=False) if isinstance(value, ArtifactRef) else value
     )
     if not isinstance(raw, dict):
         raise ValueError("Phase A artifact reference must be a strict object")
@@ -340,9 +334,7 @@ class _PublicCandidatePayload(_StrictFrozenModel):
 
     @field_validator("evidence_ids")
     @classmethod
-    def require_canonical_evidence_ids(
-        cls, values: tuple[str, ...]
-    ) -> tuple[str, ...]:
+    def require_canonical_evidence_ids(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         return _canonical_unique(values, "evidence_ids")
 
 
@@ -460,9 +452,7 @@ class _UsageAccumulator:
                 )
             ),
             tool_calls=budget.tool_calls - self.tool_calls,
-            human_interventions=(
-                budget.human_interventions - self.human_interventions
-            ),
+            human_interventions=(budget.human_interventions - self.human_interventions),
         )
 
 
@@ -694,9 +684,7 @@ class _CollaborationSessionPayload(_StrictFrozenModel):
     peers: tuple[BoundedActorIdentity, ...] = Field(min_length=1, max_length=MAX_PEERS)
     role_assignments: tuple[PeerRoleAssignment, ...] = Field(min_length=1, max_length=MAX_PEERS)
     tools: tuple[BoundedActorIdentity, ...] = Field(max_length=MAX_PEERS)
-    allowed_artifacts: tuple[BoundedArtifactRef, ...] = Field(
-        max_length=MAX_COLLABORATION_ITEMS
-    )
+    allowed_artifacts: tuple[BoundedArtifactRef, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
     budget: CollaborationBudget
     allowed_contribution_kinds: tuple[BoundedIdentifier, ...] = Field(
         min_length=1, max_length=MAX_PEERS
@@ -824,9 +812,7 @@ class _PeerRequestPayload(_StrictFrozenModel):
     recipient_id: BoundedIdentifier
     requested_capability_id: BoundedIdentifier
     question: BoundedPublicText
-    artifact_refs: tuple[BoundedArtifactRef, ...] = Field(
-        max_length=MAX_COLLABORATION_ITEMS
-    )
+    artifact_refs: tuple[BoundedArtifactRef, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
     parent_contribution_id: BoundedIdentifier | None
     tool_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PEERS)
     remaining_budget: BoundedResourceBudget
@@ -923,9 +909,7 @@ class _PeerContributionPayload(_StrictFrozenModel):
     contribution_kind: BoundedIdentifier
     rationale_summary: BoundedPublicText
     candidate_content: CanonicalCandidateJson
-    artifact_refs: tuple[BoundedArtifactRef, ...] = Field(
-        max_length=MAX_COLLABORATION_ITEMS
-    )
+    artifact_refs: tuple[BoundedArtifactRef, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
     tool_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_PEERS)
     authority: Literal["EVIDENCE_ONLY"] = "EVIDENCE_ONLY"
 
@@ -968,9 +952,7 @@ class _CollaborationStatePayload(_StrictFrozenModel):
     topology_events: tuple[TopologyEvent, ...] = Field(max_length=MAX_TOPOLOGY_CHANGES)
     requests: tuple[PeerRequest, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
     contributions: tuple[PeerContribution, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
-    usage_history: tuple[BoundedResourceUsage, ...] = Field(
-        max_length=MAX_COLLABORATION_ITEMS
-    )
+    usage_history: tuple[BoundedResourceUsage, ...] = Field(max_length=MAX_COLLABORATION_ITEMS)
     usage: BoundedResourceUsage
     hop_count: int = Field(strict=True, ge=0, le=MAX_COLLABORATION_ITEMS)
     scheduling_position: int = Field(strict=True, ge=0, le=MAX_COLLABORATION_TRANSITIONS)
@@ -1105,18 +1087,14 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                 raise ValueError("contribution parent depth exceeds collaboration budget")
             if contribution.contribution_id in known_ids:
                 raise ValueError("contribution IDs must be unique")
-            expected_remaining = validation_usage_accumulator.remaining(
-                session.budget.resources
-            )
+            expected_remaining = validation_usage_accumulator.remaining(session.budget.resources)
             if not usage_matches(request.remaining_budget, expected_remaining):
                 raise ValueError("request remaining budget must match state usage")
             known_ids.add(contribution.contribution_id)
             request_ids.add(request.request_id)
             known_depths[contribution.contribution_id] = parent_depth
             validation_usage_accumulator.add(transition_usage)
-            if not validation_usage_accumulator.within_budget(
-                session.budget.resources
-            ):
+            if not validation_usage_accumulator.within_budget(session.budget.resources):
                 raise ValueError("collaboration state exceeds its resource budget")
         completed = _completion_satisfied(session, self.contributions)
         if self.completed != completed:
@@ -1130,9 +1108,7 @@ class _CollaborationStatePayload(_StrictFrozenModel):
             len(self.observed_state_hashes) != expected_observation_count
             or len(self.cycle_projection_hashes) != expected_observation_count
         ):
-            raise ValueError(
-                "state observations must cover the initial state and every transition"
-            )
+            raise ValueError("state observations must cover the initial state and every transition")
         topology_index = 0
         peer_index = 0
         last_peer_id: str | None = None
@@ -1193,8 +1169,7 @@ class _CollaborationStatePayload(_StrictFrozenModel):
             )
             if reason is not None:
                 raise ValueError(
-                    "transition journal continues after collaboration termination: "
-                    f"{reason}"
+                    f"transition journal continues after collaboration termination: {reason}"
                 )
             if transition.kind is CollaborationTransitionKind.TOPOLOGY_EVENT:
                 if topology_index >= len(self.topology_events):
@@ -1205,10 +1180,7 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                 topology_index += 1
                 prior_topology_hash = topology.content_hash
                 topology = self.topology_history[topology_index]
-                if (
-                    len(topology_hashes) >= 2
-                    and topology.content_hash == topology_hashes[-2]
-                ):
+                if len(topology_hashes) >= 2 and topology.content_hash == topology_hashes[-2]:
                     topology_churn_count += 1
                 topology_hashes.append(topology.content_hash)
             else:
@@ -1234,9 +1206,7 @@ class _CollaborationStatePayload(_StrictFrozenModel):
                     raise ValueError("request recipient must be the expected peer")
                 usage_accumulator.add(self.usage_history[peer_index])
                 if not usage_accumulator.within_budget(self.session.budget.resources):
-                    raise ValueError(
-                        "transition replay exceeds the collaboration resource budget"
-                    )
+                    raise ValueError("transition replay exceeds the collaboration resource budget")
                 peer_counts[contribution.peer_id] += 1
                 contribution_kind_counts[contribution.contribution_kind] += 1
                 last_peer_id = contribution.peer_id
@@ -1465,11 +1435,7 @@ def _eligible_peer_ids_from_summary(
         and counts[peer.actor_id] < session.budget.max_contributions_per_peer
     }
     if last_peer_id is not None:
-        targets = {
-            target
-            for source, target in topology.enabled_edges
-            if source == last_peer_id
-        }
+        targets = {target for source, target in topology.enabled_edges if source == last_peer_id}
         candidates &= targets
     return tuple(sorted(candidates))
 
@@ -1494,8 +1460,7 @@ def _termination_reason_from_summary(
     if contribution_count >= budget.max_contributions:
         return CollaborationTerminationReason.MAX_CONTRIBUTIONS_REACHED
     if any(
-        count >= budget.max_contributions_per_peer
-        for count in peer_contribution_counts.values()
+        count >= budget.max_contributions_per_peer for count in peer_contribution_counts.values()
     ):
         return CollaborationTerminationReason.PER_PEER_LIMIT_REACHED
     if topology_event_count and topology_event_count >= budget.max_topology_changes:

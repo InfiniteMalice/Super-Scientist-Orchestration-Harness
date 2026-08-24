@@ -71,10 +71,7 @@ def _require_bounded_actor_identity(actor: ActorIdentity) -> ActorIdentity:
         actor.model_id,
         actor.adapter_id,
     )
-    if any(
-        value is not None and len(value) > MAX_IDENTIFIER_LENGTH
-        for value in identity_fields
-    ):
+    if any(value is not None and len(value) > MAX_IDENTIFIER_LENGTH for value in identity_fields):
         raise ValueError("Phase A actor identity fields must be bounded identifiers")
     return actor
 
@@ -98,9 +95,7 @@ def _require_strict_actor_identity_input(
         "configuration_hash",
     )
     if any(
-        field_name in raw
-        and raw[field_name] is not None
-        and not isinstance(raw[field_name], str)
+        field_name in raw and raw[field_name] is not None and not isinstance(raw[field_name], str)
         for field_name in string_fields
     ):
         raise ValueError("Phase A actor identity scalars must be strict")
@@ -308,9 +303,7 @@ class _CapabilityProfilePayload(_StrictFrozenModel):
     profile_id: BoundedIdentifier
     actor: BoundedActorIdentity
     diversity_fingerprint: DiversityFingerprint
-    allowed_tools: tuple[BoundedIdentifier, ...] = Field(
-        default=(), max_length=MAX_COGNITION_ITEMS
-    )
+    allowed_tools: tuple[BoundedIdentifier, ...] = Field(default=(), max_length=MAX_COGNITION_ITEMS)
     modalities: tuple[BoundedIdentifier, ...] = Field(default=(), max_length=MAX_COGNITION_ITEMS)
     supported_schemas: tuple[BoundedIdentifier, ...] = Field(
         default=(), max_length=MAX_COGNITION_ITEMS
@@ -321,9 +314,7 @@ class _CapabilityProfilePayload(_StrictFrozenModel):
     known_failure_categories: tuple[BoundedIdentifier, ...] = Field(
         default=(), max_length=MAX_COGNITION_ITEMS
     )
-    assertions: tuple[CapabilityAssertion, ...] = Field(
-        default=(), max_length=MAX_COGNITION_ITEMS
-    )
+    assertions: tuple[CapabilityAssertion, ...] = Field(default=(), max_length=MAX_COGNITION_ITEMS)
     governing_policy_hash: Sha256Hex
 
     @field_validator(
@@ -349,13 +340,9 @@ class _CapabilityProfilePayload(_StrictFrozenModel):
     ) -> tuple[CapabilityAssertion, ...]:
         if len({item.assertion_id for item in assertions}) != len(assertions):
             raise ValueError("assertion IDs must be unique")
-        logical_keys = tuple(
-            (item.capability_id, item.task_family_id) for item in assertions
-        )
+        logical_keys = tuple((item.capability_id, item.task_family_id) for item in assertions)
         if len(set(logical_keys)) != len(logical_keys):
-            raise ValueError(
-                "assertions must contain one entry per logical capability/task key"
-            )
+            raise ValueError("assertions must contain one entry per logical capability/task key")
         expected = tuple(
             sorted(
                 assertions,
@@ -410,9 +397,7 @@ class CapabilityProfile(_CapabilityProfilePayload):
     @classmethod
     def build(cls, **values: Any) -> CapabilityProfile:
         payload = _CapabilityProfilePayload(**values)
-        digest = sha256_hex(
-            canonical_json_bytes(payload.model_dump(mode="json", warnings=False))
-        )
+        digest = sha256_hex(canonical_json_bytes(payload.model_dump(mode="json", warnings=False)))
         return cls(
             **payload.model_dump(mode="python", warnings=False),
             content_hash=digest,
@@ -517,11 +502,14 @@ class CapabilityAssessment(_StrictFrozenModel):
                     "without missing or failed dimensions"
                 )
         elif self.disposition is CapabilityDisposition.UNSATISFIED:
-            if not self.failed_dimensions or self.evidence_status in {
-                CapabilityEvidenceStatus.SELF_REPORTED,
-                CapabilityEvidenceStatus.UNKNOWN,
-            } or (
-                self.evidence_status is CapabilityEvidenceStatus.VERIFIED and not verified
+            if (
+                not self.failed_dimensions
+                or self.evidence_status
+                in {
+                    CapabilityEvidenceStatus.SELF_REPORTED,
+                    CapabilityEvidenceStatus.UNKNOWN,
+                }
+                or (self.evidence_status is CapabilityEvidenceStatus.VERIFIED and not verified)
             ):
                 raise ValueError(
                     "capability assessment UNSATISFIED disposition requires a grounded failure"
@@ -626,9 +614,7 @@ class _CohortRequestPayload(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     request_id: BoundedIdentifier
     task_id: BoundedIdentifier
-    required_capabilities: tuple[CapabilityRequirement, ...] = Field(
-        max_length=MAX_COGNITION_ITEMS
-    )
+    required_capabilities: tuple[CapabilityRequirement, ...] = Field(max_length=MAX_COGNITION_ITEMS)
     preferred_capabilities: tuple[CapabilityRequirement, ...] = Field(
         max_length=MAX_COGNITION_ITEMS
     )
@@ -638,9 +624,9 @@ class _CohortRequestPayload(_StrictFrozenModel):
         min_length=1,
         max_length=MAX_COGNITION_ITEMS,
     )
-    prohibited_combinations: tuple[
-        tuple[BoundedIdentifier, BoundedIdentifier], ...
-    ] = Field(max_length=MAX_COGNITION_ITEMS)
+    prohibited_combinations: tuple[tuple[BoundedIdentifier, BoundedIdentifier], ...] = Field(
+        max_length=MAX_COGNITION_ITEMS
+    )
     tie_break_policy: Literal["ACTOR_ID_ASC"] = "ACTOR_ID_ASC"
     governing_policy_hash: Sha256Hex
 
@@ -693,9 +679,7 @@ class CohortRequest(_CohortRequestPayload):
     @classmethod
     def build(cls, **values: Any) -> CohortRequest:
         payload = _CohortRequestPayload(**values)
-        digest = sha256_hex(
-            canonical_json_bytes(payload.model_dump(mode="json", warnings=False))
-        )
+        digest = sha256_hex(canonical_json_bytes(payload.model_dump(mode="json", warnings=False)))
         return cls(
             **payload.model_dump(mode="python", warnings=False),
             content_hash=digest,
@@ -738,9 +722,7 @@ class CapabilityCoverage(_StrictFrozenModel):
     @classmethod
     def require_canonical_actor_indexes(cls, values: tuple[int, ...]) -> tuple[int, ...]:
         if len(set(values)) != len(values) or values != tuple(sorted(values)):
-            raise ValueError(
-                "satisfying_actor_indexes must be unique and canonically sorted"
-            )
+            raise ValueError("satisfying_actor_indexes must be unique and canonically sorted")
         return values
 
 
@@ -773,18 +755,14 @@ class _CohortPlanPayload(_StrictFrozenModel):
     unresolved_candidate_actor_ids: tuple[BoundedIdentifier, ...] = Field(
         max_length=MAX_COGNITION_ITEMS
     )
-    ranked_candidates: tuple[CohortRankedCandidate, ...] = Field(
-        max_length=MAX_COGNITION_ITEMS
-    )
+    ranked_candidates: tuple[CohortRankedCandidate, ...] = Field(max_length=MAX_COGNITION_ITEMS)
     tie_sets: tuple[
         Annotated[
             tuple[BoundedIdentifier, ...],
             Field(max_length=MAX_COGNITION_ITEMS),
         ],
         ...,
-    ] = Field(
-        max_length=MAX_COGNITION_ITEMS
-    )
+    ] = Field(max_length=MAX_COGNITION_ITEMS)
     tie_group_ranks: tuple[CohortTieRank, ...] = Field(max_length=MAX_COGNITION_ITEMS)
     evidence_snapshot_hashes: tuple[Sha256Hex, ...] = Field(max_length=MAX_COGNITION_ITEMS)
     profile_content_hashes: tuple[Sha256Hex, ...] = Field(max_length=MAX_COGNITION_ITEMS)
@@ -833,9 +811,7 @@ class _CohortPlanPayload(_StrictFrozenModel):
         ):
             raise ValueError("cohort plan must exactly match its retained request snapshot")
 
-        profile_actor_ids = tuple(
-            profile.actor_id for profile in self.resolved_candidate_profiles
-        )
+        profile_actor_ids = tuple(profile.actor_id for profile in self.resolved_candidate_profiles)
         if profile_actor_ids != tuple(sorted(profile_actor_ids)):
             raise ValueError("cohort candidate profile snapshots must use canonical actor order")
         if len(set(profile_actor_ids)) != len(profile_actor_ids):
@@ -847,9 +823,7 @@ class _CohortPlanPayload(_StrictFrozenModel):
         if len({profile.content_hash for profile in self.resolved_candidate_profiles}) != len(
             self.resolved_candidate_profiles
         ):
-            raise ValueError(
-                "cohort candidate profile snapshots must have unique content hashes"
-            )
+            raise ValueError("cohort candidate profile snapshots must have unique content hashes")
         if not set(profile_actor_ids).issubset(request.candidate_actor_ids):
             raise ValueError(
                 "cohort candidate profile snapshots must belong to the fixed candidate roster"
@@ -939,9 +913,9 @@ class _CohortPlanPayload(_StrictFrozenModel):
             self.ranked_candidates
         ):
             raise ValueError("cohort ranked candidates must have unique profile IDs")
-        if len(
-            {candidate.profile_content_hash for candidate in self.ranked_candidates}
-        ) != len(self.ranked_candidates):
+        if len({candidate.profile_content_hash for candidate in self.ranked_candidates}) != len(
+            self.ranked_candidates
+        ):
             raise ValueError("cohort ranked candidates must have unique profile content hashes")
 
         tied_actors = {actor_id for tie_set in self.tie_sets for actor_id in tie_set}
@@ -955,9 +929,7 @@ class _CohortPlanPayload(_StrictFrozenModel):
         if len(set(tie_rank_keys)) != len(tie_rank_keys):
             raise ValueError("cohort plan tie groups must retain one group per rank key")
 
-        requirement_count = len(request.required_capabilities) + len(
-            request.preferred_capabilities
-        )
+        requirement_count = len(request.required_capabilities) + len(request.preferred_capabilities)
         for candidate in self.ranked_candidates:
             if len(candidate.assessment_hashes) != requirement_count:
                 raise ValueError(
@@ -975,17 +947,13 @@ class _CohortPlanPayload(_StrictFrozenModel):
                 or member.required_satisfied != ranked_candidate.required_satisfied
                 or member.preferred_satisfied != ranked_candidate.preferred_satisfied
             ):
-                raise ValueError(
-                    "cohort member must exactly match its grounded ranking evidence"
-                )
+                raise ValueError("cohort member must exactly match its grounded ranking evidence")
 
         score_groups: dict[tuple[int, int], list[str]] = {}
         for candidate in self.ranked_candidates:
             score_groups.setdefault(candidate.rank_key, []).append(candidate.actor_id)
         expected_tie_sets = tuple(
-            tuple(actor_ids)
-            for actor_ids in score_groups.values()
-            if len(actor_ids) > 1
+            tuple(actor_ids) for actor_ids in score_groups.values() if len(actor_ids) > 1
         )
         expected_tie_group_ranks = tuple(
             CohortTieRank(
@@ -995,13 +963,8 @@ class _CohortPlanPayload(_StrictFrozenModel):
             for score, actor_ids in score_groups.items()
             if len(actor_ids) > 1
         )
-        if (
-            self.tie_sets != expected_tie_sets
-            or self.tie_group_ranks != expected_tie_group_ranks
-        ):
-            raise ValueError(
-                "cohort plan tie groups must exactly match grounded ranking evidence"
-            )
+        if self.tie_sets != expected_tie_sets or self.tie_group_ranks != expected_tie_group_ranks:
+            raise ValueError("cohort plan tie groups must exactly match grounded ranking evidence")
 
         for coverage in self.coverage:
             if any(
@@ -1012,8 +975,7 @@ class _CohortPlanPayload(_StrictFrozenModel):
                     "cohort coverage actor indexes must reference the candidate roster"
                 )
             satisfying_actor_ids = tuple(
-                request.candidate_actor_ids[index]
-                for index in coverage.satisfying_actor_indexes
+                request.candidate_actor_ids[index] for index in coverage.satisfying_actor_indexes
             )
             if not set(satisfying_actor_ids).issubset(selected):
                 raise ValueError("cohort coverage must reference selected cohort actors")
@@ -1029,9 +991,7 @@ class _CohortPlanPayload(_StrictFrozenModel):
             sorted(candidate.profile_content_hash for candidate in self.ranked_candidates)
         )
         if self.profile_content_hashes != expected_profile_hashes:
-            raise ValueError(
-                "profile content hashes must exactly match grounded ranking evidence"
-            )
+            raise ValueError("profile content hashes must exactly match grounded ranking evidence")
 
         from super_scientist.domain.cognition.grounding import _derive_cohort
 
@@ -1049,8 +1009,7 @@ class _CohortPlanPayload(_StrictFrozenModel):
             or self.excluded_actor_ids != derived.excluded_actor_ids
             or self.coverage != derived.coverage
             or self.unresolved_requirement_ids != derived.unresolved_requirement_ids
-            or self.unresolved_candidate_actor_ids
-            != derived.unresolved_candidate_actor_ids
+            or self.unresolved_candidate_actor_ids != derived.unresolved_candidate_actor_ids
             or self.tie_sets != derived.tie_sets
             or self.tie_group_ranks != derived.tie_group_ranks
             or self.minimum_size_met != derived.minimum_size_met
@@ -1099,11 +1058,7 @@ class CohortPlan(_CohortPlanPayload):
         by_alias: bool | None = None,
         by_name: bool | None = None,
     ) -> Self:
-        raw_size = (
-            len(json_data.encode("utf-8"))
-            if isinstance(json_data, str)
-            else len(json_data)
-        )
+        raw_size = len(json_data.encode("utf-8")) if isinstance(json_data, str) else len(json_data)
         if raw_size > MAX_COHORT_PLAN_BYTES:
             _reject_cohort_plan("cohort serialized plan exceeds the Phase A byte limit")
         return super().model_validate_json(
@@ -1118,9 +1073,7 @@ class CohortPlan(_CohortPlanPayload):
     @classmethod
     def build(cls, **values: Any) -> CohortPlan:
         payload = _CohortPlanPayload(**values)
-        digest = sha256_hex(
-            canonical_json_bytes(payload.model_dump(mode="json", warnings=False))
-        )
+        digest = sha256_hex(canonical_json_bytes(payload.model_dump(mode="json", warnings=False)))
         return cls(
             **payload.model_dump(mode="python", warnings=False),
             content_hash=digest,
@@ -1223,9 +1176,7 @@ class _DiversityAssessmentPayload(_StrictFrozenModel):
     cohort_plan_id: BoundedIdentifier
     member_actor_ids: tuple[BoundedIdentifier, ...] = Field(max_length=MAX_COGNITION_ITEMS)
     axes: DiversityAxes
-    error_correlations: tuple[ErrorCorrelationRecord, ...] = Field(
-        max_length=MAX_COGNITION_ITEMS
-    )
+    error_correlations: tuple[ErrorCorrelationRecord, ...] = Field(max_length=MAX_COGNITION_ITEMS)
     governing_policy_hash: Sha256Hex
 
     @field_validator("member_actor_ids")
@@ -1261,9 +1212,7 @@ class DiversityAssessment(_DiversityAssessmentPayload):
     @classmethod
     def build(cls, **values: Any) -> DiversityAssessment:
         payload = _DiversityAssessmentPayload(**values)
-        digest = sha256_hex(
-            canonical_json_bytes(payload.model_dump(mode="json", warnings=False))
-        )
+        digest = sha256_hex(canonical_json_bytes(payload.model_dump(mode="json", warnings=False)))
         return cls(
             **payload.model_dump(mode="python", warnings=False),
             content_hash=digest,

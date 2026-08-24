@@ -243,9 +243,7 @@ def advance_collaboration(
         session=session,
         topology=state.topology,
         peer_contribution_counts=Counter(item.peer_id for item in contributions),
-        contribution_kind_counts=Counter(
-            item.contribution_kind for item in contributions
-        ),
+        contribution_kind_counts=Counter(item.contribution_kind for item in contributions),
         last_peer_id=contribution.peer_id,
         exact_usage=exact_usage_snapshot(updated_usage_history),
         completed=completed,
@@ -256,16 +254,12 @@ def advance_collaboration(
         session=session,
         topology=state.topology,
         prior_topology_hash=(
-            state.topology_history[-2].content_hash
-            if len(state.topology_history) >= 2
-            else None
+            state.topology_history[-2].content_hash if len(state.topology_history) >= 2 else None
         ),
         topology_event_count=len(state.topology_events),
         topology_churn_count=_topology_churn_count(state.topology_history),
         peer_contribution_counts=Counter(item.peer_id for item in contributions),
-        contribution_kind_counts=Counter(
-            item.contribution_kind for item in contributions
-        ),
+        contribution_kind_counts=Counter(item.contribution_kind for item in contributions),
         last_peer_id=contribution.peer_id,
         exact_usage=exact_usage_snapshot(updated_usage_history),
         request_ids=tuple(sorted(item.request_id for item in (*state.requests, request))),
@@ -324,15 +318,9 @@ def apply_topology_event(
     cycle_projection = collaboration_cycle_projection_hash(
         session=session,
         topology=after,
-        peer_contribution_counts=Counter(
-            item.peer_id for item in state.contributions
-        ),
-        contribution_kind_counts=Counter(
-            item.contribution_kind for item in state.contributions
-        ),
-        last_peer_id=(
-            state.contributions[-1].peer_id if state.contributions else None
-        ),
+        peer_contribution_counts=Counter(item.peer_id for item in state.contributions),
+        contribution_kind_counts=Counter(item.contribution_kind for item in state.contributions),
+        last_peer_id=(state.contributions[-1].peer_id if state.contributions else None),
         exact_usage=exact_usage_snapshot(state.usage_history),
         completed=state.completed,
     )
@@ -350,15 +338,9 @@ def apply_topology_event(
                 and after.content_hash == state.topology_history[-2].content_hash
             )
         ),
-        peer_contribution_counts=Counter(
-            item.peer_id for item in state.contributions
-        ),
-        contribution_kind_counts=Counter(
-            item.contribution_kind for item in state.contributions
-        ),
-        last_peer_id=(
-            state.contributions[-1].peer_id if state.contributions else None
-        ),
+        peer_contribution_counts=Counter(item.peer_id for item in state.contributions),
+        contribution_kind_counts=Counter(item.contribution_kind for item in state.contributions),
+        last_peer_id=(state.contributions[-1].peer_id if state.contributions else None),
         exact_usage=exact_usage_snapshot(state.usage_history),
         request_ids=tuple(sorted(item.request_id for item in state.requests)),
         contribution_depths=_contribution_depths(state.contributions),

@@ -92,9 +92,7 @@ def _toggle_declared_edge(
             sequence=len(state.topology_events) + 1,
             before_topology_hash=state.topology.content_hash,
             operation=(
-                TopologyOperation.ENABLE_EDGE
-                if enabling
-                else TopologyOperation.DISABLE_EDGE
+                TopologyOperation.ENABLE_EDGE if enabling else TopologyOperation.DISABLE_EDGE
             ),
             peer_id=None,
             edge=edge,
@@ -176,8 +174,7 @@ def test_monopoly_terminates_before_accepting_a_second_contribution(
     state = _advance(session, initial_collaboration_state(session), 1)
 
     assert (
-        evaluate_termination(state).reason
-        is CollaborationTerminationReason.CONTRIBUTION_MONOPOLY
+        evaluate_termination(state).reason is CollaborationTerminationReason.CONTRIBUTION_MONOPOLY
     )
     request = PeerRequest.build(
         request_id="request-2",
@@ -378,11 +375,7 @@ def test_repeated_operational_cycle_is_detected_through_engine_evolution(
         disabling = sequence % 2 == 1
         after = TopologySnapshot.build(
             active_peer_ids=state.topology.active_peer_ids,
-            enabled_edges=(
-                (("peer-b", "peer-a"),)
-                if disabling
-                else session.declared_edges
-            ),
+            enabled_edges=((("peer-b", "peer-a"),) if disabling else session.declared_edges),
         )
         state = apply_topology_event(
             session,
@@ -393,9 +386,7 @@ def test_repeated_operational_cycle_is_detected_through_engine_evolution(
                 sequence=sequence,
                 before_topology_hash=state.topology.content_hash,
                 operation=(
-                    TopologyOperation.DISABLE_EDGE
-                    if disabling
-                    else TopologyOperation.ENABLE_EDGE
+                    TopologyOperation.DISABLE_EDGE if disabling else TopologyOperation.ENABLE_EDGE
                 ),
                 peer_id=None,
                 edge=("peer-a", "peer-b"),
@@ -407,10 +398,7 @@ def test_repeated_operational_cycle_is_detected_through_engine_evolution(
     assert len(set(state.observed_state_hashes)) == 5
     assert state.cycle_projection_hashes[0] == state.cycle_projection_hashes[2]
     assert state.cycle_projection_hashes[2] == state.cycle_projection_hashes[4]
-    assert (
-        evaluate_termination(state).reason
-        is CollaborationTerminationReason.REPEATED_STATE_LOOP
-    )
+    assert evaluate_termination(state).reason is CollaborationTerminationReason.REPEATED_STATE_LOOP
 
 
 def test_decision_hash_authenticates_cycle_projection_occurrence_counts(
@@ -441,9 +429,7 @@ def test_decision_hash_authenticates_cycle_projection_occurrence_counts(
 
     assert first.topology == second.topology
     assert first.topology_history[-2] == second.topology_history[-2]
-    assert Counter(first.cycle_projection_hashes) != Counter(
-        second.cycle_projection_hashes
-    )
+    assert Counter(first.cycle_projection_hashes) != Counter(second.cycle_projection_hashes)
     assert first.observed_state_hashes[-1] != second.observed_state_hashes[-1]
     assert evaluate_termination(first).reason is None
     assert evaluate_termination(second).reason is None
@@ -451,17 +437,14 @@ def test_decision_hash_authenticates_cycle_projection_occurrence_counts(
     first = _toggle_declared_edge(session, first, "e0", "event-first-6")
     second = _toggle_declared_edge(session, second, "e0", "event-second-6")
 
-    assert (
-        evaluate_termination(first).reason
-        is CollaborationTerminationReason.REPEATED_STATE_LOOP
-    )
+    assert evaluate_termination(first).reason is CollaborationTerminationReason.REPEATED_STATE_LOOP
     assert evaluate_termination(second).reason is None
-    assert CollaborationState.model_validate_json(
-        json.dumps(first.model_dump(mode="json"))
-    ) == first
-    assert CollaborationState.model_validate_json(
-        json.dumps(second.model_dump(mode="json"))
-    ) == second
+    assert (
+        CollaborationState.model_validate_json(json.dumps(first.model_dump(mode="json"))) == first
+    )
+    assert (
+        CollaborationState.model_validate_json(json.dumps(second.model_dump(mode="json"))) == second
+    )
 
 
 def test_direct_parser_rejects_fabricated_semantic_state_observations(
@@ -570,9 +553,7 @@ def test_direct_parser_rejects_exchange_after_completion(
 def test_direct_parser_rejects_exchange_after_topology_limit(
     session_factory: Callable[..., CollaborationSession],
 ) -> None:
-    session = session_factory(
-        "peer-a", "peer-b", max_topology_changes=2, completion_count=8
-    )
+    session = session_factory("peer-a", "peer-b", max_topology_changes=2, completion_count=8)
     state = initial_collaboration_state(session)
     reduced = TopologySnapshot.build(
         active_peer_ids=state.topology.active_peer_ids,

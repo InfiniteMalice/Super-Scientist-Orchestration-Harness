@@ -76,9 +76,7 @@ def assess_capability(
 
 
 def _assessment_hash(assessment: CapabilityAssessment) -> str:
-    return sha256_hex(
-        canonical_json_bytes(assessment.model_dump(mode="json", warnings=False))
-    )
+    return sha256_hex(canonical_json_bytes(assessment.model_dump(mode="json", warnings=False)))
 
 
 def _prepare_cohort_inputs(
@@ -99,8 +97,7 @@ def _prepare_cohort_inputs(
             {
                 "request_snapshot": request.model_dump(mode="json", warnings=False),
                 "supplied_candidate_profiles": tuple(
-                    profile.model_dump(mode="json", warnings=False)
-                    for profile in profiles
+                    profile.model_dump(mode="json", warnings=False) for profile in profiles
                 ),
             }
         )
@@ -152,8 +149,7 @@ def _derive_cohort_validated(
     ranked: list[tuple[tuple[int, int], CapabilityProfile, tuple[CapabilityAssessment, ...]]] = []
     for profile in candidates:
         assessments = tuple(
-            _assess_capability_validated(profile, requirement)
-            for requirement in requirements
+            _assess_capability_validated(profile, requirement) for requirement in requirements
         )
         required_count = sum(
             assessment.disposition is CapabilityDisposition.SATISFIED
@@ -173,9 +169,7 @@ def _derive_cohort_validated(
             score_order.append(score)
         score_groups[score].append(profile.actor_id)
     tie_sets = tuple(
-        tuple(sorted(score_groups[score]))
-        for score in score_order
-        if len(score_groups[score]) > 1
+        tuple(sorted(score_groups[score])) for score in score_order if len(score_groups[score]) > 1
     )
     tie_group_ranks = tuple(
         CohortTieRank(
@@ -223,9 +217,7 @@ def _derive_cohort_validated(
     selected_actor_ids = {member.actor_id for member in members}
     excluded_actor_ids = tuple(
         sorted(
-            profile.actor_id
-            for profile in candidates
-            if profile.actor_id not in selected_actor_ids
+            profile.actor_id for profile in candidates if profile.actor_id not in selected_actor_ids
         )
     )
 
@@ -239,8 +231,7 @@ def _derive_cohort_validated(
                 sorted(
                     candidate_index_by_actor[profile.actor_id]
                     for _score, profile, assessments in selected
-                    if assessments[requirement_index].disposition
-                    is CapabilityDisposition.SATISFIED
+                    if assessments[requirement_index].disposition is CapabilityDisposition.SATISFIED
                 )
             ),
         )

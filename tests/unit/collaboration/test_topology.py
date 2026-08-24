@@ -140,10 +140,7 @@ def test_rehashed_semantically_false_topology_event_is_rejected(
 def test_topology_envelope_rejects_impractical_edge_and_history_limits() -> None:
     peers = tuple(f"peer-{index:02d}" for index in range(16))
     too_many_edges = tuple(
-        (source, target)
-        for source in peers
-        for target in peers
-        if source != target
+        (source, target) for source in peers for target in peers if source != target
     )[:65]
 
     with pytest.raises(ValidationError, match="enabled_edges"):

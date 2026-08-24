@@ -67,9 +67,7 @@ def _profile(
 
 
 def _cohort(*profiles: CapabilityProfile):
-    candidate_ids = tuple(sorted(profile.actor_id for profile in profiles)) or (
-        "peer-missing",
-    )
+    candidate_ids = tuple(sorted(profile.actor_id for profile in profiles)) or ("peer-missing",)
     request = CohortRequest.build(
         request_id="request-a",
         task_id="task-a",
@@ -193,9 +191,7 @@ def test_diversity_rejects_profile_revision_drift_for_same_actor(drift_kind: str
         profile_id=("profile-drifted" if drift_kind == "profile-id" else retained.profile_id),
         actor=retained.actor,
         diversity_fingerprint=(
-            retained.diversity_fingerprint
-            if drift_kind == "profile-id"
-            else drifted_fingerprint
+            retained.diversity_fingerprint if drift_kind == "profile-id" else drifted_fingerprint
         ),
         governing_policy_hash=POLICY,
     )

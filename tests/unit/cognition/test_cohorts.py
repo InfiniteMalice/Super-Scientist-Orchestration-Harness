@@ -108,9 +108,7 @@ def _profile(
         task_family_id="research",
         status=status,
         evidence_ids=(
-            (f"evidence-{actor_id}",)
-            if status is not CapabilityEvidenceStatus.UNKNOWN
-            else ()
+            (f"evidence-{actor_id}",) if status is not CapabilityEvidenceStatus.UNKNOWN else ()
         ),
         validator_id="validator" if verified else None,
         validator_version="v1" if verified else None,
@@ -277,9 +275,7 @@ def test_cohort_plan_byte_gate_detaches_raw_serialization_failure() -> None:
     with warnings.catch_warnings(record=True) as caught_warnings:
         warnings.simplefilter("always")
         with pytest.raises(ValidationError) as caught:
-            CohortPlan.model_validate(
-                {"schema_version": _UnserializablePrivateMarker()}
-            )
+            CohortPlan.model_validate({"schema_version": _UnserializablePrivateMarker()})
 
     error = caught.value
     assert caught_warnings == []
@@ -404,9 +400,7 @@ def test_supplied_profiles_cannot_expand_the_fixed_candidate_roster() -> None:
 
 def test_build_cohort_revalidates_surplus_profiles_before_roster_filtering() -> None:
     request = _request(candidates=("peer-a",))
-    malformed_surplus = _profile("peer-z").model_copy(
-        update={"governing_policy_hash": "e" * 64}
-    )
+    malformed_surplus = _profile("peer-z").model_copy(update={"governing_policy_hash": "e" * 64})
 
     with pytest.raises((ValidationError, ValueError), match=r"capability profile|content_hash"):
         build_cohort(request, (_profile("peer-a"), malformed_surplus))
@@ -695,9 +689,7 @@ def test_near_limit_grounding_source_always_builds_within_plan_byte_limit() -> N
 
 def test_cohort_plan_compacts_repeated_assessments_without_source_amplification() -> None:
     actor_ids = tuple(f"peer-{index:02d}" for index in range(64))
-    constraints = tuple(
-        f"constraint-{index:02d}-" + "x" * 80 for index in range(64)
-    )
+    constraints = tuple(f"constraint-{index:02d}-" + "x" * 80 for index in range(64))
     requirements = tuple(
         _requirement(f"requirement-{index:02d}").model_copy(
             update={"required_execution_constraints": (constraints[index],)}
@@ -796,9 +788,7 @@ def test_cohort_plan_revalidates_preconstructed_profile_snapshot() -> None:
     payload = plan.model_dump(mode="python")
     invalid_hash = "0" * 64
     payload["resolved_candidate_profiles"] = (
-        plan.resolved_candidate_profiles[0].model_copy(
-            update={"content_hash": invalid_hash}
-        ),
+        plan.resolved_candidate_profiles[0].model_copy(update={"content_hash": invalid_hash}),
     )
     ranked = list(payload["ranked_candidates"])
     candidate = ranked[0]
@@ -852,9 +842,7 @@ def _two_member_plan() -> CohortPlan:
 
 def _rehash_plan_payload(payload: dict[str, object]) -> dict[str, object]:
     unhashed = {key: value for key, value in payload.items() if key != "content_hash"}
-    payload["content_hash"] = sha256_hex(
-        canonical_json_bytes(to_jsonable_python(unhashed))
-    )
+    payload["content_hash"] = sha256_hex(canonical_json_bytes(to_jsonable_python(unhashed)))
     return payload
 
 

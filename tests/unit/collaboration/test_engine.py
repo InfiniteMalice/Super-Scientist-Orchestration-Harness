@@ -115,9 +115,7 @@ def test_collaboration_session_rejects_same_id_peer_identity_substitution(
     substitution: object,
 ) -> None:
     session = session_factory("peer-a")
-    substituted_peer = session.peers[0].model_copy(
-        update={identity_field: substitution}
-    )
+    substituted_peer = session.peers[0].model_copy(update={identity_field: substitution})
 
     with pytest.raises(
         ValidationError,
@@ -133,9 +131,7 @@ def test_collaboration_session_rejects_same_id_peer_identity_substitution(
             session_payload = {
                 key: value for key, value in payload.items() if key != "content_hash"
             }
-            payload["content_hash"] = sha256_hex(
-                canonical_json_bytes(session_payload)
-            )
+            payload["content_hash"] = sha256_hex(canonical_json_bytes(session_payload))
             CollaborationSession.model_validate_json(
                 json.dumps(payload),
                 strict=True,
@@ -159,10 +155,7 @@ def test_single_peer_requires_declared_edge_after_initial_exchange(
     )
 
     assert next_peer(session, state) is None
-    assert (
-        evaluate_termination(state).reason
-        is CollaborationTerminationReason.NO_ELIGIBLE_PEER
-    )
+    assert evaluate_termination(state).reason is CollaborationTerminationReason.NO_ELIGIBLE_PEER
     with pytest.raises(ValueError, match=r"terminated.*NO_ELIGIBLE_PEER"):
         advance_collaboration(
             session,
@@ -591,9 +584,7 @@ def test_exact_semantic_hashes_ignore_ambient_decimal_precision(
                         recipient,
                         sequence=sequence,
                         sender_id=sender,
-                        remaining_budget=session.remaining_resources(
-                            state.usage_history
-                        ),
+                        remaining_budget=session.remaining_resources(state.usage_history),
                     ),
                     _contribution(session, recipient, sequence=sequence),
                     _cost_usage(value),
@@ -665,9 +656,7 @@ def test_collaboration_rejects_unbounded_artifact_and_resource_scalars(
         _request(
             session,
             "peer-a",
-            remaining_budget=session.budget.resources.model_copy(
-                update={"tokens": 10**30}
-            ),
+            remaining_budget=session.budget.resources.model_copy(update={"tokens": 10**30}),
         )
 
 
@@ -706,9 +695,7 @@ def test_preconstructed_nested_dtos_are_strictly_revalidated(
         _request(
             session,
             "peer-a",
-            remaining_budget=session.budget.resources.model_copy(
-                update={"tokens": "1000"}
-            ),
+            remaining_budget=session.budget.resources.model_copy(update={"tokens": "1000"}),
         )
 
 
@@ -840,14 +827,12 @@ def test_candidate_content_accepts_closed_public_finding_and_evidence_ids(
         session_factory("peer-a"),
         "peer-a",
         candidate_content=(
-            '{"evidence_ids":["evidence-sha256:' + "a" * 64 + '"]'
-            ',"finding":"supported"}'
+            '{"evidence_ids":["evidence-sha256:' + "a" * 64 + '"],"finding":"supported"}'
         ),
     )
 
     assert contribution.candidate_content == (
-        '{"evidence_ids":["evidence-sha256:' + "a" * 64 + '"]'
-        ',"finding":"supported"}'
+        '{"evidence_ids":["evidence-sha256:' + "a" * 64 + '"],"finding":"supported"}'
     )
 
 
