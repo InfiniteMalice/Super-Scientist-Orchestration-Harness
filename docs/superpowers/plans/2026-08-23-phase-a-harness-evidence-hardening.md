@@ -208,6 +208,29 @@ valid 256-cell boundary and the complete 24,512-comparison maximum must remain u
   path can materialize coordinates.
 - [x] Preserve valid maximum-shape analysis and run focused, Phase A, static, and authority gates.
 
+## Round 8: Deterministic Metric Arithmetic and Cell-Collection Bound
+
+### Problem and invariant
+
+Metric score subtraction must not inherit the caller's ambient Decimal precision or rounding mode:
+the same two metric vectors must produce the same normalized delta and comparison hash under every
+ambient context. Delta arithmetic uses the private fixed Phase A Decimal context defined from the
+bounded-decimal contract and never mutates the global context.
+
+Both `validate_complete_matched_grid()` and `analyze_model_harness()` must reject a raw tuple or
+list containing more than 256 cells before validating or reconstructing any cell. The fixed failure
+is `model-harness cell count exceeds 256 cells`; duplicate and unexpected-cell confounds remain
+available for collections at or below the bound.
+
+### TDD and verification
+
+- [x] Witness ambient precision/rounding produce divergent score deltas and hashes before the fixed
+  local Decimal context.
+- [x] Witness 300 repeated valid cells reach the cell validator through both public matrix paths
+  before the raw collection preflight.
+- [x] Preserve the valid 256-cell/24,512-comparison maximum and run focused, Phase A, static, and
+  authority gates.
+
 ## Global Constraints
 
 - Preserve protected-evaluation and `HarnessCampaign` behavior.

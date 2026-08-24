@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_DOWN, ROUND_UP, Decimal, localcontext
 
 import pytest
 from pydantic import ValidationError
@@ -483,6 +483,28 @@ def test_comparison_retains_canonical_component_deltas_without_collapsing_metric
     assert comparison.component_deltas.resource_usage_delta.tokens == 15
     assert "composite_delta" not in type(comparison.component_deltas).model_fields
     assert comparison.content_hash == guidance_comparison_hash(comparison)
+
+
+def test_comparison_delta_and_hash_ignore_ambient_decimal_context() -> None:
+    left = _cell(metrics=_metrics(score="0." + "1" * 60))
+    right = _cell(
+        condition=GuidanceCondition.METHOD_ONLY,
+        metrics=_metrics(score="0." + "2" * 60),
+    )
+
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = ROUND_DOWN
+        low_precision = compare_guidance_cells(left, right)
+    with localcontext() as context:
+        context.prec = 80
+        context.rounding = ROUND_UP
+        high_precision = compare_guidance_cells(left, right)
+
+    expected_delta = Decimal("0." + "1" * 60)
+    assert low_precision.component_deltas.task_score_delta == expected_delta
+    assert high_precision.component_deltas.task_score_delta == expected_delta
+    assert low_precision.content_hash == high_precision.content_hash
 
 
 def test_component_deltas_preserve_left_right_and_both_missingness_reasons() -> None:

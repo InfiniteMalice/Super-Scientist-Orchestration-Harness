@@ -703,6 +703,11 @@ def canonical_cells(cells: tuple[ModelHarnessCell, ...]) -> tuple[ModelHarnessCe
     return tuple(sorted(cells, key=lambda item: (item.cell_id, item.content_hash)))
 
 
+def _require_bounded_raw_cells(cells: object) -> None:
+    if isinstance(cells, (tuple, list)) and len(cells) > MAX_MODEL_HARNESS_GRID_CELLS:
+        raise ValueError("model-harness cell count exceeds 256 cells")
+
+
 def _add_protocol_identity_confounds(
     confounds: set[ModelHarnessConfoundCode],
     protocol: ModelHarnessProtocol,
@@ -757,7 +762,7 @@ def _add_protocol_identity_confounds(
 
 def validate_complete_matched_grid(
     protocol: ModelHarnessProtocol,
-    cells: tuple[ModelHarnessCell, ...],
+    cells: tuple[ModelHarnessCell, ...] | list[ModelHarnessCell],
     *,
     evidence_chains: tuple[HarnessCellEvidenceChain, ...],
     evidence_index: HarnessEvidenceSnapshotIndex,
@@ -774,6 +779,7 @@ def validate_complete_matched_grid(
         TraceFreshnessStatus,
     )
 
+    _require_bounded_raw_cells(cells)
     validated_protocol = ModelHarnessProtocol.model_validate(protocol)
     expected_cell_count = len(validated_protocol.expected_grid)
     if len(evidence_chains) > expected_cell_count:
@@ -978,11 +984,12 @@ def _build_declared_comparisons(
 
 def analyze_model_harness(
     protocol: ModelHarnessProtocol,
-    cells: tuple[ModelHarnessCell, ...],
+    cells: tuple[ModelHarnessCell, ...] | list[ModelHarnessCell],
     *,
     evidence_chains: tuple[HarnessCellEvidenceChain, ...],
     evidence_index: HarnessEvidenceSnapshotIndex,
 ) -> ModelHarnessAnalysis:
+    _require_bounded_raw_cells(cells)
     validated_protocol = ModelHarnessProtocol.model_validate(protocol)
     validated_cells = tuple(ModelHarnessCell.model_validate(item) for item in cells)
     ordered_cells = canonical_cells(validated_cells)

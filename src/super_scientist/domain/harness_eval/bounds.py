@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -17,6 +17,13 @@ MAX_DECIMAL_COEFFICIENT_DIGITS = 256
 MAX_DECIMAL_ABS_EXPONENT = 1_024
 MAX_DECIMAL_CANONICAL_BYTES = 260
 MAX_RESOURCE_USAGE_CANONICAL_BYTES = 4_096
+
+_PHASE_A_DECIMAL_CONTEXT = Context(
+    prec=MAX_DECIMAL_COEFFICIENT_DIGITS,
+    rounding=ROUND_HALF_EVEN,
+    Emin=-MAX_DECIMAL_ABS_EXPONENT,
+    Emax=MAX_DECIMAL_ABS_EXPONENT,
+)
 
 
 class _StrictFrozenModel(BaseModel):
@@ -41,6 +48,11 @@ def require_bounded_decimal(value: Decimal) -> Decimal:
     if len(str(value).encode("ascii")) > MAX_DECIMAL_CANONICAL_BYTES:
         raise ValueError("decimal canonical bytes exceed bound")
     return value
+
+
+def _phase_a_decimal_difference(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext(_PHASE_A_DECIMAL_CONTEXT):
+        return +(right - left)
 
 
 def require_bounded_integer(value: int, *, error: str) -> int:

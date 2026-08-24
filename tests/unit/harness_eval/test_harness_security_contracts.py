@@ -33,6 +33,7 @@ from super_scientist.domain.harness_eval.matrix import (
     ModelIdentity,
     analyze_model_harness,
     evaluation_resource_envelope_hash,
+    validate_complete_matched_grid,
 )
 from super_scientist.domain.harness_eval.models import HarnessPartition
 from super_scientist.domain.harness_eval.receipts import (
@@ -1185,6 +1186,48 @@ def test_matrix_bounds_surplus_evidence_chains_before_element_validation() -> No
             evidence_chains=(evidence[0].chain,) * 300,
             evidence_index=_snapshot_index(evidence),
         )
+
+
+def test_matrix_bounds_surplus_cells_before_element_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.unit.harness_eval.test_model_harness_matrix import _protocol
+
+    protocol = _protocol()
+    evidence = _matrix_evidence_chain(protocol, protocol.expected_grid[0], 0)
+    cell = ModelHarnessCell.from_protocol(
+        cell_id="bounded-cell",
+        protocol=protocol,
+        coordinate=protocol.expected_grid[0],
+        metrics=_metrics(),
+        evidence_chain_receipt=harness_cell_evidence_chain_receipt(evidence.chain),
+        observed_at=evidence.trace.observed_at,
+    )
+    cells = [cell] * 300
+
+    class UnexpectedCellValidator:
+        @classmethod
+        def model_validate(cls, value: object) -> None:
+            raise AssertionError("oversized cells must reject before cell validation")
+
+    monkeypatch.setattr(matrix_module, "ModelHarnessCell", UnexpectedCellValidator)
+
+    for validate in (
+        lambda: validate_complete_matched_grid(
+            protocol,
+            cells,
+            evidence_chains=(evidence.chain,),
+            evidence_index=_snapshot_index((evidence,)),
+        ),
+        lambda: analyze_model_harness(
+            protocol,
+            cells,
+            evidence_chains=(evidence.chain,),
+            evidence_index=_snapshot_index((evidence,)),
+        ),
+    ):
+        with pytest.raises(ValueError, match="model-harness cell count exceeds 256 cells"):
+            validate()
 
 
 def test_matrix_rejects_duplicate_chain_receipts_within_collection_bound() -> None:

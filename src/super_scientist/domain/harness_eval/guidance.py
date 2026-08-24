@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from super_scientist.domain.harness_eval.bounds import (
     PhaseAResourceUsage,
+    _phase_a_decimal_difference,
     bounded_canonical_record_hash,
     require_bounded_decimal,
     require_bounded_integer,
@@ -726,7 +727,7 @@ def metric_component_deltas(
         task_score_delta=(
             None
             if left_metrics.task_score is None or right_metrics.task_score is None
-            else right_metrics.task_score - left_metrics.task_score
+            else _phase_a_decimal_difference(left_metrics.task_score, right_metrics.task_score)
         ),
         procedure_compilation_changed=_changed(
             left_metrics.procedure_compilation_status,
