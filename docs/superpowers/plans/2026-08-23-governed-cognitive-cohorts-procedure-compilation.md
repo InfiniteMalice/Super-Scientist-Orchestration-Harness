@@ -827,11 +827,134 @@ Expected: FAIL because the new proposal kinds are not registered.
 
 ```python
 from contextlib import suppress
+from datetime import UTC, datetime
 
 
 # <!-- task-8-13-trace-contract:start -->
 MAX_GOVERNED_PROPOSAL_IDENTIFIER_LENGTH = 200
 MAX_HARNESS_TRACE_RECORD_IDENTIFIER_LENGTH = 200
+MAX_PROPOSAL_COLLECTION_ITEMS = 256
+
+_STABLE_IDENTIFIER_ALPHABET = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
+)
+_LOWER_HEX_ALPHABET = frozenset("0123456789abcdef")
+_ACTOR_IDENTITY_STATE_FIELDS = frozenset(
+    {
+        "actor_id",
+        "kind",
+        "created_at",
+        "provider_id",
+        "model_id",
+        "adapter_id",
+        "configuration_hash",
+    }
+)
+_APPROVAL_STATE_FIELDS = frozenset({"approver", "approved_at"})
+
+
+def _exact_model_state(
+    value: object,
+    expected_type: type[BaseModel],
+    expected_fields: frozenset[str],
+) -> dict[str, object]:
+    if type(value) is not expected_type:
+        raise ValueError("model boundary requires the exact declared type")
+    state = object.__getattribute__(value, "__dict__")
+    if type(state) is not dict:
+        raise ValueError("model boundary requires exact dictionary state")
+    if any(type(key) is not str for key in state):
+        raise ValueError("model boundary requires exact built-in string keys")
+    if frozenset(state) != expected_fields:
+        raise ValueError("model boundary received unexpected instance state")
+    return state
+
+
+def _fresh_governed_identifier(value: object) -> str:
+    if type(value) is not str:
+        raise ValueError("governed identifier must be an exact built-in string")
+    if (
+        not value
+        or len(value) > MAX_GOVERNED_PROPOSAL_IDENTIFIER_LENGTH
+        or any(character not in _STABLE_IDENTIFIER_ALPHABET for character in value)
+    ):
+        raise ValueError("governed identifier is outside its bounded alphabet")
+    return value
+
+
+def _fresh_utc_timestamp(value: object) -> datetime:
+    if type(value) is not datetime:
+        raise ValueError("timestamp must be an exact datetime")
+    if object.__getattribute__(value, "tzinfo") is not UTC:
+        raise ValueError("timestamp must use the trusted UTC timezone")
+    return datetime(
+        object.__getattribute__(value, "year"),
+        object.__getattribute__(value, "month"),
+        object.__getattribute__(value, "day"),
+        object.__getattribute__(value, "hour"),
+        object.__getattribute__(value, "minute"),
+        object.__getattribute__(value, "second"),
+        object.__getattribute__(value, "microsecond"),
+        tzinfo=UTC,
+        fold=object.__getattribute__(value, "fold"),
+    )
+
+
+def _fresh_optional_identifier(value: object) -> str | None:
+    return None if value is None else _fresh_governed_identifier(value)
+
+
+def _fresh_optional_sha256(value: object) -> str | None:
+    if value is None:
+        return None
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in _LOWER_HEX_ALPHABET for character in value)
+    ):
+        raise ValueError("configuration hash must be exact lowercase SHA-256 text")
+    return value
+
+
+def _fresh_actor_identity(value: object) -> ActorIdentity:
+    state = _exact_model_state(
+        value,
+        ActorIdentity,
+        _ACTOR_IDENTITY_STATE_FIELDS,
+    )
+    kind = state["kind"]
+    if type(kind) is not ActorKind:
+        raise ValueError("actor kind must be an exact ActorKind")
+    actor = ActorIdentity.model_validate(
+        {
+            "actor_id": _fresh_governed_identifier(state["actor_id"]),
+            "kind": kind,
+            "created_at": _fresh_utc_timestamp(state["created_at"]),
+            "provider_id": _fresh_optional_identifier(state["provider_id"]),
+            "model_id": _fresh_optional_identifier(state["model_id"]),
+            "adapter_id": _fresh_optional_identifier(state["adapter_id"]),
+            "configuration_hash": _fresh_optional_sha256(
+                state["configuration_hash"]
+            ),
+        },
+        strict=True,
+    )
+    if not actor.actor_id:
+        raise ValueError("actor_id must not be empty")
+    return actor
+
+
+def _fresh_approval(value: object) -> Approval | None:
+    if value is None:
+        return None
+    state = _exact_model_state(value, Approval, _APPROVAL_STATE_FIELDS)
+    return Approval.model_validate(
+        {
+            "approver": _fresh_actor_identity(state["approver"]),
+            "approved_at": _fresh_utc_timestamp(state["approved_at"]),
+        },
+        strict=True,
+    )
 
 BoundedGovernedProposalIdentifier = Annotated[
     StableIdentifier,
@@ -853,12 +976,65 @@ class GovernedProposalBase(ProposalBase):
     proposal_id: BoundedGovernedProposalIdentifier
     idempotency_key: BoundedGovernedProposalIdentifier
 
+    @field_validator("proposal_id", "idempotency_key", mode="before")
+    @classmethod
+    def require_exact_raw_identifier(cls, value: object) -> str:
+        return _fresh_governed_identifier(value)
+
+
+class RecordCapabilityProfile(GovernedProposalBase):
+    proposal_type: Literal["record_capability_profile"] = "record_capability_profile"
+    profile: CapabilityProfile
+
 
 class RecordCohortPlan(GovernedProposalBase):
     proposal_type: Literal["record_cohort_plan"] = "record_cohort_plan"
     request: CohortRequest
-    profile_receipts: tuple[CapabilityProfileReceiptRef, ...] = Field(min_length=1)
+    profile_receipts: tuple[CapabilityProfileReceiptRef, ...] = Field(
+        min_length=1,
+        max_length=MAX_PROPOSAL_COLLECTION_ITEMS,
+    )
     plan: CohortPlan
+
+
+class RecordDiversityAssessment(GovernedProposalBase):
+    proposal_type: Literal["record_diversity_assessment"] = "record_diversity_assessment"
+    cohort_plan_receipt: CohortPlanReceiptRef
+    profile_receipts: tuple[CapabilityProfileReceiptRef, ...] = Field(
+        min_length=1,
+        max_length=MAX_PROPOSAL_COLLECTION_ITEMS,
+    )
+    error_correlations: tuple[ErrorCorrelationRecord, ...] = Field(
+        max_length=MAX_PROPOSAL_COLLECTION_ITEMS,
+    )
+    assessment: DiversityAssessment
+
+
+class RecordCollaborationSession(GovernedProposalBase):
+    proposal_type: Literal["record_collaboration_session"] = "record_collaboration_session"
+    session: CollaborationSession
+
+
+class AppendPeerRequest(GovernedProposalBase):
+    proposal_type: Literal["append_peer_request"] = "append_peer_request"
+    request: PeerRequest
+
+
+class AppendPeerContribution(GovernedProposalBase):
+    proposal_type: Literal["append_peer_contribution"] = "append_peer_contribution"
+    contribution: PeerContribution
+
+
+class AppendTopologyEvent(GovernedProposalBase):
+    proposal_type: Literal["append_topology_event"] = "append_topology_event"
+    event: TopologyEvent
+
+
+class RecordCollaborationTermination(GovernedProposalBase):
+    proposal_type: Literal["record_collaboration_termination"] = (
+        "record_collaboration_termination"
+    )
+    termination: CollaborationTermination
 
 
 class RecordProcedureCompilation(GovernedProposalBase):
@@ -866,11 +1042,51 @@ class RecordProcedureCompilation(GovernedProposalBase):
     compilation: OpaqueProcedureCompilationEnvelope
 
 
+class RecordMethodDirectionOutcome(GovernedProposalBase):
+    proposal_type: Literal["record_method_direction_outcome"] = (
+        "record_method_direction_outcome"
+    )
+    outcome: MethodDirectionOutcome
+
+
 class BindCompiledProgressPlan(GovernedProposalBase):
     proposal_type: Literal["bind_compiled_progress_plan"] = "bind_compiled_progress_plan"
     compilation_receipt: ProcedureCompilationReceiptRef
     binding: CompiledProgressPlanBinding
     plan: ProgressPlan
+
+
+class RecordGuidanceEvaluationProtocol(GovernedProposalBase):
+    proposal_type: Literal["record_guidance_evaluation_protocol"] = (
+        "record_guidance_evaluation_protocol"
+    )
+    protocol: GuidanceEvaluationProtocol
+
+
+class AppendGuidanceEvaluationCell(GovernedProposalBase):
+    proposal_type: Literal["append_guidance_evaluation_cell"] = (
+        "append_guidance_evaluation_cell"
+    )
+    cell: GuidanceEvaluationCell
+
+
+class RecordModelHarnessProtocol(GovernedProposalBase):
+    proposal_type: Literal["record_model_harness_protocol"] = (
+        "record_model_harness_protocol"
+    )
+    protocol: ModelHarnessProtocol
+
+
+class AppendModelHarnessCell(GovernedProposalBase):
+    proposal_type: Literal["append_model_harness_cell"] = "append_model_harness_cell"
+    cell: ModelHarnessCell
+
+
+class RecordModelHarnessAnalysis(GovernedProposalBase):
+    proposal_type: Literal["record_model_harness_analysis"] = (
+        "record_model_harness_analysis"
+    )
+    analysis: ModelHarnessAnalysis
 
 
 class _StrictProposalEnvelopeModel(BaseModel):
@@ -887,6 +1103,16 @@ class HarnessTraceRecordMetadata(_StrictProposalEnvelopeModel):
     schema_version: Literal[1] = 1
     received_at: UtcTimestamp
     source_id: BoundedHarnessTraceRecordIdentifier
+
+    @field_validator("source_id", mode="before")
+    @classmethod
+    def require_exact_raw_source_id(cls, value: object) -> str:
+        return _fresh_governed_identifier(value)
+
+    @field_validator("received_at", mode="before")
+    @classmethod
+    def require_exact_raw_received_at(cls, value: object) -> datetime:
+        return _fresh_utc_timestamp(value)
 
 
 class HarnessExecutionTraceEnvelope(_StrictProposalEnvelopeModel):
@@ -919,6 +1145,123 @@ class RecordRewardAssessment(GovernedProposalBase):
                 "reward assessment proposal must bind exact observation and findings"
             )
         return self
+
+
+_HARNESS_TRACE_METADATA_STATE_FIELDS = frozenset(
+    {"schema_version", "received_at", "source_id"}
+)
+_REWARD_PROPOSAL_STATE_FIELDS = frozenset(
+    {
+        "proposal_id",
+        "idempotency_key",
+        "proposer",
+        "approval",
+        "proposal_type",
+        "observation",
+        "findings",
+        "assessment",
+    }
+)
+
+
+def _fresh_harness_trace_metadata(value: object) -> HarnessTraceRecordMetadata:
+    state = _exact_model_state(
+        value,
+        HarnessTraceRecordMetadata,
+        _HARNESS_TRACE_METADATA_STATE_FIELDS,
+    )
+    schema_version = state["schema_version"]
+    if type(schema_version) is not int or schema_version != 1:
+        raise ValueError("trace metadata schema_version must be exact integer 1")
+    received_at = state["received_at"]
+    source_id = state["source_id"]
+    if type(received_at) is not datetime or type(source_id) is not str:
+        raise ValueError("trace metadata fields require exact primitive types")
+    return HarnessTraceRecordMetadata(
+        schema_version=1,
+        received_at=_fresh_utc_timestamp(received_at),
+        source_id=_fresh_governed_identifier(source_id),
+    )
+
+
+def _fresh_reward_assessment_proposal(value: object) -> RecordRewardAssessment:
+    state = _exact_model_state(
+        value,
+        RecordRewardAssessment,
+        _REWARD_PROPOSAL_STATE_FIELDS,
+    )
+    proposal_type = state["proposal_type"]
+    observation = state["observation"]
+    findings = state["findings"]
+    assessment = state["assessment"]
+    if type(proposal_type) is not str or proposal_type != "record_reward_assessment":
+        raise ValueError("reward proposal type must be exact trusted text")
+    if type(observation) is not RewardObservation:
+        raise ValueError("reward observation must have the exact declared type")
+    if type(findings) is not tuple or any(
+        type(finding) is not RewardHackingFinding for finding in findings
+    ):
+        raise ValueError("reward findings must be an exact tuple of exact finding types")
+    if type(assessment) is not RewardValidityAssessment:
+        raise ValueError("reward assessment must have the exact declared type")
+    return RecordRewardAssessment(
+        proposal_id=_fresh_governed_identifier(state["proposal_id"]),
+        idempotency_key=_fresh_governed_identifier(state["idempotency_key"]),
+        proposer=_fresh_actor_identity(state["proposer"]),
+        approval=_fresh_approval(state["approval"]),
+        proposal_type="record_reward_assessment",
+        observation=RewardObservation.model_validate(observation, strict=True),
+        findings=tuple(
+            RewardHackingFinding.model_validate(finding, strict=True)
+            for finding in findings
+        ),
+        assessment=RewardValidityAssessment.model_validate(
+            assessment,
+            strict=True,
+        ),
+    )
+
+
+def _invalid_reward_decision(value: object) -> TransactionDecision:
+    proposal_id = "invalid-reward-proposal"
+    with suppress(TypeError, ValueError):
+        state = object.__getattribute__(value, "__dict__")
+        if type(state) is not dict or any(type(key) is not str for key in state):
+            raise ValueError("unsafe proposal state")
+        if "proposal_id" in state:
+            proposal_id = _fresh_governed_identifier(state["proposal_id"])
+    return TransactionDecision(
+        proposal_id=proposal_id,
+        accepted=False,
+        reasons=(
+            RejectionReason(
+                code=RejectionCode.INVALID_REWARD,
+                message="reward assessment proposal is invalid",
+            ),
+        ),
+    )
+
+
+GOVERNED_PROPOSAL_CLASSES = (
+    RecordCapabilityProfile,
+    RecordCohortPlan,
+    RecordDiversityAssessment,
+    RecordCollaborationSession,
+    AppendPeerRequest,
+    AppendPeerContribution,
+    AppendTopologyEvent,
+    RecordCollaborationTermination,
+    RecordProcedureCompilation,
+    RecordMethodDirectionOutcome,
+    BindCompiledProgressPlan,
+    RecordGuidanceEvaluationProtocol,
+    AppendGuidanceEvaluationCell,
+    RecordModelHarnessProtocol,
+    AppendModelHarnessCell,
+    RecordModelHarnessAnalysis,
+    RecordHarnessExecutionTrace,
+    RecordRewardAssessment,
+)
 # <!-- task-8-13-trace-contract:end -->
 
 
@@ -953,11 +1296,17 @@ def parse_untrusted_proposal_json(value: str | bytes) -> Proposal:
 
 Add these exact kinds: `record_capability_profile`, `record_cohort_plan`, `record_diversity_assessment`, `record_collaboration_session`, `append_peer_request`, `append_peer_contribution`, `append_topology_event`, `record_collaboration_termination`, `record_procedure_compilation`, `record_method_direction_outcome`, `bind_compiled_progress_plan`, `record_guidance_evaluation_protocol`, `append_guidance_evaluation_cell`, `record_model_harness_protocol`, `append_model_harness_cell`, `record_model_harness_analysis`, `record_harness_execution_trace`, and `record_reward_assessment`.
 
-All 18 additive proposal classes inherit `GovernedProposalBase`. The base rejects a
-`proposal_id` or `idempotency_key` longer than 200 characters and rejects identifiers
-outside the stable-identifier alphabet. `RecordRewardAssessment` requires exactly one
-finding per `RewardHackingFamily` and requires its observation and ordered findings to
-equal the embedded assessment inputs.
+`GOVERNED_PROPOSAL_CLASSES` is the exact executable list of all 18 additive proposal
+classes, and every listed class inherits `GovernedProposalBase`. Before Pydantic performs
+normalization, the base requires each `proposal_id` and `idempotency_key` to be an exact
+built-in `str`; it then enforces the 200-character maximum and stable-identifier alphabet.
+The only proposal-owned collections are `RecordCohortPlan.profile_receipts`,
+`RecordDiversityAssessment.profile_receipts`,
+`RecordDiversityAssessment.error_correlations`, and
+`RecordRewardAssessment.findings`. Each collection declares an explicit `max_length`;
+the receipt/correlation collections permit at most 256 entries. `RecordRewardAssessment`
+requires exactly one finding per `RewardHackingFamily` and requires its observation and
+ordered findings to equal the embedded assessment inputs.
 
 `RecordDiversityAssessment` carries a `CohortPlanReceiptRef`, the same ordered capability-profile receipts, explicit error-correlation records, and the claimed assessment. Handlers resolve accepted receipts and exact hashes; no cohort or diversity proposal trusts caller-supplied duplicate profile payloads.
 
@@ -1558,52 +1907,34 @@ class HarnessTraceProposalAdapter:
         proposer: ActorIdentity,
     ) -> RecordHarnessExecutionTrace:
         proposal: RecordHarnessExecutionTrace | None = None
-        if type(metadata) is HarnessTraceRecordMetadata:
-            with suppress(
-                MemoryError,
-                OverflowError,
-                RecursionError,
-                TypeError,
-                UnicodeError,
-                ValueError,
-            ):
-                metadata_state = object.__getattribute__(metadata, "__dict__")
-                if (
-                    type(metadata_state) is not dict
-                    or set(metadata_state) != set(HarnessTraceRecordMetadata.model_fields)
-                ):
-                    raise ValueError("trace metadata contains undeclared instance state")
-                validated_metadata = HarnessTraceRecordMetadata.model_validate(
-                    BaseModel.model_dump(
-                        metadata,
-                        mode="python",
-                        warnings=False,
-                    ),
-                    strict=True,
-                )
-                parsed_trace = parse_untrusted_harness_execution_trace(payload)
-                validated_trace = HarnessExecutionTrace.model_validate(
-                    BaseModel.model_dump(
-                        parsed_trace,
-                        mode="python",
-                        warnings=False,
-                    ),
-                    strict=True,
-                )
-                envelope = HarnessExecutionTraceEnvelope.model_validate(
-                    {
-                        "schema_version": 1,
-                        "metadata": validated_metadata,
-                        "trace": validated_trace,
-                    },
-                    strict=True,
-                )
-                proposal = RecordHarnessExecutionTrace(
-                    proposal_id=proposal_id,
-                    idempotency_key=idempotency_key,
-                    proposer=proposer,
-                    envelope=envelope,
-                )
+        with suppress(
+            MemoryError,
+            OverflowError,
+            RecursionError,
+            TypeError,
+            UnicodeError,
+            ValueError,
+        ):
+            validated_metadata = _fresh_harness_trace_metadata(metadata)
+            validated_proposal_id = _fresh_governed_identifier(proposal_id)
+            validated_idempotency_key = _fresh_governed_identifier(idempotency_key)
+            validated_proposer = _fresh_actor_identity(proposer)
+            parsed_trace = parse_untrusted_harness_execution_trace(payload)
+            validated_trace = HarnessExecutionTrace.model_validate(
+                parsed_trace,
+                strict=True,
+            )
+            envelope = HarnessExecutionTraceEnvelope(
+                schema_version=1,
+                metadata=validated_metadata,
+                trace=validated_trace,
+            )
+            proposal = RecordHarnessExecutionTrace(
+                proposal_id=validated_proposal_id,
+                idempotency_key=validated_idempotency_key,
+                proposer=validated_proposer,
+                envelope=envelope,
+            )
         if proposal is None:
             raise ProposalBoundaryValidationError(
                 "transaction proposal failed validation"
@@ -1614,13 +1945,19 @@ class HarnessTraceProposalAdapter:
 Before `HarnessTraceProposalAdapter` performs any metadata attribute or method operation,
 the adapter requires `type(metadata) is HarnessTraceRecordMetadata`. The adapter rejects
 subclasses and metaclass-backed values without invoking their hooks. For an exact metadata
-object, the adapter verifies the exact instance-state keys and calls the class-owned
-`BaseModel.model_dump()` implementation, so an injected instance method cannot run. The
-adapter then strictly revalidates the metadata and parsed trace into fresh instances. The
-adapter rejects non-validating copies, copied mutations, injected methods, and forged
-trace hashes with the same detached `ProposalBoundaryValidationError` used by the
-serialized-proposal boundary. `RecordHarnessExecutionTrace` therefore never receives an
-unvalidated caller-owned metadata or trace instance.
+object, `_fresh_harness_trace_metadata()` obtains `__dict__` through
+`object.__getattribute__()`. The helper requires an exact built-in dictionary, exact
+built-in string keys, the exact declared key set, exact integer schema version, exact
+built-in string source ID, exact `datetime`, and the trusted `UTC` timezone object before
+it compares or normalizes a field. The helper rebuilds metadata from trusted literal keys;
+it never invokes an instance serializer. The adapter also rebuilds `ActorIdentity` from
+exact primitive state, requires complete model-actor identity, and validates exact raw
+proposal and idempotency strings before it constructs the complete proposal. The adapter
+rejects non-validating copies, copied mutations, injected methods or serializers, hostile
+field subclasses, invalid actor identity, and forged trace hashes with the same detached
+`ProposalBoundaryValidationError` used by the serialized-proposal boundary.
+`RecordHarnessExecutionTrace` therefore never receives an unvalidated caller-owned
+metadata, actor, identifier, or trace instance.
 
 - [ ] **Step 4: Recompute trace freshness and reward validity**
 
@@ -1629,8 +1966,6 @@ class RecordRewardAssessmentHandler:
     proposal_type = "record_reward_assessment"
 
     def decide(self, proposal, context) -> TransactionDecision:
-        if context.trace is None:
-            return rejected(proposal, RejectionCode.MISSING_ENTITY)
         validated_proposal: RecordRewardAssessment | None = None
         with suppress(
             ArithmeticError,
@@ -1641,18 +1976,13 @@ class RecordRewardAssessmentHandler:
             UnicodeError,
             ValueError,
         ):
-            validated_proposal = RecordRewardAssessment.model_validate(
-                BaseModel.model_dump(
-                    proposal,
-                    mode="python",
-                    warnings=False,
-                ),
-                strict=True,
-            )
+            validated_proposal = _fresh_reward_assessment_proposal(proposal)
         if validated_proposal is None:
-            return rejected(proposal, RejectionCode.INVALID_REWARD)
+            return _invalid_reward_decision(proposal)
+        if context.trace is None:
+            return rejected(validated_proposal, RejectionCode.MISSING_ENTITY)
         if context.trace.reward_observation != validated_proposal.observation:
-            return rejected(proposal, RejectionCode.DERIVATION_MISMATCH)
+            return rejected(validated_proposal, RejectionCode.DERIVATION_MISMATCH)
         receipt_inputs: tuple[EvidenceReceipt, EvidenceReceipt] | None = None
         with suppress(
             ArithmeticError,
@@ -1672,14 +2002,14 @@ class RecordRewardAssessmentHandler:
                 reward_validity_receipt(validated_proposal.assessment),
             )
         if receipt_inputs is None:
-            return rejected(proposal, RejectionCode.INVALID_REWARD)
+            return _invalid_reward_decision(validated_proposal)
         trace_receipt, assessment_receipt = receipt_inputs
         capabilities = context.resolve_reward_assessment_capabilities(
             trace_receipt=trace_receipt,
             assessment_receipt=assessment_receipt,
         )
         if capabilities is None:
-            return rejected(proposal, RejectionCode.STALE_REFERENCE)
+            return rejected(validated_proposal, RejectionCode.STALE_REFERENCE)
         derivation: tuple[TraceFreshness, RewardValidityAssessment] | None = None
         with suppress(
             ArithmeticError,
@@ -1706,22 +2036,34 @@ class RecordRewardAssessmentHandler:
             )
             derivation = (freshness, expected)
         if derivation is None:
-            return rejected(proposal, RejectionCode.INVALID_REWARD)
+            return _invalid_reward_decision(validated_proposal)
         freshness, expected = derivation
         if expected != validated_proposal.assessment or expected.freshness != freshness:
-            return rejected(proposal, RejectionCode.DERIVATION_MISMATCH)
-        return reject_existing_or_accept(proposal, context.existing_assessment)
+            return rejected(validated_proposal, RejectionCode.DERIVATION_MISMATCH)
+        return reject_existing_or_accept(
+            validated_proposal,
+            context.existing_assessment,
+        )
 ```
 
-Before the handler resolves focused capabilities, it freshly validates the complete
-proposal and constructs the two bounded receipts. Before the handler compares a claimed
-assessment, it recomputes trace freshness and reward validity. If proposal revalidation,
-receipt construction, freshness computation, or reward-validity computation raises an
-expected arithmetic, memory, recursion, type, Unicode, or value failure, the handler
-returns the fixed `INVALID_REWARD` decision. The handler does not include exception text,
-structured validation details, or rejected values in that decision. A non-validating
-copy with cross-trace, empty, duplicated, or excessive findings therefore cannot crash
-the coordinator or cross the transaction boundary.
+Before the handler reads or serializes a proposal attribute, the handler requires the
+exact `RecordRewardAssessment` type and obtains state with `object.__getattribute__()`.
+The handler requires an exact built-in dictionary, exact built-in string keys, the exact
+declared key set, exact raw identifier strings, exact nested model types, and an exact
+tuple of exact finding types. `_fresh_reward_assessment_proposal()` reconstructs the
+proposer, approval, observation, findings, assessment, and complete proposal without
+calling an instance serializer. The handler uses only that fresh proposal for resolution,
+rejection, comparison, and acceptance. Before the handler compares a claimed assessment,
+it constructs the two bounded receipts and recomputes trace freshness and reward validity.
+If fresh reconstruction, receipt construction, freshness computation, or reward-validity
+computation raises an expected arithmetic, memory, recursion, type, Unicode, or value
+failure, `_invalid_reward_decision()` returns the fixed `INVALID_REWARD` decision without
+exception text, structured validation details, or rejected values. The fixed rejection
+uses a safely extracted validated proposal ID or the literal fallback
+`invalid-reward-proposal`; it does not call a proposal attribute or serializer. A proposal
+subclass, injected `__pydantic_serializer__`, hostile identifier subclass, or
+non-validating copy with cross-trace, empty, duplicated, or excessive findings therefore
+cannot execute a caller hook, crash the coordinator, or cross the transaction boundary.
 
 After the handler stores the exact assessment, only
 `valid_reward_evidence((expected,))` feeds a positive evidence selector. Invalid and inconclusive
