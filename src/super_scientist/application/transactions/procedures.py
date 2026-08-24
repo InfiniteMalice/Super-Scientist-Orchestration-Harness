@@ -14,7 +14,7 @@ from super_scientist.application.transactions.contracts import ProposalHandler
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.cognition.grounding import assess_capability
 from super_scientist.domain.evidence.models import ArtifactRef
-from super_scientist.domain.primitives import Sha256Hex, UtcTimestamp
+from super_scientist.domain.primitives import Sha256Hex, UtcTimestamp, canonical_json_bytes
 from super_scientist.domain.procedures import (
     CompiledProgressPlanBinding,
     MethodDirectionOutcome,
@@ -31,6 +31,7 @@ from super_scientist.kernel.transactions.models import (
     RecordMethodDirectionOutcome,
     RecordProcedureCompilation,
     TransactionDecision,
+    parse_untrusted_proposal_json,
 )
 from super_scientist.providers.storage.artifacts import ArtifactStore
 from super_scientist.providers.storage.cognitive_records import (
@@ -367,12 +368,22 @@ def _audit_event_matches_compilation(
             payload["stored_policy_hash"],
             strict=True,
         )
+        audited_proposal = parse_untrusted_proposal_json(canonical_json_bytes(payload["proposal"]))
+        audited_decision = TransactionDecision.model_validate_json(
+            canonical_json_bytes(payload["decision"]),
+            strict=True,
+        )
     except (KeyError, TypeError, ValueError):
         return False
     return (
         payload.get("transaction_persisted") is True
-        and payload.get("proposal") == proposal.model_dump(mode="json")
-        and payload.get("decision") == decision.model_dump(mode="json")
+        and type(audited_proposal) is RecordProcedureCompilation
+        and audited_proposal == proposal
+        and canonical_json_bytes(audited_proposal.model_dump(mode="json", warnings=False))
+        == canonical_json_bytes(proposal.model_dump(mode="json", warnings=False))
+        and audited_decision == decision
+        and canonical_json_bytes(audited_decision.model_dump(mode="json", warnings=False))
+        == canonical_json_bytes(decision.model_dump(mode="json", warnings=False))
         and policy_hash == exact_expected_policy_hash
         and stored_policy_hash == exact_expected_policy_hash
     )

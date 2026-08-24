@@ -14,6 +14,7 @@ from super_scientist.application.procedures.service import (
 )
 from super_scientist.application.progress.service import RecordProgressPlanHandler
 from super_scientist.application.transactions.procedures import (
+    ProcedureBindingCapabilities,
     _audit_event_matches_compilation,
     fixed_procedure_handlers,
     procedure_capabilities,
@@ -23,7 +24,7 @@ from super_scientist.domain.cognition.grounding import assess_capability
 from super_scientist.domain.cognition.models import CapabilityProfile
 from super_scientist.domain.evidence.models import EvidenceRecord, VerificationState
 from super_scientist.domain.identity import ActorIdentity, ActorKind
-from super_scientist.domain.primitives import canonical_json_bytes
+from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.domain.procedures import (
     AcceptedSourceReceiptRef,
     CompiledProgressPlanBinding,
@@ -44,6 +45,7 @@ from super_scientist.domain.procedures import (
 from super_scientist.domain.progress.models import ProgressPlan, ProgressSubtask
 from super_scientist.domain.research_runs.models import ResearchRun
 from super_scientist.kernel.audit.chain import append_event
+from super_scientist.kernel.audit.models import AuditEvent
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
     BindCompiledProgressPlan,
@@ -66,6 +68,7 @@ from super_scientist.providers.storage.procedure_sources import (
     ProcedureSourceBinding,
     ProcedureSourceSnapshot,
 )
+from super_scientist.providers.storage.repositories import StoredTransaction
 from tests.integration.application.test_progress_service import _research_run
 from tests.integration.storage.test_procedure_source_repositories import _persist_accepted
 from tests.unit.procedures.test_compiler import _rebuild_step, _replace_step, valid_request
@@ -487,6 +490,159 @@ def test_compilation_receipt_audit_requires_exact_current_policy(
         )
         is accepted
     )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "payload_case",
+    (
+        "proposal-schema-bool",
+        "decision-accepted-int",
+        "decision-replayed-int",
+        "proposal-extra",
+        "decision-extra",
+        "proposal-missing",
+        "decision-missing",
+    ),
+)
+def test_compilation_receipt_audit_rejects_type_confusion_and_shape_drift(
+    v2_runtime,
+    payload_case: str,
+) -> None:
+    result = compile_method(valid_request())
+    proposal = RecordProcedureCompilation(
+        proposal_id="receipt-shape-compilation-proposal",
+        idempotency_key="receipt-shape-compilation-proposal",
+        proposer=v2_runtime.proposer,
+        compilation=OpaqueProcedureCompilationEnvelope.build(
+            compilation_id="receipt-shape-compilation",
+            result=result,
+            created_at=NOW,
+            governing_policy_hash=v2_runtime.policy.policy_hash,
+        ),
+    )
+    decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+    proposal_payload = proposal.model_dump(mode="json")
+    decision_payload = decision.model_dump(mode="json")
+    if payload_case == "proposal-schema-bool":
+        proposal_payload["compilation"]["schema_version"] = True
+    elif payload_case == "decision-accepted-int":
+        decision_payload["accepted"] = 1
+    elif payload_case == "decision-replayed-int":
+        decision_payload["replayed"] = 0
+    elif payload_case == "proposal-extra":
+        proposal_payload["unexpected"] = "closed"
+    elif payload_case == "decision-extra":
+        decision_payload["unexpected"] = "closed"
+    elif payload_case == "proposal-missing":
+        proposal_payload.pop("proposal_id")
+    else:
+        decision_payload.pop("proposal_id")
+    event = append_event(
+        None,
+        "transaction_decision",
+        {
+            "proposal": proposal_payload,
+            "decision": decision_payload,
+            "transaction_persisted": True,
+            "policy_hash": v2_runtime.policy.policy_hash,
+            "stored_policy_hash": v2_runtime.policy.policy_hash,
+        },
+        NOW,
+    )
+
+    assert not _audit_event_matches_compilation(
+        event,
+        proposal,
+        decision,
+        v2_runtime.policy.policy_hash,
+    )
+
+
+@dataclass(frozen=True)
+class _SingleTransaction:
+    transaction: StoredTransaction
+
+    def get_by_proposal_id(self, proposal_id: str) -> StoredTransaction | None:
+        return self.transaction if proposal_id == self.transaction.proposal.proposal_id else None
+
+
+@dataclass(frozen=True)
+class _AuditEvents:
+    events: tuple[AuditEvent, ...]
+
+    def list_all(self) -> tuple[AuditEvent, ...]:
+        return self.events
+
+
+@dataclass(frozen=True)
+class _SingleCompilation:
+    compilation: ProcedureCompilationRecord
+
+    def get(self, compilation_id: str) -> ProcedureCompilationRecord | None:
+        return self.compilation if compilation_id == self.compilation.compilation_id else None
+
+
+@dataclass(frozen=True)
+class _ReceiptResolverHarness:
+    active_policy: PolicySnapshot
+    compilations: _SingleCompilation
+    transactions: _SingleTransaction
+    audit: _AuditEvents
+
+
+@pytest.mark.integration
+def test_concrete_binding_receipt_resolver_rejects_typed_audit_confusion(
+    v2_runtime,
+) -> None:
+    result = compile_method(valid_request())
+    proposal = RecordProcedureCompilation(
+        proposal_id="resolver-confusion-compilation-proposal",
+        idempotency_key="resolver-confusion-compilation-proposal",
+        proposer=v2_runtime.proposer,
+        compilation=OpaqueProcedureCompilationEnvelope.build(
+            compilation_id="resolver-confusion-compilation",
+            result=result,
+            created_at=NOW,
+            governing_policy_hash=v2_runtime.policy.policy_hash,
+        ),
+    )
+    compilation = ProcedureCompilationRecord.build_from_untrusted_envelope(proposal.compilation)
+    decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+    stored = StoredTransaction(
+        proposal=proposal,
+        proposal_hash=sha256_hex(canonical_json_bytes(proposal.model_dump(mode="json"))),
+        decision=decision,
+        created_at=NOW,
+    )
+    confused_decision = decision.model_dump(mode="json")
+    confused_decision["accepted"] = 1
+    event = append_event(
+        None,
+        "transaction_decision",
+        {
+            "proposal": proposal.model_dump(mode="json"),
+            "decision": confused_decision,
+            "transaction_persisted": True,
+            "policy_hash": v2_runtime.policy.policy_hash,
+            "stored_policy_hash": v2_runtime.policy.policy_hash,
+        },
+        NOW,
+    )
+    receipt = ProcedureCompilationReceiptRef(
+        proposal_id=proposal.proposal_id,
+        proposal_hash=stored.proposal_hash,
+        audit_event_id=event.event_id,
+        audit_event_hash=event.event_hash,
+    )
+    capabilities = _ReceiptResolverHarness(
+        active_policy=v2_runtime.policy,
+        compilations=_SingleCompilation(compilation),
+        transactions=_SingleTransaction(stored),
+        audit=_AuditEvents((event,)),
+    )
+
+    assert ProcedureBindingCapabilities.resolve_compilation_receipt(capabilities, receipt) is None
 
 
 @pytest.mark.integration

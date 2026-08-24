@@ -2643,7 +2643,10 @@ therefore cannot produce a progress plan. The compilation receipt's exact audit 
 must contain `policy_hash` and `stored_policy_hash` as strict SHA-256 values, and both
 must equal the active policy hash. Missing, empty, wrong-but-equal, or divergent policy
 hashes make the receipt stale before policy, duplicate-binding, or progress authority
-is read. The synthetic `RecordProgressPlan` uses the
+is read. The exact audit proposal and decision are reparsed through the strict governed
+proposal boundary and strict `TransactionDecision` schema before typed and canonical
+comparison; boolean/integer confusion, coercion, extras, or missing fields fail closed.
+The synthetic `RecordProgressPlan` uses the
 binding proposal's proposal ID, proposer, approval, and exact plan. It does not submit a
 nested transaction. Both plan and binding roll back together.
 
