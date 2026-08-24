@@ -1,10 +1,18 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, getcontext, localcontext
 
 import pytest
 from pydantic import ValidationError
-from test_compiler import NOW, POLICY_HASH, _replace_catalog, valid_request
+from test_compiler import (
+    NOW,
+    POLICY_HASH,
+    _candidate,
+    _rebuild_step,
+    _replace_catalog,
+    _step,
+    valid_request,
+)
 
 from super_scientist.domain.evidence.models import ArtifactRef
 from super_scientist.domain.improvement.models import AssessmentOutcome
@@ -50,6 +58,66 @@ def test_valid_procedure_maps_exactly_to_canonical_progress_types() -> None:
     assert plan.subtasks[1].dependency_ids == ("prepare",)
     assert sum((item.weight for item in plan.subtasks), Decimal("0")) == Decimal("1")
     assert calculate_progress(plan, ()).official_weight == Decimal("0")
+
+
+def test_mixed_scale_progress_binding_is_independent_of_decimal_precision() -> None:
+    request = valid_request()
+    first = _rebuild_step(
+        request.candidate.stages[0],
+        progress_weight=Decimal("0.1400"),
+    )
+    second = _rebuild_step(
+        request.candidate.stages[1],
+        progress_weight=Decimal("0.14"),
+    )
+    third = _step(
+        "finalize",
+        3,
+        inputs=("final",),
+        output_id="delivered",
+        dependencies=("validate",),
+        operation=request.candidate.stages[1].operation,
+        tool_ids=("fixture-tool",),
+        authority=(ProcedureAuthority.RUN_REGISTERED_TOOL,),
+        category=request.candidate.stages[1].progress_budget_category,
+        weight=Decimal("0.720"),
+    )
+    candidate = _candidate(first, second, third, expected_output_ids=("delivered",))
+    request = request.model_copy(update={"candidate": candidate})
+
+    ambient_context = getcontext()
+    original_context = ambient_context.copy()
+    compiled = []
+    plans = []
+    for precision in (1, 2, 80):
+        context = original_context.copy()
+        context.prec = precision
+        with localcontext(context):
+            result = compile_method(request)
+            compiled.append(result)
+            plans.append(
+                procedure_to_progress_plan(
+                    result,
+                    run_id="run-1",
+                    plan_version_id="mixed-plan",
+                    version=1,
+                    created_at=NOW,
+                    governing_policy_hash=POLICY_HASH,
+                )
+            )
+
+    assert compiled[0] == compiled[1] == compiled[2]
+    assert len({result.result_hash for result in compiled}) == 1
+    assert all(result.report.status is ProcedureValidationStatus.VALID for result in compiled)
+    assert len({canonical_model_hash(plan) for plan in plans}) == 1
+    assert all(calculate_progress(plan, ()).total_weight == Decimal("1.0000") for plan in plans)
+    assert getcontext() is ambient_context
+    assert (getcontext().prec, getcontext().rounding, getcontext().Emin, getcontext().Emax) == (
+        original_context.prec,
+        original_context.rounding,
+        original_context.Emin,
+        original_context.Emax,
+    )
 
 
 @pytest.mark.parametrize("status_kind", ("invalid", "inconclusive"))

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, getcontext, localcontext
 from typing import Any
 
 import pytest
@@ -470,6 +470,61 @@ def test_valid_method_compiles_deterministically_and_retains_source_hash() -> No
     assert first.report.findings == ()
     assert first.procedure.source_candidate_hash == request.candidate.content_hash
     assert tuple(step.step_id for step in first.procedure.steps) == ("prepare", "validate")
+
+
+def test_budget_aggregation_is_independent_of_ambient_decimal_precision() -> None:
+    request = valid_request()
+    tiny_cost = ResourceBudget(
+        cost_usd=0.0049,
+        compute_units=0.0049,
+        tokens=0,
+        elapsed_seconds=0.0049,
+        tool_calls=0,
+        human_interventions=0,
+    )
+    reserve = ResourceBudget(
+        cost_usd=0.0099,
+        compute_units=0.0099,
+        tokens=0,
+        elapsed_seconds=0.0099,
+        tool_calls=0,
+        human_interventions=0,
+    )
+    for index in range(2):
+        request = _replace_step(
+            request,
+            index,
+            _rebuild_step(
+                request.candidate.stages[index],
+                progress_budget_category=ProgressBudgetCategory.EXPLORATION,
+                resource_budget=tiny_cost,
+            ),
+        )
+    request = request.model_copy(
+        update={
+            "budget_envelope": request.budget_envelope.model_copy(update={"exploration": reserve})
+        }
+    )
+
+    results = []
+    ambient_context = getcontext()
+    original_context = ambient_context.copy()
+    for precision in (1, 2, 80):
+        context = original_context.copy()
+        context.prec = precision
+        with localcontext(context):
+            results.append(compile_method(request))
+
+    assert results[0] == results[1] == results[2]
+    assert len({result.result_hash for result in results}) == 1
+    assert results[0].report.status is ProcedureValidationStatus.VALID
+    assert getcontext() is ambient_context
+    assert (getcontext().prec, getcontext().rounding, getcontext().Emin, getcontext().Emax) == (
+        original_context.prec,
+        original_context.rounding,
+        original_context.Emin,
+        original_context.Emax,
+    )
 
 
 def test_self_declared_arbitrary_compiler_version_cannot_become_valid() -> None:

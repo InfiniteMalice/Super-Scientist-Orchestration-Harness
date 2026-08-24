@@ -9,6 +9,11 @@ from super_scientist.domain.improvement.models import (
     AssessmentOutcome,
     ResourceBudget,
 )
+from super_scientist.domain.progress._decimal_math import (
+    _decimal_greater_than,
+    _subtract_decimals,
+    _sum_decimals,
+)
 from super_scientist.domain.progress.models import (
     BudgetAllocation,
     BudgetReserves,
@@ -41,15 +46,15 @@ def calculate_progress(
     eligible: set[str] = set()
     provisional_ids: list[str] = []
     official_ids: list[str] = []
-    provisional_weight = Decimal("0")
-    official_weight = Decimal("0")
+    provisional_weights: list[Decimal] = []
+    official_weights: list[Decimal] = []
     for subtask in ordered_subtasks:
         latest_event = latest_by_subtask.get(subtask.subtask_id)
         if latest_event is None:
             continue
         if latest_event.requested_status is ProgressStatus.PROVISIONALLY_COMPLETE:
             provisional_ids.append(subtask.subtask_id)
-            provisional_weight += subtask.weight
+            provisional_weights.append(subtask.weight)
         if (
             latest_event.requested_status is ProgressStatus.VALIDATED
             and _is_independently_accepted(latest_event, subtask)
@@ -57,13 +62,13 @@ def calculate_progress(
         ):
             eligible.add(subtask.subtask_id)
             official_ids.append(subtask.subtask_id)
-            official_weight += subtask.weight
+            official_weights.append(subtask.weight)
 
     return ProgressSummary(
         plan_version_id=plan.plan_version_id,
-        total_weight=sum((subtask.weight for subtask in ordered_subtasks), Decimal("0")),
-        provisional_weight=provisional_weight,
-        official_weight=official_weight,
+        total_weight=_sum_decimals(tuple(subtask.weight for subtask in ordered_subtasks)),
+        provisional_weight=_sum_decimals(tuple(provisional_weights)),
+        official_weight=_sum_decimals(tuple(official_weights)),
         provisional_subtask_ids=tuple(provisional_ids),
         validated_subtask_ids=tuple(official_ids),
     )
@@ -193,7 +198,7 @@ def detect_false_finish(
         voluntary_termination
         and claims_completion
         and final_validator_result is not AssessmentOutcome.PASSED
-        and validated_weight > Decimal("0")
+        and _decimal_greater_than(validated_weight, Decimal("0"))
         and unused_budget
     )
     if is_false_finish:
@@ -214,7 +219,7 @@ def detect_false_finish(
         voluntary_termination=voluntary_termination,
         claims_completion=claims_completion,
         final_validator_failed=final_validator_result is not AssessmentOutcome.PASSED,
-        meaningful_validated_progress=validated_weight > Decimal("0"),
+        meaningful_validated_progress=_decimal_greater_than(validated_weight, Decimal("0")),
         unused_budget=unused_budget,
         reasons=(),
     )
@@ -240,7 +245,7 @@ def _topological_subtasks(plan: ProgressPlan) -> tuple[ProgressSubtask, ...]:
             indegree[subtask.subtask_id] += 1
             dependents[dependency_id].append(subtask.subtask_id)
 
-    if sum((subtask.weight for subtask in plan.subtasks), Decimal("0")) != Decimal("1"):
+    if _sum_decimals(tuple(subtask.weight for subtask in plan.subtasks)) != Decimal("1"):
         raise ValueError("progress plan weights must reconcile exactly to one")
 
     def order_key(subtask_id: str) -> tuple[int, str]:
@@ -281,4 +286,4 @@ def _is_independently_accepted(
 
 
 def _subtract_finite_float(reserved: float, used: float) -> float:
-    return float(Decimal(str(reserved)) - Decimal(str(used)))
+    return float(_subtract_decimals(Decimal(str(reserved)), Decimal(str(used))))

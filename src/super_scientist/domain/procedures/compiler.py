@@ -38,6 +38,10 @@ from super_scientist.domain.procedures.models import (
     procedure_request_json_is_bounded,
 )
 from super_scientist.domain.procedures.progress_binding import validate_progress_mapping
+from super_scientist.domain.progress._decimal_math import (
+    _decimal_greater_than,
+    _sum_decimals,
+)
 
 PROCEDURE_COMPILER_ID = "procedure-compiler"
 PROCEDURE_COMPILER_VERSION = "1.0.0"
@@ -778,12 +782,15 @@ def _check_12_budgets(
             {field_name: Decimal("0") for field_name in _resource_values(step.resource_budget)},
         )
         for field_name, value in _resource_values(step.resource_budget).items():
-            category_totals[field_name] += value
+            category_totals[field_name] = _sum_decimals((category_totals[field_name], value))
     for category, category_totals in totals.items():
         reserve = getattr(request.budget_envelope, category.value)
         reserve_values = _resource_values(reserve)
         if any(
-            category_totals[field_name] > reserve_values[field_name]
+            _decimal_greater_than(
+                category_totals[field_name],
+                reserve_values[field_name],
+            )
             for field_name in category_totals
         ):
             findings.append(
