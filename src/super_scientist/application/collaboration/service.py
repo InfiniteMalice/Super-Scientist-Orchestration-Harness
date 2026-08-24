@@ -14,7 +14,6 @@ from super_scientist.domain.collaboration import (
     CollaborationSession,
     CollaborationState,
     CollaborationTermination,
-    PeerContribution,
     PeerRequest,
     TopologyEvent,
     advance_collaboration,
@@ -23,7 +22,7 @@ from super_scientist.domain.collaboration import (
     initial_collaboration_state,
     next_peer,
 )
-from super_scientist.domain.improvement.models import ResourceUsage
+from super_scientist.domain.collaboration.models import exact_usage_within_budget
 from super_scientist.kernel.admission.engine import AdmissionEngine
 from super_scientist.kernel.transactions.models import (
     AppendPeerContribution,
@@ -41,7 +40,7 @@ if TYPE_CHECKING:
         HandlerWriteCapability,
     )
 
-type CollaborationHistoryRecord = PeerRequest | PeerContribution | TopologyEvent
+type CollaborationHistoryRecord = PeerRequest | AppendPeerContribution | TopologyEvent
 
 
 class CollaborationSessionReadCapability(Protocol):
@@ -289,9 +288,16 @@ class AppendPeerContributionHandler(_HistoryHandlerBase):
                 cast(CollaborationState, context.state),
                 request,
                 contribution,
-                _zero_usage(),
+                proposal.usage,
             )
         except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
+            state = cast(CollaborationState, context.state)
+            session = cast(CollaborationSession, context.session)
+            if not exact_usage_within_budget(
+                (*state.usage_history, proposal.usage),
+                session.budget.resources,
+            ):
+                return _bound_rejection(proposal.proposal_id)
             return _derivation_mismatch(
                 proposal.proposal_id,
                 "peer contribution does not match the recomputed collaboration transition",
@@ -413,15 +419,22 @@ def rebuild_collaboration_state(
                 pending = record
                 request_ids.add(record.request_id)
                 continue
-            if isinstance(record, PeerContribution):
+            if isinstance(record, AppendPeerContribution):
+                contribution = record.contribution
                 if (
                     pending is None
-                    or pending.request_id != record.request_id
-                    or record.contribution_id in contribution_ids
+                    or pending.request_id != contribution.request_id
+                    or contribution.contribution_id in contribution_ids
                 ):
                     return None
-                state = advance_collaboration(session, state, pending, record, _zero_usage())
-                contribution_ids.add(record.contribution_id)
+                state = advance_collaboration(
+                    session,
+                    state,
+                    pending,
+                    contribution,
+                    record.usage,
+                )
+                contribution_ids.add(contribution.contribution_id)
                 pending = None
                 continue
             if not isinstance(record, TopologyEvent) or record.event_id in topology_event_ids:
@@ -447,17 +460,6 @@ def _session_is_canonical(session: CollaborationSession) -> bool:
     except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
         return False
     return rebuilt == session
-
-
-def _zero_usage() -> ResourceUsage:
-    return ResourceUsage(
-        cost_usd=0.0,
-        compute_units=0.0,
-        tokens=0,
-        elapsed_seconds=0.0,
-        tool_calls=0,
-        human_interventions=0,
-    )
 
 
 def _accepted(proposal_id: str) -> TransactionDecision:

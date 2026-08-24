@@ -843,6 +843,7 @@ MAX_PROPOSAL_COLLECTION_ITEMS = 256
 MAX_PROPOSAL_RECONSTRUCTION_DEPTH = 128
 MAX_PROPOSAL_RECONSTRUCTION_ITEMS = 4_096
 MAX_PROPOSAL_JSON_DECIMAL_CHARACTERS = 260
+MAX_COLLABORATION_RESOURCE_SCALAR = 1_000_000_000_000
 
 _STABLE_IDENTIFIER_ALPHABET = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
@@ -860,6 +861,16 @@ _ACTOR_IDENTITY_STATE_FIELDS = frozenset(
     }
 )
 _APPROVAL_STATE_FIELDS = frozenset({"approver", "approved_at"})
+_RESOURCE_USAGE_STATE_FIELDS = frozenset(
+    {
+        "cost_usd",
+        "compute_units",
+        "tokens",
+        "elapsed_seconds",
+        "tool_calls",
+        "human_interventions",
+    }
+)
 
 
 def _exact_model_state(
@@ -977,6 +988,28 @@ def _fresh_approval(value: object) -> Approval | None:
         strict=True,
     )
 
+
+def _fresh_bounded_resource_usage(value: object) -> ResourceUsage:
+    if type(value) is ResourceUsage:
+        state = _exact_model_state(value, ResourceUsage, _RESOURCE_USAGE_STATE_FIELDS)
+    elif type(value) is dict:
+        state = value
+        if any(type(key) is not str for key in state):
+            raise ValueError("collaboration usage keys must be exact text")
+        if frozenset(state) != _RESOURCE_USAGE_STATE_FIELDS:
+            raise ValueError("collaboration usage fields must be exact")
+    else:
+        raise ValueError("collaboration usage must be an exact resource snapshot")
+    for field_name in ("cost_usd", "compute_units", "elapsed_seconds"):
+        scalar = state[field_name]
+        if type(scalar) is not float or scalar > MAX_COLLABORATION_RESOURCE_SCALAR:
+            raise ValueError("collaboration usage floating scalars must be exact and bounded")
+    for field_name in ("tokens", "tool_calls", "human_interventions"):
+        scalar = state[field_name]
+        if type(scalar) is not int or scalar > MAX_COLLABORATION_RESOURCE_SCALAR:
+            raise ValueError("collaboration usage integral scalars must be exact and bounded")
+    return ResourceUsage.model_validate(dict(state), strict=True)
+
 BoundedGovernedProposalIdentifier = Annotated[
     StableIdentifier,
     Field(
@@ -1048,6 +1081,12 @@ class AppendPeerRequest(GovernedProposalBase):
 class AppendPeerContribution(GovernedProposalBase):
     proposal_type: Literal["append_peer_contribution"] = "append_peer_contribution"
     contribution: PeerContribution
+    usage: ResourceUsage
+
+    @field_validator("usage", mode="before")
+    @classmethod
+    def require_exact_bounded_usage(cls, value: object) -> ResourceUsage:
+        return _fresh_bounded_resource_usage(value)
 
 
 class AppendTopologyEvent(GovernedProposalBase):
@@ -1758,6 +1797,12 @@ rejection before storage projection.
 
 `RecordDiversityAssessment` carries a `CohortPlanReceiptRef`, the same ordered capability-profile receipts, explicit error-correlation records, and the claimed assessment. Handlers resolve accepted receipts and exact hashes; no cohort or diversity proposal trusts caller-supplied duplicate profile payloads.
 
+`AppendPeerContribution.usage` carries the exact `ResourceUsage` for the proposed
+peer exchange. Each floating and integral resource scalar is strict, nonnegative,
+finite, and at most `1_000_000_000_000`. The serialized proposal, proposal hash,
+transaction, and audit event therefore retain the usage needed for deterministic
+budget enforcement and replay. No handler may synthesize zero usage for a contribution.
+
 Add only these rejection codes: `DERIVATION_MISMATCH`, `STALE_REFERENCE`, `COLLABORATION_BOUND_EXCEEDED`, `INVALID_PROCEDURE`, `UNMATCHED_EVALUATION`, and `INVALID_REWARD`. Reuse existing codes where their meaning is exact.
 
 `OpaqueProcedureCompilationEnvelope` contains compilation metadata and bounded,
@@ -2381,9 +2426,21 @@ class AppendPeerContributionHandler:
         return CollaborationContext(state=state)
 
     def decide(self, proposal, context) -> TransactionDecision:
-        expected = advance_collaboration_from_proposal(context.state, proposal)
-        return exact_derived_decision(proposal, expected, proposal.resulting_state)
+        advance_collaboration(
+            context.session,
+            context.state,
+            context.pending_request,
+            proposal.contribution,
+            proposal.usage,
+        )
+        return accepted(proposal)
 ```
+
+The accepted-history reader orders requests, contribution proposals, and topology
+events by their exact transaction audit events. It excludes rejected transactions.
+For each accepted contribution, replay uses the `usage` retained by the accepted
+`AppendPeerContribution` proposal and verifies that the projected
+`PeerContribution` equals the proposal contribution before advancing state.
 
 Run: `python -m pytest tests/integration/application/test_cognition_service.py tests/integration/application/test_collaboration_service.py tests/unit/cognition tests/unit/collaboration -v`
 

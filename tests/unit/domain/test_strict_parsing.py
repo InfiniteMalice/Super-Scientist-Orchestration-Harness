@@ -62,6 +62,7 @@ from super_scientist.domain.harness_eval import (
 )
 from super_scientist.domain.harness_eval.traces import RewardObservation
 from super_scientist.domain.identity import ActorIdentity, ActorKind
+from super_scientist.domain.improvement.models import ResourceUsage
 from super_scientist.domain.primitives import (
     StableIdentifier,
     UtcTimestamp,
@@ -202,6 +203,7 @@ def _task_8_and_13_namespace() -> dict[str, object]:
         "RewardObservation": RewardObservation,
         "RewardHackingFinding": RewardHackingFinding,
         "RewardValidityAssessment": RewardValidityAssessment,
+        "ResourceUsage": ResourceUsage,
         "TransactionDecision": _TransactionDecision,
         "TypeAdapter": TypeAdapter,
         "ValidationInfo": ValidationInfo,
@@ -454,6 +456,14 @@ def _governed_proposal_examples(
         proposal(
             "AppendPeerContribution",
             contribution=_contribution(session, "peer-a"),
+            usage=ResourceUsage(
+                cost_usd=1.25,
+                compute_units=2.5,
+                tokens=128,
+                elapsed_seconds=3.75,
+                tool_calls=1,
+                human_interventions=0,
+            ),
         ),
         proposal("AppendTopologyEvent", event=topology_event),
         proposal(
@@ -592,6 +602,68 @@ def test_task_8_all_governed_proposals_round_trip_through_fixed_parser(
     for proposal in proposals:
         parsed = namespace["parse_untrusted_proposal_json"](proposal.model_dump_json())
         assert parsed == proposal
+
+
+def test_task_8_peer_contribution_usage_is_strict_bounded_and_fresh(
+    task_8_namespace: dict[str, object],
+) -> None:
+    namespace = task_8_namespace
+    boundary_error = _boundary_error_type(namespace)
+    contribution = next(
+        proposal
+        for proposal in _governed_proposal_examples(namespace)
+        if type(proposal).__name__ == "AppendPeerContribution"
+    )
+    assert contribution.usage == ResourceUsage(
+        cost_usd=1.25,
+        compute_units=2.5,
+        tokens=128,
+        elapsed_seconds=3.75,
+        tool_calls=1,
+        human_interventions=0,
+    )
+
+    for field_name, coercive_value in (
+        ("cost_usd", 1),
+        ("compute_units", "2.5"),
+        ("tokens", "128"),
+        ("elapsed_seconds", 3),
+        ("tool_calls", True),
+        ("human_interventions", 0.0),
+    ):
+        payload = contribution.model_dump(mode="json")
+        payload["usage"][field_name] = coercive_value
+        with pytest.raises(boundary_error) as error:
+            namespace["parse_untrusted_proposal_json"](json.dumps(payload))
+        _assert_detached_proposal_boundary_error(error.value, boundary_error)
+
+    maximum = ResourceUsage(
+        cost_usd=1_000_000_000_000.0,
+        compute_units=1_000_000_000_000.0,
+        tokens=1_000_000_000_000,
+        elapsed_seconds=1_000_000_000_000.0,
+        tool_calls=1_000_000_000_000,
+        human_interventions=1_000_000_000_000,
+    )
+    assert (
+        namespace["AppendPeerContribution"](
+            **(contribution.model_dump(mode="python", exclude={"usage"}) | {"usage": maximum})
+        ).usage
+        == maximum
+    )
+
+    forged = ResourceUsage.model_construct(
+        cost_usd=1_000_000_000_001.0,
+        compute_units=0.0,
+        tokens=0,
+        elapsed_seconds=0.0,
+        tool_calls=0,
+        human_interventions=0,
+    )
+    with pytest.raises(ValidationError):
+        namespace["AppendPeerContribution"](
+            **(contribution.model_dump(mode="python", exclude={"usage"}) | {"usage": forged})
+        )
 
 
 def test_task_8_relationship_proposals_bind_exact_bounded_parent_identifiers(

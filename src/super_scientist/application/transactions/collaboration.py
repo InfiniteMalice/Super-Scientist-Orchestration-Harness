@@ -121,7 +121,7 @@ class _AcceptedCollaborationHistoryReader:
                     raise StorageIntegrityError(
                         "storage integrity error: accepted peer contribution history mismatch"
                     )
-                history.append(retained_contribution)
+                history.append(proposal)
             elif (
                 isinstance(proposal, AppendTopologyEvent)
                 and proposal.event.session_id == session_id
