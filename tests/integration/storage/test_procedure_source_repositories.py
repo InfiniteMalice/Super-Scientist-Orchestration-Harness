@@ -67,6 +67,14 @@ def _persist_accepted(
     audit_policy_fields: dict[str, object] | None = None,
     source_snapshot: ProcedureSourceSnapshot | None = None,
 ):
+    if type(proposal) is AddEvidence:
+        proposal = proposal.model_copy(
+            update={
+                "evidence": proposal.evidence.model_copy(
+                    update={"verification_state": VerificationState.UNVERIFIED}
+                )
+            }
+        )
     decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
     repositories.transactions.add(proposal, decision, occurred_at)
     stored = repositories.transactions.get_by_proposal_id(proposal.proposal_id)
@@ -246,7 +254,9 @@ def test_catalog_and_source_snapshot_readers_require_canonical_artifacts_and_fre
                 proposal_id="proposal-artifact-catalog",
                 idempotency_key="proposal-artifact-catalog",
                 proposer=actor("coordinator"),
-                evidence=catalog_evidence,
+                evidence=catalog_evidence.model_copy(
+                    update={"verification_state": VerificationState.UNVERIFIED}
+                ),
             )
             repositories.evidence.add(catalog_evidence)
             stored, event = _persist_accepted(repositories, catalog_proposal, NOW)
@@ -494,7 +504,7 @@ def test_source_reader_detaches_corrupt_transaction_sentinel(tmp_path) -> None:
             )
             legacy = repositories.transactions.get_by_proposal_id(proposal.proposal_id)
             assert legacy is not None
-            assert legacy.proposal == proposal
+            assert legacy.proposal == stored.proposal
             corrupt = json.loads(proposal_json)
             sentinel = "SECRET-SOURCE-SENTINEL"
             corrupt["unknown"] = sentinel

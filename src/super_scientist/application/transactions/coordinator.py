@@ -8,10 +8,7 @@ from typing import Literal, Protocol, cast, get_args
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from sqlalchemy import Connection
 
-from super_scientist.application.evidence_verification import (
-    verified_artifact_bytes,
-    verify_artifact_binding,
-)
+from super_scientist.application.evidence_verification import verify_artifact_binding
 from super_scientist.application.harness_eval import fixed_harness_extension_handlers
 from super_scientist.application.harness_eval.service import fixed_harness_eval_handlers
 from super_scientist.application.transactions.adaptation import (
@@ -62,7 +59,7 @@ from super_scientist.application.transactions.trails import (
 from super_scientist.application.workspace_integrity import require_workspace_integrity
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim
-from super_scientist.domain.evidence.models import EvidenceRecord, VerificationState
+from super_scientist.domain.evidence.models import EvidenceRecord
 from super_scientist.domain.identity import ActorIdentity
 from super_scientist.domain.primitives import (
     StableIdentifier,
@@ -135,11 +132,12 @@ from super_scientist.kernel.transactions.models import (
     ReviseHypothesis,
     TransactionDecision,
     TransitionClaim,
+    expected_hash_verified_evidence,
 )
 from super_scientist.providers.storage.artifacts import ArtifactStore
 from super_scientist.providers.storage.database import DatabaseUnitOfWork
 from super_scientist.providers.storage.procedure_sources import (
-    procedure_source_snapshot_audit_metadata_from_bytes,
+    procedure_source_snapshot_audit_metadata_from_store,
 )
 from super_scientist.providers.storage.repositories import RepositorySet
 
@@ -759,13 +757,8 @@ class TransactionCoordinator:
         return decision
 
     def _verified_evidence_proposal(self, proposal: AddEvidence) -> AddEvidence:
-        evidence = proposal.evidence
-        if evidence.verification_state is not VerificationState.UNVERIFIED:
-            raise ValueError("submitted evidence must be unverified")
-        verify_artifact_binding(evidence, self._artifact_store)
-        verified = evidence.model_copy(
-            update={"verification_state": VerificationState.HASH_VERIFIED}
-        )
+        verify_artifact_binding(proposal.evidence, self._artifact_store)
+        verified = expected_hash_verified_evidence(proposal)
         return proposal.model_copy(update={"evidence": verified})
 
     def _audit(
@@ -805,9 +798,9 @@ class TransactionCoordinator:
             and proposal.evidence.evidence_type == "procedure-source"
         ):
             try:
-                snapshot_metadata = procedure_source_snapshot_audit_metadata_from_bytes(
+                snapshot_metadata = procedure_source_snapshot_audit_metadata_from_store(
                     proposal.evidence,
-                    verified_artifact_bytes(proposal.evidence, self._artifact_store),
+                    self._artifact_store,
                 )
             except (
                 MemoryError,
@@ -903,22 +896,46 @@ def _durable_proposal(
 def _mapping_is_within_proposal_bounds(value: dict[str, object]) -> bool:
     pending: list[tuple[object, int]] = [(value, 0)]
     visited_nodes = 0
-    utf8_scalar_bytes = 0
+    canonical_bytes = 0
 
-    def consume_text(candidate: str) -> bool:
-        nonlocal utf8_scalar_bytes
-        remaining = MAX_PROPOSAL_BYTES - utf8_scalar_bytes
-        if len(candidate) > remaining:
+    def consume(count: int) -> bool:
+        nonlocal canonical_bytes
+        if count < 0 or count > MAX_PROPOSAL_BYTES - canonical_bytes:
+            return False
+        canonical_bytes += count
+        return True
+
+    def consume_json_string(candidate: str) -> bool:
+        if not consume(2):
+            return False
+        if len(candidate) > MAX_PROPOSAL_BYTES - canonical_bytes:
             return False
         try:
-            encoded_length = 0
             for offset in range(0, len(candidate), 4_096):
-                encoded_length += len(candidate[offset : offset + 4_096].encode("utf-8"))
-                if encoded_length > remaining:
-                    return False
+                chunk = candidate[offset : offset + 4_096]
+                if (
+                    chunk.isascii()
+                    and '"' not in chunk
+                    and "\\" not in chunk
+                    and all(ord(character) >= 0x20 for character in chunk)
+                ):
+                    if not consume(len(chunk)):
+                        return False
+                    continue
+                for character in chunk:
+                    codepoint = ord(character)
+                    if character in ('"', "\\") or codepoint in (8, 9, 10, 12, 13):
+                        encoded_length = 2
+                    elif codepoint < 0x20:
+                        encoded_length = 6
+                    elif 0xD800 <= codepoint <= 0xDFFF:
+                        return False
+                    else:
+                        encoded_length = len(character.encode("utf-8"))
+                    if not consume(encoded_length):
+                        return False
         except UnicodeError:
             return False
-        utf8_scalar_bytes += encoded_length
         return True
 
     while pending:
@@ -931,33 +948,39 @@ def _mapping_is_within_proposal_bounds(value: dict[str, object]) -> bool:
                 type(key) is not str for key in current
             ):
                 return False
-            if any(not consume_text(key) for key in current):
+            if not consume(2 + max(0, len(current) - 1) + len(current)):
+                return False
+            if any(not consume_json_string(key) for key in current):
                 return False
             pending.extend((item, depth + 1) for item in current.values())
         elif type(current) is list:
             if len(current) > MAX_PROPOSAL_JSON_CONTAINER_ITEMS:
                 return False
+            if not consume(2 + max(0, len(current) - 1)):
+                return False
             pending.extend((item, depth + 1) for item in current)
         elif type(current) is str:
-            if not consume_text(current):
+            if not consume_json_string(current):
                 return False
         elif type(current) is int:
-            remaining = MAX_PROPOSAL_BYTES - utf8_scalar_bytes
             bit_length = int.bit_length(current)
             decimal_upper_bound = max(1, (bit_length * 30_103 + 99_999) // 100_000)
             if current < 0:
                 decimal_upper_bound += 1
-            if decimal_upper_bound > remaining:
+            if not consume(decimal_upper_bound):
                 return False
-            utf8_scalar_bytes += decimal_upper_bound
         elif type(current) is float:
             if not math.isfinite(current):
                 return False
-            remaining = MAX_PROPOSAL_BYTES - utf8_scalar_bytes
-            if remaining < 24:
+            if not consume(len(repr(current))):
                 return False
-            utf8_scalar_bytes += 24
-        elif current is not None and type(current) is not bool:
+        elif current is None:
+            if not consume(4):
+                return False
+        elif type(current) is bool:
+            if not consume(4 if current else 5):
+                return False
+        else:
             return False
     return True
 

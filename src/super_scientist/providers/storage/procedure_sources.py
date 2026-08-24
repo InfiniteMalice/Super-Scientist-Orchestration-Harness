@@ -32,6 +32,7 @@ from super_scientist.kernel.transactions.models import (
     Proposal,
     RecordCapabilityProfile,
     TransactionDecision,
+    expected_hash_verified_evidence,
 )
 from super_scientist.providers.storage.artifacts import ArtifactStore
 from super_scientist.providers.storage.repositories import (
@@ -42,6 +43,7 @@ from super_scientist.providers.storage.repositories import (
 )
 
 __all__ = [
+    "MAX_PROCEDURE_SOURCE_ARTIFACT_BYTES",
     "AcceptedProcedureSourceReceipt",
     "AcceptedProcedureSourceReceiptReader",
     "ArtifactCatalogSnapshotRepository",
@@ -55,11 +57,12 @@ __all__ = [
     "ValidatorCatalogSource",
     "procedure_source_snapshot_audit_metadata",
     "procedure_source_snapshot_audit_metadata_from_bytes",
+    "procedure_source_snapshot_audit_metadata_from_store",
 ]
 
 _PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
 _SHA256_ADAPTER: TypeAdapter[Sha256Hex] = TypeAdapter(Sha256Hex)
-_MAX_SOURCE_ARTIFACT_BYTES = 64 * 1024 * 1024
+MAX_PROCEDURE_SOURCE_ARTIFACT_BYTES = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,7 +314,10 @@ class _FixedCatalogSnapshotRepository[EntryT: BaseModel, CatalogSourceT]:
             or not isinstance(receipt.proposal, AddEvidence)
         ):
             return None
-        proposal_evidence = receipt.proposal.evidence
+        try:
+            proposal_evidence = expected_hash_verified_evidence(receipt.proposal)
+        except (TypeError, ValueError):
+            return None
         if (
             stored_evidence is None
             or stored_evidence != proposal_evidence
@@ -320,7 +326,7 @@ class _FixedCatalogSnapshotRepository[EntryT: BaseModel, CatalogSourceT]:
         ):
             return None
         artifact = proposal_evidence.artifact
-        if artifact.size_bytes > _MAX_SOURCE_ARTIFACT_BYTES:
+        if artifact.size_bytes > MAX_PROCEDURE_SOURCE_ARTIFACT_BYTES:
             return None
         try:
             artifact_bytes = self._artifacts.read(artifact)
@@ -352,7 +358,7 @@ class _FixedCatalogSnapshotRepository[EntryT: BaseModel, CatalogSourceT]:
         )
 
     def _decode(self, artifact_bytes: bytes) -> tuple[tuple[EntryT, ...], bool]:
-        if not artifact_bytes or len(artifact_bytes) > _MAX_SOURCE_ARTIFACT_BYTES:
+        if not artifact_bytes or len(artifact_bytes) > MAX_PROCEDURE_SOURCE_ARTIFACT_BYTES:
             raise ValueError("catalog artifact is empty or oversized")
         decoded = json.loads(artifact_bytes)
         if type(decoded) is not dict or set(decoded) != {"catalog_kind", "entries", "complete"}:
@@ -483,7 +489,14 @@ def procedure_source_snapshot_audit_metadata_from_bytes(
     evidence: EvidenceRecord,
     artifact_bytes: bytes,
 ) -> dict[str, object] | None:
-    if evidence.evidence_type != "procedure-source" or not artifact_bytes:
+    if (
+        type(artifact_bytes) is not bytes
+        or evidence.evidence_type != "procedure-source"
+        or not artifact_bytes
+        or len(artifact_bytes) > MAX_PROCEDURE_SOURCE_ARTIFACT_BYTES
+        or len(artifact_bytes) != evidence.artifact.size_bytes
+        or sha256_hex(artifact_bytes) != evidence.artifact.sha256
+    ):
         return None
     try:
         snapshot = ProcedureSourceSnapshot.model_validate_json(artifact_bytes, strict=True)
@@ -492,6 +505,20 @@ def procedure_source_snapshot_audit_metadata_from_bytes(
     except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
         return None
     return procedure_source_snapshot_audit_metadata(snapshot, evidence)
+
+
+def procedure_source_snapshot_audit_metadata_from_store(
+    evidence: EvidenceRecord,
+    artifact_store: ArtifactStore,
+) -> dict[str, object] | None:
+    if (
+        evidence.evidence_type != "procedure-source"
+        or evidence.artifact.size_bytes <= 0
+        or evidence.artifact.size_bytes > MAX_PROCEDURE_SOURCE_ARTIFACT_BYTES
+    ):
+        return None
+    artifact_bytes = artifact_store.read(evidence.artifact)
+    return procedure_source_snapshot_audit_metadata_from_bytes(evidence, artifact_bytes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -599,7 +626,10 @@ class ProcedureSourceSnapshotRepository:
             )
             if len(matching_events) != 1:
                 continue
-            proposal_evidence = transaction.proposal.evidence
+            try:
+                proposal_evidence = expected_hash_verified_evidence(transaction.proposal)
+            except (TypeError, ValueError):
+                continue
             metadata_payload = json_compatible_payload(matching_events[0].payload).get(
                 "procedure_source_snapshot"
             )
@@ -646,13 +676,13 @@ class ProcedureSourceSnapshotRepository:
         return tuple(item for item in accepted if item.snapshot_id not in duplicate_ids)
 
     def _decode_snapshot(self, artifact: ArtifactRef) -> ProcedureSourceSnapshot | None:
-        if artifact.size_bytes > _MAX_SOURCE_ARTIFACT_BYTES:
+        if artifact.size_bytes > MAX_PROCEDURE_SOURCE_ARTIFACT_BYTES:
             return None
         try:
             artifact_bytes = self._artifacts.read(artifact)
             if (
                 not artifact_bytes
-                or len(artifact_bytes) > _MAX_SOURCE_ARTIFACT_BYTES
+                or len(artifact_bytes) > MAX_PROCEDURE_SOURCE_ARTIFACT_BYTES
                 or len(artifact_bytes) != artifact.size_bytes
                 or sha256_hex(artifact_bytes) != artifact.sha256
             ):

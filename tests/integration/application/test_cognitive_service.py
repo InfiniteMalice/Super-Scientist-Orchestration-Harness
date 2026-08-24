@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import gc
 from collections.abc import Callable, Iterator, MutableMapping
 from copy import copy, deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
-from weakref import ref
 
 import pytest
 from sqlalchemy import Connection, Engine
@@ -78,7 +76,7 @@ def cognitive_runtime(
     with uow_factory() as unit_of_work:
         unit_of_work.repositories().policies.add_and_activate(policy, NOW)
     coordinator = TransactionCoordinator(uow_factory, policy, FixedClock(), artifacts)
-    research = ResearchCoordinator(CognitiveOrchestrationService(coordinator))
+    research = ResearchCoordinator()
     yield coordinator, research, uow_factory, artifacts, actor
     engine.dispose()
 
@@ -116,14 +114,18 @@ def test_research_coordinator_stops_on_first_rejection(
         ActorIdentity,
     ],
 ) -> None:
-    _, research, uow_factory, artifacts, actor = cognitive_runtime
+    coordinator, research, uow_factory, artifacts, actor = cognitive_runtime
     proposals = (
         _proposal(artifacts, actor, "proposal-1", "key-1"),
         _proposal(artifacts, actor, "proposal-1", "key-2"),
         _proposal(artifacts, actor, "proposal-3", "key-3"),
     )
 
-    decisions = research.run_declared_slice(proposals)
+    decisions = research.run_declared_slice(
+        CognitiveOrchestrationService(),
+        coordinator,
+        proposals,
+    )
 
     assert tuple(decision.accepted for decision in decisions) == (True, False)
     with uow_factory() as unit_of_work:
@@ -155,11 +157,12 @@ def test_facades_require_exact_sealed_types(
         class ResearchSubclass(ResearchCoordinator):
             pass
 
+    service = CognitiveOrchestrationService()
+    research = ResearchCoordinator()
     with pytest.raises(TypeError, match="exact transaction coordinator"):
-        CognitiveOrchestrationService(object())  # type: ignore[arg-type]
-
-    with pytest.raises(TypeError, match="sealed submit capability"):
-        ResearchCoordinator(object())  # type: ignore[arg-type]
+        service.submit(object(), object())  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="sealed cognitive service"):
+        research.run_declared_slice(object(), object(), ())  # type: ignore[arg-type]
 
 
 @pytest.mark.integration
@@ -172,9 +175,9 @@ def test_research_coordinator_object_graph_has_no_storage_or_execution_authority
         ActorIdentity,
     ],
 ) -> None:
-    coordinator, _, _, _, _ = cognitive_runtime
-    submitter = CognitiveOrchestrationService(coordinator)
-    research = ResearchCoordinator(submitter)
+    del cognitive_runtime
+    submitter = CognitiveOrchestrationService()
+    research = ResearchCoordinator()
     forbidden = {
         TransactionCoordinator,
         RepositorySet,
@@ -218,7 +221,7 @@ def test_facade_authority_registry_is_not_module_mutable_forgeable_or_leaked(
         ActorIdentity,
     ],
 ) -> None:
-    coordinator, _, _, _, _ = cognitive_runtime
+    coordinator, _, _, artifacts, actor = cognitive_runtime
     assert all(
         not isinstance(value, MutableMapping)
         for name, value in vars(service_module).items()
@@ -227,20 +230,31 @@ def test_facade_authority_registry_is_not_module_mutable_forgeable_or_leaked(
     assert all(type(value) is not TransactionCoordinator for value in vars(service_module).values())
 
     forged_submitter = object.__new__(CognitiveOrchestrationService)
-    with pytest.raises(RuntimeError, match="unavailable"):
-        forged_submitter.submit(object())  # type: ignore[arg-type]
+    proposal = _proposal(artifacts, actor, "forged-proposal", "forged-key")
+    assert forged_submitter.submit(coordinator, proposal).accepted is True
     forged_research = object.__new__(ResearchCoordinator)
-    with pytest.raises(RuntimeError, match="unavailable"):
-        forged_research.run_declared_slice(())
+    assert forged_research.run_declared_slice(forged_submitter, coordinator, ()) == ()
     with pytest.raises(AttributeError):
         object.__setattr__(forged_submitter, "_token", object())
 
-    submitter = CognitiveOrchestrationService(coordinator)
-    research = ResearchCoordinator(submitter)
-    submitter_reference = ref(submitter)
-    research_reference = ref(research)
-    del submitter, research
-    gc.collect()
+    assert CognitiveOrchestrationService.submit.__closure__ is None
+    assert ResearchCoordinator.run_declared_slice.__closure__ is None
 
-    assert submitter_reference() is None
-    assert research_reference() is None
+    class HostileReceiver:
+        def __getattribute__(self, name: str) -> object:
+            del name
+            raise AssertionError("hostile receiver hook must not run")
+
+    with pytest.raises(TypeError, match="exact cognitive service"):
+        CognitiveOrchestrationService.submit(  # type: ignore[arg-type]
+            HostileReceiver(),
+            coordinator,
+            proposal,
+        )
+    with pytest.raises(TypeError, match="exact research coordinator"):
+        ResearchCoordinator.run_declared_slice(  # type: ignore[arg-type]
+            HostileReceiver(),
+            forged_submitter,
+            coordinator,
+            (),
+        )

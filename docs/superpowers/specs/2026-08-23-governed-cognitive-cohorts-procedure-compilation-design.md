@@ -757,7 +757,9 @@ own proposal. A helper stops after rejection and returns the typed decision; it 
 silently retry with weakened constraints.
 
 A `ResearchCoordinator` application service may arrange those submissions, but it is
-an orchestration convenience only. It receives no admission or repository authority.
+an orchestration convenience only. Both it and the submission facade are stateless:
+the exact transaction coordinator is supplied only as a per-call local argument, and
+neither facade retains admission, storage, artifact, execution, or protected authority.
 
 A single read-only `cognitive inspect` CLI group will inspect a capability profile,
 cohort, collaboration session, procedure compilation, evaluation protocol, trace, or

@@ -223,6 +223,7 @@ from super_scientist.kernel.transactions.models import (
     ReviseHypothesis,
     TransactionDecision,
     TransitionClaim,
+    expected_hash_verified_evidence,
 )
 from super_scientist.providers.storage.artifacts import ArtifactStore
 from super_scientist.providers.storage.domain_records import (
@@ -258,6 +259,9 @@ from super_scientist.providers.storage.integrity_records import (
     RepresentationIntegritySnapshot,
     RuleIntegritySnapshot,
     TrailIntegritySnapshot,
+)
+from super_scientist.providers.storage.procedure_sources import (
+    procedure_source_snapshot_audit_metadata_from_store,
 )
 from super_scientist.providers.storage.repositories import (
     RepositorySet,
@@ -683,7 +687,7 @@ def verify_workspace(
             active_policy is not None or not repositories.has_durable_state(),
             "durable workspace state requires an active registered policy",
         )
-        audit_records = _validated_audit_records(events, repositories)
+        audit_records = _validated_audit_records(events, repositories, artifact_store)
         _require_transaction_audit_consistency(transactions, audit_records)
         _require_projection_consistency(
             repositories,
@@ -752,6 +756,7 @@ def _require_quality_policy_binding(
 def _validated_audit_records(
     events: tuple[AuditEvent, ...],
     repositories: RepositorySet,
+    artifact_store: ArtifactStore,
 ) -> tuple[_ValidatedAuditRecord, ...]:
     records: list[_ValidatedAuditRecord] = []
     for event in events:
@@ -790,6 +795,13 @@ def _validated_audit_records(
             proposal.proposal_id == decision.proposal_id,
             "audit proposal and decision identifiers do not match",
         )
+        _require_procedure_source_snapshot_metadata(
+            proposal,
+            decision,
+            transaction_persisted,
+            payload,
+            artifact_store,
+        )
         if isinstance(proposal, ProposeGovernancePolicyTransition):
             _require(
                 _optional_policy_hash(payload, "prior_policy_hash") == proposal.prior_policy_hash,
@@ -817,6 +829,46 @@ def _validated_audit_records(
             )
         )
     return tuple(records)
+
+
+def _require_procedure_source_snapshot_metadata(
+    proposal: Proposal,
+    decision: TransactionDecision,
+    transaction_persisted: bool,
+    payload: Mapping[str, object],
+    artifact_store: ArtifactStore,
+) -> None:
+    metadata_key = "procedure_source_snapshot"
+    if type(proposal) is not AddEvidence or not decision.accepted or not transaction_persisted:
+        _require(
+            metadata_key not in payload,
+            "non-snapshot audit event contains procedure source snapshot metadata",
+        )
+        return
+    if proposal.evidence.evidence_type != "procedure-source":
+        _require(
+            metadata_key not in payload,
+            "non-snapshot audit event contains procedure source snapshot metadata",
+        )
+        return
+    expected = procedure_source_snapshot_audit_metadata_from_store(
+        proposal.evidence,
+        artifact_store,
+    )
+    if expected is None:
+        _require(
+            metadata_key not in payload,
+            "non-snapshot procedure source contains snapshot metadata",
+        )
+        return
+    _require(
+        metadata_key in payload,
+        "procedure source snapshot audit metadata is missing",
+    )
+    _require(
+        payload[metadata_key] == expected,
+        "procedure source snapshot audit metadata does not match its artifact",
+    )
 
 
 def _require_transaction_audit_consistency(
@@ -966,9 +1018,7 @@ def _require_projection_consistency(
             raise StorageIntegrityError("accepted audit transaction is unavailable")
         historical_policy = policy_by_hash[audit_record.governing_policy_hash]
         if isinstance(proposal, AddEvidence):
-            projected = proposal.evidence.model_copy(
-                update={"verification_state": VerificationState.HASH_VERIFIED}
-            )
+            projected = expected_hash_verified_evidence(proposal)
             _add_unique(expected_evidence, projected.evidence_id, projected, "evidence projection")
         elif isinstance(proposal, ProposeClaim):
             _add_unique(

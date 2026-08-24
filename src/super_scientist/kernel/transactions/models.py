@@ -49,7 +49,7 @@ from super_scientist.domain.evaluators.models import (
     EvaluatorSuccessionDecision,
     EvaluatorVersion,
 )
-from super_scientist.domain.evidence.models import EvidenceRecord
+from super_scientist.domain.evidence.models import EvidenceRecord, VerificationState
 from super_scientist.domain.evidence_trails.models import (
     AddEvidenceReceiptRef,
     EvidenceTrailNode,
@@ -119,6 +119,7 @@ from super_scientist.domain.primitives import (
     Sha256Hex,
     StableIdentifier,
     UtcTimestamp,
+    canonical_json_bytes,
 )
 from super_scientist.domain.procedures import (
     CompiledProgressPlanBinding,
@@ -273,6 +274,34 @@ class AddEvidence(ProposalBase):
     @field_serializer("evidence", when_used="json")
     def serialize_evidence(self, evidence: EvidenceRecord) -> object:
         return _json_compatible(evidence.model_dump(warnings="none"))
+
+
+def expected_hash_verified_evidence(proposal: AddEvidence) -> EvidenceRecord:
+    """Rebuild the canonical AddEvidence projection from exact admitted input."""
+
+    if type(proposal) is not AddEvidence or type(proposal.evidence) is not EvidenceRecord:
+        raise TypeError("evidence projection requires an exact AddEvidence proposal")
+    if proposal.evidence.verification_state is not VerificationState.UNVERIFIED:
+        raise ValueError("submitted evidence must be unverified")
+    evidence = proposal.evidence
+    structured_observation = (
+        None
+        if evidence.structured_observation is None
+        else json.loads(canonical_json_bytes(_json_compatible(evidence.structured_observation)))
+    )
+    return EvidenceRecord(
+        evidence_id=evidence.evidence_id,
+        evidence_type=evidence.evidence_type,
+        source_locator=evidence.source_locator,
+        retrieved_at=evidence.retrieved_at,
+        artifact=evidence.artifact,
+        extracted_span=evidence.extracted_span,
+        structured_observation=structured_observation,
+        provenance=dict(evidence.provenance),
+        license=evidence.license,
+        ingestion_actor_id=evidence.ingestion_actor_id,
+        verification_state=VerificationState.HASH_VERIFIED,
+    )
 
 
 class ProposeClaim(ProposalBase):

@@ -98,11 +98,15 @@ class _ModelCellContext(_StrictContext):
     evidence_current: bool
 
 
-class _ModelAnalysisContext(_StrictContext):
+class ModelHarnessResolutionSnapshot(_StrictContext):
     protocol: ModelHarnessProtocol | None
     cells: tuple[ModelHarnessCell, ...]
     evidence_chains: tuple[HarnessCellEvidenceChain, ...] | None
     evidence_index: HarnessEvidenceSnapshotIndex | None
+
+
+class _ModelAnalysisContext(_StrictContext):
+    resolution: ModelHarnessResolutionSnapshot
     existing: ModelHarnessAnalysis | None
 
 
@@ -146,12 +150,10 @@ class _ModelCellReads(_ModelProtocolReads, Protocol):
 class _ModelAnalysisReads(_ModelProtocolReads, Protocol):
     def get_model_harness_analysis(self, protocol_id: str) -> ModelHarnessAnalysis | None: ...
 
-    def list_model_harness_cells(self, protocol_id: str) -> tuple[ModelHarnessCell, ...]: ...
-
-    def resolve_model_harness_evidence(
+    def resolve_model_harness_snapshot(
         self,
         protocol_id: str,
-    ) -> tuple[tuple[HarnessCellEvidenceChain, ...], HarnessEvidenceSnapshotIndex] | None: ...
+    ) -> ModelHarnessResolutionSnapshot: ...
 
 
 class _TraceReads(_GuidanceProtocolReads, _ModelProtocolReads, Protocol):
@@ -414,12 +416,8 @@ class RecordModelHarnessAnalysisHandler:
     ) -> _ModelAnalysisContext:
         capability = cast(_ModelAnalysisReads, reads)
         protocol_id = proposal.analysis.protocol_id
-        resolved = capability.resolve_model_harness_evidence(protocol_id)
         return _ModelAnalysisContext(
-            protocol=capability.get_model_harness_protocol(protocol_id),
-            cells=capability.list_model_harness_cells(protocol_id),
-            evidence_chains=None if resolved is None else resolved[0],
-            evidence_index=None if resolved is None else resolved[1],
+            resolution=capability.resolve_model_harness_snapshot(protocol_id),
             existing=capability.get_model_harness_analysis(protocol_id),
         )
 
@@ -428,13 +426,14 @@ class RecordModelHarnessAnalysisHandler:
         proposal: RecordModelHarnessAnalysis,
         context: _ModelAnalysisContext,
     ) -> TransactionDecision:
-        if context.protocol is None:
+        resolution = context.resolution
+        if resolution.protocol is None:
             return _rejected(
                 proposal.proposal_id,
                 RejectionCode.MISSING_ENTITY,
                 "model-harness analysis requires its accepted protocol",
             )
-        if context.evidence_chains is None or context.evidence_index is None:
+        if resolution.evidence_chains is None or resolution.evidence_index is None:
             return _rejected(
                 proposal.proposal_id,
                 RejectionCode.STALE_REFERENCE,
@@ -443,10 +442,10 @@ class RecordModelHarnessAnalysisHandler:
         expected: ModelHarnessAnalysis | None = None
         with suppress(ArithmeticError, MemoryError, OverflowError, TypeError, ValueError):
             expected = analyze_model_harness(
-                context.protocol,
-                context.cells,
-                evidence_chains=context.evidence_chains,
-                evidence_index=context.evidence_index,
+                resolution.protocol,
+                resolution.cells,
+                evidence_chains=resolution.evidence_chains,
+                evidence_index=resolution.evidence_index,
             )
         if expected is None or expected != proposal.analysis:
             return _rejected(
@@ -803,6 +802,7 @@ __all__ = [
     "AppendGuidanceEvaluationCellHandler",
     "AppendModelHarnessCellHandler",
     "HarnessTraceProposalAdapter",
+    "ModelHarnessResolutionSnapshot",
     "RecordGuidanceEvaluationProtocolHandler",
     "RecordHarnessExecutionTraceHandler",
     "RecordModelHarnessAnalysisHandler",

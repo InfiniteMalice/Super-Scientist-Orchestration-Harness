@@ -2977,49 +2977,51 @@ Add explicit `isinstance` groups beside existing progress/harness groups and cal
 
 ```python
 class CognitiveOrchestrationService:
-    __slots__ = ("_token",)
+    __slots__ = ()
 
-    def __init__(self, coordinator: TransactionCoordinator) -> None:
+    def submit(
+        self,
+        coordinator: TransactionCoordinator,
+        proposal: Proposal,
+    ) -> TransactionDecision:
+        if type(self) is not CognitiveOrchestrationService:
+            raise TypeError("cognitive service requires its exact sealed receiver")
         if type(coordinator) is not TransactionCoordinator:
             raise TypeError("cognitive service requires the exact transaction coordinator")
-        token = _SubmissionToken()
-        _SUBMISSION_REGISTRY[token] = coordinator
-        self._token = token
-
-    def submit(self, proposal: Proposal) -> TransactionDecision:
-        token = object.__getattribute__(self, "_token")
-        coordinator = _SUBMISSION_REGISTRY.get(token)
-        if coordinator is None:
-            raise RuntimeError("cognitive submission capability is unavailable")
         return coordinator.submit(proposal)
 
 
 class ResearchCoordinator:
-    __slots__ = ("_submitter",)
+    __slots__ = ()
 
-    def __init__(self, submitter: CognitiveOrchestrationService) -> None:
+    def run_declared_slice(
+        self,
+        submitter: CognitiveOrchestrationService,
+        coordinator: TransactionCoordinator,
+        proposals: tuple[Proposal, ...],
+    ) -> tuple[TransactionDecision, ...]:
+        if type(self) is not ResearchCoordinator:
+            raise TypeError("research coordinator requires its exact sealed receiver")
         if type(submitter) is not CognitiveOrchestrationService:
-            raise TypeError("research coordinator requires the sealed submit capability")
-        self._submitter = submitter
-
-    def run_declared_slice(self, proposals: tuple[Proposal, ...]) -> tuple[TransactionDecision, ...]:
+            raise TypeError("research coordinator requires the exact stateless submitter")
+        if type(coordinator) is not TransactionCoordinator:
+            raise TypeError("research coordinator requires the exact transaction coordinator")
         decisions: list[TransactionDecision] = []
         for proposal in proposals:
-            decision = self._submitter.submit(proposal)
+            decision = submitter.submit(coordinator, proposal)
             decisions.append(decision)
             if not decision.accepted:
                 break
         return tuple(decisions)
 ```
 
-Each sealed facade method closes over its own private `WeakKeyDictionary`, keyed by the exact
-facade instance; there is no module-accessible registry or instance token. No facade instance
-stores a coordinator, repository set, unit of work, connection, artifact store, protected reader,
-or bound callable/closure that exposes one. Both facade classes reject subclass creation and
-`copy.copy()` / `copy.deepcopy()`. Authority-graph tests walk both facade instances, probe exact
-attributes with `object.__getattribute__()`, include concrete and protocol authority types, inspect
-module globals, and verify forged/unregistered instances fail closed and weak registrations are
-garbage-collected.
+Both sealed facades are stateless and retain no registry, token, closure, submitter, coordinator,
+repository set, unit of work, connection, artifact store, protected reader, or bound callable.
+The exact transaction coordinator is an operation-local argument and is never stored. Both facade
+classes reject subclass creation and `copy.copy()` / `copy.deepcopy()`. Authority-graph tests walk
+both facade instances and class functions, probe exact attributes with `object.__getattribute__()`,
+include concrete and protocol authority types, inspect module globals, and verify hostile unbound
+receivers fail before any receiver hook or operation.
 
 The Phase B review also tightens the transaction boundary and evidence-query contract:
 
@@ -3031,21 +3033,28 @@ The Phase B review also tightens the transaction boundary and evidence-query con
 - Before canonical serialization, accept only exact built-in dictionaries/lists and exact JSON
   scalar/key types under the 8 MiB, depth 128, node 4096, and container limits. Reject every other
   `Mapping` implementation without invoking its hooks, and translate recursion/memory/type failures
-  into the fixed invalid-proposal boundary result.
+  into the fixed invalid-proposal boundary result. The iterative preflight counts the full canonical
+  JSON byte representation, including string quotes and escapes, UTF-8, container punctuation, and
+  scalar spellings, so escape-heavy values fail before canonical serialization allocates them.
 - Validate all procedure receipts through one immutable operation-local provenance index: one
   transaction-history bulk read, one audit-chain scan/verification, and bounded bulk evidence,
   profile, catalog, and snapshot reads for the at-most-67 declared receipts. Reuse no index across
   operations, so later mutations are visible and fail closed. Accepted source-snapshot ingestion
   adds exact schema-version/family/id/evidence/hash metadata to the existing chain-protected audit
-  payload after canonical snapshot-byte validation. Freshness joins that metadata and decodes only
-  declared snapshots; legacy events without the derived metadata fail closed. This is audit payload
-  metadata, not a nineteenth governed record family, and it does not add or alter any migration,
-  released table, or Task 9's exact eighteen-table authoritative inventory.
+  payload after bounded canonical snapshot-byte validation. Workspace verification and import replay
+  recompute that exact optional metadata from the accepted `AddEvidence` artifact: snapshots require
+  it, non-snapshots forbid it, and missing, extra, or mismatched fields fail even when an attacker
+  rehashes the audit chain. Freshness joins that metadata and decodes only declared snapshots; legacy
+  events without the derived metadata fail closed. This is audit payload metadata, not a nineteenth
+  governed record family, and it does not add or alter any migration, released table, or Task 9's
+  exact eighteen-table authoritative inventory.
 - Resolve model/harness analyses by bulk-loading protocol traces and their reward assessments once,
-  indexing both by exact coordinate and trace ID, and joining only declared cell receipts. Reject
-  missing or ambiguous joins; do not perform per-cell history queries. The 256-cell boundary must
-  remain linear in cells plus traces plus assessments, with one bulk repository operation per
-  evidence family.
+  indexing both by exact coordinate and trace ID, and joining only declared cell receipts into one
+  frozen operation-local resolution snapshot containing protocol, cells, chains, and evidence index.
+  Reject missing or ambiguous joins; do not perform per-cell history queries. Check the 256-cell
+  boundary immediately after the one cell load and before loading or projecting traces and rewards.
+  Valid maximum requests remain linear in cells plus traces plus assessments, with one bulk
+  repository operation per evidence family.
 
 Run: `python -m pytest tests/integration/application/test_cognitive_service.py tests/integration/application/test_transaction_coordinator.py tests/property/test_admission_idempotency.py tests/property/test_transaction_replay.py tests/adversarial/test_model_execution_boundary.py -v`
 
@@ -3313,9 +3322,9 @@ Expected: FAIL because the example does not exist.
 ```python
 def run_example(workspace_root: Path) -> dict[str, object]:
     runtime = create_local_runtime(workspace_root, fixed_policy(), FixedClock())
-    submitter = CognitiveOrchestrationService(runtime.coordinator)
-    decisions = ResearchCoordinator(submitter).run_declared_slice(
-        declared_fixture_proposals(runtime)
+    submitter = CognitiveOrchestrationService()
+    decisions = ResearchCoordinator().run_declared_slice(
+        submitter, runtime.coordinator, declared_fixture_proposals(runtime)
     )
     verification = verify_workspace(runtime.repositories(), runtime.artifact_store)
     imported = round_trip_into_fresh_workspace(runtime)

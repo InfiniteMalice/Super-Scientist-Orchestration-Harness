@@ -25,6 +25,7 @@ from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 from super_scientist.handbook import create_verification_record, verify_handbook
 from super_scientist.kernel.audit.chain import append_event
+from super_scientist.kernel.audit.models import json_compatible_payload
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
     InvalidProposal,
@@ -44,6 +45,7 @@ from super_scientist.providers.storage.domain_records import (
     HandbookVerificationRepository,
     RuleIncidentRepository,
 )
+from super_scientist.providers.storage.procedure_sources import ProcedureSourceSnapshot
 from super_scientist.providers.storage.repositories import StorageIntegrityError
 from super_scientist.providers.storage.schema import (
     audit_events,
@@ -460,6 +462,98 @@ def test_workspace_verifier_detects_transaction_audit_mismatch(
 
     assert not result.valid
     assert "transaction" in result.reason
+
+
+@pytest.mark.parametrize(
+    "damage",
+    (
+        "missing",
+        "extra",
+        "wrong-schema",
+        "wrong-family",
+        "wrong-id",
+        "wrong-evidence-id",
+        "wrong-hash",
+    ),
+)
+def test_workspace_recomputes_exact_procedure_snapshot_audit_metadata(
+    integrity: IntegrityFixture,
+    damage: str,
+) -> None:
+    if damage == "extra":
+        proposal = integrity.evidence_proposal("non-snapshot-metadata")
+    else:
+        snapshot = ProcedureSourceSnapshot(
+            snapshot_family_id="workspace-snapshot-family",
+            snapshot_id="workspace-source-snapshot",
+            source_bindings=(),
+        )
+        artifact = integrity.artifacts.put(
+            canonical_json_bytes(snapshot.model_dump(mode="json")),
+            "application/json",
+        )
+        proposal = AddEvidence(
+            proposal_id="workspace-source-snapshot-proposal",
+            idempotency_key="workspace-source-snapshot-proposal",
+            proposer=integrity.actor,
+            evidence=EvidenceRecord(
+                evidence_id=snapshot.snapshot_id,
+                evidence_type="procedure-source",
+                source_locator="fixture:workspace-source-snapshot",
+                retrieved_at=NOW,
+                artifact=artifact,
+                provenance={"fixture": "workspace-snapshot"},
+                ingestion_actor_id=integrity.actor.actor_id,
+            ),
+        )
+    assert integrity.service.submit(proposal).accepted
+
+    with integrity.uow() as unit_of_work:
+        assert unit_of_work.connection is not None
+        event = unit_of_work.repositories().audit.last()
+        assert event is not None
+        payload = dict(json_compatible_payload(event.payload))
+        if damage == "missing":
+            payload.pop("procedure_source_snapshot")
+        elif damage == "extra":
+            payload["procedure_source_snapshot"] = {
+                "schema_version": 1,
+                "snapshot_family_id": "forged-family",
+                "snapshot_id": proposal.evidence.evidence_id,
+                "evidence_id": proposal.evidence.evidence_id,
+                "artifact_hash": proposal.evidence.artifact.sha256,
+            }
+        else:
+            metadata = dict(payload["procedure_source_snapshot"])
+            if damage == "wrong-schema":
+                metadata["schema_version"] = 2
+            elif damage == "wrong-family":
+                metadata["snapshot_family_id"] = "wrong-family"
+            elif damage == "wrong-id":
+                metadata["snapshot_id"] = "wrong-snapshot"
+            elif damage == "wrong-evidence-id":
+                metadata["evidence_id"] = "wrong-evidence"
+            else:
+                metadata["artifact_hash"] = "f" * 64
+            payload["procedure_source_snapshot"] = metadata
+        replacement = append_event(None, "transaction_decision", payload, NOW)
+        unit_of_work.connection.exec_driver_sql("DROP TRIGGER audit_events_no_update")
+        unit_of_work.connection.execute(
+            update(audit_events)
+            .where(audit_events.c.sequence == event.sequence)
+            .values(
+                event_id=replacement.event_id,
+                previous_hash=replacement.previous_hash,
+                payload_hash=replacement.payload_hash,
+                event_hash=replacement.event_hash,
+                event_json=replacement.model_dump_json(),
+            )
+        )
+
+    result = _verify(integrity)
+
+    assert not result.valid
+    assert "snapshot" in result.reason or "metadata" in result.reason
 
 
 @pytest.mark.parametrize("damage", ["missing", "tampered"])

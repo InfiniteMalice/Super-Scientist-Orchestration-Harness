@@ -46,9 +46,10 @@ from super_scientist.domain.procedures import (
 from super_scientist.domain.progress.models import ProgressPlan, ProgressSubtask
 from super_scientist.domain.research_runs.models import ResearchRun
 from super_scientist.kernel.audit.chain import append_event
-from super_scientist.kernel.audit.models import AuditEvent
+from super_scientist.kernel.audit.models import AuditEvent, json_compatible_payload
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
+    Approval,
     BindCompiledProgressPlan,
     RecordCapabilityProfile,
     RecordMethodDirectionOutcome,
@@ -129,6 +130,229 @@ def test_capability_evidence_snapshot_avoids_circular_profile_self_binding(v2_ru
         )
 
     assert decision.accepted is True
+
+
+@pytest.mark.integration
+def test_real_coordinator_sources_resolve_exact_verified_projections(v2_runtime) -> None:
+    base = valid_request()
+    source_actor = _actor("source-recorder")
+
+    def submit_source(proposal):
+        decision = v2_runtime.coordinator.submit(proposal)
+        assert decision.accepted is True
+        with v2_runtime.uow_factory() as unit_of_work:
+            repositories = unit_of_work.repositories()
+            stored = repositories.transactions.get_by_proposal_id(proposal.proposal_id)
+            assert stored is not None
+            matches = tuple(
+                event
+                for event in repositories.audit.list_all()
+                if (
+                    type(json_compatible_payload(event.payload).get("proposal")) is dict
+                    and json_compatible_payload(event.payload)["proposal"].get("proposal_id")
+                    == proposal.proposal_id
+                )
+            )
+            assert len(matches) == 1
+            return stored, matches[0]
+
+    support_artifact = v2_runtime.artifact_store.put(b"capability support", "text/plain")
+    support_evidence = EvidenceRecord(
+        evidence_id="evidence-1",
+        evidence_type="observation",
+        source_locator="fixture:capability-support",
+        retrieved_at=NOW,
+        artifact=support_artifact,
+        provenance={"fixture": "coordinator-source"},
+        ingestion_actor_id=source_actor.actor_id,
+    )
+    assert v2_runtime.coordinator.submit(
+        AddEvidence(
+            proposal_id="coordinator-supporting-evidence",
+            idempotency_key="coordinator-supporting-evidence",
+            proposer=source_actor,
+            evidence=support_evidence,
+        )
+    ).accepted
+
+    capability_snapshot = ProcedureSourceSnapshot(
+        snapshot_family_id="coordinator-capability-sources",
+        snapshot_id="coordinator-capability-snapshot",
+        source_bindings=(
+            ProcedureSourceBinding(
+                source_record_id=support_evidence.evidence_id,
+                source_content_hash=support_evidence.artifact.sha256,
+            ),
+        ),
+    )
+    capability_snapshot_artifact = v2_runtime.artifact_store.put(
+        canonical_json_bytes(capability_snapshot.model_dump(mode="json")),
+        "application/json",
+    )
+    capability_snapshot_evidence = _source_evidence(
+        capability_snapshot.snapshot_id,
+        capability_snapshot_artifact,
+    ).model_copy(update={"verification_state": VerificationState.UNVERIFIED})
+    submit_source(
+        AddEvidence(
+            proposal_id="coordinator-capability-snapshot-proposal",
+            idempotency_key="coordinator-capability-snapshot-proposal",
+            proposer=source_actor,
+            evidence=capability_snapshot_evidence,
+        )
+    )
+
+    original_grounded = base.capability_assessments[0]
+    assertion = original_grounded.profile.assertions[0].model_copy(
+        update={"evidence_snapshot_hash": capability_snapshot_artifact.sha256}
+    )
+    profile_values = original_grounded.profile.model_dump(
+        mode="python",
+        exclude={"content_hash"},
+    )
+    profile_values.update(
+        assertions=(assertion,),
+        governing_policy_hash=v2_runtime.policy.policy_hash,
+    )
+    retained_profile = CapabilityProfile.build(**profile_values)
+    requirement = original_grounded.assessment.requirement.model_copy(
+        update={"evidence_snapshot_hash": capability_snapshot_artifact.sha256}
+    )
+    profile_proposal = RecordCapabilityProfile(
+        proposal_id="coordinator-capability-profile",
+        idempotency_key="coordinator-capability-profile",
+        proposer=source_actor,
+        approval=Approval(approver=_actor("independent-approver"), approved_at=NOW),
+        profile=retained_profile,
+    )
+    stored_profile, profile_event = submit_source(profile_proposal)
+    grounded = GroundedCapabilityAssessment.build(
+        profile=retained_profile,
+        assessment=assess_capability(retained_profile, requirement),
+        profile_receipt=AcceptedSourceReceiptRef.build(
+            receipt_id="coordinator-capability-receipt",
+            source_kind=ProcedureEvidenceSourceKind.CAPABILITY_PROFILE,
+            source_record_id=retained_profile.profile_id,
+            source_schema_version=retained_profile.schema_version,
+            source_content_hash=retained_profile.content_hash,
+            source_snapshot_id=capability_snapshot.snapshot_id,
+            source_snapshot_hash=capability_snapshot_artifact.sha256,
+            proposal_id=profile_proposal.proposal_id,
+            proposal_hash=stored_profile.proposal_hash,
+            audit_event_id=profile_event.event_id,
+            audit_event_hash=profile_event.event_hash,
+        ),
+    )
+
+    retained_catalogs = []
+    catalog_specs = (
+        (ProcedureEvidenceSourceKind.ARTIFACT_CATALOG, base.artifact_catalog),
+        (ProcedureEvidenceSourceKind.TOOL_CATALOG, base.tool_catalog),
+        (ProcedureEvidenceSourceKind.VALIDATOR_CATALOG, base.validator_catalog),
+    )
+    for index, (kind, entries) in enumerate(catalog_specs, start=1):
+        artifact = v2_runtime.artifact_store.put(
+            canonical_json_bytes(
+                {
+                    "catalog_kind": kind.value,
+                    "entries": tuple(item.model_dump(mode="json") for item in entries),
+                    "complete": True,
+                }
+            ),
+            "application/json",
+        )
+        evidence = _source_evidence(
+            f"coordinator-{kind.value.lower()}",
+            artifact,
+        ).model_copy(update={"verification_state": VerificationState.UNVERIFIED})
+        proposal = AddEvidence(
+            proposal_id=f"coordinator-catalog-proposal-{index}",
+            idempotency_key=f"coordinator-catalog-proposal-{index}",
+            proposer=source_actor,
+            evidence=evidence,
+        )
+        stored, event = submit_source(proposal)
+        retained_catalogs.append((kind, entries, evidence, proposal, stored, event))
+
+    catalog_snapshot = ProcedureSourceSnapshot(
+        snapshot_family_id="coordinator-catalog-sources",
+        snapshot_id="coordinator-catalog-snapshot",
+        source_bindings=tuple(
+            sorted(
+                (
+                    ProcedureSourceBinding(
+                        source_record_id=evidence.evidence_id,
+                        source_content_hash=evidence.artifact.sha256,
+                    )
+                    for _kind, _entries, evidence, _proposal, _stored, _event in retained_catalogs
+                ),
+                key=lambda item: item.source_record_id,
+            )
+        ),
+    )
+    catalog_snapshot_artifact = v2_runtime.artifact_store.put(
+        canonical_json_bytes(catalog_snapshot.model_dump(mode="json")),
+        "application/json",
+    )
+    submit_source(
+        AddEvidence(
+            proposal_id="coordinator-catalog-snapshot-proposal",
+            idempotency_key="coordinator-catalog-snapshot-proposal",
+            proposer=source_actor,
+            evidence=_source_evidence(
+                catalog_snapshot.snapshot_id,
+                catalog_snapshot_artifact,
+            ).model_copy(update={"verification_state": VerificationState.UNVERIFIED}),
+        )
+    )
+
+    catalog_receipts = tuple(
+        AcceptedSourceReceiptRef.build(
+            receipt_id=f"coordinator-{kind.value.lower()}-receipt",
+            source_kind=kind,
+            source_record_id=evidence.evidence_id,
+            source_schema_version=1,
+            source_content_hash=evidence.artifact.sha256,
+            source_snapshot_id=catalog_snapshot.snapshot_id,
+            source_snapshot_hash=catalog_snapshot_artifact.sha256,
+            proposal_id=proposal.proposal_id,
+            proposal_hash=stored.proposal_hash,
+            audit_event_id=event.event_id,
+            audit_event_hash=event.event_hash,
+        )
+        for kind, _entries, evidence, proposal, stored, event in retained_catalogs
+    )
+    request_values = base.model_dump(mode="python")
+    request_values.update(
+        capability_assessments=(grounded,),
+        artifact_catalog_receipt=catalog_receipts[0],
+        tool_catalog_receipt=catalog_receipts[1],
+        validator_catalog_receipt=catalog_receipts[2],
+    )
+    request = ProcedureCompilationRequest.model_validate(request_values, strict=True)
+
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        proposal = RecordProcedureCompilation(
+            proposal_id="coordinator-source-compilation",
+            idempotency_key="coordinator-source-compilation",
+            proposer=v2_runtime.proposer,
+            compilation=OpaqueProcedureCompilationEnvelope.build(
+                compilation_id="coordinator-source-compilation",
+                result=compile_method(request),
+                created_at=NOW,
+                governing_policy_hash=v2_runtime.policy.policy_hash,
+            ),
+        )
+        capabilities = procedure_capabilities(
+            proposal,
+            connection,
+            v2_runtime.policy,
+            v2_runtime.artifact_store,
+            current_transaction_created_at=NOW,
+        )
+        assert capabilities.procedure_sources_are_current(request) is True
 
 
 @pytest.mark.integration
@@ -1547,6 +1771,14 @@ def _persist_accepted_at_policy(
     audit_policy_fields: dict[str, object] | None = None,
     source_snapshot: ProcedureSourceSnapshot | None = None,
 ):
+    if type(proposal) is AddEvidence:
+        proposal = proposal.model_copy(
+            update={
+                "evidence": proposal.evidence.model_copy(
+                    update={"verification_state": VerificationState.UNVERIFIED}
+                )
+            }
+        )
     decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
     repositories.transactions.add(proposal, decision, NOW)
     stored = repositories.transactions.get_by_proposal_id(proposal.proposal_id)

@@ -571,10 +571,16 @@ def test_mapping_ingress_preflights_deep_exact_builtins_without_hooks(
     assert oversized_decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
 
     byte_limit = coordinator_module.MAX_PROPOSAL_BYTES
-    assert coordinator_module._mapping_is_within_proposal_bounds({"": "x" * byte_limit})
-    assert not coordinator_module._mapping_is_within_proposal_bounds({"": "x" * (byte_limit + 1)})
-    assert coordinator_module._mapping_is_within_proposal_bounds({"x" * byte_limit: None})
-    assert not coordinator_module._mapping_is_within_proposal_bounds({"x" * (byte_limit + 1): None})
+    value_allowance = byte_limit - len(canonical_json_bytes({"": ""}))
+    assert coordinator_module._mapping_is_within_proposal_bounds({"": "x" * value_allowance})
+    assert not coordinator_module._mapping_is_within_proposal_bounds(
+        {"": "x" * (value_allowance + 1)}
+    )
+    key_allowance = byte_limit - len(canonical_json_bytes({"": None}))
+    assert coordinator_module._mapping_is_within_proposal_bounds({"x" * key_allowance: None})
+    assert not coordinator_module._mapping_is_within_proposal_bounds(
+        {"x" * (key_allowance + 1): None}
+    )
     assert not coordinator_module._mapping_is_within_proposal_bounds(
         {"é" * (byte_limit // 2 + 1): None}
     )
@@ -597,6 +603,10 @@ def test_mapping_ingress_preflights_deep_exact_builtins_without_hooks(
     monkeypatch.setattr(coordinator_module, "canonical_json_bytes", forbidden_serialization)
     multibyte_decision = runtime.coordinator.submit({"": "é" * (byte_limit // 2 + 1)})
     assert multibyte_decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    nul_decision = runtime.coordinator.submit({"": "\0" * (byte_limit // 2)})
+    assert nul_decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    quote_decision = runtime.coordinator.submit({"": '"' * (byte_limit * 3 // 4)})
+    assert quote_decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
     assert serialization_calls == 0
 
 

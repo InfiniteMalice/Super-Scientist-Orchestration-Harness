@@ -13,6 +13,7 @@ from super_scientist.application.harness_eval.extensions import (
     AppendGuidanceEvaluationCellHandler,
     AppendModelHarnessCellHandler,
     HarnessTraceProposalAdapter,
+    ModelHarnessResolutionSnapshot,
     RecordGuidanceEvaluationProtocolHandler,
     RecordHarnessExecutionTraceHandler,
     RecordModelHarnessAnalysisHandler,
@@ -224,6 +225,19 @@ class _Capabilities:
         return (
             tuple(item.chain for item in fixtures),
             matrix_evidence_index(self.matrix_protocol),
+        )
+
+    def resolve_model_harness_snapshot(
+        self,
+        protocol_id: str,
+    ) -> ModelHarnessResolutionSnapshot:
+        cells = self.list_model_harness_cells(protocol_id)
+        resolved = self.resolve_model_harness_evidence(protocol_id)
+        return ModelHarnessResolutionSnapshot(
+            protocol=self.get_model_harness_protocol(protocol_id),
+            cells=cells,
+            evidence_chains=None if resolved is None else resolved[0],
+            evidence_index=None if resolved is None else resolved[1],
         )
 
     def get_harness_execution_trace(self, trace_id: str) -> HarnessExecutionTrace | None:
@@ -490,6 +504,49 @@ def test_matrix_analysis_is_recomputed_from_current_complete_evidence() -> None:
     assert capabilities.projected == [analysis]
     assert stale.reasons[0].code is RejectionCode.STALE_REFERENCE
     assert mismatch.reasons[0].code is RejectionCode.DERIVATION_MISMATCH
+
+
+def test_matrix_analysis_handler_consumes_one_frozen_resolution_without_reloading() -> None:
+    protocol = matrix_protocol(governing_policy_hash=_policy().policy_hash)
+    cells = matrix_cells(protocol)
+    analysis = matrix_analysis(protocol, cells)
+    proposal = _proposal(
+        RecordModelHarnessAnalysis,
+        record_id="matrix-analysis-snapshot",
+        analysis=analysis,
+    )
+    resolved = _Capabilities(
+        matrix_protocol=protocol,
+        matrix_cells=cells,
+    ).resolve_model_harness_snapshot(protocol.protocol_id)
+    calls: list[str] = []
+
+    class SnapshotReads:
+        def resolve_model_harness_snapshot(
+            self,
+            protocol_id: str,
+        ) -> ModelHarnessResolutionSnapshot:
+            calls.append("resolution")
+            assert protocol_id == protocol.protocol_id
+            return resolved
+
+        def get_model_harness_analysis(self, protocol_id: str) -> None:
+            calls.append("analysis")
+            assert protocol_id == protocol.protocol_id
+            return None
+
+        def get_model_harness_protocol(self, protocol_id: str) -> ModelHarnessProtocol | None:
+            raise AssertionError(f"handler reloaded protocol {protocol_id}")
+
+        def list_model_harness_cells(self, protocol_id: str) -> tuple[ModelHarnessCell, ...]:
+            raise AssertionError(f"handler reloaded cells {protocol_id}")
+
+    handler = RecordModelHarnessAnalysisHandler()
+    context = handler.build_context(proposal, SnapshotReads())
+    decision = handler.decide(proposal, context)
+
+    assert decision.accepted is True
+    assert calls == ["resolution", "analysis"]
 
 
 def test_model_matrix_protocol_cells_bind_policy_budget_and_evidence() -> None:
@@ -934,12 +991,62 @@ def test_maximum_matrix_resolution_bulk_loads_each_evidence_repository_once(
         created_at=NOW,
     )
 
-    resolved = capabilities.resolve_model_harness_evidence(protocol.protocol_id)
+    resolved = capabilities.resolve_model_harness_snapshot(protocol.protocol_id)
 
-    assert resolved is not None
-    assert len(resolved[0]) == 256
+    assert resolved.evidence_chains is not None
+    assert len(resolved.evidence_chains) == 256
     assert projection_calls == 256
     assert calls == {"protocols": 1, "cells": 1, "traces": 1, "rewards": 1}
+
+
+def test_oversized_matrix_resolution_stops_before_trace_or_reward_reads() -> None:
+    protocol = matrix_protocol()
+    cells = matrix_cells(protocol)
+    oversized_cells = tuple(cells[index % len(cells)] for index in range(257))
+    calls = {"protocols": 0, "cells": 0, "traces": 0, "rewards": 0}
+
+    class Protocols:
+        def get(self, protocol_id: str) -> ModelHarnessProtocol | None:
+            calls["protocols"] += 1
+            return protocol if protocol_id == protocol.protocol_id else None
+
+    class Cells:
+        def list_for_protocol(self, protocol_id: str) -> tuple[ModelHarnessCell, ...]:
+            calls["cells"] += 1
+            assert protocol_id == protocol.protocol_id
+            return oversized_cells
+
+    class Traces:
+        def list_for_protocol(self, protocol_id: str) -> tuple[HarnessExecutionTrace, ...]:
+            calls["traces"] += 1
+            raise AssertionError(f"oversized cell set loaded traces for {protocol_id}")
+
+    class Rewards:
+        def list_for_traces(
+            self,
+            trace_ids: tuple[str, ...],
+        ) -> tuple[RewardValidityAssessment, ...]:
+            calls["rewards"] += 1
+            raise AssertionError(f"oversized cell set loaded rewards for {trace_ids!r}")
+
+    capabilities = ModelHarnessAnalysisCapabilities(
+        active_policy=_policy(),
+        proposal=object(),  # type: ignore[arg-type]
+        protocols=Protocols(),  # type: ignore[arg-type]
+        cells=Cells(),  # type: ignore[arg-type]
+        analyses=object(),  # type: ignore[arg-type]
+        traces=Traces(),  # type: ignore[arg-type]
+        rewards=Rewards(),  # type: ignore[arg-type]
+        created_at=NOW,
+    )
+
+    resolved = capabilities.resolve_model_harness_snapshot(protocol.protocol_id)
+
+    assert resolved.protocol == protocol
+    assert len(resolved.cells) == 257
+    assert resolved.evidence_chains is None
+    assert resolved.evidence_index is None
+    assert calls == {"protocols": 1, "cells": 1, "traces": 0, "rewards": 0}
 
 
 def test_duplicate_coordinate_diagnostics_project_each_candidate_once(
@@ -1030,5 +1137,6 @@ def test_duplicate_coordinate_diagnostics_project_each_candidate_once(
         created_at=NOW,
     )
 
-    assert capabilities.resolve_model_harness_evidence(protocol.protocol_id) is None
+    resolved = capabilities.resolve_model_harness_snapshot(protocol.protocol_id)
+    assert resolved.evidence_chains is None
     assert projection_calls <= 20

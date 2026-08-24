@@ -8,7 +8,10 @@ from typing import cast
 from pydantic import BaseModel
 from sqlalchemy import Connection
 
-from super_scientist.application.harness_eval.extensions import RewardAssessmentCapabilities
+from super_scientist.application.harness_eval.extensions import (
+    ModelHarnessResolutionSnapshot,
+    RewardAssessmentCapabilities,
+)
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.harness_eval.evidence_chains import (
     HarnessCellEvidenceChain,
@@ -22,6 +25,7 @@ from super_scientist.domain.harness_eval.guidance import (
     GuidanceEvaluationProtocol,
 )
 from super_scientist.domain.harness_eval.matrix import (
+    MAX_MODEL_HARNESS_GRID_CELLS,
     ModelHarnessAnalysis,
     ModelHarnessCell,
     ModelHarnessCoordinate,
@@ -534,17 +538,26 @@ class ModelHarnessAnalysisCapabilities:
     def get_model_harness_analysis(self, protocol_id: str) -> ModelHarnessAnalysis | None:
         return self.analyses.get(protocol_id)
 
-    def list_model_harness_cells(self, protocol_id: str) -> tuple[ModelHarnessCell, ...]:
-        return self.cells.list_for_protocol(protocol_id)
-
-    def resolve_model_harness_evidence(
+    def resolve_model_harness_snapshot(
         self,
         protocol_id: str,
-    ) -> tuple[tuple[HarnessCellEvidenceChain, ...], HarnessEvidenceSnapshotIndex] | None:
+    ) -> ModelHarnessResolutionSnapshot:
         protocol = self.protocols.get(protocol_id)
-        if protocol is None:
-            return None
         cells = self.cells.list_for_protocol(protocol_id)
+        if protocol is None:
+            return ModelHarnessResolutionSnapshot(
+                protocol=None,
+                cells=cells,
+                evidence_chains=None,
+                evidence_index=None,
+            )
+        if len(cells) > MAX_MODEL_HARNESS_GRID_CELLS:
+            return ModelHarnessResolutionSnapshot(
+                protocol=protocol,
+                cells=cells,
+                evidence_chains=None,
+                evidence_index=None,
+            )
         traces = self.traces.list_for_protocol(protocol_id)
         projected_index = _index_harness_evidence(
             protocol,
@@ -559,7 +572,12 @@ class ModelHarnessAnalysisCapabilities:
             for cell in cells
         )
         if not resolved or any(item is None for item in resolved):
-            return None
+            return ModelHarnessResolutionSnapshot(
+                protocol=protocol,
+                cells=cells,
+                evidence_chains=None,
+                evidence_index=None,
+            )
         complete = cast(
             tuple[tuple[HarnessCellEvidenceChain, HarnessEvidenceSnapshotRecord], ...],
             resolved,
@@ -571,8 +589,13 @@ class ModelHarnessAnalysisCapabilities:
         try:
             snapshot_index = HarnessEvidenceSnapshotIndex.build(records=snapshots)
         except (ArithmeticError, MemoryError, OverflowError, TypeError, ValueError):
-            return None
-        return chains, snapshot_index
+            snapshot_index = None
+        return ModelHarnessResolutionSnapshot(
+            protocol=protocol,
+            cells=cells,
+            evidence_chains=None if snapshot_index is None else chains,
+            evidence_index=snapshot_index,
+        )
 
     def append_authoritative(self, record: BaseModel) -> None:
         _require_exact_record(record, self.proposal.analysis, ModelHarnessAnalysis)
