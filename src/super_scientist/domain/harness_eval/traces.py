@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
+from datetime import datetime
 from decimal import Decimal
-from enum import StrEnum
-from typing import Annotated, Any, Literal, NoReturn, Self
+from enum import Enum, StrEnum
+from types import UnionType
+from typing import Annotated, Any, Literal, NoReturn, Self, Union, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import to_jsonable_python
@@ -1250,6 +1253,60 @@ def _raise_untrusted_harness_trace_error() -> NoReturn:
     raise ValueError(UNTRUSTED_HARNESS_TRACE_ERROR)
 
 
+def _normalize_json_trace_value(value: object, annotation: object) -> object:
+    """Convert only JSON representations that strict trace models explicitly permit."""
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        return _normalize_json_trace_value(value, get_args(annotation)[0])
+    if origin in (Union, UnionType):
+        options = get_args(annotation)
+        if value is None and type(None) in options:
+            return None
+        for option in options:
+            if option is not type(None):
+                normalized = _normalize_json_trace_value(value, option)
+                if normalized is not value or option in (str, int, float, bool):
+                    return normalized
+        return value
+    if annotation is Decimal:
+        return Decimal(value) if type(value) is str else value
+    if annotation is datetime:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")) if type(value) is str else value
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        return annotation(value) if type(value) is str else value
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        if type(value) is not dict:
+            return value
+        normalized = dict(value)
+        for field_name, field in annotation.model_fields.items():
+            if field_name in normalized:
+                normalized[field_name] = _normalize_json_trace_value(
+                    normalized[field_name], field.annotation
+                )
+        return normalized
+    if origin is tuple:
+        if type(value) is not list:
+            return value
+        arguments = get_args(annotation)
+        if len(arguments) == 2 and arguments[1] is Ellipsis:
+            return tuple(_normalize_json_trace_value(item, arguments[0]) for item in value)
+        return tuple(
+            _normalize_json_trace_value(item, arguments[index]) if index < len(arguments) else item
+            for index, item in enumerate(value)
+        )
+    if origin is list and type(value) is list:
+        arguments = get_args(annotation)
+        return [
+            _normalize_json_trace_value(item, arguments[0]) if arguments else item for item in value
+        ]
+    return value
+
+
+def _normalize_json_harness_execution_trace(payload: str | bytes) -> object:
+    """Decode bounded JSON into the exact Python shapes admitted by strict validation."""
+    return _normalize_json_trace_value(json.loads(payload), HarnessExecutionTrace)
+
+
 def parse_untrusted_harness_execution_trace(
     payload: str | bytes,
 ) -> HarnessExecutionTrace:
@@ -1268,8 +1325,17 @@ def parse_untrusted_harness_execution_trace(
             json_payload = payload
         else:
             raise TypeError("untrusted harness trace payload must be JSON text or bytes")
-        return HarnessExecutionTrace.model_validate_json(json_payload, strict=False)
-    except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
+        normalized_payload = _normalize_json_harness_execution_trace(json_payload)
+        return HarnessExecutionTrace.model_validate(normalized_payload, strict=True)
+    except (
+        ArithmeticError,
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ):
         pass
     _raise_untrusted_harness_trace_error()
 

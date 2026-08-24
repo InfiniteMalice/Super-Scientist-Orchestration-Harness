@@ -7,6 +7,7 @@ from decimal import ROUND_DOWN, ROUND_UP, Decimal, localcontext
 import pytest
 from pydantic import ValidationError
 
+from super_scientist.domain.harness_eval.bounds import PhaseAResourceUsage
 from super_scientist.domain.harness_eval.budget_bounds import PhaseAEvaluationBudget
 from super_scientist.domain.harness_eval.guidance import (
     EvaluationConfoundCode,
@@ -163,7 +164,7 @@ def test_guidance_strictly_revalidates_copied_released_budget_and_usage() -> Non
     copied_usage = _usage().model_copy(update={"tokens": 1 << 10_000})
     values = _metrics().model_dump(mode="python")
     values["resource_usage"] = copied_usage
-    with pytest.raises(ValidationError, match="resource usage integers exceed bound"):
+    with pytest.raises(ValidationError, match="canonical validated resource usage"):
         EvaluationMetricVector.model_validate(values)
 
 
@@ -177,6 +178,20 @@ def test_phase_a_budget_revalidation_sanitizes_copied_serializer_failure() -> No
         ) as raised:
             PhaseAEvaluationBudget.from_evaluation_budget(copied_budget)
     assert "budget-marker" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+def test_phase_a_resource_revalidation_sanitizes_copied_serializer_failure() -> None:
+    copied_usage = _usage().model_copy(update={"tokens": "resource-marker"})
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(
+            ValueError, match="resource usage requires canonical validated resource usage"
+        ) as raised:
+            PhaseAResourceUsage.from_resource_usage(copied_usage)
+    assert "resource-marker" not in str(raised.value)
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
 

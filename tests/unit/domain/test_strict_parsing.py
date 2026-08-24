@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -23,6 +24,30 @@ from super_scientist.kernel.transactions.models import (
 
 PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
 NOW = datetime(2026, 7, 13, 15, 0, tzinfo=UTC)
+
+
+def test_task_8_and_13_trace_boundary_contract_source_compiles() -> None:
+    plan = (
+        Path(__file__).parents[3]
+        / "docs"
+        / "superpowers"
+        / "plans"
+        / "2026-08-23-governed-cognitive-cohorts-procedure-compilation.md"
+    ).read_text(encoding="utf-8")
+    start_marker = "<!-- task-8-13-trace-contract:start -->"
+    end_marker = "<!-- task-8-13-trace-contract:end -->"
+    source = plan.split(start_marker, 1)[1].split(end_marker, 1)[0]
+
+    compile(source, "task-8-13-trace-contract", "exec")
+    assert source.count("class HarnessTraceRecordMetadata") == 1
+    assert source.count("class HarnessExecutionTraceEnvelope") == 1
+    assert source.count("class RecordHarnessExecutionTrace") == 1
+    assert "RecordHarnessExecutionTraceProposal" not in plan
+    assert "-> RecordHarnessExecutionTrace" in plan
+    assert "envelope=HarnessExecutionTraceEnvelope" in plan
+    assert "proposal.expectation" not in plan
+    assert "proposal.verification" not in plan
+    assert "proposal.diagnostic_coverage" not in plan
 
 
 def _actor() -> ActorIdentity:

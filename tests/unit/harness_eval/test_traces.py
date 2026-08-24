@@ -531,6 +531,34 @@ def test_safe_trace_parser_rejects_oversized_and_subclass_payloads_before_conver
         assert raised.value.__context__ is None
 
 
+def test_safe_trace_parser_rejects_quoted_strict_scalars_without_changing_hashes() -> None:
+    parser = getattr(harness_eval, "parse_untrusted_harness_execution_trace", None)
+    assert callable(parser)
+    trace = valid_trace()
+    mutations = (
+        ("resource_usage", "tokens", "20"),
+        ("resource_usage", "cost_usd", "0.2"),
+        ("generation_metadata", "token_count", "17"),
+        ("artifact_integrity", "value", "true"),
+    )
+
+    for parent_field, field_name, quoted_value in mutations:
+        payload = trace.model_dump(mode="json")
+        container = payload[parent_field]
+        assert isinstance(container, dict)
+        if parent_field == "generation_metadata":
+            token_count = container[field_name]
+            assert isinstance(token_count, dict)
+            token_count["value"] = quoted_value
+        else:
+            container[field_name] = quoted_value
+
+        with pytest.raises(ValueError, match="untrusted harness execution trace") as raised:
+            parser(json.dumps(payload))
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
+
 def test_trace_binding_consumes_exact_guidance_and_matrix_protocol_contracts() -> None:
     guidance = guidance_protocol()
     guidance_artifact = ObservableArtifactRef.build(

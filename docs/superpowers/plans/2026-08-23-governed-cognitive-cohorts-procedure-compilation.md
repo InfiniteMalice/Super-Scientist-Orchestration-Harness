@@ -848,6 +848,24 @@ class BindCompiledProgressPlan(ProposalBase):
     plan: ProgressPlan
 
 
+<!-- task-8-13-trace-contract:start -->
+class HarnessTraceRecordMetadata(BaseModel):
+    schema_version: Literal[1] = 1
+    received_at: UtcTimestamp
+    source_id: StableIdentifier
+
+
+class HarnessExecutionTraceEnvelope(BaseModel):
+    metadata: HarnessTraceRecordMetadata
+    trace: HarnessExecutionTrace
+
+
+class RecordHarnessExecutionTrace(ProposalBase):
+    proposal_type: Literal["record_harness_execution_trace"] = "record_harness_execution_trace"
+    envelope: HarnessExecutionTraceEnvelope
+<!-- task-8-13-trace-contract:end -->
+
+
 class RecordRewardAssessment(ProposalBase):
     proposal_type: Literal["record_reward_assessment"] = "record_reward_assessment"
     observation: RewardObservation
@@ -1450,7 +1468,7 @@ class AppendGuidanceEvaluationCellHandler:
 Protocol handlers require exact model/harness/verifier/task/budget identities. A dedicated
 `HarnessTraceProposalAdapter` is the only actor that receives raw bounded JSON text or exact bytes:
 it calls `parse_untrusted_harness_execution_trace()` and constructs a typed
-`RecordHarnessExecutionTraceProposal` before the handler runs. The handler consumes only that typed
+`RecordHarnessExecutionTrace` before the handler runs. The handler consumes only that typed
 proposal; direct `HarnessExecutionTrace.model_validate*()` calls are trusted/internal and must not
 parse request payloads. Analysis handlers recompute `analyze_model_harness()` and compare
 canonically. No handler creates or changes a `HarnessCampaign` decision.
@@ -1458,11 +1476,21 @@ canonically. No handler creates or changes a `HarnessCampaign` decision.
 ```python
 class HarnessTraceProposalAdapter:
     def from_untrusted_payload(
-        self, payload: str | bytes, metadata: RecordTraceMetadata
-    ) -> RecordHarnessExecutionTraceProposal:
-        return RecordHarnessExecutionTraceProposal(
-            trace=parse_untrusted_harness_execution_trace(payload),
-            metadata=metadata,
+        self,
+        payload: str | bytes,
+        metadata: HarnessTraceRecordMetadata,
+        proposal_id: StableIdentifier,
+        idempotency_key: StableIdentifier,
+        proposer: ActorIdentity,
+    ) -> RecordHarnessExecutionTrace:
+        return RecordHarnessExecutionTrace(
+            proposal_id=proposal_id,
+            idempotency_key=idempotency_key,
+            proposer=proposer,
+            envelope=HarnessExecutionTraceEnvelope(
+                metadata=metadata,
+                trace=parse_untrusted_harness_execution_trace(payload),
+            ),
         )
 ```
 
@@ -1477,23 +1505,32 @@ class RecordRewardAssessmentHandler:
             return rejected(proposal, RejectionCode.MISSING_ENTITY)
         if context.trace.reward_observation != proposal.observation:
             return rejected(proposal, RejectionCode.DERIVATION_MISMATCH)
-        freshness = trace_freshness(
-            proposal.expectation,
-            context.trace,
-            inventory=context.inventory,
+        assessment_receipt = reward_validity_receipt(proposal.assessment)
+        capabilities = context.resolve_reward_assessment_capabilities(
+            trace_receipt=EvidenceReceipt(
+                record_id=context.trace.trace_id,
+                schema_version=context.trace.schema_version,
+                content_hash=context.trace.content_hash,
+            ),
+            assessment_receipt=assessment_receipt,
         )
-        if freshness != proposal.freshness:
-            return rejected(proposal, RejectionCode.DERIVATION_MISMATCH)
+        if capabilities is None:
+            return rejected(proposal, RejectionCode.STALE_REFERENCE)
+        freshness = trace_freshness(
+            capabilities.expectation,
+            context.trace,
+            inventory=capabilities.inventory,
+        )
         expected = assess_reward_validity(
             proposal.observation,
             context.trace,
             proposal.findings,
-            expectation=proposal.expectation,
-            verification=proposal.verification,
-            diagnostic_coverage=proposal.diagnostic_coverage,
-            inventory=context.inventory,
+            expectation=capabilities.expectation,
+            verification=capabilities.verification,
+            diagnostic_coverage=capabilities.diagnostic_coverage,
+            inventory=capabilities.inventory,
         )
-        if expected != proposal.assessment:
+        if expected != proposal.assessment or expected.freshness != freshness:
             return rejected(proposal, RejectionCode.DERIVATION_MISMATCH)
         return reject_existing_or_accept(proposal, context.existing_assessment)
 ```

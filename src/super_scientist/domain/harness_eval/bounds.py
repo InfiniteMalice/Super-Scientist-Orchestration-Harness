@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
-from typing import Self
+from typing import NoReturn, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import to_jsonable_python
@@ -24,6 +24,11 @@ _PHASE_A_DECIMAL_CONTEXT = Context(
     Emin=-MAX_DECIMAL_ABS_EXPONENT,
     Emax=MAX_DECIMAL_ABS_EXPONENT,
 )
+
+
+def _raise_resource_usage_error() -> NoReturn:
+    """Raise only after unsafe DTO serialization or validation has unwound."""
+    raise ValueError("resource usage requires canonical validated resource usage")
 
 
 class _StrictFrozenModel(BaseModel):
@@ -126,8 +131,12 @@ class PhaseAResourceUsage(_StrictFrozenModel):
     @classmethod
     def from_resource_usage(cls, usage: ResourceUsage | Self) -> Self:
         if type(usage) not in (ResourceUsage, cls):
-            raise TypeError("resource usage requires the exact released or Phase A DTO")
-        return cls.model_validate(usage.model_dump(mode="python", warnings=False), strict=True)
+            _raise_resource_usage_error()
+        try:
+            return cls.model_validate(usage.model_dump(mode="python", warnings=False), strict=True)
+        except (AttributeError, TypeError, ValueError):
+            pass
+        _raise_resource_usage_error()
 
     @model_validator(mode="after")
     def require_bounded_outer_record(self) -> Self:

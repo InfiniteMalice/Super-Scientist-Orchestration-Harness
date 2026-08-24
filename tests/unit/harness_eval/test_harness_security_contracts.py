@@ -294,7 +294,7 @@ def test_trace_rejects_1001_bit_embedded_resource_usage_integers() -> None:
         human_interventions=0,
     )
 
-    with pytest.raises(ValidationError, match="1000-bit"):
+    with pytest.raises(ValueError, match="canonical validated resource usage"):
         HarnessExecutionTrace.build(**values)
 
     with pytest.raises(ValidationError):
