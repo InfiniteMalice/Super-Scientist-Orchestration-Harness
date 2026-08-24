@@ -763,7 +763,13 @@ class AppendTopologyEvent(GovernedProposalBase):
 
 class RecordCollaborationTermination(GovernedProposalBase):
     proposal_type: Literal["record_collaboration_termination"] = "record_collaboration_termination"
+    session_id: BoundedGovernedProposalIdentifier
     termination: CollaborationTermination
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def require_exact_raw_session_id(cls, value: object) -> str:
+        return _fresh_governed_identifier(value)
 
 
 class RecordProcedureCompilation(GovernedProposalBase):
@@ -773,7 +779,13 @@ class RecordProcedureCompilation(GovernedProposalBase):
 
 class RecordMethodDirectionOutcome(GovernedProposalBase):
     proposal_type: Literal["record_method_direction_outcome"] = "record_method_direction_outcome"
+    compilation_id: BoundedGovernedProposalIdentifier
     outcome: MethodDirectionOutcome
+
+    @field_validator("compilation_id", mode="before")
+    @classmethod
+    def require_exact_raw_compilation_id(cls, value: object) -> str:
+        return _fresh_governed_identifier(value)
 
 
 class BindCompiledProgressPlan(GovernedProposalBase):

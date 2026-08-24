@@ -456,10 +456,15 @@ def _governed_proposal_examples(
         proposal("AppendTopologyEvent", event=topology_event),
         proposal(
             "RecordCollaborationTermination",
+            session_id=session.session_id,
             termination=evaluate_termination(collaboration_state),
         ),
         proposal("RecordProcedureCompilation", compilation=compilation),
-        proposal("RecordMethodDirectionOutcome", outcome=direction_outcome),
+        proposal(
+            "RecordMethodDirectionOutcome",
+            compilation_id=compilation_record.compilation_id,
+            outcome=direction_outcome,
+        ),
         proposal(
             "BindCompiledProgressPlan",
             compilation_receipt=compilation_receipt,
@@ -585,6 +590,28 @@ def test_task_8_all_governed_proposals_round_trip_through_fixed_parser(
     for proposal in proposals:
         parsed = namespace["parse_untrusted_proposal_json"](proposal.model_dump_json())
         assert parsed == proposal
+
+
+def test_task_8_relationship_proposals_bind_exact_bounded_parent_identifiers(
+    task_8_namespace: dict[str, object],
+) -> None:
+    namespace = task_8_namespace
+    by_name = {
+        type(proposal).__name__: proposal for proposal in _governed_proposal_examples(namespace)
+    }
+    expected = {
+        "RecordCollaborationTermination": ("session_id", "session-a"),
+        "RecordMethodDirectionOutcome": ("compilation_id", "round-trip-compilation"),
+    }
+
+    for class_name, (field_name, expected_value) in expected.items():
+        proposal = by_name[class_name]
+        assert getattr(proposal, field_name) == expected_value
+        payload = proposal.model_dump(mode="python")
+        for invalid in ("", "contains/slash", "contains space", "x" * 201):
+            payload[field_name] = invalid
+            with pytest.raises(ValidationError):
+                namespace[class_name].model_validate(payload, strict=True)
 
 
 def test_task_8_runtime_registers_every_governed_proposal_in_closed_parser() -> None:

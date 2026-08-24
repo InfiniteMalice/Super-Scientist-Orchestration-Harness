@@ -11,6 +11,8 @@ down_revision: str | None = "0006_handbook_and_harness_evaluation"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+MAX_IDENTIFIER_LENGTH = 200
+
 AUTHORITATIVE_TABLES = (
     "capability_profiles",
     "cohort_plans",
@@ -50,7 +52,23 @@ RELATIONSHIP_INDEXES = {
 
 def _hash_constraint(column_name: str, table_name: str) -> sa.CheckConstraint:
     return sa.CheckConstraint(
-        f"length({column_name}) = 64 AND {column_name} NOT GLOB '*[^0-9a-f]*'",
+        f"typeof({column_name}) = 'text' "
+        f"AND length({column_name}) = 64 "
+        f"AND length(CAST({column_name} AS BLOB)) = 64 "
+        f"AND instr({column_name}, char(0)) = 0 "
+        f"AND {column_name} NOT GLOB '*[^0-9a-f]*'",
+        name=f"ck_{table_name}_{column_name}",
+    )
+
+
+def _identifier_constraint(column_name: str, table_name: str) -> sa.CheckConstraint:
+    return sa.CheckConstraint(
+        f"typeof({column_name}) = 'text' "
+        f"AND length({column_name}) BETWEEN 1 AND {MAX_IDENTIFIER_LENGTH} "
+        f"AND length(CAST({column_name} AS BLOB)) = length({column_name}) "
+        f"AND instr({column_name}, char(0)) = 0 "
+        f"AND substr({column_name}, 1, 1) GLOB '[A-Za-z0-9]' "
+        f"AND {column_name} NOT GLOB '*[^A-Za-z0-9_.:-]*'",
         name=f"ck_{table_name}_{column_name}",
     )
 
@@ -66,29 +84,38 @@ def _create_record_table(
         id_column,
         *relationship_columns,
         sa.Column("schema_version", sa.Integer(), nullable=False),
-        sa.Column("payload_json", sa.Text(), nullable=False),
+        sa.Column("record_json", sa.Text(), nullable=False),
         sa.Column("content_hash", sa.String(length=64), nullable=False),
         sa.Column(
             "transaction_id",
-            sa.String(length=128),
-            sa.ForeignKey("transactions.proposal_id"),
+            sa.String(length=MAX_IDENTIFIER_LENGTH),
+            sa.ForeignKey(
+                "transactions.proposal_id",
+                deferrable=True,
+                initially="DEFERRED",
+            ),
             nullable=False,
         ),
         sa.Column(
             "governing_policy_hash",
             sa.String(length=64),
-            sa.ForeignKey("governance_policies.policy_hash"),
+            sa.ForeignKey(
+                "governance_policies.policy_hash",
+                deferrable=True,
+                initially="DEFERRED",
+            ),
             nullable=False,
         ),
         sa.Column("created_at", sa.String(length=40), nullable=False),
         *table_constraints,
-        sa.CheckConstraint("schema_version = 1", name=f"ck_{name}_schema_version"),
-        sa.CheckConstraint("length(payload_json) > 0", name=f"ck_{name}_payload_json"),
-        _hash_constraint("content_hash", name),
-        sa.CheckConstraint(
-            "length(transaction_id) > 0",
-            name=f"ck_{name}_transaction_id",
+        *(
+            _identifier_constraint(str(column.name), name)
+            for column in (id_column, *relationship_columns)
         ),
+        _identifier_constraint("transaction_id", name),
+        sa.CheckConstraint("schema_version = 1", name=f"ck_{name}_schema_version"),
+        sa.CheckConstraint("length(record_json) > 0", name=f"ck_{name}_record_json"),
+        _hash_constraint("content_hash", name),
         _hash_constraint("governing_policy_hash", name),
         sa.CheckConstraint("length(created_at) > 0", name=f"ck_{name}_created_at"),
     )
@@ -115,20 +142,24 @@ def _create_append_only_triggers(table_name: str) -> None:
 def upgrade() -> None:
     _create_record_table(
         "capability_profiles",
-        sa.Column("profile_id", sa.String(length=160), primary_key=True),
+        sa.Column("profile_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
     )
     _create_record_table(
         "cohort_plans",
-        sa.Column("cohort_plan_id", sa.String(length=160), primary_key=True),
-        (sa.Column("request_id", sa.String(length=160), nullable=False),),
+        sa.Column("cohort_plan_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
+        (sa.Column("request_id", sa.String(length=MAX_IDENTIFIER_LENGTH), nullable=False),),
     )
     _create_record_table(
         "diversity_assessments",
-        sa.Column("diversity_assessment_id", sa.String(length=160), primary_key=True),
+        sa.Column(
+            "diversity_assessment_id",
+            sa.String(length=MAX_IDENTIFIER_LENGTH),
+            primary_key=True,
+        ),
         (
             sa.Column(
                 "cohort_plan_id",
-                sa.String(length=160),
+                sa.String(length=MAX_IDENTIFIER_LENGTH),
                 sa.ForeignKey("cohort_plans.cohort_plan_id"),
                 nullable=False,
             ),
@@ -136,11 +167,11 @@ def upgrade() -> None:
     )
     _create_record_table(
         "collaboration_sessions",
-        sa.Column("session_id", sa.String(length=160), primary_key=True),
+        sa.Column("session_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
         (
             sa.Column(
                 "cohort_plan_id",
-                sa.String(length=160),
+                sa.String(length=MAX_IDENTIFIER_LENGTH),
                 sa.ForeignKey("cohort_plans.cohort_plan_id"),
                 nullable=False,
             ),
@@ -148,11 +179,11 @@ def upgrade() -> None:
     )
     _create_record_table(
         "peer_requests",
-        sa.Column("request_id", sa.String(length=160), primary_key=True),
+        sa.Column("request_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
         (
             sa.Column(
                 "session_id",
-                sa.String(length=160),
+                sa.String(length=MAX_IDENTIFIER_LENGTH),
                 sa.ForeignKey("collaboration_sessions.session_id"),
                 nullable=False,
             ),
@@ -167,10 +198,10 @@ def upgrade() -> None:
     )
     _create_record_table(
         "peer_contributions",
-        sa.Column("contribution_id", sa.String(length=160), primary_key=True),
+        sa.Column("contribution_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
         (
-            sa.Column("session_id", sa.String(length=160), nullable=False),
-            sa.Column("request_id", sa.String(length=160), nullable=False),
+            sa.Column("session_id", sa.String(length=MAX_IDENTIFIER_LENGTH), nullable=False),
+            sa.Column("request_id", sa.String(length=MAX_IDENTIFIER_LENGTH), nullable=False),
         ),
         (
             sa.ForeignKeyConstraint(
@@ -181,11 +212,11 @@ def upgrade() -> None:
     )
     _create_record_table(
         "topology_events",
-        sa.Column("event_id", sa.String(length=160), primary_key=True),
+        sa.Column("event_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
         (
             sa.Column(
                 "session_id",
-                sa.String(length=160),
+                sa.String(length=MAX_IDENTIFIER_LENGTH),
                 sa.ForeignKey("collaboration_sessions.session_id"),
                 nullable=False,
             ),
@@ -195,22 +226,22 @@ def upgrade() -> None:
         "collaboration_terminations",
         sa.Column(
             "session_id",
-            sa.String(length=160),
+            sa.String(length=MAX_IDENTIFIER_LENGTH),
             sa.ForeignKey("collaboration_sessions.session_id"),
             primary_key=True,
         ),
     )
     _create_record_table(
         "procedure_compilations",
-        sa.Column("compilation_id", sa.String(length=160), primary_key=True),
+        sa.Column("compilation_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
     )
     _create_record_table(
         "method_direction_outcomes",
-        sa.Column("outcome_id", sa.String(length=160), primary_key=True),
+        sa.Column("outcome_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
         (
             sa.Column(
                 "compilation_id",
-                sa.String(length=160),
+                sa.String(length=MAX_IDENTIFIER_LENGTH),
                 sa.ForeignKey("procedure_compilations.compilation_id"),
                 nullable=False,
             ),
@@ -218,11 +249,11 @@ def upgrade() -> None:
     )
     _create_record_table(
         "compiled_progress_plan_bindings",
-        sa.Column("binding_id", sa.String(length=160), primary_key=True),
+        sa.Column("binding_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
         (
             sa.Column(
                 "compilation_id",
-                sa.String(length=160),
+                sa.String(length=MAX_IDENTIFIER_LENGTH),
                 sa.ForeignKey("procedure_compilations.compilation_id"),
                 nullable=False,
             ),
@@ -230,15 +261,15 @@ def upgrade() -> None:
     )
     _create_record_table(
         "guidance_protocols",
-        sa.Column("protocol_id", sa.String(length=160), primary_key=True),
+        sa.Column("protocol_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
     )
     _create_record_table(
         "guidance_cells",
-        sa.Column("cell_id", sa.String(length=160), primary_key=True),
+        sa.Column("cell_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
         (
             sa.Column(
                 "protocol_id",
-                sa.String(length=160),
+                sa.String(length=MAX_IDENTIFIER_LENGTH),
                 sa.ForeignKey("guidance_protocols.protocol_id"),
                 nullable=False,
             ),
@@ -246,15 +277,15 @@ def upgrade() -> None:
     )
     _create_record_table(
         "model_harness_protocols",
-        sa.Column("protocol_id", sa.String(length=160), primary_key=True),
+        sa.Column("protocol_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
     )
     _create_record_table(
         "model_harness_cells",
-        sa.Column("cell_id", sa.String(length=160), primary_key=True),
+        sa.Column("cell_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
         (
             sa.Column(
                 "protocol_id",
-                sa.String(length=160),
+                sa.String(length=MAX_IDENTIFIER_LENGTH),
                 sa.ForeignKey("model_harness_protocols.protocol_id"),
                 nullable=False,
             ),
@@ -264,27 +295,27 @@ def upgrade() -> None:
         "model_harness_analyses",
         sa.Column(
             "protocol_id",
-            sa.String(length=160),
+            sa.String(length=MAX_IDENTIFIER_LENGTH),
             sa.ForeignKey("model_harness_protocols.protocol_id"),
             primary_key=True,
         ),
     )
     _create_record_table(
         "harness_execution_traces",
-        sa.Column("trace_id", sa.String(length=160), primary_key=True),
-        (sa.Column("protocol_id", sa.String(length=160), nullable=False),),
+        sa.Column("trace_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
+        (sa.Column("protocol_id", sa.String(length=MAX_IDENTIFIER_LENGTH), nullable=False),),
     )
     _create_record_table(
         "reward_assessments",
-        sa.Column("assessment_id", sa.String(length=160), primary_key=True),
+        sa.Column("assessment_id", sa.String(length=MAX_IDENTIFIER_LENGTH), primary_key=True),
         (
             sa.Column(
                 "trace_id",
-                sa.String(length=160),
+                sa.String(length=MAX_IDENTIFIER_LENGTH),
                 sa.ForeignKey("harness_execution_traces.trace_id"),
                 nullable=False,
             ),
-            sa.Column("observation_id", sa.String(length=160), nullable=False),
+            sa.Column("observation_id", sa.String(length=MAX_IDENTIFIER_LENGTH), nullable=False),
         ),
     )
 

@@ -1842,42 +1842,76 @@ def _governed_record_table(
     relationship_columns: tuple[Column[str], ...] = (),
     table_constraints: tuple[Constraint, ...] = (),
 ) -> Table:
+    identifier_columns = (id_column, *relationship_columns)
     return Table(
         name,
         metadata,
         id_column,
         *relationship_columns,
         Column("schema_version", Integer, nullable=False),
-        Column("payload_json", Text, nullable=False),
+        Column("record_json", Text, nullable=False),
         Column("content_hash", String(64), nullable=False),
         Column(
             "transaction_id",
-            String(128),
-            ForeignKey("transactions.proposal_id"),
+            String(200),
+            ForeignKey(
+                "transactions.proposal_id",
+                deferrable=True,
+                initially="DEFERRED",
+            ),
             nullable=False,
             index=True,
         ),
         Column(
             "governing_policy_hash",
             String(64),
-            ForeignKey("governance_policies.policy_hash"),
+            ForeignKey(
+                "governance_policies.policy_hash",
+                deferrable=True,
+                initially="DEFERRED",
+            ),
             nullable=False,
             index=True,
         ),
         Column("created_at", String(40), nullable=False),
         *table_constraints,
-        CheckConstraint("schema_version = 1", name=f"ck_{name}_schema_version"),
-        CheckConstraint("length(payload_json) > 0", name=f"ck_{name}_payload_json"),
+        *(
+            CheckConstraint(
+                f"typeof({column.name}) = 'text' "
+                f"AND length({column.name}) BETWEEN 1 AND 200 "
+                f"AND length(CAST({column.name} AS BLOB)) = length({column.name}) "
+                f"AND instr({column.name}, char(0)) = 0 "
+                f"AND substr({column.name}, 1, 1) GLOB '[A-Za-z0-9]' "
+                f"AND {column.name} NOT GLOB '*[^A-Za-z0-9_.:-]*'",
+                name=f"ck_{name}_{column.name}",
+            )
+            for column in identifier_columns
+        ),
         CheckConstraint(
-            "length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'",
+            "typeof(transaction_id) = 'text' "
+            "AND length(transaction_id) BETWEEN 1 AND 200 "
+            "AND length(CAST(transaction_id AS BLOB)) = length(transaction_id) "
+            "AND instr(transaction_id, char(0)) = 0 "
+            "AND substr(transaction_id, 1, 1) GLOB '[A-Za-z0-9]' "
+            "AND transaction_id NOT GLOB '*[^A-Za-z0-9_.:-]*'",
+            name=f"ck_{name}_transaction_id",
+        ),
+        CheckConstraint("schema_version = 1", name=f"ck_{name}_schema_version"),
+        CheckConstraint("length(record_json) > 0", name=f"ck_{name}_record_json"),
+        CheckConstraint(
+            "typeof(content_hash) = 'text' "
+            "AND length(content_hash) = 64 "
+            "AND length(CAST(content_hash AS BLOB)) = 64 "
+            "AND instr(content_hash, char(0)) = 0 "
+            "AND content_hash NOT GLOB '*[^0-9a-f]*'",
             name=f"ck_{name}_content_hash",
         ),
         CheckConstraint(
-            "length(transaction_id) > 0",
-            name=f"ck_{name}_transaction_id",
-        ),
-        CheckConstraint(
-            "length(governing_policy_hash) = 64 AND governing_policy_hash NOT GLOB '*[^0-9a-f]*'",
+            "typeof(governing_policy_hash) = 'text' "
+            "AND length(governing_policy_hash) = 64 "
+            "AND length(CAST(governing_policy_hash AS BLOB)) = 64 "
+            "AND instr(governing_policy_hash, char(0)) = 0 "
+            "AND governing_policy_hash NOT GLOB '*[^0-9a-f]*'",
             name=f"ck_{name}_governing_policy_hash",
         ),
         CheckConstraint("length(created_at) > 0", name=f"ck_{name}_created_at"),
@@ -1886,20 +1920,20 @@ def _governed_record_table(
 
 capability_profiles = _governed_record_table(
     "capability_profiles",
-    Column("profile_id", String(160), primary_key=True),
+    Column("profile_id", String(200), primary_key=True),
 )
 cohort_plans = _governed_record_table(
     "cohort_plans",
-    Column("cohort_plan_id", String(160), primary_key=True),
-    (Column("request_id", String(160), nullable=False, index=True),),
+    Column("cohort_plan_id", String(200), primary_key=True),
+    (Column("request_id", String(200), nullable=False, index=True),),
 )
 diversity_assessments = _governed_record_table(
     "diversity_assessments",
-    Column("diversity_assessment_id", String(160), primary_key=True),
+    Column("diversity_assessment_id", String(200), primary_key=True),
     (
         Column(
             "cohort_plan_id",
-            String(160),
+            String(200),
             ForeignKey("cohort_plans.cohort_plan_id"),
             nullable=False,
             index=True,
@@ -1908,11 +1942,11 @@ diversity_assessments = _governed_record_table(
 )
 collaboration_sessions = _governed_record_table(
     "collaboration_sessions",
-    Column("session_id", String(160), primary_key=True),
+    Column("session_id", String(200), primary_key=True),
     (
         Column(
             "cohort_plan_id",
-            String(160),
+            String(200),
             ForeignKey("cohort_plans.cohort_plan_id"),
             nullable=False,
             index=True,
@@ -1921,11 +1955,11 @@ collaboration_sessions = _governed_record_table(
 )
 peer_requests = _governed_record_table(
     "peer_requests",
-    Column("request_id", String(160), primary_key=True),
+    Column("request_id", String(200), primary_key=True),
     (
         Column(
             "session_id",
-            String(160),
+            String(200),
             ForeignKey("collaboration_sessions.session_id"),
             nullable=False,
             index=True,
@@ -1941,10 +1975,10 @@ peer_requests = _governed_record_table(
 )
 peer_contributions = _governed_record_table(
     "peer_contributions",
-    Column("contribution_id", String(160), primary_key=True),
+    Column("contribution_id", String(200), primary_key=True),
     (
-        Column("session_id", String(160), nullable=False, index=True),
-        Column("request_id", String(160), nullable=False, index=True),
+        Column("session_id", String(200), nullable=False, index=True),
+        Column("request_id", String(200), nullable=False, index=True),
     ),
     (
         ForeignKeyConstraint(
@@ -1955,11 +1989,11 @@ peer_contributions = _governed_record_table(
 )
 topology_events = _governed_record_table(
     "topology_events",
-    Column("event_id", String(160), primary_key=True),
+    Column("event_id", String(200), primary_key=True),
     (
         Column(
             "session_id",
-            String(160),
+            String(200),
             ForeignKey("collaboration_sessions.session_id"),
             nullable=False,
             index=True,
@@ -1970,22 +2004,22 @@ collaboration_terminations = _governed_record_table(
     "collaboration_terminations",
     Column(
         "session_id",
-        String(160),
+        String(200),
         ForeignKey("collaboration_sessions.session_id"),
         primary_key=True,
     ),
 )
 procedure_compilations = _governed_record_table(
     "procedure_compilations",
-    Column("compilation_id", String(160), primary_key=True),
+    Column("compilation_id", String(200), primary_key=True),
 )
 method_direction_outcomes = _governed_record_table(
     "method_direction_outcomes",
-    Column("outcome_id", String(160), primary_key=True),
+    Column("outcome_id", String(200), primary_key=True),
     (
         Column(
             "compilation_id",
-            String(160),
+            String(200),
             ForeignKey("procedure_compilations.compilation_id"),
             nullable=False,
             index=True,
@@ -1994,11 +2028,11 @@ method_direction_outcomes = _governed_record_table(
 )
 compiled_progress_plan_bindings = _governed_record_table(
     "compiled_progress_plan_bindings",
-    Column("binding_id", String(160), primary_key=True),
+    Column("binding_id", String(200), primary_key=True),
     (
         Column(
             "compilation_id",
-            String(160),
+            String(200),
             ForeignKey("procedure_compilations.compilation_id"),
             nullable=False,
             index=True,
@@ -2007,15 +2041,15 @@ compiled_progress_plan_bindings = _governed_record_table(
 )
 guidance_protocols = _governed_record_table(
     "guidance_protocols",
-    Column("protocol_id", String(160), primary_key=True),
+    Column("protocol_id", String(200), primary_key=True),
 )
 guidance_cells = _governed_record_table(
     "guidance_cells",
-    Column("cell_id", String(160), primary_key=True),
+    Column("cell_id", String(200), primary_key=True),
     (
         Column(
             "protocol_id",
-            String(160),
+            String(200),
             ForeignKey("guidance_protocols.protocol_id"),
             nullable=False,
             index=True,
@@ -2024,15 +2058,15 @@ guidance_cells = _governed_record_table(
 )
 model_harness_protocols = _governed_record_table(
     "model_harness_protocols",
-    Column("protocol_id", String(160), primary_key=True),
+    Column("protocol_id", String(200), primary_key=True),
 )
 model_harness_cells = _governed_record_table(
     "model_harness_cells",
-    Column("cell_id", String(160), primary_key=True),
+    Column("cell_id", String(200), primary_key=True),
     (
         Column(
             "protocol_id",
-            String(160),
+            String(200),
             ForeignKey("model_harness_protocols.protocol_id"),
             nullable=False,
             index=True,
@@ -2043,27 +2077,27 @@ model_harness_analyses = _governed_record_table(
     "model_harness_analyses",
     Column(
         "protocol_id",
-        String(160),
+        String(200),
         ForeignKey("model_harness_protocols.protocol_id"),
         primary_key=True,
     ),
 )
 harness_execution_traces = _governed_record_table(
     "harness_execution_traces",
-    Column("trace_id", String(160), primary_key=True),
-    (Column("protocol_id", String(160), nullable=False, index=True),),
+    Column("trace_id", String(200), primary_key=True),
+    (Column("protocol_id", String(200), nullable=False, index=True),),
 )
 reward_assessments = _governed_record_table(
     "reward_assessments",
-    Column("assessment_id", String(160), primary_key=True),
+    Column("assessment_id", String(200), primary_key=True),
     (
         Column(
             "trace_id",
-            String(160),
+            String(200),
             ForeignKey("harness_execution_traces.trace_id"),
             nullable=False,
             index=True,
         ),
-        Column("observation_id", String(160), nullable=False, index=True),
+        Column("observation_id", String(200), nullable=False, index=True),
     ),
 )

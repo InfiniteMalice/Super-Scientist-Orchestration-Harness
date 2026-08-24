@@ -1043,7 +1043,13 @@ class RecordCollaborationTermination(GovernedProposalBase):
     proposal_type: Literal["record_collaboration_termination"] = (
         "record_collaboration_termination"
     )
+    session_id: BoundedGovernedProposalIdentifier
     termination: CollaborationTermination
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def require_exact_raw_session_id(cls, value: object) -> str:
+        return _fresh_governed_identifier(value)
 
 
 class RecordProcedureCompilation(GovernedProposalBase):
@@ -1055,7 +1061,13 @@ class RecordMethodDirectionOutcome(GovernedProposalBase):
     proposal_type: Literal["record_method_direction_outcome"] = (
         "record_method_direction_outcome"
     )
+    compilation_id: BoundedGovernedProposalIdentifier
     outcome: MethodDirectionOutcome
+
+    @field_validator("compilation_id", mode="before")
+    @classmethod
+    def require_exact_raw_compilation_id(cls, value: object) -> str:
+        return _fresh_governed_identifier(value)
 
 
 class BindCompiledProgressPlan(GovernedProposalBase):
@@ -1835,27 +1847,65 @@ Expected: FAIL because revision 0007 and the table metadata do not exist.
 ```python
 def _create_record_table(
     name: str,
-    id_column: str,
+    id_column: sa.Column[object],
     relationship_columns: Sequence[sa.Column[object]],
 ) -> None:
     op.create_table(
         name,
-        sa.Column(id_column, sa.String(), primary_key=True),
+        id_column,
         *relationship_columns,
         sa.Column("schema_version", sa.Integer(), nullable=False),
-        sa.Column("payload_json", sa.Text(), nullable=False),
+        sa.Column("record_json", sa.Text(), nullable=False),
         sa.Column("content_hash", sa.String(64), nullable=False),
-        sa.Column("transaction_id", sa.String(), nullable=False),
-        sa.Column("governing_policy_hash", sa.String(64), nullable=False),
+        sa.Column(
+            "transaction_id",
+            sa.String(200),
+            sa.ForeignKey(
+                "transactions.proposal_id",
+                deferrable=True,
+                initially="DEFERRED",
+            ),
+            nullable=False,
+        ),
+        sa.Column(
+            "governing_policy_hash",
+            sa.String(64),
+            sa.ForeignKey(
+                "governance_policies.policy_hash",
+                deferrable=True,
+                initially="DEFERRED",
+            ),
+            nullable=False,
+        ),
         sa.Column("created_at", sa.String(), nullable=False),
+        *(
+            _identifier_constraint(str(column.name), name)
+            for column in (id_column, *relationship_columns)
+        ),
+        _identifier_constraint("transaction_id", name),
         sa.CheckConstraint("schema_version = 1"),
-        sa.CheckConstraint("length(content_hash) = 64"),
-        sa.CheckConstraint("length(governing_policy_hash) = 64"),
+        _hash_constraint("content_hash", name),
+        _hash_constraint("governing_policy_hash", name),
     )
     _create_append_only_triggers(name)
 ```
 
-Give each table a domain ID primary key and indexed parent IDs: session ID for collaboration children, compilation ID for outcomes/bindings, protocol ID for cells/analyses, and trace/observation IDs for reward records. The downgrade drops only 0007 triggers, indexes, and tables in reverse dependency order.
+Give each table a domain ID primary key and indexed parent IDs: session ID for
+collaboration children, compilation ID for outcomes/bindings, protocol ID for
+cells/analyses, and trace/observation IDs for reward records. In particular,
+`RecordCollaborationTermination.session_id` and
+`RecordMethodDirectionOutcome.compilation_id` are the authoritative proposal fields
+for their relationship columns.
+
+`_identifier_constraint()` requires SQLite TEXT storage, 1-200 ASCII characters,
+no NUL, an ASCII alphanumeric first character, and the remaining domain identifier
+alphabet `A-Za-z0-9_.:-`. The colon is required by canonical derived cohort and
+diversity identifiers. `_hash_constraint()` requires
+SQLite TEXT storage, exactly 64 characters and 64 bytes, no NUL, and lowercase hex.
+Both provenance foreign keys are `DEFERRABLE INITIALLY DEFERRED`, so the coordinator
+may persist the child before its accepted transaction and policy rows within one
+database transaction; unresolved parents still fail at commit. The downgrade drops
+only 0007 triggers, indexes, and tables in reverse dependency order.
 
 - [ ] **Step 4: Prove append-only behavior and exact migration chain**
 
@@ -1895,16 +1945,30 @@ git commit -m "feat: add cognitive procedure storage schema"
 - [ ] **Step 1: Write strict decode, relationship, and idempotent-read tests**
 
 ```python
-def test_capability_profile_repository_rejects_payload_id_mismatch(runtime) -> None:
-    runtime.insert_raw_capability_row(primary_key="profile-a", payload=profile("profile-b"))
+def test_capability_profile_repository_rejects_record_id_mismatch(runtime) -> None:
+    runtime.insert_raw_capability_row(primary_key="profile-a", record=profile("profile-b"))
     with pytest.raises(StorageIntegrityError, match="stored derived column mismatch"):
         CapabilityProfileRepository(runtime.connection).get("profile-a")
 
 
 def test_guidance_cells_are_returned_in_canonical_identity_order(runtime) -> None:
     repository = GuidanceCellRepository(runtime.connection)
-    repository.add(cell("cell-b"), transaction_id="tx-b")
-    repository.add(cell("cell-a"), transaction_id="tx-a")
+    second = cell("cell-b")
+    first = cell("cell-a")
+    repository.add(
+        second.cell_id,
+        second,
+        created_at=runtime.created_at,
+        transaction_id="tx-b",
+        governing_policy_hash="b" * 64,
+    )
+    repository.add(
+        first.cell_id,
+        first,
+        created_at=runtime.created_at,
+        transaction_id="tx-a",
+        governing_policy_hash="b" * 64,
+    )
     assert tuple(item.cell_id for item in repository.list_for_protocol("protocol-1")) == (
         "cell-a", "cell-b"
     )
@@ -1925,24 +1989,40 @@ Expected: FAIL because the repository modules do not exist.
 - [ ] **Step 3: Add focused model-bound repositories**
 
 ```python
-class CapabilityProfileRepository(AppendOnlyRecordRepository[CapabilityProfile]):
+class CapabilityProfileRepository(
+    GovernedAppendOnlyRecordRepository[CapabilityProfile]
+):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
             table=capability_profiles,
             model_type=CapabilityProfile,
-            record_id_column="profile_id",
-            model_id_field="profile_id",
-            derived_fields=("actor_id", "governing_policy_hash"),
+            identifier_field="profile_id",
         )
 
 
-class PeerContributionRepository(AppendOnlyRecordRepository[PeerContribution]):
+class PeerContributionRepository(
+    GovernedAppendOnlyRecordRepository[PeerContribution]
+):
     def list_for_session(self, session_id: str) -> tuple[PeerContribution, ...]:
         return self._list_by_relationship("session_id", session_id)
 ```
 
-Do not create a generic repository locator or dynamic model registry. Export explicit repository classes and explicit snapshot fields. Each `add()` receives the coordinator transaction ID and uses the domain record's timestamp/policy hash.
+Do not create a generic repository locator or dynamic model registry. Export explicit
+repository classes and explicit snapshot fields. Each `add()` requires the record ID,
+record, coordinator-created timestamp, accepted transaction ID, and active governing
+policy hash as explicit inputs.
+
+Task 10 defines one fixed `GovernedAppendOnlyRecordRepository` extension in
+`cognitive_records.py`. The extension subclasses `AppendOnlyRecordRepository` and
+reuses its canonical `record_json` encoding, strict decoding, identifier comparison,
+relationship comparison, and canonical ordering. The extension overrides `add()` so
+the caller must supply `transaction_id` and `governing_policy_hash`; the extension
+inserts those provenance values plus `schema_version` in the same row as the base
+repository's canonical fields. The extension must not call the base `add()` directly,
+because the Task 9 provenance columns are non-nullable. Evaluation repositories import
+that fixed extension. Task 10 repository tests cover all 18 table round trips and prove
+that row provenance equals the accepted proposal and active policy.
 
 Add these focused read contracts in `procedure_sources.py`:
 
