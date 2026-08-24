@@ -5,7 +5,14 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from super_scientist.domain.harness_eval.bounds import (
     PhaseAResourceUsage,
@@ -38,9 +45,17 @@ MAX_GUIDANCE_PROTOCOL_CANONICAL_BYTES = 131_072
 MAX_GUIDANCE_CELL_CANONICAL_BYTES = 393_216
 MAX_GUIDANCE_COMPARISON_CANONICAL_BYTES = 32_768
 
+
+def _reject_nul_identifier(value: str) -> str:
+    if "\x00" in value:
+        raise ValueError("Phase A identifier must not contain NUL")
+    return value
+
+
 BoundedIdentifier = Annotated[
     StableIdentifier,
     Field(max_length=MAX_EVALUATION_IDENTIFIER_LENGTH),
+    AfterValidator(_reject_nul_identifier),
 ]
 
 

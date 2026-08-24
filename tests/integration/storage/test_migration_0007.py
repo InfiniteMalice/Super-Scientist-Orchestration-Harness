@@ -83,9 +83,7 @@ PARENT_SCOPED_PRIMARY_IDS = {
     "collaboration_terminations": "session-1",
     "model_harness_analyses": "model-protocol-1",
 }
-MAX_RECORD_JSON_BYTES = 8 * 1024 * 1024
-OVERSIZED_RECORD_JSON = "x" * (MAX_RECORD_JSON_BYTES + 1)
-OVERSIZED_UTF8_RECORD_JSON = "é" * (MAX_RECORD_JSON_BYTES // 2 + 1)
+MAX_RECORD_JSON_BYTES = 64 * 1024 * 1024 + 64 * 1024
 
 
 @pytest.fixture
@@ -601,8 +599,6 @@ def test_0007_rejects_unsafe_shared_scalar_storage_for_every_table(
             b"{}",
             "",
             "contains\x00nul",
-            OVERSIZED_RECORD_JSON,
-            OVERSIZED_UTF8_RECORD_JSON,
         ),
         "created_at": (
             b"2026-08-23T00:00:00+00:00",
@@ -628,6 +624,82 @@ def test_0007_rejects_unsafe_shared_scalar_storage_for_every_table(
                         ),
                     ):
                         _insert_values(connection, table_name, values)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_0007_record_json_accepts_declared_maximum_and_rejects_one_byte_more(
+    database_url: str,
+) -> None:
+    _upgrade_to(database_url, REVISION)
+    engine = create_database_engine(database_url)
+    try:
+        with engine.begin() as connection:
+            _insert_shared_references(connection)
+            _insert_record(
+                connection,
+                "capability_profiles",
+                "profile_id",
+                "record-json-at-maximum",
+                record_json="x" * MAX_RECORD_JSON_BYTES,
+            )
+            with pytest.raises(
+                IntegrityError,
+                match="ck_capability_profiles_record_json",
+            ):
+                _insert_record(
+                    connection,
+                    "capability_profiles",
+                    "profile_id",
+                    "record-json-over-maximum",
+                    record_json="x" * (MAX_RECORD_JSON_BYTES + 1),
+                )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_0007_inserts_actual_maximum_shape_model_harness_analysis(
+    database_url: str,
+) -> None:
+    from tests.unit.harness_eval.test_harness_security_contracts import (
+        _maximum_shape_model_harness_analysis,
+    )
+
+    analysis, _ = _maximum_shape_model_harness_analysis()
+    record_json = canonical_json_bytes(analysis.model_dump(mode="json")).decode("utf-8")
+    record_bytes = record_json.encode("utf-8")
+    assert len(analysis.comparisons) == 24_512
+    assert 8 * 1024 * 1024 < len(record_bytes) <= MAX_RECORD_JSON_BYTES
+
+    _upgrade_to(database_url, REVISION)
+    engine = create_database_engine(database_url)
+    try:
+        with engine.begin() as connection:
+            _insert_shared_references(
+                connection,
+                governing_policy_hash=analysis.protocol.governing_policy_hash,
+            )
+            _insert_record(
+                connection,
+                "model_harness_protocols",
+                "protocol_id",
+                analysis.protocol_id,
+                governing_policy_hash=analysis.protocol.governing_policy_hash,
+            )
+            _insert_record(
+                connection,
+                "model_harness_analyses",
+                "protocol_id",
+                analysis.protocol_id,
+                record_json=record_json,
+                content_hash=sha256_hex(record_bytes),
+                governing_policy_hash=analysis.protocol.governing_policy_hash,
+            )
+            assert connection.execute(
+                text("SELECT length(CAST(record_json AS BLOB)) FROM model_harness_analyses")
+            ).scalar_one() == len(record_bytes)
     finally:
         engine.dispose()
 

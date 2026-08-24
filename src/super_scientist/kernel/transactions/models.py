@@ -626,7 +626,7 @@ def _fresh_domain_record_identifier(value: object) -> str:
         or len(value) > MAX_GOVERNED_PROPOSAL_IDENTIFIER_LENGTH
         or "\x00" in value
     ):
-        raise ValueError("domain record identifier must be exact bounded nonblank text")
+        raise ValueError("domain record identifier must be exact bounded nonblank NUL-free text")
     return value
 
 

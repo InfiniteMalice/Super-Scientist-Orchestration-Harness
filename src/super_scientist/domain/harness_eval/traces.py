@@ -9,6 +9,7 @@ from types import UnionType
 from typing import Annotated, Any, Literal, NoReturn, Self, Union, get_args, get_origin
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -61,12 +62,17 @@ MAX_REWARD_OBSERVATION_CANONICAL_BYTES = 2_048
 MAX_HARNESS_TRACE_CANONICAL_BYTES = 262_144
 UNTRUSTED_HARNESS_TRACE_ERROR = "untrusted harness execution trace is invalid"
 
+
+def _reject_nul_identifier(value: str) -> str:
+    if "\x00" in value:
+        raise ValueError("Phase A identifier must not contain NUL")
+    return value
+
+
 BoundedTraceIdentifier = Annotated[
     StableIdentifier,
-    Field(
-        max_length=MAX_TRACE_IDENTIFIER_LENGTH,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
-    ),
+    Field(max_length=MAX_TRACE_IDENTIFIER_LENGTH),
+    AfterValidator(_reject_nul_identifier),
 ]
 BoundedCategoricalReward = Annotated[
     str,

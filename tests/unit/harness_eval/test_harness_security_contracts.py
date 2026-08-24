@@ -26,6 +26,7 @@ from super_scientist.domain.harness_eval.guidance import (
 from super_scientist.domain.harness_eval.matrix import (
     HarnessIdentity,
     ModelBudgetBinding,
+    ModelHarnessAnalysis,
     ModelHarnessCell,
     ModelHarnessComparisonKind,
     ModelHarnessConfoundCode,
@@ -1641,7 +1642,7 @@ def test_eight_by_eight_valid_matrix_fits_declared_comparison_bound() -> None:
     assert perf_counter() - started < 60.0
 
 
-def test_maximum_shape_matrix_emits_24512_comparisons_within_runtime_bound() -> None:
+def _maximum_shape_model_harness_analysis() -> tuple[ModelHarnessAnalysis, float]:
     models = tuple(
         ModelIdentity(model_id=f"max-model-{index:03d}", model_version="v1") for index in range(128)
     )
@@ -1716,6 +1717,12 @@ def test_maximum_shape_matrix_emits_24512_comparisons_within_runtime_bound() -> 
         evidence_index=_snapshot_index(evidence),
     )
     elapsed = perf_counter() - started
+
+    return analysis, elapsed
+
+
+def test_maximum_shape_matrix_emits_24512_comparisons_within_runtime_bound() -> None:
+    analysis, elapsed = _maximum_shape_model_harness_analysis()
 
     assert analysis.confounds == ()
     assert len(analysis.comparisons) == 24_512

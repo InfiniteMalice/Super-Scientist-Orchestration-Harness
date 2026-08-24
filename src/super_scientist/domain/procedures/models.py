@@ -9,6 +9,7 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     ConfigDict,
@@ -52,9 +53,16 @@ def _strip_text(value: object) -> object:
     return value.strip() if isinstance(value, str) else value
 
 
+def _reject_nul_identifier(value: str) -> str:
+    if "\x00" in value:
+        raise ValueError("Phase A identifier must not contain NUL")
+    return value
+
+
 BoundedIdentifier = Annotated[
     StableIdentifier,
     Field(max_length=MAX_IDENTIFIER_LENGTH),
+    AfterValidator(_reject_nul_identifier),
 ]
 BoundedText = Annotated[
     str,

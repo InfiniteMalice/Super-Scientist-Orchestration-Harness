@@ -1835,6 +1835,12 @@ harness_campaign_heads = Table(
     ),
 )
 
+MAX_PHASE_A_CANONICAL_RECORD_BYTES = 64 * 1024 * 1024
+MAX_GOVERNED_STORAGE_ENVELOPE_OVERHEAD_BYTES = 64 * 1024
+MAX_GOVERNED_RECORD_JSON_BYTES = (
+    MAX_PHASE_A_CANONICAL_RECORD_BYTES + MAX_GOVERNED_STORAGE_ENVELOPE_OVERHEAD_BYTES
+)
+
 
 def _governed_record_table(
     name: str,
@@ -1898,8 +1904,9 @@ def _governed_record_table(
         ),
         CheckConstraint(
             "typeof(record_json) = 'text' "
-            "AND length(record_json) BETWEEN 1 AND 8388608 "
-            "AND length(CAST(record_json AS BLOB)) BETWEEN 1 AND 8388608 "
+            f"AND length(record_json) BETWEEN 1 AND {MAX_GOVERNED_RECORD_JSON_BYTES} "
+            "AND length(CAST(record_json AS BLOB)) BETWEEN 1 "
+            f"AND {MAX_GOVERNED_RECORD_JSON_BYTES} "
             "AND instr(record_json, char(0)) = 0",
             name=f"ck_{name}_record_json",
         ),

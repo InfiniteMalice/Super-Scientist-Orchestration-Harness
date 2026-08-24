@@ -899,7 +899,7 @@ def _fresh_domain_record_identifier(value: object) -> str:
         or len(value) > MAX_GOVERNED_PROPOSAL_IDENTIFIER_LENGTH
         or "\x00" in value
     ):
-        raise ValueError("domain record identifier must be exact bounded nonblank text")
+        raise ValueError("domain record identifier must be exact bounded nonblank NUL-free text")
     return value
 
 
@@ -1744,6 +1744,18 @@ the receipt/correlation collections permit at most 256 entries. `RecordRewardAss
 requires exactly one finding per `RewardHackingFamily` and requires its observation and
 ordered findings to equal the embedded assessment inputs.
 
+The Phase A `BoundedIdentifier` aliases in cognition, collaboration, procedures, and
+evaluation guidance, plus `BoundedTraceIdentifier` and
+`BoundedAssessmentIdentifier`, each apply an after-validator that rejects embedded
+NUL. These scoped aliases retain the canonical trimmed, nonblank, Unicode-text contract
+through 200 code points; slash, internal space, colon, and Unicode remain valid. This
+hardening is deliberately not applied to the released shared `StableIdentifier` alias.
+Together with the proposal-owned exact `session_id` and `compilation_id` validator and
+the governed `proposal_id` validator, it covers every identifier projected into the 18
+Task 9 tables, including their transaction IDs. The Task 8 matrix mutates every
+materialized primary/relationship path in all 18 real proposals and requires domain
+rejection before storage projection.
+
 `RecordDiversityAssessment` carries a `CohortPlanReceiptRef`, the same ordered capability-profile receipts, explicit error-correlation records, and the claimed assessment. Handlers resolve accepted receipts and exact hashes; no cohort or diversity proposal trusts caller-supplied duplicate profile payloads.
 
 Add only these rejection codes: `DERIVATION_MISMATCH`, `STALE_REFERENCE`, `COLLABORATION_BOUND_EXCEEDED`, `INVALID_PROCEDURE`, `UNMATCHED_EVALUATION`, and `INVALID_REWARD`. Reuse existing codes where their meaning is exact.
@@ -1902,7 +1914,11 @@ def _create_record_table(
         sa.CheckConstraint(
             "typeof(schema_version) = 'integer' AND schema_version = 1"
         ),
-        _bounded_text_constraint("record_json", name, maximum=8 * 1024 * 1024),
+        _bounded_text_constraint(
+            "record_json",
+            name,
+            maximum=64 * 1024 * 1024 + 64 * 1024,
+        ),
         _hash_constraint("content_hash", name),
         _hash_constraint("governing_policy_hash", name),
         _bounded_text_constraint("created_at", name, maximum=40),
@@ -1923,9 +1939,17 @@ at most 800 UTF-8 bytes, and no NUL. It deliberately permits every canonical Pha
 `_hash_constraint()` requires
 SQLite TEXT storage, exactly 64 characters and 64 bytes, no NUL, and lowercase hex.
 `schema_version` requires SQLite INTEGER storage and the exact value `1`. `record_json`
-requires nonempty NUL-free SQLite TEXT bounded to 8 MiB in both characters and UTF-8
-bytes. `created_at` requires nonempty NUL-free SQLite TEXT bounded to 40 characters and
-40 UTF-8 bytes.
+requires nonempty NUL-free SQLite TEXT bounded to 64 MiB plus 64 KiB in both characters
+and UTF-8 bytes. The audit ceiling is `MAX_MODEL_HARNESS_ANALYSIS_CANONICAL_BYTES`
+(64 MiB); the next-largest explicit Phase A bounds are 8 MiB for cohort records,
+4 MiB plus base64 framing for procedure results, 1 MiB for harness protocols, and
+393,216 bytes for cells. Collaboration and reward records are bounded by their fixed
+collection and text limits below 64 MiB. The additional 64 KiB covers the canonical
+`content_hash` field and Task 10's fixed storage-envelope keys plus at most five
+200-code-point identifiers (at most 800 UTF-8 bytes each). Tests insert the actual
+24,512-comparison `ModelHarnessAnalysis`, accept the exact storage maximum, and reject
+one byte more. `created_at` requires nonempty NUL-free SQLite TEXT bounded to 40
+characters and 40 UTF-8 bytes.
 Both provenance foreign keys are `DEFERRABLE INITIALLY DEFERRED`, so the coordinator
 may persist the child before its accepted transaction and policy rows within one
 database transaction; unresolved parents still fail at commit. The downgrade drops

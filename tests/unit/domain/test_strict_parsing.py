@@ -636,6 +636,112 @@ def test_task_8_relationship_proposals_bind_exact_bounded_parent_identifiers(
                 namespace[class_name].model_validate(payload, strict=True)
 
 
+MATERIALIZED_0007_IDENTIFIER_PATHS = {
+    "RecordCapabilityProfile": (("profile", "profile_id"),),
+    "RecordCohortPlan": (("plan", "cohort_plan_id"), ("plan", "request_id")),
+    "RecordDiversityAssessment": (
+        ("assessment", "diversity_assessment_id"),
+        ("assessment", "cohort_plan_id"),
+    ),
+    "RecordCollaborationSession": (
+        ("session", "session_id"),
+        ("session", "cohort_plan", "cohort_plan_id"),
+    ),
+    "AppendPeerRequest": (("request", "request_id"), ("request", "session_id")),
+    "AppendPeerContribution": (
+        ("contribution", "contribution_id"),
+        ("contribution", "session_id"),
+        ("contribution", "request_id"),
+    ),
+    "AppendTopologyEvent": (("event", "event_id"), ("event", "session_id")),
+    "RecordCollaborationTermination": (("session_id",),),
+    "RecordProcedureCompilation": (("compilation", "compilation_id"),),
+    "RecordMethodDirectionOutcome": (
+        ("outcome", "outcome_id"),
+        ("compilation_id",),
+    ),
+    "BindCompiledProgressPlan": (
+        ("binding", "binding_id"),
+        ("binding", "compilation_id"),
+    ),
+    "RecordGuidanceEvaluationProtocol": (("protocol", "protocol_id"),),
+    "AppendGuidanceEvaluationCell": (("cell", "cell_id"), ("cell", "protocol_id")),
+    "RecordModelHarnessProtocol": (("protocol", "protocol_id"),),
+    "AppendModelHarnessCell": (("cell", "cell_id"), ("cell", "protocol_id")),
+    "RecordModelHarnessAnalysis": (("analysis", "protocol_id"),),
+    "RecordHarnessExecutionTrace": (
+        ("envelope", "trace", "trace_id"),
+        ("envelope", "trace", "observed_binding", "protocol_id"),
+    ),
+    "RecordRewardAssessment": (
+        ("assessment", "assessment_id"),
+        ("assessment", "trace_id"),
+        ("assessment", "observation", "observation_id"),
+    ),
+}
+
+
+def _replace_nested_value(payload: dict[str, object], path: tuple[str, ...]) -> None:
+    parent = payload
+    for field_name in path[:-1]:
+        value = parent[field_name]
+        assert isinstance(value, dict)
+        parent = value
+    parent[path[-1]] = "materialized\x00identifier"
+
+
+def test_task_8_all_0007_materialized_identifiers_reject_nul_before_projection(
+    task_8_namespace: dict[str, object],
+) -> None:
+    proposals = _governed_proposal_examples(task_8_namespace)
+    assert {type(proposal).__name__ for proposal in proposals} == set(
+        MATERIALIZED_0007_IDENTIFIER_PATHS
+    )
+
+    for proposal in proposals:
+        class_name = type(proposal).__name__
+        for path in MATERIALIZED_0007_IDENTIFIER_PATHS[class_name]:
+            payload = proposal.model_dump(mode="python")
+            _replace_nested_value(payload, path)
+            with pytest.raises(ValidationError, match="NUL"):
+                task_8_namespace[class_name].model_validate(payload, strict=True)
+
+        transaction_payload = proposal.model_dump(mode="python")
+        transaction_payload["proposal_id"] = "transaction\x00identifier"
+        with pytest.raises(ValidationError):
+            task_8_namespace[class_name].model_validate(transaction_payload, strict=True)
+
+
+def test_phase_a_materialized_identifier_aliases_preserve_canonical_unicode_contract() -> None:
+    from super_scientist.domain.cognition.models import BoundedIdentifier as CognitionIdentifier
+    from super_scientist.domain.collaboration.models import (
+        BoundedIdentifier as CollaborationIdentifier,
+    )
+    from super_scientist.domain.harness_eval.guidance import (
+        BoundedIdentifier as EvaluationIdentifier,
+    )
+    from super_scientist.domain.harness_eval.rewards import BoundedAssessmentIdentifier
+    from super_scientist.domain.harness_eval.traces import BoundedTraceIdentifier
+    from super_scientist.domain.procedures.models import (
+        BoundedIdentifier as ProcedureIdentifier,
+    )
+
+    aliases = (
+        CognitionIdentifier,
+        CollaborationIdentifier,
+        ProcedureIdentifier,
+        EvaluationIdentifier,
+        BoundedTraceIdentifier,
+        BoundedAssessmentIdentifier,
+    )
+    for identifier_type in aliases:
+        adapter = TypeAdapter(identifier_type)
+        assert adapter.validate_python("会話/id space:識別", strict=True) == "会話/id space:識別"
+        assert adapter.validate_python("界" * 200, strict=True) == "界" * 200
+        with pytest.raises(ValidationError, match="NUL"):
+            adapter.validate_python("id\x00value", strict=True)
+
+
 def test_task_8_runtime_registers_every_governed_proposal_in_closed_parser() -> None:
     planned_namespace = _task_8_and_13_namespace()
     planned_proposals = _governed_proposal_examples(planned_namespace)

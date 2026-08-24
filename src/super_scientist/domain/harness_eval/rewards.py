@@ -4,7 +4,14 @@ from collections.abc import Mapping
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from super_scientist.domain.harness_eval.receipts import (
     EvidenceReceipt,
@@ -30,9 +37,17 @@ from super_scientist.domain.primitives import Sha256Hex, sha256_hex
 
 MAX_REWARD_EVIDENCE = 256
 
+
+def _reject_nul_identifier(value: str) -> str:
+    if "\x00" in value:
+        raise ValueError("Phase A identifier must not contain NUL")
+    return value
+
+
 BoundedAssessmentIdentifier = Annotated[
     str,
     Field(strict=True, min_length=1, max_length=200),
+    AfterValidator(_reject_nul_identifier),
 ]
 
 
