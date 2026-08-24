@@ -849,13 +849,35 @@ class BindCompiledProgressPlan(ProposalBase):
 
 
 # <!-- task-8-13-trace-contract:start -->
-class HarnessTraceRecordMetadata(BaseModel):
+MAX_HARNESS_TRACE_RECORD_IDENTIFIER_LENGTH = 200
+
+BoundedHarnessTraceRecordIdentifier = Annotated[
+    StableIdentifier,
+    Field(
+        max_length=MAX_HARNESS_TRACE_RECORD_IDENTIFIER_LENGTH,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    ),
+]
+
+
+class _StrictProposalEnvelopeModel(BaseModel):
+    model_config = ConfigDict(
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        revalidate_instances="always",
+        hide_input_in_errors=True,
+    )
+
+
+class HarnessTraceRecordMetadata(_StrictProposalEnvelopeModel):
     schema_version: Literal[1] = 1
     received_at: UtcTimestamp
-    source_id: StableIdentifier
+    source_id: BoundedHarnessTraceRecordIdentifier
 
 
-class HarnessExecutionTraceEnvelope(BaseModel):
+class HarnessExecutionTraceEnvelope(_StrictProposalEnvelopeModel):
+    schema_version: Literal[1] = 1
     metadata: HarnessTraceRecordMetadata
     trace: HarnessExecutionTrace
 
@@ -876,11 +898,25 @@ class RecordRewardAssessment(ProposalBase):
 MAX_PROPOSAL_BYTES = 8 * 1_024 * 1_024
 
 
-def parse_untrusted_proposal_json(value: bytes) -> Proposal:
+# Preserve the released bytes call shape:
+# def parse_untrusted_proposal_json(value: bytes) -> Proposal:
+def parse_untrusted_proposal_json(value: str | bytes) -> Proposal:
     proposal: Proposal | None = None
-    with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
-        if len(value) <= MAX_PROPOSAL_BYTES and proposal_json_is_within_depth_limit(value):
-            proposal = PROPOSAL_ADAPTER.validate_json(value)
+    if type(value) is str or type(value) is bytes:
+        with suppress(
+            MemoryError,
+            OverflowError,
+            RecursionError,
+            TypeError,
+            UnicodeError,
+            ValueError,
+        ):
+            serialized_bytes = value.encode("utf-8") if type(value) is str else value
+            if (
+                len(serialized_bytes) <= MAX_PROPOSAL_BYTES
+                and proposal_json_is_within_depth_limit(value)
+            ):
+                proposal = PROPOSAL_ADAPTER.validate_json(value)
     if proposal is None:
         raise ProposalBoundaryValidationError(
             "transaction proposal failed validation"
@@ -907,15 +943,18 @@ durable `ProcedureCompilationRecord.content_hash` independently binds the normal
 metadata and validated typed result after acceptance.
 
 `parse_untrusted_proposal_json()` is the only public parser for serialized untrusted
-proposal bytes. It applies an 8 MiB byte limit and the shared iterative depth limit
-before `PROPOSAL_ADAPTER.validate_json()`. It converts every Pydantic, JSON, recursion,
-overflow, and recoverable memory failure to the fixed `ProposalBoundaryValidationError`
-only after the caught-exception scope exits. The public error has no cause, context,
-structured error surface, or rejected input. Raw `PROPOSAL_ADAPTER` calls remain trusted
-construction and diagnostic operations; application entrypoints must not expose their
-exceptions or structured errors. Base64 is transport encoding, not secrecy; the fixed
-outer parser must discard any rejected encoded payload before returning control to a
-caller.
+proposal JSON text or bytes. Before the parser calls `len()` or any payload operation,
+the parser requires the value's type to be exactly built-in `str` or built-in `bytes`.
+The parser rejects subclasses, `bytearray`, and metaclass-backed objects without invoking
+their hooks. For admitted values, the parser applies an 8 MiB limit and the shared
+iterative depth limit before `PROPOSAL_ADAPTER.validate_json()`. The parser converts every
+Pydantic, JSON, Unicode, recursion, overflow, and recoverable memory failure to the fixed
+`ProposalBoundaryValidationError` only after the caught-exception scope exits. The public
+error has no cause, context, structured error surface, or rejected input. Raw
+`PROPOSAL_ADAPTER` calls remain trusted construction and diagnostic operations;
+application entrypoints must not expose their exceptions or structured errors. Base64 is
+transport encoding, not secrecy; the fixed outer parser must discard any rejected encoded
+payload before returning control to a caller.
 
 - [ ] **Step 4: Prove old proposal bytes and hashes are unchanged**
 
@@ -1485,16 +1524,51 @@ class HarnessTraceProposalAdapter:
         idempotency_key: StableIdentifier,
         proposer: ActorIdentity,
     ) -> RecordHarnessExecutionTrace:
-        return RecordHarnessExecutionTrace(
-            proposal_id=proposal_id,
-            idempotency_key=idempotency_key,
-            proposer=proposer,
-            envelope=HarnessExecutionTraceEnvelope(
-                metadata=metadata,
-                trace=parse_untrusted_harness_execution_trace(payload),
-            ),
-        )
+        proposal: RecordHarnessExecutionTrace | None = None
+        with suppress(
+            MemoryError,
+            OverflowError,
+            RecursionError,
+            TypeError,
+            UnicodeError,
+            ValueError,
+        ):
+            validated_metadata = HarnessTraceRecordMetadata.model_validate(
+                metadata.model_dump(mode="python", warnings=False),
+                strict=True,
+            )
+            parsed_trace = parse_untrusted_harness_execution_trace(payload)
+            validated_trace = HarnessExecutionTrace.model_validate(
+                parsed_trace.model_dump(mode="python", warnings=False),
+                strict=True,
+            )
+            envelope = HarnessExecutionTraceEnvelope.model_validate(
+                {
+                    "schema_version": 1,
+                    "metadata": validated_metadata,
+                    "trace": validated_trace,
+                },
+                strict=True,
+            )
+            proposal = RecordHarnessExecutionTrace(
+                proposal_id=proposal_id,
+                idempotency_key=idempotency_key,
+                proposer=proposer,
+                envelope=envelope,
+            )
+        if proposal is None:
+            raise ProposalBoundaryValidationError(
+                "transaction proposal failed validation"
+            ) from None
+        return proposal
 ```
+
+Before `HarnessTraceProposalAdapter` constructs a proposal, the adapter serializes and
+strictly revalidates the typed metadata and parsed trace into fresh instances. The
+adapter rejects non-validating copies, copied mutations, and forged trace hashes with the
+same detached `ProposalBoundaryValidationError` used by the serialized-proposal boundary.
+`RecordHarnessExecutionTrace` therefore never receives an unvalidated caller-owned
+metadata or trace instance.
 
 - [ ] **Step 4: Recompute trace freshness and reward validity**
 
