@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import tracemalloc
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, getcontext, localcontext
+from time import perf_counter
 
 import pytest
 from pydantic import ValidationError
@@ -221,6 +223,71 @@ def test_progress_weight_arithmetic_is_independent_of_ambient_decimal_precision(
         original_context.Emin,
         original_context.Emax,
     )
+
+
+def test_progress_weight_rejects_compact_extreme_exponent_at_model_boundary() -> None:
+    original = _plan().subtasks[0]
+    payload = original.model_dump(mode="python")
+    payload["weight"] = Decimal("1E-500000000")
+
+    with pytest.raises(ValidationError, match="deterministic arithmetic bounds"):
+        ProgressSubtask.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "weight",
+    (
+        Decimal("1E-384"),
+        Decimal("0." + ("1" * 128)),
+    ),
+)
+def test_progress_weight_accepts_deterministic_decimal_boundaries(weight: Decimal) -> None:
+    payload = _plan().subtasks[0].model_dump(mode="python")
+    payload["weight"] = weight
+
+    assert ProgressSubtask.model_validate(payload).weight == weight
+
+
+@pytest.mark.parametrize(
+    "weight",
+    (
+        Decimal("1E-385"),
+        Decimal("0." + ("1" * 129)),
+    ),
+)
+def test_progress_weight_rejects_values_beyond_decimal_boundaries(weight: Decimal) -> None:
+    payload = _plan().subtasks[0].model_dump(mode="python")
+    payload["weight"] = weight
+
+    with pytest.raises(ValidationError, match="deterministic arithmetic bounds"):
+        ProgressSubtask.model_validate(payload)
+
+
+def test_copied_extreme_progress_weight_fails_fast_without_large_allocation() -> None:
+    plan = _plan()
+    forged = plan.subtasks[0].model_copy(update={"weight": Decimal("1E-500000000")})
+    forged_plan = plan.model_copy(update={"subtasks": (forged, plan.subtasks[1])})
+
+    tracemalloc.start()
+    started = perf_counter()
+    errors = []
+    original_context = getcontext().copy()
+    try:
+        for precision in (1, 2, 80):
+            context = original_context.copy()
+            context.prec = precision
+            with localcontext(context), pytest.raises(ValueError) as caught:
+                calculate_progress(forged_plan, ())
+            errors.append(caught.value)
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert {str(error) for error in errors} == {
+        "progress decimal scalar exceeds deterministic arithmetic bounds"
+    }
+    assert perf_counter() - started < 1.0
+    assert peak_bytes < 2_000_000
 
 
 def test_remaining_budget_subtraction_is_independent_of_ambient_decimal_precision() -> None:

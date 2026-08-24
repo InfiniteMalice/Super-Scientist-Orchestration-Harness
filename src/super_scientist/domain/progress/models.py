@@ -4,7 +4,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from super_scientist.domain.evidence.models import ArtifactRef
 from super_scientist.domain.identity import ActorIdentity, are_independent
@@ -23,6 +23,7 @@ from super_scientist.domain.primitives import (
     StableIdentifier,
     UtcTimestamp,
 )
+from super_scientist.domain.progress._decimal_math import _require_bounded_decimal
 
 
 class _StrictFrozenModel(BaseModel):
@@ -51,6 +52,11 @@ class ProgressSubtask(_StrictFrozenModel):
     weight: Decimal = Field(strict=True, gt=Decimal("0"))
     evidence_requirements: tuple[NonBlankText, ...] = Field(min_length=1)
     order: int = Field(strict=True, ge=1)
+
+    @field_validator("weight")
+    @classmethod
+    def require_bounded_weight(cls, value: Decimal) -> Decimal:
+        return _require_bounded_decimal(value)
 
 
 class ProgressPlan(_StrictFrozenModel):

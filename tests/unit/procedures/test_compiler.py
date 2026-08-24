@@ -6,6 +6,7 @@ from decimal import Decimal, getcontext, localcontext
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from super_scientist.domain.cognition.grounding import assess_capability
 from super_scientist.domain.cognition.models import (
@@ -27,6 +28,7 @@ from super_scientist.domain.procedures import (
     DeclaredProcedureArtifact,
     GroundedCapabilityAssessment,
     ProcedureAuthority,
+    ProcedureBoundaryValidationError,
     ProcedureCompilationRequest,
     ProcedureEvidenceSourceKind,
     ProcedureFindingCode,
@@ -525,6 +527,34 @@ def test_budget_aggregation_is_independent_of_ambient_decimal_precision() -> Non
         original_context.Emin,
         original_context.Emax,
     )
+
+
+def test_copied_extreme_progress_weight_fails_at_safe_compiler_boundary() -> None:
+    request = valid_request()
+    forged_step = request.candidate.stages[0].model_copy(
+        update={"progress_weight": Decimal("1E-500000000")}
+    )
+    forged_candidate = request.candidate.model_copy(
+        update={"stages": (forged_step, request.candidate.stages[1])}
+    )
+    forged_request = request.model_copy(update={"candidate": forged_candidate})
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        compile_method(forged_request)
+
+    assert str(caught.value) == "procedure compilation request failed canonical validation"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+def test_procedure_weight_enforces_shared_decimal_boundaries() -> None:
+    step = valid_request().candidate.stages[0]
+
+    assert _rebuild_step(step, progress_weight=Decimal("1E-384")).progress_weight == Decimal(
+        "1E-384"
+    )
+    with pytest.raises(ValidationError, match="deterministic arithmetic bounds"):
+        _rebuild_step(step, progress_weight=Decimal("1E-385"))
 
 
 def test_self_declared_arbitrary_compiler_version_cannot_become_valid() -> None:

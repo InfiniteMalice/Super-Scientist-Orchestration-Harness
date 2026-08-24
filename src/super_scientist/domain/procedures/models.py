@@ -28,6 +28,7 @@ from super_scientist.domain.primitives import (
     canonical_json_bytes,
     sha256_hex,
 )
+from super_scientist.domain.progress._decimal_math import _require_bounded_decimal
 from super_scientist.domain.progress.models import BudgetReserves, ProgressPlan
 
 MAX_PROCEDURE_ITEMS = 64
@@ -370,6 +371,11 @@ class _ProcedureStepPayload(_StrictFrozenModel):
         le=Decimal("1"),
         allow_inf_nan=False,
     )
+
+    @field_validator("progress_weight")
+    @classmethod
+    def require_bounded_progress_weight(cls, value: Decimal) -> Decimal:
+        return _require_bounded_decimal(value)
 
     @field_validator(
         "input_artifact_ids",
