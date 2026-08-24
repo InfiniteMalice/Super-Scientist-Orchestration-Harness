@@ -3,7 +3,7 @@ import json
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 from enum import Enum, StrEnum
 from functools import reduce
 from operator import or_
@@ -149,6 +149,7 @@ def _task_8_and_13_namespace() -> dict[str, object]:
         "BaseModel": BaseModel,
         "Any": Any,
         "Decimal": Decimal,
+        "DecimalException": DecimalException,
         "Enum": Enum,
         "Mapping": Mapping,
         "Union": Union,
@@ -203,7 +204,6 @@ def _task_8_and_13_namespace() -> dict[str, object]:
         "ValidationInfo": ValidationInfo,
         "model_validator": model_validator,
         "parse_untrusted_harness_execution_trace": parse_untrusted_harness_execution_trace,
-        "proposal_json_is_within_depth_limit": lambda value: True,
         "suppress": __import__("contextlib").suppress,
     }
     exec(compile(task_8_source, "task-8-contract", "exec"), namespace)
@@ -675,6 +675,94 @@ def test_task_8_governed_parser_detaches_coercive_and_oversized_json() -> None:
             guidance_payload,
             strict=True,
         )
+
+
+def test_task_8_reward_json_requires_exact_tag_before_union_fallback() -> None:
+    namespace = _task_8_and_13_namespace()
+    reward = next(
+        proposal
+        for proposal in _governed_proposal_examples(namespace)
+        if type(proposal).__name__ == "RecordRewardAssessment"
+    )
+
+    for bare_value in ("0.9", "PASS", 0.9, None, ["numeric", "0.9"]):
+        payload = reward.model_dump(mode="json")
+        payload["observation"]["value"] = bare_value
+        with pytest.raises(_ProposalBoundaryValidationError) as error:
+            namespace["parse_untrusted_proposal_json"](json.dumps(payload))
+        _assert_detached_proposal_boundary_error(error.value)
+
+
+def test_task_8_decimal_json_failures_are_safely_detached() -> None:
+    namespace = _task_8_and_13_namespace()
+    normalize = namespace["_normalize_json_proposal_value"]
+
+    with pytest.raises(ValueError) as direct_error:
+        normalize("not-a-decimal", Decimal)
+    assert str(direct_error.value) == "proposal JSON decimal text is invalid"
+    assert direct_error.value.__cause__ is None
+    assert direct_error.value.__context__ is None
+
+    proposals = {
+        type(proposal).__name__: proposal for proposal in _governed_proposal_examples(namespace)
+    }
+    guidance_payload = proposals["RecordGuidanceEvaluationProtocol"].model_dump(mode="json")
+    guidance_payload["protocol"]["evaluation_budget"]["cost_limit"] = "not-a-decimal"
+    matrix_payload = proposals["RecordModelHarnessProtocol"].model_dump(mode="json")
+    matrix_payload["protocol"]["model_budgets"][0]["budget"]["wall_clock_seconds"] = "not-a-decimal"
+    reward_payload = proposals["RecordRewardAssessment"].model_dump(mode="json")
+    reward_payload["observation"]["value"] = {
+        "kind": "numeric",
+        "value": "not-a-decimal",
+    }
+
+    for payload in (guidance_payload, matrix_payload, reward_payload):
+        with pytest.raises(_ProposalBoundaryValidationError) as error:
+            namespace["parse_untrusted_proposal_json"](json.dumps(payload))
+        _assert_detached_proposal_boundary_error(error.value)
+
+
+def test_task_8_proposal_json_depth_checker_is_iterative_bounded_and_exact() -> None:
+    namespace = _task_8_and_13_namespace()
+    checker = namespace["proposal_json_is_within_depth_limit"]
+    maximum_depth = namespace["MAX_PROPOSAL_JSON_DEPTH"]
+    maximum_nodes = namespace["MAX_PROPOSAL_JSON_NODES"]
+
+    assert checker('{"proposal_type":"record_capability_profile"}') is True
+    assert checker("[" * maximum_depth + "0" + "]" * maximum_depth) is True
+    assert checker("[" * (maximum_depth + 1) + "0" + "]" * (maximum_depth + 1)) is False
+    assert checker(json.dumps([0] * (maximum_nodes - 1))) is True
+    assert checker(json.dumps([0] * maximum_nodes)) is False
+
+    hooks: list[str] = []
+
+    class HostileText(str):
+        def __len__(self) -> int:
+            hooks.append("text-len")
+            return super().__len__()
+
+        def encode(self, *args: object, **kwargs: object) -> bytes:
+            hooks.append("text-encode")
+            return super().encode(*args, **kwargs)
+
+    class HostileBytes(bytes):
+        def __len__(self) -> int:
+            hooks.append("bytes-len")
+            return super().__len__()
+
+    class HookedMeta(type):
+        def __getattribute__(cls, name: str) -> object:
+            hooks.append(f"metaclass-{name}")
+            return super().__getattribute__(name)
+
+    class MetaclassBacked(metaclass=HookedMeta):
+        pass
+
+    assert checker(HostileText("{}")) is False
+    assert checker(HostileBytes(b"{}")) is False
+    assert checker(bytearray(b"{}")) is False
+    assert checker(MetaclassBacked) is False
+    assert hooks == []
 
 
 def test_task_8_governed_identifier_boundary_rejects_raw_string_subclasses() -> None:
@@ -1338,11 +1426,25 @@ def test_task_8_untrusted_proposal_parser_rejects_non_exact_text_without_hooks()
             if (
                 isinstance(node, ast.Assign)
                 and any(
-                    isinstance(target, ast.Name) and target.id == "MAX_PROPOSAL_BYTES"
+                    isinstance(target, ast.Name)
+                    and target.id
+                    in {
+                        "MAX_PROPOSAL_BYTES",
+                        "MAX_PROPOSAL_JSON_DEPTH",
+                        "MAX_PROPOSAL_JSON_NODES",
+                        "MAX_PROPOSAL_JSON_CONTAINER_ITEMS",
+                    }
                     for target in node.targets
                 )
             )
-            or (isinstance(node, ast.FunctionDef) and node.name == "parse_untrusted_proposal_json")
+            or (
+                isinstance(node, ast.FunctionDef)
+                and node.name
+                in {
+                    "proposal_json_is_within_depth_limit",
+                    "parse_untrusted_proposal_json",
+                }
+            )
         ],
         type_ignores=[],
     )
@@ -1359,9 +1461,7 @@ def test_task_8_untrusted_proposal_parser_rejects_non_exact_text_without_hooks()
         "PROPOSAL_ADAPTER": Adapter(),
         "Proposal": object,
         "ProposalBoundaryValidationError": _ProposalBoundaryValidationError,
-        "_normalize_governed_proposal_json": lambda value: value,
-        "json": json,
-        "proposal_json_is_within_depth_limit": lambda value: True,
+        "DecimalException": DecimalException,
         "suppress": __import__("contextlib").suppress,
     }
     exec(compile(parser_tree, "task-8-parser-contract", "exec"), namespace)

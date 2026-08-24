@@ -830,7 +830,7 @@ import json
 from collections.abc import Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 from enum import Enum
 from types import UnionType
 from typing import Annotated, Any, Union, get_args, get_origin
@@ -1237,7 +1237,7 @@ def _fresh_exact_value(
     if annotation is Decimal:
         if type(value) is not Decimal:
             raise ValueError("proposal decimal must have the exact declared type")
-        return Decimal(str(value))
+        return _bounded_json_decimal(str(value))
     if annotation in (str, int, float, bool, bytes):
         if type(value) is not annotation:
             raise ValueError("proposal primitive must have the exact declared type")
@@ -1433,6 +1433,23 @@ def _base_json_annotation(annotation: object) -> object:
     return annotation
 
 
+def _bounded_json_decimal(value: object) -> Decimal:
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > MAX_PROPOSAL_JSON_DECIMAL_CHARACTERS
+    ):
+        raise ValueError("proposal JSON decimal must be bounded exact text")
+    decimal_value: Decimal | None = None
+    try:
+        decimal_value = Decimal(value)
+    except (ArithmeticError, DecimalException, ValueError):
+        pass
+    if decimal_value is None:
+        raise ValueError("proposal JSON decimal text is invalid") from None
+    return decimal_value
+
+
 def _normalize_json_proposal_value(
     value: object,
     annotation: object,
@@ -1451,21 +1468,19 @@ def _normalize_json_proposal_value(
         )
     if origin in (Union, UnionType):
         base_options = tuple(_base_json_annotation(option) for option in arguments)
-        if (
-            type(value) is dict
-            and all(type(key) is str for key in value)
-            and frozenset(value) == frozenset({"kind", "value"})
-            and Decimal in base_options
-            and str in base_options
-        ):
+        if Decimal in base_options and str in base_options:
+            if (
+                type(value) is not dict
+                or any(type(key) is not str for key in value)
+                or frozenset(value) != frozenset({"kind", "value"})
+            ):
+                raise ValueError("reward JSON value requires an exact tagged object")
             kind = value["kind"]
             tagged_value = value["value"]
             if type(kind) is not str or type(tagged_value) is not str:
                 raise ValueError("tagged reward JSON requires exact text")
             if kind == "numeric":
-                if not tagged_value or len(tagged_value) > MAX_PROPOSAL_JSON_DECIMAL_CHARACTERS:
-                    raise ValueError("tagged numeric reward exceeds its text bound")
-                return Decimal(tagged_value)
+                return _bounded_json_decimal(tagged_value)
             if kind == "categorical":
                 return tagged_value
             raise ValueError("tagged reward JSON kind is not admitted")
@@ -1495,13 +1510,7 @@ def _normalize_json_proposal_value(
             raise ValueError("proposal JSON timestamp must be bounded exact text")
         return _fresh_utc_timestamp(datetime.fromisoformat(value))
     if annotation is Decimal:
-        if (
-            type(value) is not str
-            or not value
-            or len(value) > MAX_PROPOSAL_JSON_DECIMAL_CHARACTERS
-        ):
-            raise ValueError("proposal JSON decimal must be bounded exact text")
-        return Decimal(value)
+        return _bounded_json_decimal(value)
     if annotation in (str, int, float, bool):
         if type(value) is not annotation:
             raise ValueError("proposal JSON primitive has the wrong exact type")
@@ -1599,6 +1608,56 @@ def _normalize_governed_proposal_json(value: object) -> object:
 
 
 MAX_PROPOSAL_BYTES = 8 * 1_024 * 1_024
+MAX_PROPOSAL_JSON_DEPTH = 128
+MAX_PROPOSAL_JSON_NODES = 4_096
+MAX_PROPOSAL_JSON_CONTAINER_ITEMS = 4_096
+
+
+def proposal_json_is_within_depth_limit(value: object) -> bool:
+    if type(value) is not str and type(value) is not bytes:
+        return False
+    try:
+        if type(value) is str:
+            if len(value) > MAX_PROPOSAL_BYTES:
+                return False
+            encoded = value.encode("utf-8")
+            if len(encoded) > MAX_PROPOSAL_BYTES:
+                return False
+        elif len(value) > MAX_PROPOSAL_BYTES:
+            return False
+        decoded = __import__("json").loads(value)
+    except (
+        ArithmeticError,
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ):
+        return False
+
+    stack: list[tuple[object, int]] = [(decoded, 0)]
+    visited_nodes = 0
+    while stack:
+        current, depth = stack.pop()
+        visited_nodes += 1
+        if depth > MAX_PROPOSAL_JSON_DEPTH or visited_nodes > MAX_PROPOSAL_JSON_NODES:
+            return False
+        if type(current) is dict:
+            if (
+                len(current) > MAX_PROPOSAL_JSON_CONTAINER_ITEMS
+                or any(type(key) is not str for key in current)
+            ):
+                return False
+            stack.extend((item, depth + 1) for item in current.values())
+        elif type(current) is list:
+            if len(current) > MAX_PROPOSAL_JSON_CONTAINER_ITEMS:
+                return False
+            stack.extend((item, depth + 1) for item in current)
+        elif current is not None and type(current) not in (str, int, float, bool):
+            return False
+    return True
 
 
 # Preserve the released bytes call shape:
@@ -1607,6 +1666,7 @@ def parse_untrusted_proposal_json(value: str | bytes) -> Proposal:
     proposal: Proposal | None = None
     if type(value) is str or type(value) is bytes:
         with suppress(
+            ArithmeticError,
             MemoryError,
             OverflowError,
             RecursionError,
@@ -1684,6 +1744,14 @@ application entrypoints must not expose their exceptions or structured errors. B
 transport encoding, not secrecy; the fixed outer parser must discard any rejected encoded
 payload before returning control to a caller.
 
+`proposal_json_is_within_depth_limit()` is implemented in this module, not supplied by a
+caller. It exact-type gates raw built-in text or bytes before any operation, performs one
+bounded decode, and walks the decoded graph with an explicit stack. It accepts only exact
+built-in dictionaries, lists, string keys, JSON scalar runtime types, and `None`; it
+enforces 128 levels, 4,096 total nodes, 4,096 items per container, and the same 8 MiB byte
+limit without recursive Python traversal. Subclasses, `bytearray`, and metaclass-backed
+objects return `False` without invoking their hooks.
+
 For one of the 18 additive tags, the public parser decodes bounded JSON and uses the
 declared proposal and nested field annotations to reconstruct the exact strict Python
 wire shape before calling `PROPOSAL_ADAPTER.validate_python(..., strict=True)`. This
@@ -1694,7 +1762,12 @@ mapping, recursion level, decimal string, and the complete serialized proposal h
 explicit bound. The reward-value union additionally requires the exact two-key tagged
 wire form: `{"kind":"numeric","value":"..."}` becomes `Decimal`, while
 `{"kind":"categorical","value":"..."}` remains exact text. Untagged or mistyped
-numeric values cannot cross between those branches. Typed-Python model validation remains
+numeric values—and every other non-object shape—are rejected before generic union
+fallback, so bare numeric-looking or categorical strings cannot cross either branch. All
+decimal text passes through the bounded conversion helper. The helper catches decimal and
+arithmetic conversion failures and raises only its fixed context-free `ValueError`; the
+outer parser also defensively includes those failures in its fixed detached boundary.
+Typed-Python model validation remains
 strict and receives no coercive normalizer. Existing released proposal tags retain their
 original direct `PROPOSAL_ADAPTER.validate_json()` route, so their bytes and hashes are
 unchanged.
