@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import warnings
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from pydantic_core import to_jsonable_python
 
 from super_scientist.domain.cognition import (
@@ -15,7 +17,10 @@ from super_scientist.domain.cognition import (
     CohortPlan,
     CohortRequest,
     DiversityFingerprint,
+    ErrorCorrelationRecord,
+    ErrorCorrelationStatus,
     assess_capability,
+    assess_diversity,
     build_cohort,
 )
 from super_scientist.domain.identity import ActorIdentity, ActorKind
@@ -25,6 +30,44 @@ NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 SNAPSHOT = "a" * 64
 POLICY = "f" * 64
 PLAN_LIMIT_BYTES = 8 * 1024 * 1024
+PRIVATE_MARKER = "PRIVATE-MARKER-7f4d"
+
+
+class _UnserializablePrivateMarker:
+    def __repr__(self) -> str:
+        return PRIVATE_MARKER
+
+
+def _forge_schema_version(
+    model: BaseModel,
+    construction: str,
+    value: object = PRIVATE_MARKER,
+) -> BaseModel:
+    if construction == "model-copy":
+        return model.model_copy(update={"schema_version": value})
+    values = model.model_dump(mode="python", warnings=False)
+    values["schema_version"] = value
+    return type(model).model_construct(**values)
+
+
+def _assert_sanitized_derivation_failure(
+    action: Callable[[], object],
+    expected_message: str,
+) -> None:
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        with pytest.raises(ValueError) as caught:
+            action()
+
+    error = caught.value
+    assert caught_warnings == []
+    assert type(error) is ValueError
+    assert str(error) == expected_message
+    assert PRIVATE_MARKER not in str(error)
+    assert PRIVATE_MARKER not in repr(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert not hasattr(error, "errors")
 
 
 def _requirement(requirement_id: str = "requirement-a") -> CapabilityRequirement:
@@ -118,6 +161,140 @@ def _request(
         prohibited_combinations=prohibited,
         governing_policy_hash=POLICY,
     )
+
+
+@pytest.mark.parametrize("construction", ("model-copy", "model-construct"))
+@pytest.mark.parametrize(
+    "boundary",
+    (
+        "assess-requirement",
+        "assess-profile",
+        "build-request",
+        "build-profile",
+        "diversity-cohort",
+        "diversity-profile",
+        "diversity-correlation",
+    ),
+)
+def test_public_cognition_derivations_detach_forged_input_details(
+    boundary: str,
+    construction: str,
+) -> None:
+    requirement = _requirement()
+    profile = _profile("peer-a")
+    request = _request(candidates=("peer-a",), required=(requirement,))
+
+    if boundary == "assess-requirement":
+        forged = _forge_schema_version(requirement, construction)
+        _assert_sanitized_derivation_failure(
+            lambda: assess_capability(profile, forged),
+            "capability requirement is invalid",
+        )
+        return
+    if boundary == "assess-profile":
+        forged = _forge_schema_version(profile, construction)
+        _assert_sanitized_derivation_failure(
+            lambda: assess_capability(forged, requirement),
+            "capability profile is invalid",
+        )
+        return
+    if boundary == "build-request":
+        forged = _forge_schema_version(request, construction)
+        _assert_sanitized_derivation_failure(
+            lambda: build_cohort(forged, (profile,)),
+            "cohort request is invalid",
+        )
+        return
+    if boundary == "build-profile":
+        forged = _forge_schema_version(profile, construction)
+        _assert_sanitized_derivation_failure(
+            lambda: build_cohort(request, (forged,)),
+            "capability profile is invalid",
+        )
+        return
+
+    right = _profile("peer-b")
+    diversity_request = _request(
+        min_members=2,
+        max_members=2,
+        candidates=("peer-a", "peer-b"),
+        required=(requirement,),
+    )
+    cohort = build_cohort(diversity_request, (profile, right))
+    if boundary == "diversity-cohort":
+        forged = _forge_schema_version(cohort, construction)
+        _assert_sanitized_derivation_failure(
+            lambda: assess_diversity(forged, (profile, right), ()),
+            "cohort plan is invalid",
+        )
+        return
+    if boundary == "diversity-profile":
+        forged = _forge_schema_version(profile, construction)
+        _assert_sanitized_derivation_failure(
+            lambda: assess_diversity(cohort, (forged, right), ()),
+            "capability profile is invalid",
+        )
+        return
+    correlation = ErrorCorrelationRecord(
+        correlation_id="correlation-a",
+        left_actor_id="peer-a",
+        right_actor_id="peer-b",
+        evaluation_set_id="evaluation-a",
+        sample_count=1,
+        method="pearson",
+        status=ErrorCorrelationStatus.INSUFFICIENT_DATA,
+        value=None,
+        governing_policy_hash=POLICY,
+    )
+    forged = _forge_schema_version(correlation, construction)
+    _assert_sanitized_derivation_failure(
+        lambda: assess_diversity(cohort, (profile, right), (forged,)),
+        "error correlation is invalid",
+    )
+
+
+@pytest.mark.parametrize("construction", ("model-copy", "model-construct"))
+@pytest.mark.parametrize("input_kind", ("request", "profile"))
+def test_build_cohort_detaches_supplied_input_serialization_failures(
+    construction: str,
+    input_kind: str,
+) -> None:
+    request = _request(candidates=("peer-a",))
+    profile = _profile("peer-a")
+    marker = _UnserializablePrivateMarker()
+    if input_kind == "request":
+        request = _forge_schema_version(request, construction, marker)
+    else:
+        profile = _forge_schema_version(profile, construction, marker)
+
+    _assert_sanitized_derivation_failure(
+        lambda: build_cohort(request, (profile,)),
+        "cohort supplied profile inputs are invalid",
+    )
+
+
+def test_cohort_plan_byte_gate_detaches_raw_serialization_failure() -> None:
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        with pytest.raises(ValidationError) as caught:
+            CohortPlan.model_validate(
+                {"schema_version": _UnserializablePrivateMarker()}
+            )
+
+    error = caught.value
+    assert caught_warnings == []
+    assert PRIVATE_MARKER not in str(error)
+    assert PRIVATE_MARKER not in repr(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert error.errors(include_url=False, include_context=False) == [
+        {
+            "type": "value_error",
+            "loc": (),
+            "msg": "Value error, cohort plan canonical serialization failed",
+            "input": "[REDACTED]",
+        }
+    ]
 
 
 def test_cohort_tie_is_recorded_then_broken_by_actor_id() -> None:

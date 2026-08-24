@@ -40,6 +40,13 @@ MAX_COHORT_GROUNDING_INPUT_BYTES = min(
     4 * 1024 * 1024,
     MAX_COHORT_PLAN_BYTES - MAX_COHORT_COMPACT_DERIVED_BYTES,
 )
+_COGNITION_INPUT_FAILURES = (
+    MemoryError,
+    OverflowError,
+    RecursionError,
+    TypeError,
+    ValueError,
+)
 
 
 def _strip_text(value: object) -> object:
@@ -141,10 +148,15 @@ def _strict_revalidate_cognition_model[CognitionModelT: BaseModel](
 ) -> CognitionModelT:
     if type(value) is not expected_type:
         raise TypeError(f"{label} must be an exact {expected_type.__name__}")
+    validated: CognitionModelT | None = None
     try:
-        return expected_type.model_validate_json(value.model_dump_json(warnings=False))
-    except (PydanticValidationError, TypeError, ValueError):
-        raise ValueError(f"{label} is invalid") from None
+        serialized = value.model_dump_json(warnings=False)
+        validated = expected_type.model_validate_json(serialized)
+    except _COGNITION_INPUT_FAILURES:
+        pass
+    if validated is None:
+        raise ValueError(f"{label} is invalid")
+    return validated
 
 
 def _require_canonical_unique(
@@ -160,7 +172,7 @@ def _require_canonical_unique(
 
 
 def _content_hash(model: BaseModel, *, exclude: str = "content_hash") -> str:
-    payload = model.model_dump(mode="json", exclude={exclude})
+    payload = model.model_dump(mode="json", exclude={exclude}, warnings=False)
     return sha256_hex(canonical_json_bytes(payload))
 
 
@@ -180,9 +192,12 @@ def _reject_cohort_plan(message: str) -> NoReturn:
 
 
 def _require_cohort_plan_byte_bound(value: object) -> None:
+    serialization_failed = False
     try:
         serialized = canonical_json_bytes(to_jsonable_python(value))
-    except (TypeError, ValueError):
+    except _COGNITION_INPUT_FAILURES:
+        serialization_failed = True
+    if serialization_failed:
         _reject_cohort_plan("cohort plan canonical serialization failed")
     if len(serialized) > MAX_COHORT_PLAN_BYTES:
         _reject_cohort_plan("cohort serialized plan exceeds the Phase A byte limit")
@@ -395,8 +410,13 @@ class CapabilityProfile(_CapabilityProfilePayload):
     @classmethod
     def build(cls, **values: Any) -> CapabilityProfile:
         payload = _CapabilityProfilePayload(**values)
-        digest = sha256_hex(canonical_json_bytes(payload.model_dump(mode="json")))
-        return cls(**payload.model_dump(mode="python"), content_hash=digest)
+        digest = sha256_hex(
+            canonical_json_bytes(payload.model_dump(mode="json", warnings=False))
+        )
+        return cls(
+            **payload.model_dump(mode="python", warnings=False),
+            content_hash=digest,
+        )
 
     @model_validator(mode="after")
     def require_canonical_content_hash(self) -> Self:
@@ -673,8 +693,13 @@ class CohortRequest(_CohortRequestPayload):
     @classmethod
     def build(cls, **values: Any) -> CohortRequest:
         payload = _CohortRequestPayload(**values)
-        digest = sha256_hex(canonical_json_bytes(payload.model_dump(mode="json")))
-        return cls(**payload.model_dump(mode="python"), content_hash=digest)
+        digest = sha256_hex(
+            canonical_json_bytes(payload.model_dump(mode="json", warnings=False))
+        )
+        return cls(
+            **payload.model_dump(mode="python", warnings=False),
+            content_hash=digest,
+        )
 
     @model_validator(mode="after")
     def require_canonical_content_hash(self) -> Self:
@@ -831,9 +856,9 @@ class _CohortPlanPayload(_StrictFrozenModel):
             )
         grounding_input_bytes = canonical_json_bytes(
             {
-                "request_snapshot": request.model_dump(mode="json"),
+                "request_snapshot": request.model_dump(mode="json", warnings=False),
                 "resolved_candidate_profiles": tuple(
-                    profile.model_dump(mode="json")
+                    profile.model_dump(mode="json", warnings=False)
                     for profile in self.resolved_candidate_profiles
                 ),
             }
@@ -1093,8 +1118,13 @@ class CohortPlan(_CohortPlanPayload):
     @classmethod
     def build(cls, **values: Any) -> CohortPlan:
         payload = _CohortPlanPayload(**values)
-        digest = sha256_hex(canonical_json_bytes(payload.model_dump(mode="json")))
-        return cls(**payload.model_dump(mode="python"), content_hash=digest)
+        digest = sha256_hex(
+            canonical_json_bytes(payload.model_dump(mode="json", warnings=False))
+        )
+        return cls(
+            **payload.model_dump(mode="python", warnings=False),
+            content_hash=digest,
+        )
 
     @model_validator(mode="after")
     def require_canonical_content_hash(self) -> Self:
@@ -1231,8 +1261,13 @@ class DiversityAssessment(_DiversityAssessmentPayload):
     @classmethod
     def build(cls, **values: Any) -> DiversityAssessment:
         payload = _DiversityAssessmentPayload(**values)
-        digest = sha256_hex(canonical_json_bytes(payload.model_dump(mode="json")))
-        return cls(**payload.model_dump(mode="python"), content_hash=digest)
+        digest = sha256_hex(
+            canonical_json_bytes(payload.model_dump(mode="json", warnings=False))
+        )
+        return cls(
+            **payload.model_dump(mode="python", warnings=False),
+            content_hash=digest,
+        )
 
     @model_validator(mode="after")
     def require_canonical_content_hash(self) -> Self:

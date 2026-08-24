@@ -4,6 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from super_scientist.domain.cognition.models import (
+    _COGNITION_INPUT_FAILURES,
     MAX_COGNITION_ITEMS,
     MAX_COHORT_GROUNDING_INPUT_BYTES,
     CapabilityAssessment,
@@ -75,7 +76,9 @@ def assess_capability(
 
 
 def _assessment_hash(assessment: CapabilityAssessment) -> str:
-    return sha256_hex(canonical_json_bytes(assessment.model_dump(mode="json")))
+    return sha256_hex(
+        canonical_json_bytes(assessment.model_dump(mode="json", warnings=False))
+    )
 
 
 def _prepare_cohort_inputs(
@@ -90,6 +93,7 @@ def _prepare_cohort_inputs(
         raise TypeError("cohort request must be an exact CohortRequest")
     if any(type(profile) is not CapabilityProfile for profile in profiles):
         raise TypeError("cohort profiles must contain exact CapabilityProfile values")
+    serialization_failed = False
     try:
         supplied_input_bytes = canonical_json_bytes(
             {
@@ -100,8 +104,10 @@ def _prepare_cohort_inputs(
                 ),
             }
         )
-    except (TypeError, ValueError):
-        raise ValueError("cohort supplied profile inputs are invalid") from None
+    except _COGNITION_INPUT_FAILURES:
+        serialization_failed = True
+    if serialization_failed:
+        raise ValueError("cohort supplied profile inputs are invalid")
     if len(supplied_input_bytes) > MAX_COHORT_GROUNDING_INPUT_BYTES:
         raise ValueError("cohort supplied profile inputs exceed the Phase A byte limit")
     validated_request = _strict_revalidate_cognition_model(
