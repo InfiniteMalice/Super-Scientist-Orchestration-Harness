@@ -75,6 +75,7 @@ from super_scientist.domain.procedures import (
     ProcedureCompilationReceiptRef,
 )
 from super_scientist.domain.progress.models import ProgressPlan
+from super_scientist.kernel.transactions import models as transaction_models
 from super_scientist.kernel.transactions.models import (
     AddEvidence,
     Approval,
@@ -561,6 +562,58 @@ def test_task_8_all_governed_proposals_round_trip_through_fixed_parser() -> None
     for proposal in proposals:
         parsed = namespace["parse_untrusted_proposal_json"](proposal.model_dump_json())
         assert parsed == proposal
+
+
+def test_task_8_runtime_registers_every_governed_proposal_in_closed_parser() -> None:
+    planned_namespace = _task_8_and_13_namespace()
+    planned_proposals = _governed_proposal_examples(planned_namespace)
+
+    assert (
+        tuple(
+            proposal_type.__name__ for proposal_type in transaction_models.GOVERNED_PROPOSAL_CLASSES
+        )
+        == GOVERNED_PROPOSAL_CLASS_NAMES
+    )
+    assert {
+        code.value
+        for code in transaction_models.RejectionCode
+        if code.value
+        in {
+            "DERIVATION_MISMATCH",
+            "STALE_REFERENCE",
+            "COLLABORATION_BOUND_EXCEEDED",
+            "INVALID_PROCEDURE",
+            "UNMATCHED_EVALUATION",
+            "INVALID_REWARD",
+        }
+    } == {
+        "DERIVATION_MISMATCH",
+        "STALE_REFERENCE",
+        "COLLABORATION_BOUND_EXCEEDED",
+        "INVALID_PROCEDURE",
+        "UNMATCHED_EVALUATION",
+        "INVALID_REWARD",
+    }
+
+    for planned_proposal in planned_proposals:
+        parsed = transaction_models.parse_untrusted_proposal_json(
+            planned_proposal.model_dump_json()
+        )
+        assert type(parsed).__name__ == type(planned_proposal).__name__
+        assert parsed.model_dump(mode="json") == planned_proposal.model_dump(mode="json")
+
+
+def test_task_8_runtime_parser_rejects_unknown_governed_field_with_detached_error() -> None:
+    planned_namespace = _task_8_and_13_namespace()
+    planned_proposal = _governed_proposal_examples(planned_namespace)[0]
+    payload = planned_proposal.model_dump(mode="json") | {"authority": "peer"}
+
+    with pytest.raises(transaction_models.ProposalBoundaryValidationError) as error:
+        transaction_models.parse_untrusted_proposal_json(canonical_json_bytes(payload))
+
+    assert str(error.value) == "transaction proposal failed validation"
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
 
 
 def test_task_8_reward_proposal_json_round_trip_preserves_tagged_value_kind() -> None:
