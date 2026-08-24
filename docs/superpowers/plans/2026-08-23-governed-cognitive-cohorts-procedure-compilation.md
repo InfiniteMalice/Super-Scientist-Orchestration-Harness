@@ -826,14 +826,22 @@ Expected: FAIL because the new proposal kinds are not registered.
 - [ ] **Step 3: Add the exact proposal classes**
 
 ```python
+import json
+from collections.abc import Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
+from decimal import Decimal
+from enum import Enum
+from types import UnionType
+from typing import Annotated, Any, Union, get_args, get_origin
 
 
 # <!-- task-8-13-trace-contract:start -->
 MAX_GOVERNED_PROPOSAL_IDENTIFIER_LENGTH = 200
 MAX_HARNESS_TRACE_RECORD_IDENTIFIER_LENGTH = 200
 MAX_PROPOSAL_COLLECTION_ITEMS = 256
+MAX_PROPOSAL_RECONSTRUCTION_DEPTH = 128
+MAX_PROPOSAL_RECONSTRUCTION_ITEMS = 4_096
 
 _STABLE_IDENTIFIER_ALPHABET = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
@@ -1111,7 +1119,20 @@ class HarnessTraceRecordMetadata(_StrictProposalEnvelopeModel):
 
     @field_validator("received_at", mode="before")
     @classmethod
-    def require_exact_raw_received_at(cls, value: object) -> datetime:
+    def require_safe_raw_received_at(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if info.mode == "json":
+            if type(value) is not str or not value or len(value) > 64:
+                raise ValueError("JSON timestamp must be bounded exact text")
+            return datetime.fromisoformat(value)
+        return _fresh_utc_timestamp(value)
+
+    @field_validator("received_at", mode="after")
+    @classmethod
+    def require_exact_decoded_received_at(cls, value: datetime) -> datetime:
         return _fresh_utc_timestamp(value)
 
 
@@ -1119,6 +1140,21 @@ class HarnessExecutionTraceEnvelope(_StrictProposalEnvelopeModel):
     schema_version: Literal[1] = 1
     metadata: HarnessTraceRecordMetadata
     trace: HarnessExecutionTrace
+
+    @field_validator("trace", mode="before")
+    @classmethod
+    def decode_strict_json_trace(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if info.mode != "json":
+            return value
+        if type(value) is not dict or any(type(key) is not str for key in value):
+            raise ValueError("JSON trace must decode to an exact object")
+        return parse_untrusted_harness_execution_trace(
+            json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        )
 
 
 class RecordHarnessExecutionTrace(GovernedProposalBase):
@@ -1162,6 +1198,102 @@ _REWARD_PROPOSAL_STATE_FIELDS = frozenset(
         "assessment",
     }
 )
+
+
+def _fresh_exact_value(
+    value: object,
+    annotation: object,
+    *,
+    depth: int = 0,
+) -> object:
+    if depth > MAX_PROPOSAL_RECONSTRUCTION_DEPTH:
+        raise ValueError("proposal reconstruction exceeds its depth bound")
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+    if origin is Annotated:
+        return _fresh_exact_value(value, arguments[0], depth=depth + 1)
+    if origin in (Union, UnionType):
+        for option in arguments:
+            try:
+                return _fresh_exact_value(value, option, depth=depth + 1)
+            except (TypeError, ValueError):
+                continue
+        raise ValueError("proposal union value has no exact admitted type")
+    if origin is Literal:
+        if not any(type(value) is type(option) and value == option for option in arguments):
+            raise ValueError("proposal literal value is not exact")
+        return value
+    if annotation is Any:
+        if value is None or type(value) in (str, int, float, bool, bytes):
+            return value
+        raise ValueError("untyped proposal state admits exact primitives only")
+    if annotation is type(None):
+        if value is not None:
+            raise ValueError("proposal value must be None")
+        return None
+    if annotation is datetime:
+        return _fresh_utc_timestamp(value)
+    if annotation is Decimal:
+        if type(value) is not Decimal:
+            raise ValueError("proposal decimal must have the exact declared type")
+        return Decimal(str(value))
+    if annotation in (str, int, float, bool, bytes):
+        if type(value) is not annotation:
+            raise ValueError("proposal primitive must have the exact declared type")
+        return value
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        if type(value) is not annotation:
+            raise ValueError("proposal enum must have the exact declared type")
+        return value
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        fields = frozenset(annotation.model_fields)
+        state = _exact_model_state(value, annotation, fields)
+        rebuilt = {
+            field_name: _fresh_exact_value(
+                state[field_name],
+                field.annotation,
+                depth=depth + 1,
+            )
+            for field_name, field in annotation.model_fields.items()
+        }
+        return annotation.model_validate(rebuilt, strict=True)
+    if origin is tuple:
+        if type(value) is not tuple or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
+            raise ValueError("proposal tuple must be exact and bounded")
+        if len(arguments) == 2 and arguments[1] is Ellipsis:
+            return tuple(
+                _fresh_exact_value(item, arguments[0], depth=depth + 1)
+                for item in value
+            )
+        if len(value) != len(arguments):
+            raise ValueError("fixed proposal tuple has the wrong length")
+        return tuple(
+            _fresh_exact_value(item, item_type, depth=depth + 1)
+            for item, item_type in zip(value, arguments, strict=True)
+        )
+    if origin is list:
+        if type(value) is not list or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
+            raise ValueError("proposal list must be exact and bounded")
+        item_type = arguments[0] if arguments else Any
+        return [
+            _fresh_exact_value(item, item_type, depth=depth + 1)
+            for item in value
+        ]
+    if origin in (dict, Mapping):
+        if type(value) is not dict or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
+            raise ValueError("proposal mapping must be exact and bounded")
+        if any(type(key) is not str for key in value):
+            raise ValueError("proposal mapping keys must be exact built-in strings")
+        key_type, item_type = arguments if len(arguments) == 2 else (str, Any)
+        return {
+            _fresh_exact_value(key, key_type, depth=depth + 1): _fresh_exact_value(
+                item,
+                item_type,
+                depth=depth + 1,
+            )
+            for key, item in value.items()
+        }
+    raise ValueError("proposal state contains an unsupported declared type")
 
 
 def _fresh_harness_trace_metadata(value: object) -> HarnessTraceRecordMetadata:
@@ -1210,21 +1342,21 @@ def _fresh_reward_assessment_proposal(value: object) -> RecordRewardAssessment:
         proposer=_fresh_actor_identity(state["proposer"]),
         approval=_fresh_approval(state["approval"]),
         proposal_type="record_reward_assessment",
-        observation=RewardObservation.model_validate(observation, strict=True),
+        observation=_fresh_exact_value(observation, RewardObservation),
         findings=tuple(
-            RewardHackingFinding.model_validate(finding, strict=True)
+            _fresh_exact_value(finding, RewardHackingFinding)
             for finding in findings
         ),
-        assessment=RewardValidityAssessment.model_validate(
+        assessment=_fresh_exact_value(
             assessment,
-            strict=True,
+            RewardValidityAssessment,
         ),
     )
 
 
 def _invalid_reward_decision(value: object) -> TransactionDecision:
     proposal_id = "invalid-reward-proposal"
-    with suppress(TypeError, ValueError):
+    with suppress(AttributeError, MemoryError, RecursionError, TypeError, ValueError):
         state = object.__getattribute__(value, "__dict__")
         if type(state) is not dict or any(type(key) is not str for key in state):
             raise ValueError("unsafe proposal state")
@@ -1957,7 +2089,13 @@ rejects non-validating copies, copied mutations, injected methods or serializers
 field subclasses, invalid actor identity, and forged trace hashes with the same detached
 `ProposalBoundaryValidationError` used by the serialized-proposal boundary.
 `RecordHarnessExecutionTrace` therefore never receives an unvalidated caller-owned
-metadata, actor, identifier, or trace instance.
+metadata, actor, identifier, or trace instance. In typed Python validation, metadata
+still admits only an exact `datetime`. In JSON validation, the mode-aware validator first
+requires bounded exact built-in text, decodes it with the trusted datetime constructor,
+and then applies the same exact UTC check. The envelope similarly routes its exact decoded
+JSON trace object back through the bounded untrusted-trace parser. Consequently a complete
+`RecordHarnessExecutionTrace` can make a strict `model_dump_json()` / `model_validate_json()`
+round trip without weakening the typed adapter boundary.
 
 - [ ] **Step 4: Recompute trace freshness and reward validity**
 
@@ -2051,8 +2189,12 @@ exact `RecordRewardAssessment` type and obtains state with `object.__getattribut
 The handler requires an exact built-in dictionary, exact built-in string keys, the exact
 declared key set, exact raw identifier strings, exact nested model types, and an exact
 tuple of exact finding types. `_fresh_reward_assessment_proposal()` reconstructs the
-proposer, approval, observation, findings, assessment, and complete proposal without
-calling an instance serializer. The handler uses only that fresh proposal for resolution,
+proposer, approval, and the complete observation, finding, trace, and assessment graphs.
+Every nested model is read through exact non-dispatching dictionary acquisition; every
+field is rebuilt recursively from exact bounded containers, exact primitive values, and
+trusted enum values before class-owned validation. Caller-owned nested models are never
+passed to Pydantic, and no caller serializer is invoked. The handler uses only that fresh
+proposal for resolution,
 rejection, comparison, and acceptance. Before the handler compares a claimed assessment,
 it constructs the two bounded receipts and recomputes trace freshness and reward validity.
 If fresh reconstruction, receipt construction, freshness computation, or reward-validity
@@ -2064,6 +2206,8 @@ uses a safely extracted validated proposal ID or the literal fallback
 subclass, injected `__pydantic_serializer__`, hostile identifier subclass, or
 non-validating copy with cross-trace, empty, duplicated, or excessive findings therefore
 cannot execute a caller hook, crash the coordinator, or cross the transaction boundary.
+Values without instance dictionaries—including `object()`, integers, `None`, and
+metaclass-backed objects—also deterministically receive the same fixed fallback decision.
 
 After the handler stores the exact assessment, only
 `valid_reward_evidence((expected,))` feeds a positive evidence selector. Invalid and inconclusive

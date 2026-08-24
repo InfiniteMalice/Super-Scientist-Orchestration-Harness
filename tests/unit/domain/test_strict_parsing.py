@@ -1,11 +1,13 @@
 import ast
 import json
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
-from enum import StrEnum
+from decimal import Decimal
+from enum import Enum, StrEnum
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Annotated, Self
+from types import SimpleNamespace, UnionType
+from typing import Annotated, Any, Self, Union, get_args, get_origin
 
 import pytest
 from pydantic import (
@@ -14,6 +16,7 @@ from pydantic import (
     Field,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -144,6 +147,12 @@ def _task_8_and_13_namespace() -> dict[str, object]:
         "Annotated": Annotated,
         "Approval": Approval,
         "BaseModel": BaseModel,
+        "Any": Any,
+        "Decimal": Decimal,
+        "Enum": Enum,
+        "Mapping": Mapping,
+        "Union": Union,
+        "UnionType": UnionType,
         "CapabilityProfile": CapabilityProfile,
         "CapabilityProfileReceiptRef": CapabilityProfileReceiptRef,
         "CohortPlan": CohortPlan,
@@ -157,9 +166,12 @@ def _task_8_and_13_namespace() -> dict[str, object]:
         "ErrorCorrelationRecord": ErrorCorrelationRecord,
         "Field": Field,
         "field_validator": field_validator,
+        "get_args": get_args,
+        "get_origin": get_origin,
         "GuidanceEvaluationCell": GuidanceEvaluationCell,
         "GuidanceEvaluationProtocol": GuidanceEvaluationProtocol,
         "HarnessExecutionTrace": HarnessExecutionTrace,
+        "json": json,
         "Literal": __import__("typing").Literal,
         "MethodDirectionOutcome": MethodDirectionOutcome,
         "ModelHarnessAnalysis": ModelHarnessAnalysis,
@@ -185,6 +197,7 @@ def _task_8_and_13_namespace() -> dict[str, object]:
         "RewardHackingFinding": RewardHackingFinding,
         "RewardValidityAssessment": RewardValidityAssessment,
         "TransactionDecision": _TransactionDecision,
+        "ValidationInfo": ValidationInfo,
         "model_validator": model_validator,
         "parse_untrusted_harness_execution_trace": parse_untrusted_harness_execution_trace,
         "suppress": __import__("contextlib").suppress,
@@ -431,6 +444,30 @@ def test_task_8_and_13_trace_boundary_contract_revalidates_untrusted_inputs() ->
             _actor(),
         )
     _assert_detached_proposal_boundary_error(trace_error.value)
+
+
+def test_task_8_trace_proposal_strict_json_round_trip() -> None:
+    namespace = _task_8_and_13_namespace()
+
+    from tests.unit.harness_eval.test_traces import valid_trace
+
+    proposal = namespace["HarnessTraceProposalAdapter"]().from_untrusted_payload(
+        valid_trace().model_dump_json(),
+        namespace["HarnessTraceRecordMetadata"](
+            received_at=NOW,
+            source_id="json-round-trip",
+        ),
+        "json-round-trip-proposal",
+        "json-round-trip-idempotency",
+        _actor(),
+    )
+
+    decoded = namespace["RecordHarnessExecutionTrace"].model_validate_json(
+        proposal.model_dump_json(),
+        strict=True,
+    )
+
+    assert decoded == proposal
 
 
 def test_task_13_trace_adapter_rejects_nonexact_metadata_without_hooks() -> None:
@@ -758,11 +795,44 @@ def test_task_13_reward_handler_executes_with_focused_capabilities() -> None:
         proposal.model_copy(update={"idempotency_key": HostileIdentifier("hostile-idempotency")}),
     )
 
+    hostile_observation = assessment.observation.model_copy(
+        update={"observation_id": HostileIdentifier("hostile-observation")}
+    )
+    hostile_finding = assessment.findings[0].model_copy(
+        update={"finding_id": HostileIdentifier("hostile-finding")}
+    )
+    hostile_finding_assessment = assessment.model_copy(
+        update={"findings": (hostile_finding, *assessment.findings[1:])}
+    )
+    hostile_binding = assessment.trace.observed_binding.model_copy(
+        update={"task_id": HostileIdentifier("hostile-task")}
+    )
+    hostile_trace = assessment.trace.model_copy(update={"observed_binding": hostile_binding})
+    hostile_deep_assessment = assessment.model_copy(update={"trace": hostile_trace})
+    serializer_assessment = assessment.model_copy()
+    object.__setattr__(
+        serializer_assessment,
+        "__pydantic_serializer__",
+        HostileSerializer(),
+    )
+    hostile_nested_proposals = (
+        proposal.model_copy(update={"observation": hostile_observation}),
+        proposal.model_copy(
+            update={
+                "findings": (hostile_finding, *assessment.findings[1:]),
+                "assessment": hostile_finding_assessment,
+            }
+        ),
+        proposal.model_copy(update={"assessment": hostile_deep_assessment}),
+        proposal.model_copy(update={"assessment": serializer_assessment}),
+    )
+
     hooks.clear()
     for hostile_proposal in (
         subclass_proposal,
         serializer_proposal,
         *hostile_identifier_proposals,
+        *hostile_nested_proposals,
     ):
         decision = namespace["RecordRewardAssessmentHandler"]().decide(
             hostile_proposal,
@@ -770,6 +840,41 @@ def test_task_13_reward_handler_executes_with_focused_capabilities() -> None:
         )
         _assert_fixed_invalid_reward_decision(decision)
     assert hooks == []
+
+
+def test_task_13_invalid_reward_decision_is_total_without_hooks() -> None:
+    namespace = _task_8_and_13_namespace()
+    hooks: list[str] = []
+
+    class HookedMeta(type):
+        def __getattribute__(cls, name: str) -> object:
+            hooks.append(f"metaclass-{name}")
+            return super().__getattribute__(name)
+
+    class MetaclassBacked(metaclass=HookedMeta):
+        pass
+
+    for value in (object(), 1, None, MetaclassBacked):
+        decision = namespace["_invalid_reward_decision"](value)
+        _assert_fixed_invalid_reward_decision(decision)
+        assert decision.proposal_id == "invalid-reward-proposal"
+
+    assert hooks == []
+
+
+def test_task_8_recursive_proposal_reconstruction_bounds_containers() -> None:
+    namespace = _task_8_and_13_namespace()
+    fresh_exact_value = namespace["_fresh_exact_value"]
+    maximum = namespace["MAX_PROPOSAL_RECONSTRUCTION_ITEMS"]
+    exact_tuple = ("item",) * maximum
+    exact_list = ["item"] * maximum
+
+    assert fresh_exact_value(exact_tuple, tuple[str, ...]) == exact_tuple
+    assert fresh_exact_value(exact_list, list[str]) == exact_list
+    with pytest.raises(ValueError, match="tuple must be exact and bounded"):
+        fresh_exact_value((*exact_tuple, "excess"), tuple[str, ...])
+    with pytest.raises(ValueError, match="list must be exact and bounded"):
+        fresh_exact_value([*exact_list, "excess"], list[str])
 
 
 def test_task_8_reward_proposal_bounds_identifiers_and_findings() -> None:
