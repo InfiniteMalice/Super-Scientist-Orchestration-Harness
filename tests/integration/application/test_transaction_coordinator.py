@@ -108,6 +108,42 @@ COGNITIVE_CAPABILITY_GROUPS = (
     ),
 )
 
+HOSTILE_GOVERNED_REJECTION_CASES = (
+    *(
+        (proposal_type, RejectionCode.DERIVATION_MISMATCH)
+        for proposal_type in (
+            RecordCapabilityProfile,
+            RecordCohortPlan,
+            RecordDiversityAssessment,
+            RecordCollaborationSession,
+            AppendPeerRequest,
+            AppendPeerContribution,
+            AppendTopologyEvent,
+            RecordCollaborationTermination,
+        )
+    ),
+    *(
+        (proposal_type, RejectionCode.INVALID_PROCEDURE)
+        for proposal_type in (
+            RecordProcedureCompilation,
+            RecordMethodDirectionOutcome,
+            BindCompiledProgressPlan,
+        )
+    ),
+    *(
+        (proposal_type, RejectionCode.UNMATCHED_EVALUATION)
+        for proposal_type in (
+            RecordGuidanceEvaluationProtocol,
+            AppendGuidanceEvaluationCell,
+            RecordModelHarnessProtocol,
+            AppendModelHarnessCell,
+            RecordModelHarnessAnalysis,
+            RecordHarnessExecutionTrace,
+        )
+    ),
+    (RecordRewardAssessment, RejectionCode.INVALID_REWARD),
+)
+
 
 class _CapabilityObserved(RuntimeError):
     pass
@@ -451,12 +487,63 @@ def test_other_nonvalidating_governed_copies_fail_closed_without_crashing(
 
     decision = runtime.coordinator.submit(copied)
 
-    assert decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    assert decision.reasons[0].code is RejectionCode.DERIVATION_MISMATCH
     assert runtime.transaction_and_audit_counts() == (1, 1)
 
 
 @pytest.mark.integration
-def test_mapping_ingress_preflights_deep_exact_builtins_without_hooks(runtime: Runtime) -> None:
+@pytest.mark.parametrize(("proposal_type", "expected_code"), HOSTILE_GOVERNED_REJECTION_CASES)
+def test_every_hostile_governed_subclass_is_rejected_before_capability_attribute_access(
+    runtime: Runtime,
+    proposal_type: type[BaseModel],
+    expected_code: RejectionCode,
+) -> None:
+    attribute_calls = 0
+    serializer_calls = 0
+
+    def hostile_attribute(self: object, name: str) -> object:
+        del self, name
+        nonlocal attribute_calls
+        attribute_calls += 1
+        raise AssertionError("hostile governed attribute hook must not run")
+
+    hostile_type = type(
+        f"Hostile{proposal_type.__name__}",
+        (proposal_type,),
+        {"__getattribute__": hostile_attribute},
+    )
+
+    def injected_serializer(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        nonlocal serializer_calls
+        serializer_calls += 1
+        raise AssertionError("injected governed serializer must not run")
+
+    hostile = hostile_type.model_construct(
+        proposal_id=f"hostile-{proposal_type.__name__}",
+        idempotency_key=f"hostile-key-{proposal_type.__name__}",
+        proposer=runtime.actor,
+    )
+    object.__setattr__(hostile, "model_dump", injected_serializer)
+
+    decision = runtime.coordinator.submit(hostile)
+
+    assert decision.reasons[0].code is expected_code
+    assert attribute_calls == 0
+    assert serializer_calls == 0
+    with runtime.uow_factory() as unit_of_work:
+        retained = unit_of_work.repositories().transactions.get_by_proposal_id(
+            f"hostile-{proposal_type.__name__}"
+        )
+        assert retained is not None
+        assert retained.proposal.proposal_type == "invalid_proposal"
+
+
+@pytest.mark.integration
+def test_mapping_ingress_preflights_deep_exact_builtins_without_hooks(
+    runtime: Runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     hostile = _HookedMapping()
 
     hostile_decision = runtime.coordinator.submit(hostile)
@@ -482,6 +569,35 @@ def test_mapping_ingress_preflights_deep_exact_builtins_without_hooks(runtime: R
     oversized = {"padding": "x" * coordinator_module.MAX_PROPOSAL_BYTES}
     oversized_decision = runtime.coordinator.submit(oversized)
     assert oversized_decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+
+    byte_limit = coordinator_module.MAX_PROPOSAL_BYTES
+    assert coordinator_module._mapping_is_within_proposal_bounds({"": "x" * byte_limit})
+    assert not coordinator_module._mapping_is_within_proposal_bounds({"": "x" * (byte_limit + 1)})
+    assert coordinator_module._mapping_is_within_proposal_bounds({"x" * byte_limit: None})
+    assert not coordinator_module._mapping_is_within_proposal_bounds({"x" * (byte_limit + 1): None})
+    assert not coordinator_module._mapping_is_within_proposal_bounds(
+        {"é" * (byte_limit // 2 + 1): None}
+    )
+    assert not coordinator_module._mapping_is_within_proposal_bounds(
+        {"parts": ["x" * (byte_limit // 2), "y" * (byte_limit // 2)]}
+    )
+    assert not coordinator_module._mapping_is_within_proposal_bounds(
+        {"integer": 1 << (byte_limit * 4)}
+    )
+    assert not coordinator_module._mapping_is_within_proposal_bounds({"float": float("inf")})
+
+    serialization_calls = 0
+
+    def forbidden_serialization(value: object) -> bytes:
+        del value
+        nonlocal serialization_calls
+        serialization_calls += 1
+        raise AssertionError("oversized mapping must fail before canonical serialization")
+
+    monkeypatch.setattr(coordinator_module, "canonical_json_bytes", forbidden_serialization)
+    multibyte_decision = runtime.coordinator.submit({"": "é" * (byte_limit // 2 + 1)})
+    assert multibyte_decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    assert serialization_calls == 0
 
 
 @pytest.mark.integration

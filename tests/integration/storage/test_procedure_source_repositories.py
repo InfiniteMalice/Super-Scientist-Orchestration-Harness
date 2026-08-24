@@ -36,6 +36,7 @@ from super_scientist.providers.storage.procedure_sources import (
     ProcedureSourceSnapshotRepository,
     ToolCatalogSnapshotRepository,
     ValidatorCatalogSnapshotRepository,
+    procedure_source_snapshot_audit_metadata,
 )
 from super_scientist.providers.storage.repositories import RepositorySet, StorageIntegrityError
 from tests.unit.collaboration.conftest import actor, profile
@@ -64,6 +65,7 @@ def _persist_accepted(
     occurred_at: datetime,
     *,
     audit_policy_fields: dict[str, object] | None = None,
+    source_snapshot: ProcedureSourceSnapshot | None = None,
 ):
     decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
     repositories.transactions.add(proposal, decision, occurred_at)
@@ -74,15 +76,23 @@ def _persist_accepted(
         if audit_policy_fields is None
         else audit_policy_fields
     )
+    payload = {
+        "proposal": proposal.model_dump(mode="json"),
+        "decision": decision.model_dump(mode="json"),
+        "transaction_persisted": True,
+        **policy_fields,
+    }
+    if source_snapshot is not None:
+        metadata = procedure_source_snapshot_audit_metadata(
+            source_snapshot,
+            proposal.evidence,
+        )
+        assert metadata is not None
+        payload["procedure_source_snapshot"] = metadata
     event = append_event(
         repositories.audit.last(),
         "transaction_decision",
-        {
-            "proposal": proposal.model_dump(mode="json"),
-            "decision": decision.model_dump(mode="json"),
-            "transaction_persisted": True,
-            **policy_fields,
-        },
+        payload,
         occurred_at,
     )
     repositories.audit.add(event)
@@ -136,6 +146,7 @@ def test_source_snapshot_requires_exact_stored_policy_audit_provenance(
                 proposal,
                 NOW,
                 audit_policy_fields=audit_policy_fields,
+                source_snapshot=snapshot,
             )
             snapshots = ProcedureSourceSnapshotRepository(connection, artifacts)
 
@@ -286,7 +297,12 @@ def test_catalog_and_source_snapshot_readers_require_canonical_artifacts_and_fre
                 evidence=first_evidence,
             )
             repositories.evidence.add(first_evidence)
-            _persist_accepted(repositories, first_proposal, NOW + timedelta(seconds=1))
+            _persist_accepted(
+                repositories,
+                first_proposal,
+                NOW + timedelta(seconds=1),
+                source_snapshot=first_snapshot,
+            )
 
             snapshots = ProcedureSourceSnapshotRepository(connection, artifacts)
             assert snapshots.resolve_exact("snapshot-a", first_artifact.sha256) == first_snapshot
@@ -311,7 +327,12 @@ def test_catalog_and_source_snapshot_readers_require_canonical_artifacts_and_fre
                 evidence=second_evidence,
             )
             repositories.evidence.add(second_evidence)
-            _persist_accepted(repositories, second_proposal, NOW + timedelta(seconds=2))
+            _persist_accepted(
+                repositories,
+                second_proposal,
+                NOW + timedelta(seconds=2),
+                source_snapshot=second_snapshot,
+            )
 
             assert not snapshots.is_current("snapshot-a", first_artifact.sha256)
             assert snapshots.is_current("snapshot-b", second_artifact.sha256)
@@ -603,7 +624,7 @@ def test_source_snapshot_rejects_valid_canonical_bytes_with_wrong_actual_hash(tm
                 evidence=evidence,
             )
             repositories.evidence.add(evidence)
-            _persist_accepted(repositories, proposal, NOW)
+            _persist_accepted(repositories, proposal, NOW, source_snapshot=snapshot)
             replacement = ProcedureSourceSnapshot(
                 snapshot_family_id=snapshot.snapshot_family_id,
                 snapshot_id=snapshot.snapshot_id,

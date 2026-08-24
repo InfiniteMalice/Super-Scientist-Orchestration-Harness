@@ -51,6 +51,7 @@ from super_scientist.providers.storage.database import (
     create_database_engine,
     upgrade_database,
 )
+from super_scientist.providers.storage.query_bounds import SQLITE_IN_PARAMETER_CHUNK
 from super_scientist.providers.storage.repositories import RepositorySet, StorageIntegrityError
 from super_scientist.providers.storage.schema import (
     audit_events,
@@ -183,6 +184,48 @@ def test_append_only_add_rolls_back_record_and_references(runtime: StorageRuntim
         )
     assert runtime.count("fixture_records") == 0
     assert runtime.count("fixture_record_references") == 0
+
+
+@pytest.mark.integration
+def test_variable_length_repository_reads_chunk_32767_identifiers(
+    runtime: StorageRuntime,
+) -> None:
+    identifiers = tuple(f"missing-{index:05d}" for index in range(32_767))
+    expected_queries = (
+        len(identifiers) + SQLITE_IN_PARAMETER_CHUNK - 1
+    ) // SQLITE_IN_PARAMETER_CHUNK
+
+    with runtime.uow() as unit_of_work:
+        assert unit_of_work.connection is not None
+        statements: list[str] = []
+
+        def record_statement(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: object,
+        ) -> None:
+            statements.append(statement.lower())
+
+        event.listen(unit_of_work.connection, "before_cursor_execute", record_statement)
+        try:
+            repositories = unit_of_work.repositories()
+            assert repositories.evidence.get_many(identifiers) == ()
+            assert sum("from evidence_records" in item for item in statements) == expected_queries
+
+            statements.clear()
+            assert repositories.transactions.get_many_by_proposal_ids(identifiers) == ()
+            assert sum("from transactions" in item for item in statements) == expected_queries
+
+            statements.clear()
+            assert (
+                runtime.referenced_repository(unit_of_work.connection)._get_many(identifiers) == ()
+            )
+            assert sum("from fixture_records" in item for item in statements) == expected_queries
+        finally:
+            event.remove(unit_of_work.connection, "before_cursor_execute", record_statement)
 
 
 def _evidence_record(evidence_id: str, now: datetime = NOW) -> EvidenceRecord:

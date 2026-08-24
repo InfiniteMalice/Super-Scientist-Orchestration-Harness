@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter
 from sqlalchemy import Connection, Table, insert, select
 
 from super_scientist.domain.primitives import UtcTimestamp, canonical_json_bytes, sha256_hex
+from super_scientist.providers.storage.query_bounds import sqlite_in_chunks
 from super_scientist.providers.storage.repositories import StorageIntegrityError
 from super_scientist.providers.storage.schema import hypothesis_versions
 
@@ -131,14 +132,17 @@ class AppendOnlyRecordRepository[RecordT: BaseModel]:
         return tuple(self._decode_row(dict(row)) for row in rows)
 
     def _get_many(self, record_ids: tuple[str, ...]) -> tuple[RecordT, ...]:
-        if not record_ids:
-            return ()
-        rows = self._connection.execute(
-            select(self._table)
-            .where(self._table.c[self._identifier_field].in_(record_ids))
-            .order_by(self._table.c[self._identifier_field])
-        ).mappings()
-        return tuple(self._decode_row(dict(row)) for row in rows)
+        rows: list[dict[str, object]] = []
+        for identifiers in sqlite_in_chunks(record_ids):
+            rows.extend(
+                dict(row)
+                for row in self._connection.execute(
+                    select(self._table)
+                    .where(self._table.c[self._identifier_field].in_(identifiers))
+                    .order_by(self._table.c[self._identifier_field])
+                ).mappings()
+            )
+        return tuple(self._decode_row(row) for row in rows)
 
     def add(self, record_id: str, record: RecordT, created_at: UtcTimestamp) -> None:
         _require_integrity(isinstance(record_id, str), "record identifier must be a string")
@@ -269,9 +273,7 @@ class OrderedReferenceBinding:
     scope_columns: tuple[str, ...] = ()
 
 
-class ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](
-    AppendOnlyRecordRepository[RecordT]
-):
+class ReferencedAppendOnlyRecordRepository[RecordT: BaseModel](AppendOnlyRecordRepository[RecordT]):
     """Materializes ordered relationship tuples and verifies exact canonical equality."""
 
     def __init__(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast, get_args
@@ -7,7 +8,10 @@ from typing import Literal, Protocol, cast, get_args
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from sqlalchemy import Connection
 
-from super_scientist.application.evidence_verification import verify_artifact_binding
+from super_scientist.application.evidence_verification import (
+    verified_artifact_bytes,
+    verify_artifact_binding,
+)
 from super_scientist.application.harness_eval import fixed_harness_extension_handlers
 from super_scientist.application.harness_eval.service import fixed_harness_eval_handlers
 from super_scientist.application.transactions.adaptation import (
@@ -134,6 +138,9 @@ from super_scientist.kernel.transactions.models import (
 )
 from super_scientist.providers.storage.artifacts import ArtifactStore
 from super_scientist.providers.storage.database import DatabaseUnitOfWork
+from super_scientist.providers.storage.procedure_sources import (
+    procedure_source_snapshot_audit_metadata_from_bytes,
+)
 from super_scientist.providers.storage.repositories import RepositorySet
 
 
@@ -397,6 +404,15 @@ class TransactionCoordinator:
     ) -> TransactionDecision:
         governed_type = _trusted_governed_proposal_type(proposal)
         stored_proposal = _durable_proposal(proposal, governed_type)
+        invalid_governed_type = (
+            governed_type
+            if governed_type is not None and type(proposal) is not governed_type
+            else None
+        )
+        if governed_type is None and type(stored_proposal) is InvalidProposal:
+            invalid_governed_type = _attempted_governed_proposal_type(stored_proposal)
+        if invalid_governed_type is not None:
+            governed_type = None
         proposal_hash = sha256_hex(
             canonical_json_bytes(BaseModel.model_dump(stored_proposal, mode="json"))
         )
@@ -491,7 +507,13 @@ class TransactionCoordinator:
         transaction_created_at = self._clock.now()
         reads: HandlerReadCapability
         writes: HandlerWriteCapability
-        if governed_type is None and isinstance(admitted_proposal, InvalidProposal):
+        if invalid_governed_type is not None:
+            reads = _CompatibilityReadCapability(repositories, stored_policy)
+            decision = _governed_handler_failure_decision(
+                stored_proposal.proposal_id,
+                invalid_governed_type,
+            )
+        elif governed_type is None and isinstance(admitted_proposal, InvalidProposal):
             reads = _CompatibilityReadCapability(repositories, stored_policy)
             compatibility_handler = _CompatibilityProposalHandler(
                 self._engine,
@@ -776,6 +798,29 @@ class TransactionCoordinator:
             payload["configured_policy_hash"] = self._active_policy.policy_hash
         if intent_fingerprint is not None:
             payload["intent_fingerprint"] = intent_fingerprint
+        if (
+            type(proposal) is AddEvidence
+            and decision.accepted
+            and transaction_persisted
+            and proposal.evidence.evidence_type == "procedure-source"
+        ):
+            try:
+                snapshot_metadata = procedure_source_snapshot_audit_metadata_from_bytes(
+                    proposal.evidence,
+                    verified_artifact_bytes(proposal.evidence, self._artifact_store),
+                )
+            except (
+                MemoryError,
+                OSError,
+                OverflowError,
+                RecursionError,
+                TypeError,
+                UnicodeError,
+                ValueError,
+            ):
+                snapshot_metadata = None
+            if snapshot_metadata is not None:
+                payload["procedure_source_snapshot"] = snapshot_metadata
         if isinstance(proposal, ProposeGovernancePolicyTransition):
             payload["prior_policy_hash"] = proposal.prior_policy_hash
             payload["candidate_policy_hash"] = proposal.candidate_policy_snapshot.policy_hash
@@ -858,6 +903,24 @@ def _durable_proposal(
 def _mapping_is_within_proposal_bounds(value: dict[str, object]) -> bool:
     pending: list[tuple[object, int]] = [(value, 0)]
     visited_nodes = 0
+    utf8_scalar_bytes = 0
+
+    def consume_text(candidate: str) -> bool:
+        nonlocal utf8_scalar_bytes
+        remaining = MAX_PROPOSAL_BYTES - utf8_scalar_bytes
+        if len(candidate) > remaining:
+            return False
+        try:
+            encoded_length = 0
+            for offset in range(0, len(candidate), 4_096):
+                encoded_length += len(candidate[offset : offset + 4_096].encode("utf-8"))
+                if encoded_length > remaining:
+                    return False
+        except UnicodeError:
+            return False
+        utf8_scalar_bytes += encoded_length
+        return True
+
     while pending:
         current, depth = pending.pop()
         visited_nodes += 1
@@ -868,12 +931,33 @@ def _mapping_is_within_proposal_bounds(value: dict[str, object]) -> bool:
                 type(key) is not str for key in current
             ):
                 return False
+            if any(not consume_text(key) for key in current):
+                return False
             pending.extend((item, depth + 1) for item in current.values())
         elif type(current) is list:
             if len(current) > MAX_PROPOSAL_JSON_CONTAINER_ITEMS:
                 return False
             pending.extend((item, depth + 1) for item in current)
-        elif current is not None and type(current) not in (str, int, float, bool):
+        elif type(current) is str:
+            if not consume_text(current):
+                return False
+        elif type(current) is int:
+            remaining = MAX_PROPOSAL_BYTES - utf8_scalar_bytes
+            bit_length = int.bit_length(current)
+            decimal_upper_bound = max(1, (bit_length * 30_103 + 99_999) // 100_000)
+            if current < 0:
+                decimal_upper_bound += 1
+            if decimal_upper_bound > remaining:
+                return False
+            utf8_scalar_bytes += decimal_upper_bound
+        elif type(current) is float:
+            if not math.isfinite(current):
+                return False
+            remaining = MAX_PROPOSAL_BYTES - utf8_scalar_bytes
+            if remaining < 24:
+                return False
+            utf8_scalar_bytes += 24
+        elif current is not None and type(current) is not bool:
             return False
     return True
 
@@ -888,17 +972,56 @@ def _governed_handler_failure_decision(
             RejectionCode.INVALID_REWARD,
             "reward assessment proposal is invalid",
         )
+    if governed_type in (
+        RecordProcedureCompilation,
+        RecordMethodDirectionOutcome,
+        BindCompiledProgressPlan,
+    ):
+        return AdmissionEngine.rejected(
+            proposal_id,
+            RejectionCode.INVALID_PROCEDURE,
+            "procedure proposal is invalid",
+        )
+    if governed_type in (
+        RecordGuidanceEvaluationProtocol,
+        AppendGuidanceEvaluationCell,
+        RecordModelHarnessProtocol,
+        AppendModelHarnessCell,
+        RecordModelHarnessAnalysis,
+        RecordHarnessExecutionTrace,
+    ):
+        return AdmissionEngine.rejected(
+            proposal_id,
+            RejectionCode.UNMATCHED_EVALUATION,
+            "harness evaluation proposal is invalid",
+        )
     return AdmissionEngine.rejected(
         proposal_id,
-        RejectionCode.INVALID_PROPOSAL,
+        RejectionCode.DERIVATION_MISMATCH,
         "governed proposal failed fixed handler validation",
+    )
+
+
+def _attempted_governed_proposal_type(
+    proposal: InvalidProposal,
+) -> type[BaseModel] | None:
+    attempted_kind = proposal.attempted_proposal_kind
+    return next(
+        (
+            proposal_type
+            for proposal_type in GOVERNED_PROPOSAL_CLASSES
+            if proposal_type.model_fields["proposal_type"].default == attempted_kind
+        ),
+        None,
     )
 
 
 def _normalize_proposal(value: object) -> Proposal | TransactionDecision:
     governed_type = _trusted_governed_proposal_type(value)
     if governed_type is not None:
-        return cast(Proposal, value)
+        if type(value) is governed_type:
+            return cast(Proposal, value)
+        return _durable_proposal(cast(Proposal, value), governed_type)
     value_type = type(value)
     if value_type is not dict and value_type not in _PROPOSAL_EXACT_TYPES:
         return _invalid_proposal_decision("invalid-proposal")

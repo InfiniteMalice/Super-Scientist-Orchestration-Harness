@@ -62,12 +62,47 @@ from super_scientist.providers.storage.evaluation_records import (
     ModelHarnessProtocolRepository,
     RewardAssessmentRepository,
 )
+from super_scientist.providers.storage.query_bounds import SQLITE_IN_PARAMETER_CHUNK
 from super_scientist.providers.storage.repositories import RepositorySet, StorageIntegrityError
 from tests.unit.collaboration.conftest import actor, profile
 from tests.unit.domain.test_strict_parsing import _governed_proposal_examples
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 POLICY_HASH = "f" * 64
+
+
+@pytest.mark.integration
+def test_governed_relationship_reads_chunk_32767_identifiers(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'chunked-governed.db').as_posix()}"
+    upgrade_database(database_url)
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection, connection.begin():
+            identifiers = tuple(f"missing-trace-{index:05d}" for index in range(32_767))
+            statements: list[str] = []
+
+            def record_statement(
+                _connection: object,
+                _cursor: object,
+                statement: str,
+                _parameters: object,
+                _context: object,
+                _executemany: object,
+            ) -> None:
+                statements.append(statement.lower())
+
+            sqlalchemy_event.listen(connection, "before_cursor_execute", record_statement)
+            try:
+                assert RewardAssessmentRepository(connection).list_for_traces(identifiers) == ()
+            finally:
+                sqlalchemy_event.remove(connection, "before_cursor_execute", record_statement)
+
+            expected_queries = (
+                len(identifiers) + SQLITE_IN_PARAMETER_CHUNK - 1
+            ) // SQLITE_IN_PARAMETER_CHUNK
+            assert sum("from reward_assessments" in item for item in statements) == expected_queries
+    finally:
+        engine.dispose()
 
 
 @dataclass(frozen=True, slots=True)

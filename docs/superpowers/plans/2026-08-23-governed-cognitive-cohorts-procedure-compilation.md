@@ -3012,13 +3012,14 @@ class ResearchCoordinator:
         return tuple(decisions)
 ```
 
-`_SubmissionToken` is a private weak-referenceable identity token and
-`_SUBMISSION_REGISTRY` is a private module-level `WeakKeyDictionary`; neither facade instance
+Each sealed facade method closes over its own private `WeakKeyDictionary`, keyed by the exact
+facade instance; there is no module-accessible registry or instance token. No facade instance
 stores a coordinator, repository set, unit of work, connection, artifact store, protected reader,
 or bound callable/closure that exposes one. Both facade classes reject subclass creation and
 `copy.copy()` / `copy.deepcopy()`. Authority-graph tests walk both facade instances, probe exact
-attributes with `object.__getattribute__()`, include concrete and protocol authority types, and
-verify forged or unavailable tokens fail closed.
+attributes with `object.__getattribute__()`, include concrete and protocol authority types, inspect
+module globals, and verify forged/unregistered instances fail closed and weak registrations are
+garbage-collected.
 
 The Phase B review also tightens the transaction boundary and evidence-query contract:
 
@@ -3034,7 +3035,12 @@ The Phase B review also tightens the transaction boundary and evidence-query con
 - Validate all procedure receipts through one immutable operation-local provenance index: one
   transaction-history bulk read, one audit-chain scan/verification, and bounded bulk evidence,
   profile, catalog, and snapshot reads for the at-most-67 declared receipts. Reuse no index across
-  operations, so later mutations are visible and fail closed.
+  operations, so later mutations are visible and fail closed. Accepted source-snapshot ingestion
+  adds exact schema-version/family/id/evidence/hash metadata to the existing chain-protected audit
+  payload after canonical snapshot-byte validation. Freshness joins that metadata and decodes only
+  declared snapshots; legacy events without the derived metadata fail closed. This is audit payload
+  metadata, not a nineteenth governed record family, and it does not add or alter any migration,
+  released table, or Task 9's exact eighteen-table authoritative inventory.
 - Resolve model/harness analyses by bulk-loading protocol traces and their reward assessments once,
   indexing both by exact coordinate and trace ID, and joining only declared cell receipts. Reject
   missing or ambiguous joins; do not perform per-cell history queries. The 256-cell boundary must

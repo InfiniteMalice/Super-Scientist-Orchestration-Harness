@@ -63,6 +63,7 @@ from super_scientist.providers.storage.append_only import AppendOnlyRecordReposi
 from super_scientist.providers.storage.procedure_sources import (
     AcceptedProcedureSourceReceiptReader,
 )
+from super_scientist.providers.storage.query_bounds import sqlite_in_chunks
 from super_scientist.providers.storage.repositories import (
     AuditRepository,
     StorageIntegrityError,
@@ -268,45 +269,48 @@ class GovernedAppendOnlyRecordRepository[RecordT: BaseModel](AppendOnlyRecordRep
             column_name in self._relationship_fields,
             "unknown relationship column",
         )
-        exact_values = tuple(sorted(set(values)))
-        if not exact_values:
-            return ()
-        rows = tuple(
-            dict(row)
-            for row in self._connection.execute(
-                select(self._table)
-                .where(self._table.c[column_name].in_(exact_values))
-                .order_by(self._table.c[self._identifier_field])
-            ).mappings()
-        )
-        return self._decode_rows_with_new_provenance_snapshot(rows)
+        rows: list[dict[str, object]] = []
+        for exact_values in sqlite_in_chunks(values):
+            rows.extend(
+                dict(row)
+                for row in self._connection.execute(
+                    select(self._table)
+                    .where(self._table.c[column_name].in_(exact_values))
+                    .order_by(self._table.c[self._identifier_field])
+                ).mappings()
+            )
+        rows.sort(key=lambda row: _exact_string(row.get(self._identifier_field)))
+        return self._decode_rows_with_new_provenance_snapshot(tuple(rows))
 
     def _get_many(self, record_ids: tuple[str, ...]) -> tuple[RecordT, ...]:
-        if not record_ids:
-            return ()
-        rows = tuple(
-            dict(row)
-            for row in self._connection.execute(
-                select(self._table)
-                .where(self._table.c[self._identifier_field].in_(record_ids))
-                .order_by(self._table.c[self._identifier_field])
-            ).mappings()
-        )
-        return self._decode_rows_with_new_provenance_snapshot(rows)
+        rows: list[dict[str, object]] = []
+        for identifiers in sqlite_in_chunks(record_ids):
+            rows.extend(
+                dict(row)
+                for row in self._connection.execute(
+                    select(self._table)
+                    .where(self._table.c[self._identifier_field].in_(identifiers))
+                    .order_by(self._table.c[self._identifier_field])
+                ).mappings()
+            )
+        return self._decode_rows_with_new_provenance_snapshot(tuple(rows))
 
     def _get_many_with_provenance(
         self,
         record_ids: tuple[str, ...],
         snapshot: _GovernedProvenanceSnapshot,
     ) -> tuple[RecordT, ...]:
-        if not record_ids:
-            return ()
-        rows = self._connection.execute(
-            select(self._table)
-            .where(self._table.c[self._identifier_field].in_(record_ids))
-            .order_by(self._table.c[self._identifier_field])
-        ).mappings()
-        return tuple(self._decode_row_with_provenance(dict(row), snapshot) for row in rows)
+        rows: list[dict[str, object]] = []
+        for identifiers in sqlite_in_chunks(record_ids):
+            rows.extend(
+                dict(row)
+                for row in self._connection.execute(
+                    select(self._table)
+                    .where(self._table.c[self._identifier_field].in_(identifiers))
+                    .order_by(self._table.c[self._identifier_field])
+                ).mappings()
+            )
+        return tuple(self._decode_row_with_provenance(row, snapshot) for row in rows)
 
     def _list_all_with_provenance(
         self,

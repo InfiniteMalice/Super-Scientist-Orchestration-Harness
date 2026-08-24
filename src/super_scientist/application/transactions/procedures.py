@@ -27,7 +27,6 @@ from super_scientist.domain.progress.models import ProgressPlan, ProgressSubtask
 from super_scientist.domain.research_runs.models import ResearchRun
 from super_scientist.kernel.audit.models import AuditEvent, json_compatible_payload
 from super_scientist.kernel.transactions.models import (
-    AddEvidence,
     BindCompiledProgressPlan,
     RecordCapabilityProfile,
     RecordMethodDirectionOutcome,
@@ -121,15 +120,15 @@ class _ProcedureSourceReaders:
             batch.transactions,
             batch.audit_events,
         )
+        snapshot_keys = {
+            (reference.source_snapshot_id, reference.source_snapshot_hash)
+            for reference in references
+        }
         evidence_ids = tuple(
             sorted(
                 {
                     *(reference.source_record_id for reference in references),
-                    *(
-                        transaction.proposal.evidence.evidence_id
-                        for transaction in batch.transactions
-                        if isinstance(transaction.proposal, AddEvidence)
-                    ),
+                    *(snapshot_id for snapshot_id, _snapshot_hash in snapshot_keys),
                 }
             )
         )
@@ -139,17 +138,14 @@ class _ProcedureSourceReaders:
             batch.audit_events,
             evidence_by_id,
         )
-        snapshot_keys = {
-            (reference.source_snapshot_id, reference.source_snapshot_hash)
-            for reference in references
-        }
         snapshots: dict[tuple[str, str], ProcedureSourceSnapshot] = {}
         for snapshot_id, snapshot_hash in snapshot_keys:
             matches = tuple(
                 item
                 for item in accepted_snapshots
-                if item.snapshot.snapshot_id == snapshot_id
+                if item.snapshot_id == snapshot_id
                 and item.artifact.sha256 == snapshot_hash
+                and item.snapshot is not None
             )
             if len(matches) != 1:
                 return False
@@ -157,13 +153,15 @@ class _ProcedureSourceReaders:
             family = tuple(
                 item
                 for item in accepted_snapshots
-                if item.snapshot.snapshot_family_id == target.snapshot.snapshot_family_id
+                if item.snapshot_family_id == target.snapshot_family_id
             )
             greatest_sequence = max((item.audit_sequence for item in family), default=-1)
             greatest = tuple(item for item in family if item.audit_sequence == greatest_sequence)
             if len(greatest) != 1 or greatest[0] != target:
                 return False
             snapshot = target.snapshot
+            if snapshot is None:
+                return False
             snapshots[(snapshot_id, snapshot_hash)] = snapshot
         for reference, _kind, _entries, _complete in catalog_items:
             snapshot = snapshots[(reference.source_snapshot_id, reference.source_snapshot_hash)]

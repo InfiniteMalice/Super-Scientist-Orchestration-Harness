@@ -69,6 +69,7 @@ from super_scientist.providers.storage.domain_records import (
 from super_scientist.providers.storage.procedure_sources import (
     ProcedureSourceBinding,
     ProcedureSourceSnapshot,
+    procedure_source_snapshot_audit_metadata,
 )
 from super_scientist.providers.storage.repositories import StoredTransaction
 from tests.integration.application.test_progress_service import _research_run
@@ -145,6 +146,27 @@ def test_procedure_source_validation_scans_governance_history_once_per_operation
             v2_runtime.artifact_store,
             v2_runtime.policy.policy_hash,
         )
+        for index in range(128):
+            unrelated_artifact = v2_runtime.artifact_store.put(
+                canonical_json_bytes({"unrelated": index}),
+                "application/json",
+            )
+            unrelated_evidence = _source_evidence(
+                f"unrelated-procedure-source-{index}",
+                unrelated_artifact,
+            )
+            unrelated_proposal = AddEvidence(
+                proposal_id=f"unrelated-procedure-proposal-{index}",
+                idempotency_key=f"unrelated-procedure-proposal-{index}",
+                proposer=_actor("source-recorder"),
+                evidence=unrelated_evidence,
+            )
+            repositories.evidence.add(unrelated_evidence)
+            _persist_accepted_at_policy(
+                repositories,
+                unrelated_proposal,
+                v2_runtime.policy.policy_hash,
+            )
         proposal = RecordProcedureCompilation(
             proposal_id="batched-source-compilation",
             idempotency_key="batched-source-compilation",
@@ -164,12 +186,19 @@ def test_procedure_source_validation_scans_governance_history_once_per_operation
             current_transaction_created_at=NOW,
         )
         verification_calls = 0
+        artifact_reads = 0
         original_verify_chain = repositories_module.verify_chain
+        original_artifact_read = v2_runtime.artifact_store.read
 
         def counted_verify_chain(events):
             nonlocal verification_calls
             verification_calls += 1
             return original_verify_chain(events)
+
+        def counted_artifact_read(reference):
+            nonlocal artifact_reads
+            artifact_reads += 1
+            return original_artifact_read(reference)
 
         statements: list[str] = []
 
@@ -184,6 +213,7 @@ def test_procedure_source_validation_scans_governance_history_once_per_operation
             statements.append(statement.lower())
 
         monkeypatch.setattr(repositories_module, "verify_chain", counted_verify_chain)
+        monkeypatch.setattr(v2_runtime.artifact_store, "read", counted_artifact_read)
         sqlalchemy_event.listen(connection, "before_cursor_execute", record_statement)
         try:
             assert capabilities.procedure_sources_are_current(request) is True
@@ -191,6 +221,7 @@ def test_procedure_source_validation_scans_governance_history_once_per_operation
             sqlalchemy_event.remove(connection, "before_cursor_execute", record_statement)
 
     assert verification_calls == 1
+    assert artifact_reads == 5
     assert sum("audit_events" in item for item in statements) == 1
     assert sum("transactions" in item for item in statements) == 1
 
@@ -1467,6 +1498,7 @@ def _retain_source_snapshot(
         proposal,
         "f" * 64,
         audit_policy_fields=audit_policy_fields,
+        source_snapshot=snapshot,
     )
     return snapshot_id, artifact.sha256
 
@@ -1513,6 +1545,7 @@ def _persist_accepted_at_policy(
     policy_hash: str,
     *,
     audit_policy_fields: dict[str, object] | None = None,
+    source_snapshot: ProcedureSourceSnapshot | None = None,
 ):
     decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
     repositories.transactions.add(proposal, decision, NOW)
@@ -1523,15 +1556,23 @@ def _persist_accepted_at_policy(
         if audit_policy_fields is None
         else audit_policy_fields
     )
+    payload = {
+        "proposal": proposal.model_dump(mode="json"),
+        "decision": decision.model_dump(mode="json"),
+        "transaction_persisted": True,
+        **policy_fields,
+    }
+    if source_snapshot is not None:
+        metadata = procedure_source_snapshot_audit_metadata(
+            source_snapshot,
+            proposal.evidence,
+        )
+        assert metadata is not None
+        payload["procedure_source_snapshot"] = metadata
     event = append_event(
         repositories.audit.last(),
         "transaction_decision",
-        {
-            "proposal": proposal.model_dump(mode="json"),
-            "decision": decision.model_dump(mode="json"),
-            "transaction_persisted": True,
-            **policy_fields,
-        },
+        payload,
         NOW,
     )
     repositories.audit.add(event)

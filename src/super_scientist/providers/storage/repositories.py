@@ -40,6 +40,7 @@ from super_scientist.providers.storage.integrity_records import (
     RuleIntegritySnapshot,
     TrailIntegritySnapshot,
 )
+from super_scientist.providers.storage.query_bounds import sqlite_in_chunks
 from super_scientist.providers.storage.schema import (
     audit_events,
     behavior_rule_link_versions,
@@ -529,18 +530,21 @@ class EvidenceRepository:
         return tuple(_decode_evidence_row(dict(row)) for row in rows)
 
     def get_many(self, evidence_ids: tuple[str, ...]) -> tuple[EvidenceRecord, ...]:
-        if not evidence_ids:
-            return ()
-        rows = self._connection.execute(
-            select(
-                evidence_records.c.evidence_id,
-                evidence_records.c.content_hash,
-                evidence_records.c.record_json,
-                evidence_records.c.created_at,
+        rows: list[Mapping[str, object]] = []
+        for identifiers in sqlite_in_chunks(evidence_ids):
+            rows.extend(
+                dict(row)
+                for row in self._connection.execute(
+                    select(
+                        evidence_records.c.evidence_id,
+                        evidence_records.c.content_hash,
+                        evidence_records.c.record_json,
+                        evidence_records.c.created_at,
+                    )
+                    .where(evidence_records.c.evidence_id.in_(identifiers))
+                    .order_by(evidence_records.c.evidence_id)
+                ).mappings()
             )
-            .where(evidence_records.c.evidence_id.in_(tuple(sorted(set(evidence_ids)))))
-            .order_by(evidence_records.c.evidence_id)
-        ).mappings()
         return tuple(_decode_evidence_row(dict(row)) for row in rows)
 
     def add(self, record: EvidenceRecord) -> None:
@@ -794,22 +798,24 @@ class TransactionRepository:
         self,
         proposal_ids: tuple[str, ...],
     ) -> tuple[StoredTransaction, ...]:
-        exact_ids = tuple(sorted(set(proposal_ids)))
-        if not exact_ids:
-            return ()
-        rows = self._connection.execute(
-            select(
-                transactions.c.proposal_id,
-                transactions.c.idempotency_key,
-                transactions.c.intent_fingerprint,
-                transactions.c.proposal_json,
-                transactions.c.proposal_hash,
-                transactions.c.decision_json,
-                transactions.c.created_at,
+        rows: list[Mapping[str, object]] = []
+        for identifiers in sqlite_in_chunks(proposal_ids):
+            rows.extend(
+                dict(row)
+                for row in self._connection.execute(
+                    select(
+                        transactions.c.proposal_id,
+                        transactions.c.idempotency_key,
+                        transactions.c.intent_fingerprint,
+                        transactions.c.proposal_json,
+                        transactions.c.proposal_hash,
+                        transactions.c.decision_json,
+                        transactions.c.created_at,
+                    )
+                    .where(transactions.c.proposal_id.in_(identifiers))
+                    .order_by(transactions.c.proposal_id)
+                ).mappings()
             )
-            .where(transactions.c.proposal_id.in_(exact_ids))
-            .order_by(transactions.c.proposal_id)
-        ).mappings()
         return tuple(_decode_transaction_row(dict(row)) for row in rows)
 
     def list_all(self) -> tuple[StoredTransaction, ...]:

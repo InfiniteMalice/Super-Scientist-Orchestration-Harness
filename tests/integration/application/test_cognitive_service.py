@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+import gc
+from collections.abc import Callable, Iterator, MutableMapping
 from copy import copy, deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
+from weakref import ref
 
 import pytest
 from sqlalchemy import Connection, Engine
 
+from super_scientist.application.cognitive import service as service_module
 from super_scientist.application.cognitive.service import (
     CognitiveOrchestrationService,
     ResearchCoordinator,
@@ -169,8 +172,9 @@ def test_research_coordinator_object_graph_has_no_storage_or_execution_authority
         ActorIdentity,
     ],
 ) -> None:
-    _, research, _, _, _ = cognitive_runtime
-    submitter = object.__getattribute__(research, "_submitter")
+    coordinator, _, _, _, _ = cognitive_runtime
+    submitter = CognitiveOrchestrationService(coordinator)
+    research = ResearchCoordinator(submitter)
     forbidden = {
         TransactionCoordinator,
         RepositorySet,
@@ -187,6 +191,10 @@ def test_research_coordinator_object_graph_has_no_storage_or_execution_authority
     assert walk_object_graph_types(submitter).isdisjoint(forbidden)
     with pytest.raises(AttributeError):
         object.__getattribute__(submitter, "_coordinator")
+    with pytest.raises(AttributeError):
+        object.__getattribute__(submitter, "_token")
+    with pytest.raises(AttributeError):
+        object.__getattribute__(research, "_submitter")
     with pytest.raises(TypeError, match="cannot be copied"):
         copy(submitter)
     with pytest.raises(TypeError, match="cannot be copied"):
@@ -198,3 +206,41 @@ def test_research_coordinator_object_graph_has_no_storage_or_execution_authority
     assert {name for name in dir(type(research)) if not name.startswith("_")} == {
         "run_declared_slice"
     }
+
+
+@pytest.mark.integration
+def test_facade_authority_registry_is_not_module_mutable_forgeable_or_leaked(
+    cognitive_runtime: tuple[
+        TransactionCoordinator,
+        ResearchCoordinator,
+        Callable[[], DatabaseUnitOfWork],
+        FileArtifactStore,
+        ActorIdentity,
+    ],
+) -> None:
+    coordinator, _, _, _, _ = cognitive_runtime
+    assert all(
+        not isinstance(value, MutableMapping)
+        for name, value in vars(service_module).items()
+        if not name.startswith("__")
+    )
+    assert all(type(value) is not TransactionCoordinator for value in vars(service_module).values())
+
+    forged_submitter = object.__new__(CognitiveOrchestrationService)
+    with pytest.raises(RuntimeError, match="unavailable"):
+        forged_submitter.submit(object())  # type: ignore[arg-type]
+    forged_research = object.__new__(ResearchCoordinator)
+    with pytest.raises(RuntimeError, match="unavailable"):
+        forged_research.run_declared_slice(())
+    with pytest.raises(AttributeError):
+        object.__setattr__(forged_submitter, "_token", object())
+
+    submitter = CognitiveOrchestrationService(coordinator)
+    research = ResearchCoordinator(submitter)
+    submitter_reference = ref(submitter)
+    research_reference = ref(research)
+    del submitter, research
+    gc.collect()
+
+    assert submitter_reference() is None
+    assert research_reference() is None

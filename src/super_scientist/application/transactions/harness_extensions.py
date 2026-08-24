@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import cast
 
 from pydantic import BaseModel
@@ -23,6 +24,7 @@ from super_scientist.domain.harness_eval.guidance import (
 from super_scientist.domain.harness_eval.matrix import (
     ModelHarnessAnalysis,
     ModelHarnessCell,
+    ModelHarnessCoordinate,
     ModelHarnessProtocol,
 )
 from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
@@ -269,28 +271,20 @@ def _guidance_cell_evidence_matches(
 def _resolved_chain_for_cell(
     cell: ModelHarnessCell,
     *,
-    protocol: ModelHarnessProtocol,
-    traces: tuple[HarnessExecutionTrace, ...],
-    rewards_by_trace: Mapping[str, tuple[RewardValidityAssessment, ...]],
+    projected_by_cell_receipt: Mapping[
+        tuple[tuple[str, str, str, str, object], tuple[str, int, str]],
+        tuple[tuple[HarnessCellEvidenceChain, HarnessEvidenceSnapshotRecord], ...],
+    ],
 ) -> tuple[HarnessCellEvidenceChain, HarnessEvidenceSnapshotRecord] | None:
-    matches: list[tuple[HarnessCellEvidenceChain, HarnessEvidenceSnapshotRecord]] = []
-    for trace in traces:
-        for assessment in rewards_by_trace.get(trace.trace_id, ()):
-            try:
-                chain, snapshot = project_harness_evidence_snapshots(
-                    protocol=protocol,
-                    coordinate=cell.coordinate,
-                    trace=trace,
-                    freshness=assessment.freshness,
-                    assessment=assessment,
-                )
-            except (ArithmeticError, MemoryError, OverflowError, TypeError, ValueError):
-                continue
-            if harness_cell_evidence_chain_receipt(chain) == cell.evidence_chain_receipt:
-                matches.append((chain, snapshot))
-                if len(matches) > 1:
-                    return None
-    return matches[0] if matches else None
+    receipt = cell.evidence_chain_receipt
+    matches = projected_by_cell_receipt.get(
+        (
+            _cell_coordinate_key(cell),
+            (receipt.record_id, receipt.schema_version, receipt.content_hash),
+        ),
+        (),
+    )
+    return matches[0] if len(matches) == 1 else None
 
 
 def _trace_coordinate_key(trace: HarnessExecutionTrace) -> tuple[str, str, str, str, object]:
@@ -316,22 +310,58 @@ def _cell_coordinate_key(cell: ModelHarnessCell) -> tuple[str, str, str, str, ob
 
 
 def _index_harness_evidence(
+    protocol: ModelHarnessProtocol,
     traces: tuple[HarnessExecutionTrace, ...],
     assessments: tuple[RewardValidityAssessment, ...],
-) -> tuple[
-    Mapping[tuple[str, str, str, str, object], tuple[HarnessExecutionTrace, ...]],
-    Mapping[str, tuple[RewardValidityAssessment, ...]],
+) -> Mapping[
+    tuple[tuple[str, str, str, str, object], tuple[str, int, str]],
+    tuple[tuple[HarnessCellEvidenceChain, HarnessEvidenceSnapshotRecord], ...],
 ]:
-    traces_by_coordinate: dict[tuple[str, str, str, str, object], list[HarnessExecutionTrace]] = {}
+    coordinates: dict[
+        tuple[str, str, str, str, object],
+        ModelHarnessCoordinate,
+    ] = {
+        (
+            item.model.model_id,
+            item.model.model_version,
+            item.harness.harness_id,
+            item.harness.harness_version,
+            item.partition,
+        ): item
+        for item in protocol.expected_grid
+    }
     rewards_by_trace: dict[str, list[RewardValidityAssessment]] = {}
-    for trace in traces:
-        traces_by_coordinate.setdefault(_trace_coordinate_key(trace), []).append(trace)
     for assessment in assessments:
         rewards_by_trace.setdefault(assessment.trace_id, []).append(assessment)
-    return (
-        {key: tuple(value) for key, value in traces_by_coordinate.items()},
-        {key: tuple(value) for key, value in rewards_by_trace.items()},
-    )
+    projected: dict[
+        tuple[tuple[str, str, str, str, object], tuple[str, int, str]],
+        list[tuple[HarnessCellEvidenceChain, HarnessEvidenceSnapshotRecord]],
+    ] = {}
+    for trace in traces:
+        coordinate_key = _trace_coordinate_key(trace)
+        coordinate = coordinates.get(coordinate_key)
+        if coordinate is None:
+            continue
+        for assessment in rewards_by_trace.get(trace.trace_id, ()):
+            try:
+                chain, snapshot = project_harness_evidence_snapshots(
+                    protocol=protocol,
+                    coordinate=coordinate,
+                    trace=trace,
+                    freshness=assessment.freshness,
+                    assessment=assessment,
+                )
+            except (ArithmeticError, MemoryError, OverflowError, TypeError, ValueError):
+                continue
+            receipt = harness_cell_evidence_chain_receipt(chain)
+            projected.setdefault(
+                (
+                    coordinate_key,
+                    (receipt.record_id, receipt.schema_version, receipt.content_hash),
+                ),
+                [],
+            ).append((chain, snapshot))
+    return MappingProxyType({key: tuple(value) for key, value in projected.items()})
 
 
 @dataclass(frozen=True)
@@ -458,16 +488,15 @@ class ModelHarnessCellCapabilities:
         if protocol is None:
             return False
         traces = self.traces.list_for_protocol(cell.protocol_id)
-        trace_index, reward_index = _index_harness_evidence(
+        projected_index = _index_harness_evidence(
+            protocol,
             traces,
             self.rewards.list_for_traces(tuple(item.trace_id for item in traces)),
         )
         return (
             _resolved_chain_for_cell(
                 cell,
-                protocol=protocol,
-                traces=trace_index.get(_cell_coordinate_key(cell), ()),
-                rewards_by_trace=reward_index,
+                projected_by_cell_receipt=projected_index,
             )
             is not None
         )
@@ -517,16 +546,15 @@ class ModelHarnessAnalysisCapabilities:
             return None
         cells = self.cells.list_for_protocol(protocol_id)
         traces = self.traces.list_for_protocol(protocol_id)
-        traces_by_coordinate, rewards_by_trace = _index_harness_evidence(
+        projected_index = _index_harness_evidence(
+            protocol,
             traces,
             self.rewards.list_for_traces(tuple(item.trace_id for item in traces)),
         )
         resolved = tuple(
             _resolved_chain_for_cell(
                 cell,
-                protocol=protocol,
-                traces=traces_by_coordinate.get(_cell_coordinate_key(cell), ()),
-                rewards_by_trace=rewards_by_trace,
+                projected_by_cell_receipt=projected_index,
             )
             for cell in cells
         )
@@ -540,7 +568,11 @@ class ModelHarnessAnalysisCapabilities:
         snapshots = tuple(
             sorted((item[1] for item in complete), key=lambda item: item.chain_receipt.record_id)
         )
-        return chains, HarnessEvidenceSnapshotIndex.build(records=snapshots)
+        try:
+            snapshot_index = HarnessEvidenceSnapshotIndex.build(records=snapshots)
+        except (ArithmeticError, MemoryError, OverflowError, TypeError, ValueError):
+            return None
+        return chains, snapshot_index
 
     def append_authoritative(self, record: BaseModel) -> None:
         _require_exact_record(record, self.proposal.analysis, ModelHarnessAnalysis)

@@ -20,6 +20,9 @@ from super_scientist.application.harness_eval.extensions import (
     RecordRewardAssessmentHandler,
     RewardAssessmentCapabilities,
 )
+from super_scientist.application.transactions import (
+    harness_extensions as harness_transactions,
+)
 from super_scientist.application.transactions.harness_extensions import (
     HarnessTraceCapabilities,
     ModelHarnessAnalysisCapabilities,
@@ -842,7 +845,9 @@ def test_capability_write_rolls_back_atomically_with_failed_transaction(
         )
 
 
-def test_maximum_matrix_resolution_bulk_loads_each_evidence_repository_once() -> None:
+def test_maximum_matrix_resolution_bulk_loads_each_evidence_repository_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     models = tuple(
         ModelIdentity(model_id=f"model-{index:02d}", model_version="v1") for index in range(16)
     )
@@ -875,6 +880,19 @@ def test_maximum_matrix_resolution_bulk_loads_each_evidence_repository_once() ->
         for index, coordinate in enumerate(protocol.expected_grid)
     )
     calls = {"protocols": 0, "cells": 0, "traces": 0, "rewards": 0}
+    projection_calls = 0
+    real_project = harness_transactions.project_harness_evidence_snapshots
+
+    def counted_project(**kwargs):
+        nonlocal projection_calls
+        projection_calls += 1
+        return real_project(**kwargs)
+
+    monkeypatch.setattr(
+        harness_transactions,
+        "project_harness_evidence_snapshots",
+        counted_project,
+    )
 
     class Protocols:
         def get(self, protocol_id: str) -> ModelHarnessProtocol | None:
@@ -920,4 +938,97 @@ def test_maximum_matrix_resolution_bulk_loads_each_evidence_repository_once() ->
 
     assert resolved is not None
     assert len(resolved[0]) == 256
+    assert projection_calls == 256
     assert calls == {"protocols": 1, "cells": 1, "traces": 1, "rewards": 1}
+
+
+def test_duplicate_coordinate_diagnostics_project_each_candidate_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    models = tuple(
+        ModelIdentity(model_id=f"duplicate-model-{index:02d}", model_version="v1")
+        for index in range(5)
+    )
+    harnesses = tuple(
+        HarnessIdentity(
+            harness_id=f"duplicate-harness-{index}",
+            harness_version="v1",
+        )
+        for index in range(2)
+    )
+    grid = matrix_grid(models=models, harnesses=harnesses)
+    protocol = matrix_protocol(
+        models=models,
+        harnesses=harnesses,
+        expected_grid=grid,
+        model_budgets=tuple(
+            ModelBudgetBinding.build(model=model, budget=matrix_budget(model)) for model in models
+        ),
+    )
+    fixtures = tuple(
+        _matrix_evidence_chain(protocol, coordinate, index)
+        for index, coordinate in enumerate(protocol.expected_grid[:10])
+    )
+    cells = tuple(
+        ModelHarnessCell.from_protocol(
+            cell_id=f"duplicate-cell-{coordinate_index:02d}-{duplicate_index:02d}",
+            protocol=protocol,
+            coordinate=coordinate,
+            metrics=matrix_metrics(),
+            evidence_chain_receipt=harness_cell_evidence_chain_receipt(
+                fixtures[coordinate_index].chain
+            ),
+            observed_at=NOW,
+        )
+        for coordinate_index, coordinate in enumerate(protocol.expected_grid[:10])
+        for duplicate_index in range(10)
+    )
+    projection_calls = 0
+    real_project = harness_transactions.project_harness_evidence_snapshots
+
+    def counted_project(**kwargs):
+        nonlocal projection_calls
+        projection_calls += 1
+        return real_project(**kwargs)
+
+    monkeypatch.setattr(
+        harness_transactions,
+        "project_harness_evidence_snapshots",
+        counted_project,
+    )
+
+    class Protocols:
+        def get(self, protocol_id: str) -> ModelHarnessProtocol | None:
+            return protocol if protocol_id == protocol.protocol_id else None
+
+    class Cells:
+        def list_for_protocol(self, protocol_id: str) -> tuple[ModelHarnessCell, ...]:
+            assert protocol_id == protocol.protocol_id
+            return cells
+
+    class Traces:
+        def list_for_protocol(self, protocol_id: str) -> tuple[HarnessExecutionTrace, ...]:
+            assert protocol_id == protocol.protocol_id
+            return tuple(item.trace for item in fixtures)
+
+    class Rewards:
+        def list_for_traces(
+            self,
+            trace_ids: tuple[str, ...],
+        ) -> tuple[RewardValidityAssessment, ...]:
+            assert set(trace_ids) == {item.trace.trace_id for item in fixtures}
+            return tuple(item.assessment for item in fixtures)
+
+    capabilities = ModelHarnessAnalysisCapabilities(
+        active_policy=_policy(),
+        proposal=object(),  # type: ignore[arg-type]
+        protocols=Protocols(),  # type: ignore[arg-type]
+        cells=Cells(),  # type: ignore[arg-type]
+        analyses=object(),  # type: ignore[arg-type]
+        traces=Traces(),  # type: ignore[arg-type]
+        rewards=Rewards(),  # type: ignore[arg-type]
+        created_at=NOW,
+    )
+
+    assert capabilities.resolve_model_harness_evidence(protocol.protocol_id) is None
+    assert projection_calls <= 20

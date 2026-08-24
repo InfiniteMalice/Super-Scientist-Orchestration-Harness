@@ -53,6 +53,8 @@ __all__ = [
     "ToolCatalogSource",
     "ValidatorCatalogSnapshotRepository",
     "ValidatorCatalogSource",
+    "procedure_source_snapshot_audit_metadata",
+    "procedure_source_snapshot_audit_metadata_from_bytes",
 ]
 
 _PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
@@ -452,11 +454,53 @@ class ProcedureSourceSnapshot(BaseModel):
         return bindings
 
 
+class _ProcedureSourceSnapshotAuditMetadata(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    snapshot_family_id: BoundedIdentifier
+    snapshot_id: BoundedIdentifier
+    evidence_id: BoundedIdentifier
+    artifact_hash: Sha256Hex
+
+
+def procedure_source_snapshot_audit_metadata(
+    snapshot: ProcedureSourceSnapshot,
+    evidence: EvidenceRecord,
+) -> dict[str, object] | None:
+    if snapshot.snapshot_id != evidence.evidence_id or evidence.evidence_type != "procedure-source":
+        return None
+    metadata = _ProcedureSourceSnapshotAuditMetadata(
+        snapshot_family_id=snapshot.snapshot_family_id,
+        snapshot_id=snapshot.snapshot_id,
+        evidence_id=evidence.evidence_id,
+        artifact_hash=evidence.artifact.sha256,
+    )
+    return metadata.model_dump(mode="json", warnings=False)
+
+
+def procedure_source_snapshot_audit_metadata_from_bytes(
+    evidence: EvidenceRecord,
+    artifact_bytes: bytes,
+) -> dict[str, object] | None:
+    if evidence.evidence_type != "procedure-source" or not artifact_bytes:
+        return None
+    try:
+        snapshot = ProcedureSourceSnapshot.model_validate_json(artifact_bytes, strict=True)
+        if canonical_json_bytes(snapshot.model_dump(mode="json", warnings=False)) != artifact_bytes:
+            return None
+    except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
+        return None
+    return procedure_source_snapshot_audit_metadata(snapshot, evidence)
+
+
 @dataclass(frozen=True, slots=True)
 class _AcceptedProcedureSourceSnapshot:
-    snapshot: ProcedureSourceSnapshot
+    snapshot_family_id: str
+    snapshot_id: str
+    snapshot: ProcedureSourceSnapshot | None
     artifact: ArtifactRef
-    evidence: EvidenceRecord
+    evidence: EvidenceRecord | None
     audit_sequence: int
 
 
@@ -472,12 +516,13 @@ class ProcedureSourceSnapshotRepository:
         source_snapshot_id: str,
         source_snapshot_hash: str,
     ) -> ProcedureSourceSnapshot | None:
-        accepted_snapshots = self._accepted_snapshots()
+        accepted_snapshots = self._accepted_snapshots((source_snapshot_id,))
         matches = tuple(
             item
             for item in accepted_snapshots
-            if item.snapshot.snapshot_id == source_snapshot_id
+            if item.snapshot_id == source_snapshot_id
             and item.artifact.sha256 == source_snapshot_hash
+            and item.snapshot is not None
         )
         if len(matches) != 1:
             return None
@@ -491,20 +536,19 @@ class ProcedureSourceSnapshotRepository:
         return self.resolve_exact(source_snapshot_id, source_snapshot_hash)
 
     def is_current(self, source_snapshot_id: str, source_snapshot_hash: str) -> bool:
-        snapshots = self._accepted_snapshots()
+        snapshots = self._accepted_snapshots((source_snapshot_id,))
         matches = tuple(
             item
             for item in snapshots
-            if item.snapshot.snapshot_id == source_snapshot_id
+            if item.snapshot_id == source_snapshot_id
             and item.artifact.sha256 == source_snapshot_hash
+            and item.snapshot is not None
         )
         if len(matches) != 1:
             return False
         target = matches[0]
         family = tuple(
-            item
-            for item in snapshots
-            if item.snapshot.snapshot_family_id == target.snapshot.snapshot_family_id
+            item for item in snapshots if item.snapshot_family_id == target.snapshot_family_id
         )
         if not family:
             return False
@@ -512,18 +556,14 @@ class ProcedureSourceSnapshotRepository:
         greatest = tuple(item for item in family if item.audit_sequence == greatest_sequence)
         return len(greatest) == 1 and greatest[0] == target
 
-    def _accepted_snapshots(self) -> tuple[_AcceptedProcedureSourceSnapshot, ...]:
+    def _accepted_snapshots(
+        self,
+        declared_snapshot_ids: tuple[str, ...],
+    ) -> tuple[_AcceptedProcedureSourceSnapshot, ...]:
         events = self._audit.list_all()
         transactions = self._transactions.list_all()
         evidence_by_id = {
-            item.evidence_id: item
-            for item in self._evidence.get_many(
-                tuple(
-                    transaction.proposal.evidence.evidence_id
-                    for transaction in transactions
-                    if isinstance(transaction.proposal, AddEvidence)
-                )
-            )
+            item.evidence_id: item for item in self._evidence.get_many(declared_snapshot_ids)
         }
         return self.accepted_snapshots_from(transactions, events, evidence_by_id)
 
@@ -560,14 +600,38 @@ class ProcedureSourceSnapshotRepository:
             if len(matching_events) != 1:
                 continue
             proposal_evidence = transaction.proposal.evidence
+            metadata_payload = json_compatible_payload(matching_events[0].payload).get(
+                "procedure_source_snapshot"
+            )
+            try:
+                metadata = _ProcedureSourceSnapshotAuditMetadata.model_validate(
+                    metadata_payload,
+                    strict=True,
+                )
+            except (TypeError, ValueError):
+                continue
+            if (
+                metadata.snapshot_id != proposal_evidence.evidence_id
+                or metadata.evidence_id != proposal_evidence.evidence_id
+                or metadata.artifact_hash != proposal_evidence.artifact.sha256
+            ):
+                continue
             stored_evidence = evidence_by_id.get(proposal_evidence.evidence_id)
-            if stored_evidence is None or stored_evidence != proposal_evidence:
-                continue
-            snapshot = self._decode_snapshot(proposal_evidence.artifact)
-            if snapshot is None or snapshot.snapshot_id != proposal_evidence.evidence_id:
-                continue
+            snapshot = None
+            if stored_evidence is not None:
+                if stored_evidence != proposal_evidence:
+                    continue
+                snapshot = self._decode_snapshot(proposal_evidence.artifact)
+                if (
+                    snapshot is None
+                    or snapshot.snapshot_id != metadata.snapshot_id
+                    or snapshot.snapshot_family_id != metadata.snapshot_family_id
+                ):
+                    continue
             accepted.append(
                 _AcceptedProcedureSourceSnapshot(
+                    snapshot_family_id=metadata.snapshot_family_id,
+                    snapshot_id=metadata.snapshot_id,
                     snapshot=snapshot,
                     artifact=proposal_evidence.artifact,
                     evidence=stored_evidence,
@@ -576,10 +640,10 @@ class ProcedureSourceSnapshotRepository:
             )
         id_counts: dict[str, int] = {}
         for item in accepted:
-            snapshot_id = item.snapshot.snapshot_id
+            snapshot_id = item.snapshot_id
             id_counts[snapshot_id] = id_counts.get(snapshot_id, 0) + 1
         duplicate_ids = {snapshot_id for snapshot_id, count in id_counts.items() if count > 1}
-        return tuple(item for item in accepted if item.snapshot.snapshot_id not in duplicate_ids)
+        return tuple(item for item in accepted if item.snapshot_id not in duplicate_ids)
 
     def _decode_snapshot(self, artifact: ArtifactRef) -> ProcedureSourceSnapshot | None:
         if artifact.size_bytes > _MAX_SOURCE_ARTIFACT_BYTES:
