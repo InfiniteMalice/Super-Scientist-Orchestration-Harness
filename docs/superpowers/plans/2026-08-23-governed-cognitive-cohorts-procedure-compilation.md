@@ -2977,15 +2977,21 @@ Add explicit `isinstance` groups beside existing progress/harness groups and cal
 
 ```python
 class CognitiveOrchestrationService:
-    __slots__ = ("_coordinator",)
+    __slots__ = ("_token",)
 
     def __init__(self, coordinator: TransactionCoordinator) -> None:
         if type(coordinator) is not TransactionCoordinator:
             raise TypeError("cognitive service requires the exact transaction coordinator")
-        self._coordinator = coordinator
+        token = _SubmissionToken()
+        _SUBMISSION_REGISTRY[token] = coordinator
+        self._token = token
 
     def submit(self, proposal: Proposal) -> TransactionDecision:
-        return self._coordinator.submit(proposal)
+        token = object.__getattribute__(self, "_token")
+        coordinator = _SUBMISSION_REGISTRY.get(token)
+        if coordinator is None:
+            raise RuntimeError("cognitive submission capability is unavailable")
+        return coordinator.submit(proposal)
 
 
 class ResearchCoordinator:
@@ -3005,6 +3011,35 @@ class ResearchCoordinator:
                 break
         return tuple(decisions)
 ```
+
+`_SubmissionToken` is a private weak-referenceable identity token and
+`_SUBMISSION_REGISTRY` is a private module-level `WeakKeyDictionary`; neither facade instance
+stores a coordinator, repository set, unit of work, connection, artifact store, protected reader,
+or bound callable/closure that exposes one. Both facade classes reject subclass creation and
+`copy.copy()` / `copy.deepcopy()`. Authority-graph tests walk both facade instances, probe exact
+attributes with `object.__getattribute__()`, include concrete and protocol authority types, and
+verify forged or unavailable tokens fail closed.
+
+The Phase B review also tightens the transaction boundary and evidence-query contract:
+
+- Determine a governed proposal family only from trusted class/MRO tables. Pass exact governed
+  models and non-validating copies unchanged to the family handler so its fixed rejection (for
+  example `INVALID_REWARD`) remains authoritative; never invoke subclass attributes, instance
+  serializers, or injected dictionaries. Construct a separately validated or fixed-invalid durable
+  copy for transaction/audit persistence.
+- Before canonical serialization, accept only exact built-in dictionaries/lists and exact JSON
+  scalar/key types under the 8 MiB, depth 128, node 4096, and container limits. Reject every other
+  `Mapping` implementation without invoking its hooks, and translate recursion/memory/type failures
+  into the fixed invalid-proposal boundary result.
+- Validate all procedure receipts through one immutable operation-local provenance index: one
+  transaction-history bulk read, one audit-chain scan/verification, and bounded bulk evidence,
+  profile, catalog, and snapshot reads for the at-most-67 declared receipts. Reuse no index across
+  operations, so later mutations are visible and fail closed.
+- Resolve model/harness analyses by bulk-loading protocol traces and their reward assessments once,
+  indexing both by exact coordinate and trace ID, and joining only declared cell receipts. Reject
+  missing or ambiguous joins; do not perform per-cell history queries. The 256-cell boundary must
+  remain linear in cells plus traces plus assessments, with one bulk repository operation per
+  evidence family.
 
 Run: `python -m pytest tests/integration/application/test_cognitive_service.py tests/integration/application/test_transaction_coordinator.py tests/property/test_admission_idempotency.py tests/property/test_transaction_replay.py tests/adversarial/test_model_execution_boundary.py -v`
 

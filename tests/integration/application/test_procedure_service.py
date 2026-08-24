@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 from pydantic import BaseModel
+from sqlalchemy import event as sqlalchemy_event
 
 from super_scientist.application.procedures.service import (
     BindCompiledProgressPlanHandler,
@@ -55,6 +56,7 @@ from super_scientist.kernel.transactions.models import (
     RejectionCode,
     TransactionDecision,
 )
+from super_scientist.providers.storage import repositories as repositories_module
 from super_scientist.providers.storage.cognitive_records import (
     CapabilityProfileRepository,
     CompiledProgressPlanBindingRepository,
@@ -126,6 +128,71 @@ def test_capability_evidence_snapshot_avoids_circular_profile_self_binding(v2_ru
         )
 
     assert decision.accepted is True
+
+
+@pytest.mark.integration
+def test_procedure_source_validation_scans_governance_history_once_per_operation(
+    v2_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with v2_runtime.uow_factory() as unit_of_work:
+        connection = unit_of_work.connection
+        assert connection is not None
+        repositories = unit_of_work.repositories()
+        request = _retain_exact_sources(
+            repositories,
+            connection,
+            v2_runtime.artifact_store,
+            v2_runtime.policy.policy_hash,
+        )
+        proposal = RecordProcedureCompilation(
+            proposal_id="batched-source-compilation",
+            idempotency_key="batched-source-compilation",
+            proposer=v2_runtime.proposer,
+            compilation=OpaqueProcedureCompilationEnvelope.build(
+                compilation_id="batched-source-compilation",
+                result=compile_method(request),
+                created_at=NOW,
+                governing_policy_hash=v2_runtime.policy.policy_hash,
+            ),
+        )
+        capabilities = procedure_capabilities(
+            proposal,
+            connection,
+            v2_runtime.policy,
+            v2_runtime.artifact_store,
+            current_transaction_created_at=NOW,
+        )
+        verification_calls = 0
+        original_verify_chain = repositories_module.verify_chain
+
+        def counted_verify_chain(events):
+            nonlocal verification_calls
+            verification_calls += 1
+            return original_verify_chain(events)
+
+        statements: list[str] = []
+
+        def record_statement(
+            _connection,
+            _cursor,
+            statement: str,
+            _parameters,
+            _context,
+            _executemany,
+        ) -> None:
+            statements.append(statement.lower())
+
+        monkeypatch.setattr(repositories_module, "verify_chain", counted_verify_chain)
+        sqlalchemy_event.listen(connection, "before_cursor_execute", record_statement)
+        try:
+            assert capabilities.procedure_sources_are_current(request) is True
+        finally:
+            sqlalchemy_event.remove(connection, "before_cursor_execute", record_statement)
+
+    assert verification_calls == 1
+    assert sum("audit_events" in item for item in statements) == 1
+    assert sum("transactions" in item for item in statements) == 1
 
 
 @pytest.mark.integration

@@ -27,7 +27,9 @@ from super_scientist.domain.progress.models import ProgressPlan, ProgressSubtask
 from super_scientist.domain.research_runs.models import ResearchRun
 from super_scientist.kernel.audit.models import AuditEvent, json_compatible_payload
 from super_scientist.kernel.transactions.models import (
+    AddEvidence,
     BindCompiledProgressPlan,
+    RecordCapabilityProfile,
     RecordMethodDirectionOutcome,
     RecordProcedureCompilation,
     TransactionDecision,
@@ -39,6 +41,7 @@ from super_scientist.providers.storage.cognitive_records import (
     CompiledProgressPlanBindingRepository,
     MethodDirectionOutcomeRepository,
     ProcedureCompilationRepository,
+    build_governed_provenance_snapshot,
 )
 from super_scientist.providers.storage.domain_records import (
     ProgressPlanRepository,
@@ -73,6 +76,7 @@ class _ProcedureSourceReaders:
     tools: ToolCatalogSnapshotRepository
     validators: ValidatorCatalogSnapshotRepository
     snapshots: ProcedureSourceSnapshotRepository
+    evidence: EvidenceRepository
 
     def all_current(self, request: ProcedureCompilationRequest) -> bool:
         capability_items = tuple(
@@ -110,17 +114,56 @@ class _ProcedureSourceReaders:
         }
         if len(catalog_snapshot_keys) != 1:
             return False
-        if any(self.accepted.resolve(reference) is None for reference in references):
+        batch = self.accepted.resolve_many(references)
+        if batch is None or set(batch.receipts) != set(receipt_ids):
             return False
+        provenance = build_governed_provenance_snapshot(
+            batch.transactions,
+            batch.audit_events,
+        )
+        evidence_ids = tuple(
+            sorted(
+                {
+                    *(reference.source_record_id for reference in references),
+                    *(
+                        transaction.proposal.evidence.evidence_id
+                        for transaction in batch.transactions
+                        if isinstance(transaction.proposal, AddEvidence)
+                    ),
+                }
+            )
+        )
+        evidence_by_id = {item.evidence_id: item for item in self.evidence.get_many(evidence_ids)}
+        accepted_snapshots = self.snapshots.accepted_snapshots_from(
+            batch.transactions,
+            batch.audit_events,
+            evidence_by_id,
+        )
         snapshot_keys = {
             (reference.source_snapshot_id, reference.source_snapshot_hash)
             for reference in references
         }
         snapshots: dict[tuple[str, str], ProcedureSourceSnapshot] = {}
         for snapshot_id, snapshot_hash in snapshot_keys:
-            snapshot = self.snapshots.resolve_exact(snapshot_id, snapshot_hash)
-            if snapshot is None or not self.snapshots.is_current(snapshot_id, snapshot_hash):
+            matches = tuple(
+                item
+                for item in accepted_snapshots
+                if item.snapshot.snapshot_id == snapshot_id
+                and item.artifact.sha256 == snapshot_hash
+            )
+            if len(matches) != 1:
                 return False
+            target = matches[0]
+            family = tuple(
+                item
+                for item in accepted_snapshots
+                if item.snapshot.snapshot_family_id == target.snapshot.snapshot_family_id
+            )
+            greatest_sequence = max((item.audit_sequence for item in family), default=-1)
+            greatest = tuple(item for item in family if item.audit_sequence == greatest_sequence)
+            if len(greatest) != 1 or greatest[0] != target:
+                return False
+            snapshot = target.snapshot
             snapshots[(snapshot_id, snapshot_hash)] = snapshot
         for reference, _kind, _entries, _complete in catalog_items:
             snapshot = snapshots[(reference.source_snapshot_id, reference.source_snapshot_hash)]
@@ -134,17 +177,32 @@ class _ProcedureSourceReaders:
                 or matching_bindings[0].source_content_hash != reference.source_content_hash
             ):
                 return False
+        retained_profiles = {
+            item.profile_id: item
+            for item in self.profiles.get_many_with_provenance(
+                tuple(reference.source_record_id for reference, _ in capability_items),
+                provenance,
+            )
+        }
         for reference, grounded in capability_items:
-            retained = self.profiles.resolve(reference)
+            receipt = batch.receipts[reference.receipt_id]
+            retained = retained_profiles.get(reference.source_record_id)
             if (
-                retained != grounded.profile
+                not isinstance(receipt.proposal, RecordCapabilityProfile)
+                or retained is None
+                or receipt.proposal.profile != retained
+                or retained != grounded.profile
                 or assess_capability(retained, grounded.assessment.requirement)
                 != grounded.assessment
             ):
                 return False
         for reference, kind, expected_entries, expected_complete in catalog_items:
             if kind is ProcedureEvidenceSourceKind.ARTIFACT_CATALOG:
-                artifact_source = self.artifacts.resolve(reference)
+                artifact_source = self.artifacts.resolve_verified(
+                    reference,
+                    batch.receipts[reference.receipt_id],
+                    evidence_by_id.get(reference.source_record_id),
+                )
                 if (
                     artifact_source is None
                     or artifact_source.entries != expected_entries
@@ -152,7 +210,11 @@ class _ProcedureSourceReaders:
                 ):
                     return False
             elif kind is ProcedureEvidenceSourceKind.TOOL_CATALOG:
-                tool_source = self.tools.resolve(reference)
+                tool_source = self.tools.resolve_verified(
+                    reference,
+                    batch.receipts[reference.receipt_id],
+                    evidence_by_id.get(reference.source_record_id),
+                )
                 if (
                     tool_source is None
                     or tool_source.entries != expected_entries
@@ -160,7 +222,11 @@ class _ProcedureSourceReaders:
                 ):
                     return False
             else:
-                validator_source = self.validators.resolve(reference)
+                validator_source = self.validators.resolve_verified(
+                    reference,
+                    batch.receipts[reference.receipt_id],
+                    evidence_by_id.get(reference.source_record_id),
+                )
                 if (
                     validator_source is None
                     or validator_source.entries != expected_entries
@@ -452,6 +518,7 @@ def _source_readers(
         tools=ToolCatalogSnapshotRepository(connection, artifact_store),
         validators=ValidatorCatalogSnapshotRepository(connection, artifact_store),
         snapshots=ProcedureSourceSnapshotRepository(connection, artifact_store),
+        evidence=EvidenceRepository(connection),
     )
 
 

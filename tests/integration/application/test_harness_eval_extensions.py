@@ -22,20 +22,27 @@ from super_scientist.application.harness_eval.extensions import (
 )
 from super_scientist.application.transactions.harness_extensions import (
     HarnessTraceCapabilities,
+    ModelHarnessAnalysisCapabilities,
     _guidance_cell_evidence_is_current,
     _guidance_cell_evidence_matches,
     _receipt_is_current,
     harness_extension_capabilities,
 )
 from super_scientist.config.models import PolicySnapshot
+from super_scientist.domain.harness_eval.evidence_chains import (
+    harness_cell_evidence_chain_receipt,
+)
 from super_scientist.domain.harness_eval.guidance import (
     GuidanceEvaluationCell,
     GuidanceEvaluationProtocol,
 )
 from super_scientist.domain.harness_eval.matrix import (
+    HarnessIdentity,
+    ModelBudgetBinding,
     ModelHarnessAnalysis,
     ModelHarnessCell,
     ModelHarnessProtocol,
+    ModelIdentity,
 )
 from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
 from super_scientist.domain.harness_eval.rewards import (
@@ -70,6 +77,10 @@ from super_scientist.providers.storage.evaluation_records import (
 from tests.integration.application.test_harness_eval_service import _policy
 from tests.unit.harness_eval.test_guidance import _cell as guidance_cell
 from tests.unit.harness_eval.test_guidance import _protocol as guidance_protocol
+from tests.unit.harness_eval.test_harness_security_contracts import _matrix_evidence_chain
+from tests.unit.harness_eval.test_model_harness_matrix import (
+    _budget as matrix_budget,
+)
 from tests.unit.harness_eval.test_model_harness_matrix import (
     _cells as matrix_cells,
 )
@@ -79,6 +90,8 @@ from tests.unit.harness_eval.test_model_harness_matrix import (
 from tests.unit.harness_eval.test_model_harness_matrix import (
     _evidence_index as matrix_evidence_index,
 )
+from tests.unit.harness_eval.test_model_harness_matrix import _grid as matrix_grid
+from tests.unit.harness_eval.test_model_harness_matrix import _metrics as matrix_metrics
 from tests.unit.harness_eval.test_model_harness_matrix import (
     _protocol as matrix_protocol,
 )
@@ -827,3 +840,84 @@ def test_capability_write_rolls_back_atomically_with_failed_transaction(
             GuidanceEvaluationProtocolRepository(unit_of_work.connection).get(protocol.protocol_id)
             is None
         )
+
+
+def test_maximum_matrix_resolution_bulk_loads_each_evidence_repository_once() -> None:
+    models = tuple(
+        ModelIdentity(model_id=f"model-{index:02d}", model_version="v1") for index in range(16)
+    )
+    harnesses = tuple(
+        HarnessIdentity(harness_id=f"harness-{index:02d}", harness_version="v1")
+        for index in range(8)
+    )
+    grid = matrix_grid(models=models, harnesses=harnesses)
+    protocol = matrix_protocol(
+        models=models,
+        harnesses=harnesses,
+        expected_grid=grid,
+        model_budgets=tuple(
+            ModelBudgetBinding.build(model=model, budget=matrix_budget(model)) for model in models
+        ),
+    )
+    fixtures = tuple(
+        _matrix_evidence_chain(protocol, coordinate, index)
+        for index, coordinate in enumerate(protocol.expected_grid)
+    )
+    cells = tuple(
+        ModelHarnessCell.from_protocol(
+            cell_id=f"bulk-cell-{index:03d}",
+            protocol=protocol,
+            coordinate=coordinate,
+            metrics=matrix_metrics(),
+            evidence_chain_receipt=harness_cell_evidence_chain_receipt(fixtures[index].chain),
+            observed_at=NOW,
+        )
+        for index, coordinate in enumerate(protocol.expected_grid)
+    )
+    calls = {"protocols": 0, "cells": 0, "traces": 0, "rewards": 0}
+
+    class Protocols:
+        def get(self, protocol_id: str) -> ModelHarnessProtocol | None:
+            calls["protocols"] += 1
+            return protocol if protocol_id == protocol.protocol_id else None
+
+    class Cells:
+        def list_for_protocol(self, protocol_id: str) -> tuple[ModelHarnessCell, ...]:
+            calls["cells"] += 1
+            assert protocol_id == protocol.protocol_id
+            return cells
+
+    class Traces:
+        def list_for_protocol(self, protocol_id: str) -> tuple[HarnessExecutionTrace, ...]:
+            calls["traces"] += 1
+            assert protocol_id == protocol.protocol_id
+            return tuple(item.trace for item in fixtures)
+
+    class Rewards:
+        def list_for_traces(
+            self,
+            trace_ids: tuple[str, ...],
+        ) -> tuple[RewardValidityAssessment, ...]:
+            calls["rewards"] += 1
+            assert set(trace_ids) == {item.trace.trace_id for item in fixtures}
+            return tuple(item.assessment for item in fixtures)
+
+        def list_for_trace(self, trace_id: str) -> tuple[RewardValidityAssessment, ...]:
+            raise AssertionError(f"per-cell reward lookup attempted for {trace_id}")
+
+    capabilities = ModelHarnessAnalysisCapabilities(
+        active_policy=_policy(),
+        proposal=object(),  # type: ignore[arg-type]
+        protocols=Protocols(),  # type: ignore[arg-type]
+        cells=Cells(),  # type: ignore[arg-type]
+        analyses=object(),  # type: ignore[arg-type]
+        traces=Traces(),  # type: ignore[arg-type]
+        rewards=Rewards(),  # type: ignore[arg-type]
+        created_at=NOW,
+    )
+
+    resolved = capabilities.resolve_model_harness_evidence(protocol.protocol_id)
+
+    assert resolved is not None
+    assert len(resolved[0]) == 256
+    assert calls == {"protocols": 1, "cells": 1, "traces": 1, "rewards": 1}

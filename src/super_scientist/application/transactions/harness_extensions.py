@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -269,18 +270,12 @@ def _resolved_chain_for_cell(
     cell: ModelHarnessCell,
     *,
     protocol: ModelHarnessProtocol,
-    traces: HarnessExecutionTraceRepository,
-    rewards: RewardAssessmentRepository,
+    traces: tuple[HarnessExecutionTrace, ...],
+    rewards_by_trace: Mapping[str, tuple[RewardValidityAssessment, ...]],
 ) -> tuple[HarnessCellEvidenceChain, HarnessEvidenceSnapshotRecord] | None:
-    for trace in traces.list_for_protocol(protocol.protocol_id):
-        binding = trace.observed_binding
-        if (
-            binding.model != cell.coordinate.model
-            or binding.harness != cell.coordinate.harness
-            or binding.partition is not cell.coordinate.partition
-        ):
-            continue
-        for assessment in rewards.list_for_trace(trace.trace_id):
+    matches: list[tuple[HarnessCellEvidenceChain, HarnessEvidenceSnapshotRecord]] = []
+    for trace in traces:
+        for assessment in rewards_by_trace.get(trace.trace_id, ()):
             try:
                 chain, snapshot = project_harness_evidence_snapshots(
                     protocol=protocol,
@@ -292,8 +287,51 @@ def _resolved_chain_for_cell(
             except (ArithmeticError, MemoryError, OverflowError, TypeError, ValueError):
                 continue
             if harness_cell_evidence_chain_receipt(chain) == cell.evidence_chain_receipt:
-                return chain, snapshot
-    return None
+                matches.append((chain, snapshot))
+                if len(matches) > 1:
+                    return None
+    return matches[0] if matches else None
+
+
+def _trace_coordinate_key(trace: HarnessExecutionTrace) -> tuple[str, str, str, str, object]:
+    binding = trace.observed_binding
+    return (
+        binding.model.model_id,
+        binding.model.model_version,
+        binding.harness.harness_id,
+        binding.harness.harness_version,
+        binding.partition,
+    )
+
+
+def _cell_coordinate_key(cell: ModelHarnessCell) -> tuple[str, str, str, str, object]:
+    coordinate = cell.coordinate
+    return (
+        coordinate.model.model_id,
+        coordinate.model.model_version,
+        coordinate.harness.harness_id,
+        coordinate.harness.harness_version,
+        coordinate.partition,
+    )
+
+
+def _index_harness_evidence(
+    traces: tuple[HarnessExecutionTrace, ...],
+    assessments: tuple[RewardValidityAssessment, ...],
+) -> tuple[
+    Mapping[tuple[str, str, str, str, object], tuple[HarnessExecutionTrace, ...]],
+    Mapping[str, tuple[RewardValidityAssessment, ...]],
+]:
+    traces_by_coordinate: dict[tuple[str, str, str, str, object], list[HarnessExecutionTrace]] = {}
+    rewards_by_trace: dict[str, list[RewardValidityAssessment]] = {}
+    for trace in traces:
+        traces_by_coordinate.setdefault(_trace_coordinate_key(trace), []).append(trace)
+    for assessment in assessments:
+        rewards_by_trace.setdefault(assessment.trace_id, []).append(assessment)
+    return (
+        {key: tuple(value) for key, value in traces_by_coordinate.items()},
+        {key: tuple(value) for key, value in rewards_by_trace.items()},
+    )
 
 
 @dataclass(frozen=True)
@@ -417,13 +455,19 @@ class ModelHarnessCellCapabilities:
 
     def model_harness_cell_evidence_is_current(self, cell: ModelHarnessCell) -> bool:
         protocol = self.protocols.get(cell.protocol_id)
+        if protocol is None:
+            return False
+        traces = self.traces.list_for_protocol(cell.protocol_id)
+        trace_index, reward_index = _index_harness_evidence(
+            traces,
+            self.rewards.list_for_traces(tuple(item.trace_id for item in traces)),
+        )
         return (
-            protocol is not None
-            and _resolved_chain_for_cell(
+            _resolved_chain_for_cell(
                 cell,
                 protocol=protocol,
-                traces=self.traces,
-                rewards=self.rewards,
+                traces=trace_index.get(_cell_coordinate_key(cell), ()),
+                rewards_by_trace=reward_index,
             )
             is not None
         )
@@ -471,14 +515,20 @@ class ModelHarnessAnalysisCapabilities:
         protocol = self.protocols.get(protocol_id)
         if protocol is None:
             return None
+        cells = self.cells.list_for_protocol(protocol_id)
+        traces = self.traces.list_for_protocol(protocol_id)
+        traces_by_coordinate, rewards_by_trace = _index_harness_evidence(
+            traces,
+            self.rewards.list_for_traces(tuple(item.trace_id for item in traces)),
+        )
         resolved = tuple(
             _resolved_chain_for_cell(
                 cell,
                 protocol=protocol,
-                traces=self.traces,
-                rewards=self.rewards,
+                traces=traces_by_coordinate.get(_cell_coordinate_key(cell), ()),
+                rewards_by_trace=rewards_by_trace,
             )
-            for cell in self.cells.list_for_protocol(protocol_id)
+            for cell in cells
         )
         if not resolved or any(item is None for item in resolved):
             return None
@@ -644,17 +694,18 @@ def harness_extension_capabilities(
     *,
     current_transaction_created_at: UtcTimestamp,
 ) -> HarnessExtensionCapabilities:
-    if type(proposal) is RecordGuidanceEvaluationProtocol:
+    proposal_mro = type.__getattribute__(type(proposal), "__mro__")
+    if RecordGuidanceEvaluationProtocol in proposal_mro:
         return GuidanceProtocolCapabilities(
             active_policy,
-            proposal,
+            cast(RecordGuidanceEvaluationProtocol, proposal),
             GuidanceEvaluationProtocolRepository(connection),
             current_transaction_created_at,
         )
-    if type(proposal) is AppendGuidanceEvaluationCell:
+    if AppendGuidanceEvaluationCell in proposal_mro:
         return GuidanceCellCapabilities(
             active_policy,
-            proposal,
+            cast(AppendGuidanceEvaluationCell, proposal),
             GuidanceEvaluationProtocolRepository(connection),
             GuidanceCellRepository(connection),
             HarnessExecutionTraceRepository(connection),
@@ -662,27 +713,27 @@ def harness_extension_capabilities(
             EvidenceRepository(connection),
             current_transaction_created_at,
         )
-    if type(proposal) is RecordModelHarnessProtocol:
+    if RecordModelHarnessProtocol in proposal_mro:
         return ModelHarnessProtocolCapabilities(
             active_policy,
-            proposal,
+            cast(RecordModelHarnessProtocol, proposal),
             ModelHarnessProtocolRepository(connection),
             current_transaction_created_at,
         )
-    if type(proposal) is AppendModelHarnessCell:
+    if AppendModelHarnessCell in proposal_mro:
         return ModelHarnessCellCapabilities(
             active_policy,
-            proposal,
+            cast(AppendModelHarnessCell, proposal),
             ModelHarnessProtocolRepository(connection),
             ModelHarnessCellRepository(connection),
             HarnessExecutionTraceRepository(connection),
             RewardAssessmentRepository(connection),
             current_transaction_created_at,
         )
-    if type(proposal) is RecordModelHarnessAnalysis:
+    if RecordModelHarnessAnalysis in proposal_mro:
         return ModelHarnessAnalysisCapabilities(
             active_policy,
-            proposal,
+            cast(RecordModelHarnessAnalysis, proposal),
             ModelHarnessProtocolRepository(connection),
             ModelHarnessCellRepository(connection),
             ModelHarnessAnalysisRepository(connection),
@@ -690,20 +741,20 @@ def harness_extension_capabilities(
             RewardAssessmentRepository(connection),
             current_transaction_created_at,
         )
-    if type(proposal) is RecordHarnessExecutionTrace:
+    if RecordHarnessExecutionTrace in proposal_mro:
         return HarnessTraceCapabilities(
             active_policy,
-            proposal,
+            cast(RecordHarnessExecutionTrace, proposal),
             GuidanceEvaluationProtocolRepository(connection),
             ModelHarnessProtocolRepository(connection),
             HarnessExecutionTraceRepository(connection),
             EvidenceRepository(connection),
             current_transaction_created_at,
         )
-    if type(proposal) is RecordRewardAssessment:
+    if RecordRewardAssessment in proposal_mro:
         return RewardAssessmentRecordCapabilities(
             active_policy,
-            proposal,
+            cast(RecordRewardAssessment, proposal),
             GuidanceEvaluationProtocolRepository(connection),
             ModelHarnessProtocolRepository(connection),
             HarnessExecutionTraceRepository(connection),

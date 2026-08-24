@@ -374,6 +374,15 @@ class RewardAssessmentRepository:
             item.record for item in self._records._list_by_relationship("trace_id", trace_id)
         )
 
+    def list_for_traces(
+        self,
+        trace_ids: tuple[str, ...],
+    ) -> tuple[RewardValidityAssessment, ...]:
+        return tuple(
+            item.record
+            for item in self._records._list_by_relationship_values("trace_id", trace_ids)
+        )
+
     def list_for_observation(
         self,
         observation_id: str,

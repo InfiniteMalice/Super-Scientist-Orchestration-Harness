@@ -206,6 +206,9 @@ class _GovernedProvenanceSnapshot:
     bindings: Mapping[str, _GovernedProvenanceBinding]
 
 
+GovernedProvenanceSnapshot = _GovernedProvenanceSnapshot
+
+
 class GovernedAppendOnlyRecordRepository[RecordT: BaseModel](AppendOnlyRecordRepository[RecordT]):
     """Append-only storage for one fixed governed table and model."""
 
@@ -256,6 +259,28 @@ class GovernedAppendOnlyRecordRepository[RecordT: BaseModel](AppendOnlyRecordRep
         )
         return self._decode_rows_with_new_provenance_snapshot(rows)
 
+    def _list_by_relationship_values(
+        self,
+        column_name: str,
+        values: tuple[str, ...],
+    ) -> tuple[RecordT, ...]:
+        _require_storage(
+            column_name in self._relationship_fields,
+            "unknown relationship column",
+        )
+        exact_values = tuple(sorted(set(values)))
+        if not exact_values:
+            return ()
+        rows = tuple(
+            dict(row)
+            for row in self._connection.execute(
+                select(self._table)
+                .where(self._table.c[column_name].in_(exact_values))
+                .order_by(self._table.c[self._identifier_field])
+            ).mappings()
+        )
+        return self._decode_rows_with_new_provenance_snapshot(rows)
+
     def _get_many(self, record_ids: tuple[str, ...]) -> tuple[RecordT, ...]:
         if not record_ids:
             return ()
@@ -268,6 +293,20 @@ class GovernedAppendOnlyRecordRepository[RecordT: BaseModel](AppendOnlyRecordRep
             ).mappings()
         )
         return self._decode_rows_with_new_provenance_snapshot(rows)
+
+    def _get_many_with_provenance(
+        self,
+        record_ids: tuple[str, ...],
+        snapshot: _GovernedProvenanceSnapshot,
+    ) -> tuple[RecordT, ...]:
+        if not record_ids:
+            return ()
+        rows = self._connection.execute(
+            select(self._table)
+            .where(self._table.c[self._identifier_field].in_(record_ids))
+            .order_by(self._table.c[self._identifier_field])
+        ).mappings()
+        return tuple(self._decode_row_with_provenance(dict(row), snapshot) for row in rows)
 
     def _list_all_with_provenance(
         self,
@@ -546,6 +585,13 @@ def _load_governed_provenance_snapshot(
     if invalid_provenance_storage:
         _raise_storage_integrity("transaction provenance does not match record_json")
 
+    return build_governed_provenance_snapshot(transactions, audit_events)
+
+
+def build_governed_provenance_snapshot(
+    transactions: tuple[StoredTransaction, ...],
+    audit_events: tuple[AuditEvent, ...],
+) -> _GovernedProvenanceSnapshot:
     audits_by_proposal_id: dict[str, list[_ParsedTransactionAuditBinding]] = {}
     for event in audit_events:
         parsed = _parse_transaction_audit_binding(event)
@@ -738,6 +784,13 @@ class CapabilityProfileRepository(GovernedAppendOnlyRecordRepository[CapabilityP
             return None
         stored = self.get(reference.source_record_id)
         return stored if stored == receipt.proposal.profile else None
+
+    def get_many_with_provenance(
+        self,
+        record_ids: tuple[str, ...],
+        snapshot: GovernedProvenanceSnapshot,
+    ) -> tuple[CapabilityProfile, ...]:
+        return self._get_many_with_provenance(record_ids, snapshot)
 
 
 class CohortPlanRepository(GovernedAppendOnlyRecordRepository[CohortPlan]):

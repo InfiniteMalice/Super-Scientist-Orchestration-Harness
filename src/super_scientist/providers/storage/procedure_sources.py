@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
@@ -69,6 +70,13 @@ class AcceptedProcedureSourceReceipt:
     governing_policy_hash: str
 
 
+@dataclass(frozen=True, slots=True)
+class AcceptedProcedureSourceBatch:
+    receipts: Mapping[str, AcceptedProcedureSourceReceipt]
+    transactions: tuple[StoredTransaction, ...]
+    audit_events: tuple[AuditEvent, ...]
+
+
 class AcceptedProcedureSourceReceiptReader:
     """Resolve one source reference through its accepted transaction and exact audit event."""
 
@@ -133,6 +141,55 @@ class AcceptedProcedureSourceReceiptReader:
             return None
         self._resolved_by_receipt_id[exact_reference.receipt_id] = resolved
         return resolved
+
+    def resolve_many(
+        self,
+        references: tuple[AcceptedSourceReceiptRef, ...],
+    ) -> AcceptedProcedureSourceBatch | None:
+        try:
+            exact_references = tuple(
+                AcceptedSourceReceiptRef.model_validate(
+                    reference.model_dump(mode="python", warnings=False)
+                )
+                for reference in references
+            )
+            transactions = self._transactions.list_all()
+            audit_events = self._audit.list_all()
+        except (MemoryError, OverflowError, RecursionError, TypeError, ValueError):
+            return None
+        transactions_by_id = {item.proposal.proposal_id: item for item in transactions}
+        events_by_id = {item.event_id: item for item in audit_events}
+        receipts: dict[str, AcceptedProcedureSourceReceipt] = {}
+        for reference in exact_references:
+            transaction = transactions_by_id.get(reference.proposal_id)
+            event = events_by_id.get(reference.audit_event_id)
+            if (
+                transaction is None
+                or event is None
+                or not transaction.decision.accepted
+                or transaction.proposal_hash != reference.proposal_hash
+                or event.event_hash != reference.audit_event_hash
+                or not isinstance(transaction.proposal, (RecordCapabilityProfile, AddEvidence))
+                or not _audit_event_matches_transaction(event, transaction)
+                or not _proposal_matches_source_kind(transaction.proposal, reference.source_kind)
+            ):
+                return None
+            policy_hash = _audit_policy_hash(event)
+            if policy_hash is None or reference.receipt_id in receipts:
+                return None
+            receipts[reference.receipt_id] = AcceptedProcedureSourceReceipt(
+                reference=reference,
+                proposal=transaction.proposal,
+                transaction_created_at=transaction.created_at,
+                audit_sequence=event.sequence,
+                audit_occurred_at=event.occurred_at,
+                governing_policy_hash=policy_hash,
+            )
+        return AcceptedProcedureSourceBatch(
+            receipts=MappingProxyType(receipts),
+            transactions=transactions,
+            audit_events=audit_events,
+        )
 
 
 def _proposal_matches_source_kind(
@@ -236,6 +293,15 @@ class _FixedCatalogSnapshotRepository[EntryT: BaseModel, CatalogSourceT]:
 
     def resolve(self, reference: AcceptedSourceReceiptRef) -> CatalogSourceT | None:
         receipt = self._receipts.resolve(reference)
+        stored_evidence = self._evidence.get(reference.source_record_id)
+        return self.resolve_verified(reference, receipt, stored_evidence)
+
+    def resolve_verified(
+        self,
+        reference: AcceptedSourceReceiptRef,
+        receipt: AcceptedProcedureSourceReceipt | None,
+        stored_evidence: EvidenceRecord | None,
+    ) -> CatalogSourceT | None:
         if (
             receipt is None
             or reference.source_kind is not self._source_kind
@@ -244,7 +310,6 @@ class _FixedCatalogSnapshotRepository[EntryT: BaseModel, CatalogSourceT]:
         ):
             return None
         proposal_evidence = receipt.proposal.evidence
-        stored_evidence = self._evidence.get(reference.source_record_id)
         if (
             stored_evidence is None
             or stored_evidence != proposal_evidence
@@ -449,19 +514,53 @@ class ProcedureSourceSnapshotRepository:
 
     def _accepted_snapshots(self) -> tuple[_AcceptedProcedureSourceSnapshot, ...]:
         events = self._audit.list_all()
+        transactions = self._transactions.list_all()
+        evidence_by_id = {
+            item.evidence_id: item
+            for item in self._evidence.get_many(
+                tuple(
+                    transaction.proposal.evidence.evidence_id
+                    for transaction in transactions
+                    if isinstance(transaction.proposal, AddEvidence)
+                )
+            )
+        }
+        return self.accepted_snapshots_from(transactions, events, evidence_by_id)
+
+    def accepted_snapshots_from(
+        self,
+        transactions: tuple[StoredTransaction, ...],
+        events: tuple[AuditEvent, ...],
+        evidence_by_id: Mapping[str, EvidenceRecord],
+    ) -> tuple[_AcceptedProcedureSourceSnapshot, ...]:
+        transactions_by_id = {
+            transaction.proposal.proposal_id: transaction for transaction in transactions
+        }
+        matching_events_by_proposal_id: dict[str, list[AuditEvent]] = {}
+        for event in events:
+            payload = json_compatible_payload(event.payload)
+            proposal_payload = payload.get("proposal")
+            proposal_id = (
+                proposal_payload.get("proposal_id") if type(proposal_payload) is dict else None
+            )
+            if type(proposal_id) is not str:
+                continue
+            transaction = transactions_by_id.get(proposal_id)
+            if transaction is not None and _audit_event_matches_transaction(event, transaction):
+                matching_events_by_proposal_id.setdefault(proposal_id, []).append(event)
         accepted: list[_AcceptedProcedureSourceSnapshot] = []
-        for transaction in self._transactions.list_all():
+        for transaction in transactions:
             if not transaction.decision.accepted or not isinstance(
                 transaction.proposal, AddEvidence
             ):
                 continue
             matching_events = tuple(
-                event for event in events if _audit_event_matches_transaction(event, transaction)
+                matching_events_by_proposal_id.get(transaction.proposal.proposal_id, ())
             )
             if len(matching_events) != 1:
                 continue
             proposal_evidence = transaction.proposal.evidence
-            stored_evidence = self._evidence.get(proposal_evidence.evidence_id)
+            stored_evidence = evidence_by_id.get(proposal_evidence.evidence_id)
             if stored_evidence is None or stored_evidence != proposal_evidence:
                 continue
             snapshot = self._decode_snapshot(proposal_evidence.artifact)

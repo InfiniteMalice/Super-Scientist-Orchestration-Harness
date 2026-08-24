@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 from sqlalchemy import Connection, Engine
 
 from super_scientist.application.kernel_service import KernelService
@@ -37,6 +38,7 @@ from super_scientist.kernel.transactions.models import (
     RecordModelHarnessProtocol,
     RecordProcedureCompilation,
     RecordRewardAssessment,
+    RejectionCode,
 )
 from super_scientist.providers.storage.artifacts import FileArtifactStore
 from super_scientist.providers.storage.database import (
@@ -44,6 +46,8 @@ from super_scientist.providers.storage.database import (
     create_database_engine,
     upgrade_database,
 )
+from tests.unit.harness_eval.test_rewards import assess_reward_validity
+from tests.unit.harness_eval.test_traces import valid_trace
 
 NOW = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
 
@@ -122,6 +126,24 @@ class _CapabilityProbeHandler:
 
     def project(self, proposal: object, decision: object, writes: object) -> None:
         raise AssertionError("probe handler must not project")
+
+
+class _HookedMapping(Mapping[str, object]):
+    def __init__(self) -> None:
+        self.hook_calls = 0
+
+    def __getitem__(self, key: str) -> object:
+        del key
+        self.hook_calls += 1
+        raise AssertionError("mapping hook must not run")
+
+    def __iter__(self) -> Iterator[str]:
+        self.hook_calls += 1
+        raise AssertionError("mapping hook must not run")
+
+    def __len__(self) -> int:
+        self.hook_calls += 1
+        raise AssertionError("mapping hook must not run")
 
 
 class FixedClock:
@@ -361,6 +383,105 @@ def test_each_new_proposal_uses_only_its_focused_capability_factory(
         for factory_name, proposal_classes in COGNITIVE_CAPABILITY_GROUPS
         for proposal_class in proposal_classes
     ]
+
+
+@pytest.mark.integration
+def test_governed_reward_copies_and_hostile_subclasses_reach_fixed_handler_decision(
+    runtime: Runtime,
+) -> None:
+    trace = valid_trace()
+    assert trace.reward_observation is not None
+    assessment = assess_reward_validity(
+        trace.reward_observation,
+        trace,
+        (),
+        verifier_succeeded=True,
+    )
+    proposal = RecordRewardAssessment(
+        proposal_id="proposal-hostile-reward",
+        idempotency_key="key-hostile-reward",
+        proposer=runtime.actor,
+        observation=trace.reward_observation,
+        findings=assessment.findings,
+        assessment=assessment,
+    )
+    copied = proposal.model_copy(update={"findings": ()})
+    serializer_calls = 0
+
+    def injected_serializer(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        nonlocal serializer_calls
+        serializer_calls += 1
+        raise AssertionError("injected serializer must not run")
+
+    object.__setattr__(copied, "model_dump", injected_serializer)
+    copied_decision = runtime.coordinator.submit(copied)
+
+    attribute_calls = 0
+
+    class HostileReward(RecordRewardAssessment):
+        def __getattribute__(self, name: str) -> object:
+            del name
+            nonlocal attribute_calls
+            attribute_calls += 1
+            raise AssertionError("subclass attribute hook must not run")
+
+    hostile_values = BaseModel.model_dump(proposal, mode="python", warnings=False) | {
+        "proposal_id": "proposal-hostile-reward-subclass",
+        "idempotency_key": "key-hostile-reward-subclass",
+    }
+    hostile = HostileReward.model_construct(**hostile_values)
+    hostile_decision = runtime.coordinator.submit(hostile)
+
+    assert copied_decision.reasons[0].code is RejectionCode.INVALID_REWARD
+    assert hostile_decision.reasons[0].code is RejectionCode.INVALID_REWARD
+    assert serializer_calls == 0
+    assert attribute_calls == 0
+
+
+@pytest.mark.integration
+def test_other_nonvalidating_governed_copies_fail_closed_without_crashing(
+    runtime: Runtime,
+) -> None:
+    copied = RecordCapabilityProfile.model_construct(
+        proposal_id="proposal-invalid-capability-copy",
+        idempotency_key="key-invalid-capability-copy",
+        proposer=runtime.actor,
+    )
+
+    decision = runtime.coordinator.submit(copied)
+
+    assert decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    assert runtime.transaction_and_audit_counts() == (1, 1)
+
+
+@pytest.mark.integration
+def test_mapping_ingress_preflights_deep_exact_builtins_without_hooks(runtime: Runtime) -> None:
+    hostile = _HookedMapping()
+
+    hostile_decision = runtime.coordinator.submit(hostile)
+
+    assert hostile_decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    assert hostile.hook_calls == 0
+
+    deeply_nested: object = None
+    for _ in range(10_000):
+        deeply_nested = {"nested": [deeply_nested]}
+    deep_decision = runtime.coordinator.submit(deeply_nested)
+
+    assert deep_decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
+    assert deep_decision.reasons[0].message == (
+        "proposal failed service boundary validation and could not be stored"
+    )
+
+    maximum_nodes = {"items": [None] * (coordinator_module.MAX_PROPOSAL_JSON_NODES - 2)}
+    excessive_nodes = {"items": [None] * (coordinator_module.MAX_PROPOSAL_JSON_NODES - 1)}
+    assert coordinator_module._mapping_is_within_proposal_bounds(maximum_nodes) is True
+    assert coordinator_module._mapping_is_within_proposal_bounds(excessive_nodes) is False
+
+    oversized = {"padding": "x" * coordinator_module.MAX_PROPOSAL_BYTES}
+    oversized_decision = runtime.coordinator.submit(oversized)
+    assert oversized_decision.reasons[0].code is RejectionCode.INVALID_PROPOSAL
 
 
 @pytest.mark.integration

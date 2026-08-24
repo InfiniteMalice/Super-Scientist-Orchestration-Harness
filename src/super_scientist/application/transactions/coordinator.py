@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast, get_args
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from sqlalchemy import Connection
@@ -69,6 +69,11 @@ from super_scientist.domain.primitives import (
 from super_scientist.kernel.admission.engine import AdmissionContext, AdmissionEngine
 from super_scientist.kernel.audit.chain import append_event
 from super_scientist.kernel.transactions.models import (
+    GOVERNED_PROPOSAL_CLASSES,
+    MAX_PROPOSAL_BYTES,
+    MAX_PROPOSAL_JSON_CONTAINER_ITEMS,
+    MAX_PROPOSAL_JSON_DEPTH,
+    MAX_PROPOSAL_JSON_NODES,
     AddEvidence,
     AdmitHypothesis,
     AdmitPrimitiveVersion,
@@ -141,6 +146,7 @@ type ProposalFactory = Callable[[], object]
 PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
 IDENTIFIER_ADAPTER: TypeAdapter[StableIdentifier] = TypeAdapter(StableIdentifier)
 PROPOSAL_KIND_ADAPTER: TypeAdapter[ProposalKind] = TypeAdapter(ProposalKind)
+_PROPOSAL_EXACT_TYPES = frozenset(get_args(get_args(Proposal)[0]))
 
 
 @dataclass(frozen=True)
@@ -283,13 +289,13 @@ class TransactionCoordinator:
 
     def submit(self, proposal: object) -> TransactionDecision:
         normalized = _normalize_proposal(proposal)
-        if isinstance(normalized, TransactionDecision):
+        if type(normalized) is TransactionDecision:
             return normalized
         with self._uow_factory() as uow:
             repositories = uow.repositories()
             require_workspace_integrity(repositories, self._artifact_store)
             connection = _active_connection(uow.connection)
-            return self._submit_locked(normalized, repositories, connection)
+            return self._submit_locked(cast(Proposal, normalized), repositories, connection)
 
     def submit_batch(
         self,
@@ -305,10 +311,12 @@ class TransactionCoordinator:
             require_workspace_integrity(repositories, self._artifact_store)
             connection = _active_connection(uow.connection)
             for proposal in normalized:
-                if isinstance(proposal, TransactionDecision):
+                if type(proposal) is TransactionDecision:
                     decisions.append(proposal)
                 else:
-                    decisions.append(self._submit_locked(proposal, repositories, connection))
+                    decisions.append(
+                        self._submit_locked(cast(Proposal, proposal), repositories, connection)
+                    )
         return tuple(decisions)
 
     def submit_intent(
@@ -360,18 +368,18 @@ class TransactionCoordinator:
                 )
             else:
                 normalized_result = _normalize_proposal(candidate)
-                if isinstance(normalized_result, TransactionDecision):
+                if type(normalized_result) is TransactionDecision:
                     normalized = _invalid_attempt(
                         attempt,
                         "proposal factory returned a malformed proposal",
                     )
-                elif not _matches_attempt(normalized_result, attempt):
+                elif not _matches_attempt(cast(Proposal, normalized_result), attempt):
                     normalized = _invalid_attempt(
                         attempt,
                         "proposal factory result did not match the trusted attempt envelope",
                     )
                 else:
-                    normalized = normalized_result
+                    normalized = cast(Proposal, normalized_result)
             return self._submit_locked(
                 normalized,
                 repositories,
@@ -387,22 +395,26 @@ class TransactionCoordinator:
         *,
         intent_fingerprint: str | None = None,
     ) -> TransactionDecision:
-        proposal_hash = sha256_hex(canonical_json_bytes(proposal.model_dump(mode="json")))
+        governed_type = _trusted_governed_proposal_type(proposal)
+        stored_proposal = _durable_proposal(proposal, governed_type)
+        proposal_hash = sha256_hex(
+            canonical_json_bytes(BaseModel.model_dump(stored_proposal, mode="json"))
+        )
         stored_policy = repositories.policies.get_active()
-        prior = repositories.transactions.get_by_idempotency_key(proposal.idempotency_key)
+        prior = repositories.transactions.get_by_idempotency_key(stored_proposal.idempotency_key)
         if prior is not None:
             if (
                 prior.proposal_hash != proposal_hash
                 or prior.intent_fingerprint != intent_fingerprint
             ):
                 decision = AdmissionEngine.rejected(
-                    proposal.proposal_id,
+                    stored_proposal.proposal_id,
                     RejectionCode.IDEMPOTENCY_CONFLICT,
                     "idempotency key was reused with different proposal content",
                 )
                 if stored_policy is not None:
                     self._audit(
-                        proposal,
+                        stored_proposal,
                         decision,
                         repositories,
                         stored_policy,
@@ -410,10 +422,12 @@ class TransactionCoordinator:
                     )
                 return decision
             return prior.decision.model_copy(update={"replayed": True})
-        existing_proposal = repositories.transactions.get_by_proposal_id(proposal.proposal_id)
+        existing_proposal = repositories.transactions.get_by_proposal_id(
+            stored_proposal.proposal_id
+        )
         if stored_policy is None or stored_policy.policy_hash != self._active_policy.policy_hash:
             decision = AdmissionEngine.rejected(
-                proposal.proposal_id,
+                stored_proposal.proposal_id,
                 RejectionCode.POLICY_HASH_MISMATCH,
                 "stored active policy does not match the configured policy snapshot",
             )
@@ -421,13 +435,13 @@ class TransactionCoordinator:
                 return decision
             if existing_proposal is None:
                 repositories.transactions.add(
-                    proposal,
+                    stored_proposal,
                     decision,
                     self._clock.now(),
                     intent_fingerprint=intent_fingerprint,
                 )
             self._audit(
-                proposal,
+                stored_proposal,
                 decision,
                 repositories,
                 stored_policy,
@@ -436,12 +450,12 @@ class TransactionCoordinator:
             return decision
         if existing_proposal is not None:
             decision = AdmissionEngine.rejected(
-                proposal.proposal_id,
+                stored_proposal.proposal_id,
                 RejectionCode.ENTITY_ALREADY_EXISTS,
                 "proposal id already exists",
             )
             self._audit(
-                proposal,
+                stored_proposal,
                 decision,
                 repositories,
                 stored_policy,
@@ -450,23 +464,23 @@ class TransactionCoordinator:
             return decision
 
         admitted_proposal: Proposal = proposal
-        if isinstance(proposal, AddEvidence):
+        if governed_type is None and isinstance(proposal, AddEvidence):
             try:
                 admitted_proposal = self._verified_evidence_proposal(proposal)
             except (OSError, UnicodeError, ValueError) as error:
                 decision = AdmissionEngine.rejected(
-                    proposal.proposal_id,
+                    stored_proposal.proposal_id,
                     RejectionCode.EVIDENCE_HASH_MISMATCH,
                     f"evidence artifact verification failed: {error}",
                 )
                 repositories.transactions.add(
-                    proposal,
+                    stored_proposal,
                     decision,
                     self._clock.now(),
                     intent_fingerprint=intent_fingerprint,
                 )
                 self._audit(
-                    proposal,
+                    stored_proposal,
                     decision,
                     repositories,
                     stored_policy,
@@ -477,7 +491,7 @@ class TransactionCoordinator:
         transaction_created_at = self._clock.now()
         reads: HandlerReadCapability
         writes: HandlerWriteCapability
-        if isinstance(admitted_proposal, InvalidProposal):
+        if governed_type is None and isinstance(admitted_proposal, InvalidProposal):
             reads = _CompatibilityReadCapability(repositories, stored_policy)
             compatibility_handler = _CompatibilityProposalHandler(
                 self._engine,
@@ -486,11 +500,19 @@ class TransactionCoordinator:
             context = compatibility_handler.build_context(admitted_proposal, reads)
             decision = self._engine.decide(admitted_proposal, context)
         else:
-            handler = self._router.resolve(admitted_proposal.proposal_type)
-            if isinstance(admitted_proposal, (AddEvidence, ProposeClaim, TransitionClaim)):
+            route_type = (
+                admitted_proposal.proposal_type
+                if governed_type is None
+                else cast(str, governed_type.model_fields["proposal_type"].default)
+            )
+            handler = self._router.resolve(route_type)
+            if governed_type is None and isinstance(
+                admitted_proposal,
+                (AddEvidence, ProposeClaim, TransitionClaim),
+            ):
                 reads = _CompatibilityReadCapability(repositories, stored_policy)
                 writes = _CompatibilityWriteCapability(repositories)
-            elif isinstance(
+            elif governed_type is None and isinstance(
                 admitted_proposal,
                 (
                     RecordProgressPlan,
@@ -507,7 +529,7 @@ class TransactionCoordinator:
                 )
                 reads = progress_io
                 writes = progress_io
-            elif isinstance(
+            elif governed_type is None and isinstance(
                 admitted_proposal,
                 (
                     ProposeEvidenceTrailNodes,
@@ -524,7 +546,7 @@ class TransactionCoordinator:
                 )
                 reads = trail_io
                 writes = trail_io
-            elif isinstance(
+            elif governed_type is None and isinstance(
                 admitted_proposal,
                 (
                     RecordRuleIncident,
@@ -541,7 +563,7 @@ class TransactionCoordinator:
                 )
                 reads = rule_io
                 writes = cast(HandlerWriteCapability, rule_io)
-            elif isinstance(
+            elif governed_type is None and isinstance(
                 admitted_proposal,
                 (
                     ProposePrimitiveVersion,
@@ -557,7 +579,7 @@ class TransactionCoordinator:
                 )
                 reads = representation_io.reads
                 writes = representation_io.writes
-            elif isinstance(
+            elif governed_type is None and isinstance(
                 admitted_proposal,
                 (
                     ProposeHypothesisVersion,
@@ -579,7 +601,7 @@ class TransactionCoordinator:
                 )
                 reads = hypothesis_io.reads
                 writes = hypothesis_io.writes
-            elif isinstance(
+            elif governed_type is None and isinstance(
                 admitted_proposal,
                 (
                     CreateHarnessCampaign,
@@ -596,13 +618,10 @@ class TransactionCoordinator:
                 )
                 reads = harness_eval_io
                 writes = harness_eval_io
-            elif isinstance(
-                admitted_proposal,
-                (
-                    RecordCapabilityProfile,
-                    RecordCohortPlan,
-                    RecordDiversityAssessment,
-                ),
+            elif governed_type in (
+                RecordCapabilityProfile,
+                RecordCohortPlan,
+                RecordDiversityAssessment,
             ):
                 cognition_io = cognition_capabilities(
                     admitted_proposal,
@@ -612,15 +631,12 @@ class TransactionCoordinator:
                 )
                 reads = cognition_io
                 writes = cognition_io
-            elif isinstance(
-                admitted_proposal,
-                (
-                    RecordCollaborationSession,
-                    AppendPeerRequest,
-                    AppendPeerContribution,
-                    AppendTopologyEvent,
-                    RecordCollaborationTermination,
-                ),
+            elif governed_type in (
+                RecordCollaborationSession,
+                AppendPeerRequest,
+                AppendPeerContribution,
+                AppendTopologyEvent,
+                RecordCollaborationTermination,
             ):
                 collaboration_io = collaboration_capabilities(
                     admitted_proposal,
@@ -630,13 +646,10 @@ class TransactionCoordinator:
                 )
                 reads = collaboration_io
                 writes = collaboration_io
-            elif isinstance(
-                admitted_proposal,
-                (
-                    RecordProcedureCompilation,
-                    RecordMethodDirectionOutcome,
-                    BindCompiledProgressPlan,
-                ),
+            elif governed_type in (
+                RecordProcedureCompilation,
+                RecordMethodDirectionOutcome,
+                BindCompiledProgressPlan,
             ):
                 procedure_io = procedure_capabilities(
                     admitted_proposal,
@@ -647,17 +660,14 @@ class TransactionCoordinator:
                 )
                 reads = procedure_io
                 writes = procedure_io
-            elif isinstance(
-                admitted_proposal,
-                (
-                    RecordGuidanceEvaluationProtocol,
-                    AppendGuidanceEvaluationCell,
-                    RecordModelHarnessProtocol,
-                    AppendModelHarnessCell,
-                    RecordModelHarnessAnalysis,
-                    RecordHarnessExecutionTrace,
-                    RecordRewardAssessment,
-                ),
+            elif governed_type in (
+                RecordGuidanceEvaluationProtocol,
+                AppendGuidanceEvaluationCell,
+                RecordModelHarnessProtocol,
+                AppendModelHarnessCell,
+                RecordModelHarnessAnalysis,
+                RecordHarnessExecutionTrace,
+                RecordRewardAssessment,
             ):
                 harness_extension_io = harness_extension_capabilities(
                     admitted_proposal,
@@ -675,24 +685,50 @@ class TransactionCoordinator:
                 )
                 reads = adaptation_io
                 writes = adaptation_io
-            decision = handler.decide(
-                admitted_proposal,
-                handler.build_context(admitted_proposal, reads),
-            )
-            if decision.accepted:
+            try:
+                decision = handler.decide(
+                    admitted_proposal,
+                    handler.build_context(admitted_proposal, reads),
+                )
+            except (
+                ArithmeticError,
+                AttributeError,
+                MemoryError,
+                OverflowError,
+                RecursionError,
+                TypeError,
+                UnicodeError,
+                ValueError,
+            ):
+                if governed_type is None:
+                    raise
+                decision = _governed_handler_failure_decision(
+                    stored_proposal.proposal_id,
+                    governed_type,
+                )
+            if (
+                decision.accepted
+                and governed_type is not None
+                and type(stored_proposal) is InvalidProposal
+            ):
+                decision = _governed_handler_failure_decision(
+                    stored_proposal.proposal_id,
+                    governed_type,
+                )
+            elif decision.accepted:
                 handler.project(
                     admitted_proposal,
                     decision,
                     writes,
                 )
         repositories.transactions.add(
-            proposal,
+            stored_proposal,
             decision,
             transaction_created_at,
             intent_fingerprint=intent_fingerprint,
         )
         self._audit(
-            proposal,
+            stored_proposal,
             decision,
             repositories,
             stored_policy,
@@ -753,42 +789,169 @@ class TransactionCoordinator:
         repositories.audit.add(event)
 
 
-def _normalize_proposal(value: object) -> Proposal | TransactionDecision:
+def _trusted_governed_proposal_type(value: object) -> type[BaseModel] | None:
+    value_type = type(value)
     try:
-        if isinstance(
-            value,
-            (
-                RecordRuleIncident,
-                ProposeBehavioralRule,
-                ImportReviewerAssessment,
-                ConsolidateBehavioralRule,
-                ProposePrimitiveVersion,
-                RecordPrimitiveEvaluation,
-                AdmitPrimitiveVersion,
-                ProposeHypothesisVersion,
-                RegisterExecutableModel,
-                RegisterVerificationMechanism,
-                RecordSimulationResult,
-                RecordVerificationResult,
-                RecordCounterexample,
-                ReviseHypothesis,
-                AdmitHypothesis,
-                CreateHarnessCampaign,
-                RecordHarnessIteration,
-                RecordHarnessProtectedResult,
-                RecordHarnessConfound,
-                DecideHarnessCampaign,
+        value_mro = type.__getattribute__(value_type, "__mro__")
+    except (AttributeError, TypeError):
+        return None
+    return next(
+        (candidate for candidate in GOVERNED_PROPOSAL_CLASSES if candidate in value_mro),
+        None,
+    )
+
+
+def _safe_model_state(value: object) -> dict[str, object] | None:
+    try:
+        state = object.__getattribute__(value, "__dict__")
+    except (AttributeError, MemoryError, RecursionError, TypeError):
+        return None
+    if type(state) is not dict or any(type(key) is not str for key in state):
+        return None
+    return state
+
+
+def _trusted_model_dump(
+    value: object,
+    model_type: type[BaseModel],
+    *,
+    mode: Literal["json", "python"],
+) -> dict[str, object]:
+    serializer = type.__getattribute__(model_type, "__pydantic_serializer__")
+    dumped = serializer.to_python(value, mode=mode, warnings=False)
+    if type(dumped) is not dict or any(type(key) is not str for key in dumped):
+        raise ValueError("trusted model serializer returned an invalid mapping")
+    return dumped
+
+
+def _durable_proposal(
+    proposal: Proposal,
+    governed_type: type[BaseModel] | None,
+) -> Proposal:
+    if governed_type is None:
+        return proposal
+    try:
+        if type(proposal) is not governed_type:
+            raise TypeError("governed proposal subclasses are not durable input")
+        dumped = _trusted_model_dump(proposal, governed_type, mode="python")
+        return PROPOSAL_ADAPTER.validate_python(dumped)
+    except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
+        state = _safe_model_state(proposal) or {}
+        proposal_id = _safe_identifier(state.get("proposal_id")) or (
+            "invalid-reward-proposal"
+            if governed_type is RecordRewardAssessment
+            else "invalid-governed-proposal"
+        )
+        idempotency_key = _safe_identifier(state.get("idempotency_key")) or proposal_id
+        proposer = _safe_proposer_state(state.get("proposer"))
+        return InvalidProposal(
+            proposal_id=proposal_id,
+            idempotency_key=idempotency_key,
+            validation_error="governed proposal failed safe durable normalization",
+            proposer=proposer,
+            attempted_proposal_kind=PROPOSAL_KIND_ADAPTER.validate_python(
+                governed_type.model_fields["proposal_type"].default
             ),
+        )
+
+
+def _mapping_is_within_proposal_bounds(value: dict[str, object]) -> bool:
+    pending: list[tuple[object, int]] = [(value, 0)]
+    visited_nodes = 0
+    while pending:
+        current, depth = pending.pop()
+        visited_nodes += 1
+        if depth > MAX_PROPOSAL_JSON_DEPTH or visited_nodes > MAX_PROPOSAL_JSON_NODES:
+            return False
+        if type(current) is dict:
+            if len(current) > MAX_PROPOSAL_JSON_CONTAINER_ITEMS or any(
+                type(key) is not str for key in current
+            ):
+                return False
+            pending.extend((item, depth + 1) for item in current.values())
+        elif type(current) is list:
+            if len(current) > MAX_PROPOSAL_JSON_CONTAINER_ITEMS:
+                return False
+            pending.extend((item, depth + 1) for item in current)
+        elif current is not None and type(current) not in (str, int, float, bool):
+            return False
+    return True
+
+
+def _governed_handler_failure_decision(
+    proposal_id: str,
+    governed_type: type[BaseModel],
+) -> TransactionDecision:
+    if governed_type is RecordRewardAssessment:
+        return AdmissionEngine.rejected(
+            proposal_id,
+            RejectionCode.INVALID_REWARD,
+            "reward assessment proposal is invalid",
+        )
+    return AdmissionEngine.rejected(
+        proposal_id,
+        RejectionCode.INVALID_PROPOSAL,
+        "governed proposal failed fixed handler validation",
+    )
+
+
+def _normalize_proposal(value: object) -> Proposal | TransactionDecision:
+    governed_type = _trusted_governed_proposal_type(value)
+    if governed_type is not None:
+        return cast(Proposal, value)
+    value_type = type(value)
+    if value_type is not dict and value_type not in _PROPOSAL_EXACT_TYPES:
+        return _invalid_proposal_decision("invalid-proposal")
+    try:
+        if value_type in (
+            RecordRuleIncident,
+            ProposeBehavioralRule,
+            ImportReviewerAssessment,
+            ConsolidateBehavioralRule,
+            ProposePrimitiveVersion,
+            RecordPrimitiveEvaluation,
+            AdmitPrimitiveVersion,
+            ProposeHypothesisVersion,
+            RegisterExecutableModel,
+            RegisterVerificationMechanism,
+            RecordSimulationResult,
+            RecordVerificationResult,
+            RecordCounterexample,
+            ReviseHypothesis,
+            AdmitHypothesis,
+            CreateHarnessCampaign,
+            RecordHarnessIteration,
+            RecordHarnessProtectedResult,
+            RecordHarnessConfound,
+            DecideHarnessCampaign,
         ):
             return PROPOSAL_ADAPTER.validate_json(
-                canonical_json_bytes(value.model_dump(mode="json"))
+                canonical_json_bytes(
+                    _trusted_model_dump(
+                        value,
+                        cast(type[BaseModel], value_type),
+                        mode="json",
+                    )
+                )
             )
-        if isinstance(value, BaseModel):
-            return PROPOSAL_ADAPTER.validate_python(dict(value.__dict__))
-        if isinstance(value, Mapping):
-            return PROPOSAL_ADAPTER.validate_json(canonical_json_bytes(value))
+        if value_type in _PROPOSAL_EXACT_TYPES:
+            return PROPOSAL_ADAPTER.validate_python(
+                _trusted_model_dump(
+                    value,
+                    cast(type[BaseModel], value_type),
+                    mode="python",
+                )
+            )
+        if value_type is dict:
+            exact_mapping = cast(dict[str, object], value)
+            if not _mapping_is_within_proposal_bounds(exact_mapping):
+                raise ValueError("proposal mapping exceeds fixed bounds")
+            encoded = canonical_json_bytes(exact_mapping)
+            if len(encoded) > MAX_PROPOSAL_BYTES:
+                raise ValueError("proposal mapping exceeds fixed byte bound")
+            return PROPOSAL_ADAPTER.validate_json(encoded)
         return PROPOSAL_ADAPTER.validate_python(value)
-    except (TypeError, ValueError):
+    except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
         proposal_id = _safe_proposal_field(value, "proposal_id")
         idempotency_key = _safe_proposal_field(value, "idempotency_key")
         if proposal_id is None or idempotency_key is None:
@@ -803,14 +966,12 @@ def _normalize_proposal(value: object) -> Proposal | TransactionDecision:
 
 
 def _safe_proposal_field(value: object, field: str) -> str | None:
-    try:
-        if isinstance(value, BaseModel):
-            candidate = value.__dict__.get(field)
-        elif isinstance(value, Mapping):
-            candidate = value.get(field)
-        else:
-            candidate = getattr(value, field, None)
-    except Exception:
+    state = _safe_model_state(value)
+    if state is not None:
+        candidate = state.get(field)
+    elif type(value) is dict:
+        candidate = dict.get(value, field)
+    else:
         return None
     return _safe_identifier(candidate)
 
@@ -820,6 +981,19 @@ def _safe_identifier(value: object) -> str | None:
         return IDENTIFIER_ADAPTER.validate_python(value)
     except Exception:
         return None
+
+
+def _safe_proposer_state(candidate: object) -> ActorIdentity | None:
+    try:
+        if type(candidate) is dict:
+            return ActorIdentity.model_validate_json(canonical_json_bytes(candidate))
+        if type(candidate) is ActorIdentity:
+            return ActorIdentity.model_validate(
+                _trusted_model_dump(candidate, ActorIdentity, mode="python")
+            )
+    except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
+        return None
+    return None
 
 
 def _invalid_proposal_decision(proposal_id: str) -> TransactionDecision:
@@ -876,15 +1050,7 @@ def _sanitized_validation_message(error: ValidationError) -> str:
 
 
 def _safe_proposer(value: object) -> ActorIdentity | None:
-    candidate = _raw_proposal_field(value, "proposer")
-    if candidate is None:
-        return None
-    try:
-        if isinstance(candidate, Mapping):
-            return ActorIdentity.model_validate_json(canonical_json_bytes(candidate))
-        return ActorIdentity.model_validate(candidate)
-    except (TypeError, ValueError):
-        return None
+    return _safe_proposer_state(_raw_proposal_field(value, "proposer"))
 
 
 def _safe_proposal_kind(value: object) -> ProposalKind | None:
@@ -896,14 +1062,12 @@ def _safe_proposal_kind(value: object) -> ProposalKind | None:
 
 
 def _raw_proposal_field(value: object, field: str) -> object:
-    try:
-        if isinstance(value, BaseModel):
-            return value.__dict__.get(field)
-        if isinstance(value, Mapping):
-            return value.get(field)
-        return getattr(value, field, None)
-    except Exception:
-        return None
+    state = _safe_model_state(value)
+    if state is not None:
+        return state.get(field)
+    if type(value) is dict:
+        return dict.get(value, field)
+    return None
 
 
 def _active_connection(connection: Connection | None) -> Connection:

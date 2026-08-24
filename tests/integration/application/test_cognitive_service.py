@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from copy import copy, deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -141,21 +142,21 @@ def test_facades_require_exact_sealed_types(
 ) -> None:
     _, _, _, _, _ = cognitive_runtime
 
-    class CoordinatorSubclass(TransactionCoordinator):
-        pass
+    with pytest.raises(TypeError, match="cannot be subclassed"):
 
-    class SubmitterSubclass(CognitiveOrchestrationService):
-        pass
+        class CoordinatorSubclass(CognitiveOrchestrationService):
+            pass
+
+    with pytest.raises(TypeError, match="cannot be subclassed"):
+
+        class ResearchSubclass(ResearchCoordinator):
+            pass
 
     with pytest.raises(TypeError, match="exact transaction coordinator"):
         CognitiveOrchestrationService(object())  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="exact transaction coordinator"):
-        CognitiveOrchestrationService(object.__new__(CoordinatorSubclass))
 
     with pytest.raises(TypeError, match="sealed submit capability"):
         ResearchCoordinator(object())  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="sealed submit capability"):
-        ResearchCoordinator(object.__new__(SubmitterSubclass))
 
 
 @pytest.mark.integration
@@ -169,17 +170,31 @@ def test_research_coordinator_object_graph_has_no_storage_or_execution_authority
     ],
 ) -> None:
     _, research, _, _, _ = cognitive_runtime
+    submitter = object.__getattribute__(research, "_submitter")
     forbidden = {
+        TransactionCoordinator,
         RepositorySet,
         DatabaseUnitOfWork,
         Connection,
         ArtifactStore,
+        FileArtifactStore,
         ProtectedAnswerReader,
         SimulatorRegistry,
         OutputOnlyEvaluatorExecutor,
     }
 
     assert walk_object_graph_types(research).isdisjoint(forbidden)
+    assert walk_object_graph_types(submitter).isdisjoint(forbidden)
+    with pytest.raises(AttributeError):
+        object.__getattribute__(submitter, "_coordinator")
+    with pytest.raises(TypeError, match="cannot be copied"):
+        copy(submitter)
+    with pytest.raises(TypeError, match="cannot be copied"):
+        deepcopy(submitter)
+    with pytest.raises(TypeError, match="cannot be copied"):
+        copy(research)
+    with pytest.raises(TypeError, match="cannot be copied"):
+        deepcopy(research)
     assert {name for name in dir(type(research)) if not name.startswith("_")} == {
         "run_declared_slice"
     }

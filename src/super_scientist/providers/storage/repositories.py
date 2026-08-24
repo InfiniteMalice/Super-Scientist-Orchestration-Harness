@@ -528,6 +528,21 @@ class EvidenceRepository:
         ).mappings()
         return tuple(_decode_evidence_row(dict(row)) for row in rows)
 
+    def get_many(self, evidence_ids: tuple[str, ...]) -> tuple[EvidenceRecord, ...]:
+        if not evidence_ids:
+            return ()
+        rows = self._connection.execute(
+            select(
+                evidence_records.c.evidence_id,
+                evidence_records.c.content_hash,
+                evidence_records.c.record_json,
+                evidence_records.c.created_at,
+            )
+            .where(evidence_records.c.evidence_id.in_(tuple(sorted(set(evidence_ids)))))
+            .order_by(evidence_records.c.evidence_id)
+        ).mappings()
+        return tuple(_decode_evidence_row(dict(row)) for row in rows)
+
     def add(self, record: EvidenceRecord) -> None:
         dumped = record.model_dump(mode="python", warnings="none")
         validated = EvidenceRecord.model_validate(dumped)
