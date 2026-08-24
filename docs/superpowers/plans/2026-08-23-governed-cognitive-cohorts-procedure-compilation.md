@@ -842,6 +842,7 @@ MAX_HARNESS_TRACE_RECORD_IDENTIFIER_LENGTH = 200
 MAX_PROPOSAL_COLLECTION_ITEMS = 256
 MAX_PROPOSAL_RECONSTRUCTION_DEPTH = 128
 MAX_PROPOSAL_RECONSTRUCTION_ITEMS = 4_096
+MAX_PROPOSAL_JSON_DECIMAL_CHARACTERS = 260
 
 _STABLE_IDENTIFIER_ALPHABET = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
@@ -1394,6 +1395,206 @@ GOVERNED_PROPOSAL_CLASSES = (
     RecordHarnessExecutionTrace,
     RecordRewardAssessment,
 )
+
+_GOVERNED_PROPOSAL_BY_TYPE = {
+    proposal_type.model_fields["proposal_type"].default: proposal_type
+    for proposal_type in GOVERNED_PROPOSAL_CLASSES
+}
+
+
+def _normalize_untyped_json_value(value: object, *, depth: int) -> object:
+    if depth > MAX_PROPOSAL_RECONSTRUCTION_DEPTH:
+        raise ValueError("proposal JSON exceeds its depth bound")
+    if value is None or type(value) in (str, int, float, bool):
+        return value
+    if type(value) is list:
+        if len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
+            raise ValueError("proposal JSON array exceeds its item bound")
+        return [
+            _normalize_untyped_json_value(item, depth=depth + 1)
+            for item in value
+        ]
+    if type(value) is dict:
+        if (
+            len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS
+            or any(type(key) is not str for key in value)
+        ):
+            raise ValueError("proposal JSON object exceeds its exact bounded contract")
+        return {
+            key: _normalize_untyped_json_value(item, depth=depth + 1)
+            for key, item in value.items()
+        }
+    raise ValueError("proposal JSON contains a non-JSON runtime type")
+
+
+def _base_json_annotation(annotation: object) -> object:
+    while get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    return annotation
+
+
+def _normalize_json_proposal_value(
+    value: object,
+    annotation: object,
+    *,
+    depth: int = 0,
+) -> object:
+    if depth > MAX_PROPOSAL_RECONSTRUCTION_DEPTH:
+        raise ValueError("proposal JSON exceeds its depth bound")
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+    if origin is Annotated:
+        return _normalize_json_proposal_value(
+            value,
+            arguments[0],
+            depth=depth + 1,
+        )
+    if origin in (Union, UnionType):
+        base_options = tuple(_base_json_annotation(option) for option in arguments)
+        if (
+            type(value) is dict
+            and all(type(key) is str for key in value)
+            and frozenset(value) == frozenset({"kind", "value"})
+            and Decimal in base_options
+            and str in base_options
+        ):
+            kind = value["kind"]
+            tagged_value = value["value"]
+            if type(kind) is not str or type(tagged_value) is not str:
+                raise ValueError("tagged reward JSON requires exact text")
+            if kind == "numeric":
+                if not tagged_value or len(tagged_value) > MAX_PROPOSAL_JSON_DECIMAL_CHARACTERS:
+                    raise ValueError("tagged numeric reward exceeds its text bound")
+                return Decimal(tagged_value)
+            if kind == "categorical":
+                return tagged_value
+            raise ValueError("tagged reward JSON kind is not admitted")
+        for option in arguments:
+            try:
+                normalized = _normalize_json_proposal_value(
+                    value,
+                    option,
+                    depth=depth + 1,
+                )
+                return TypeAdapter(option).validate_python(normalized, strict=True)
+            except (TypeError, ValueError):
+                continue
+        raise ValueError("proposal JSON union value has no exact admitted type")
+    if origin is Literal:
+        if not any(type(value) is type(option) and value == option for option in arguments):
+            raise ValueError("proposal JSON literal is not exact")
+        return value
+    if annotation is Any:
+        return _normalize_untyped_json_value(value, depth=depth + 1)
+    if annotation is type(None):
+        if value is not None:
+            raise ValueError("proposal JSON value must be null")
+        return None
+    if annotation is datetime:
+        if type(value) is not str or not value or len(value) > 64:
+            raise ValueError("proposal JSON timestamp must be bounded exact text")
+        return _fresh_utc_timestamp(datetime.fromisoformat(value))
+    if annotation is Decimal:
+        if (
+            type(value) is not str
+            or not value
+            or len(value) > MAX_PROPOSAL_JSON_DECIMAL_CHARACTERS
+        ):
+            raise ValueError("proposal JSON decimal must be bounded exact text")
+        return Decimal(value)
+    if annotation in (str, int, float, bool):
+        if type(value) is not annotation:
+            raise ValueError("proposal JSON primitive has the wrong exact type")
+        return value
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        enum_members = tuple(annotation)
+        if not enum_members:
+            raise ValueError("proposal JSON enum must declare a value")
+        expected_value_type = type(enum_members[0].value)
+        if type(value) is not expected_value_type:
+            raise ValueError("proposal JSON enum has the wrong exact value type")
+        return annotation(value)
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        if (
+            type(value) is not dict
+            or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS
+            or any(type(key) is not str for key in value)
+        ):
+            raise ValueError("proposal JSON model must be an exact bounded object")
+        fields = annotation.model_fields
+        return {
+            key: (
+                _normalize_json_proposal_value(
+                    item,
+                    fields[key].annotation,
+                    depth=depth + 1,
+                )
+                if key in fields
+                else _normalize_untyped_json_value(item, depth=depth + 1)
+            )
+            for key, item in value.items()
+        }
+    if origin is tuple:
+        if type(value) is not list or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
+            raise ValueError("proposal JSON tuple must be a bounded array")
+        if len(arguments) == 2 and arguments[1] is Ellipsis:
+            return tuple(
+                _normalize_json_proposal_value(
+                    item,
+                    arguments[0],
+                    depth=depth + 1,
+                )
+                for item in value
+            )
+        if len(value) != len(arguments):
+            raise ValueError("fixed proposal JSON tuple has the wrong length")
+        return tuple(
+            _normalize_json_proposal_value(item, item_type, depth=depth + 1)
+            for item, item_type in zip(value, arguments, strict=True)
+        )
+    if origin is list:
+        if type(value) is not list or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
+            raise ValueError("proposal JSON list must be a bounded array")
+        item_type = arguments[0] if arguments else Any
+        return [
+            _normalize_json_proposal_value(item, item_type, depth=depth + 1)
+            for item in value
+        ]
+    if origin is frozenset:
+        if type(value) is not list or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
+            raise ValueError("proposal JSON frozen set must be a bounded array")
+        item_type = arguments[0] if arguments else Any
+        return frozenset(
+            _normalize_json_proposal_value(item, item_type, depth=depth + 1)
+            for item in value
+        )
+    if origin in (dict, Mapping):
+        if (
+            type(value) is not dict
+            or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS
+            or any(type(key) is not str for key in value)
+        ):
+            raise ValueError("proposal JSON mapping must be an exact bounded object")
+        key_type, item_type = arguments if len(arguments) == 2 else (str, Any)
+        return {
+            _normalize_json_proposal_value(key, key_type, depth=depth + 1): (
+                _normalize_json_proposal_value(item, item_type, depth=depth + 1)
+            )
+            for key, item in value.items()
+        }
+    raise ValueError("proposal JSON contains an unsupported declared type")
+
+
+def _normalize_governed_proposal_json(value: object) -> object:
+    if type(value) is not dict or any(type(key) is not str for key in value):
+        raise ValueError("governed proposal JSON must be an exact object")
+    proposal_type = value.get("proposal_type")
+    if type(proposal_type) is not str:
+        raise ValueError("governed proposal JSON requires an exact type tag")
+    proposal_model = _GOVERNED_PROPOSAL_BY_TYPE.get(proposal_type)
+    if proposal_model is None:
+        return value
+    return _normalize_json_proposal_value(value, proposal_model)
 # <!-- task-8-13-trace-contract:end -->
 
 
@@ -1418,7 +1619,20 @@ def parse_untrusted_proposal_json(value: str | bytes) -> Proposal:
                 len(serialized_bytes) <= MAX_PROPOSAL_BYTES
                 and proposal_json_is_within_depth_limit(value)
             ):
-                proposal = PROPOSAL_ADAPTER.validate_json(value)
+                normalizer = globals().get("_normalize_governed_proposal_json")
+                if normalizer is None:
+                    proposal = PROPOSAL_ADAPTER.validate_json(value)
+                else:
+                    decoded = __import__("json").loads(value)
+                    normalized = normalizer(decoded)
+                    proposal = (
+                        PROPOSAL_ADAPTER.validate_json(value)
+                        if normalized is decoded
+                        else PROPOSAL_ADAPTER.validate_python(
+                            normalized,
+                            strict=True,
+                        )
+                    )
     if proposal is None:
         raise ProposalBoundaryValidationError(
             "transaction proposal failed validation"
@@ -1461,7 +1675,7 @@ proposal JSON text or bytes. Before the parser calls `len()` or any payload oper
 the parser requires the value's type to be exactly built-in `str` or built-in `bytes`.
 The parser rejects subclasses, `bytearray`, and metaclass-backed objects without invoking
 their hooks. For admitted values, the parser applies an 8 MiB limit and the shared
-iterative depth limit before `PROPOSAL_ADAPTER.validate_json()`. The parser converts every
+iterative depth limit before invoking `PROPOSAL_ADAPTER`. The parser converts every
 Pydantic, JSON, Unicode, recursion, overflow, and recoverable memory failure to the fixed
 `ProposalBoundaryValidationError` only after the caught-exception scope exits. The public
 error has no cause, context, structured error surface, or rejected input. Raw
@@ -1469,6 +1683,21 @@ error has no cause, context, structured error surface, or rejected input. Raw
 application entrypoints must not expose their exceptions or structured errors. Base64 is
 transport encoding, not secrecy; the fixed outer parser must discard any rejected encoded
 payload before returning control to a caller.
+
+For one of the 18 additive tags, the public parser decodes bounded JSON and uses the
+declared proposal and nested field annotations to reconstruct the exact strict Python
+wire shape before calling `PROPOSAL_ADAPTER.validate_python(..., strict=True)`. This
+JSON-only path converts arrays to declared tuples or frozen sets, bounded decimal text to
+`Decimal`, bounded timestamp text to exact UTC `datetime`, exact enum values to their
+declared enum, and nested objects recursively to strict field mappings. Each array,
+mapping, recursion level, decimal string, and the complete serialized proposal has an
+explicit bound. The reward-value union additionally requires the exact two-key tagged
+wire form: `{"kind":"numeric","value":"..."}` becomes `Decimal`, while
+`{"kind":"categorical","value":"..."}` remains exact text. Untagged or mistyped
+numeric values cannot cross between those branches. Typed-Python model validation remains
+strict and receives no coercive normalizer. Existing released proposal tags retain their
+original direct `PROPOSAL_ADAPTER.validate_json()` route, so their bytes and hashes are
+unchanged.
 
 - [ ] **Step 4: Prove old proposal bytes and hashes are unchanged**
 

@@ -5,6 +5,8 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum, StrEnum
+from functools import reduce
+from operator import or_
 from pathlib import Path
 from types import SimpleNamespace, UnionType
 from typing import Annotated, Any, Self, Union, get_args, get_origin
@@ -136,9 +138,7 @@ def _assert_fixed_invalid_reward_decision(decision: object) -> None:
 
 def _task_8_and_13_namespace() -> dict[str, object]:
     plan = _phase_a_plan()
-    start_marker = "<!-- task-8-13-trace-contract:start -->"
-    end_marker = "<!-- task-8-13-trace-contract:end -->"
-    task_8_source = plan.split(start_marker, 1)[1].split(end_marker, 1)[0]
+    task_8_source = _plan_python_block(plan, "RecordCohortPlan")
     adapter_source = _plan_python_block(plan, "HarnessTraceProposalAdapter")
 
     namespace: dict[str, object] = {
@@ -182,7 +182,9 @@ def _task_8_and_13_namespace() -> dict[str, object]:
         "PeerRequest": PeerRequest,
         "ProcedureCompilationReceiptRef": ProcedureCompilationReceiptRef,
         "ProgressPlan": ProgressPlan,
+        "Proposal": Proposal,
         "ProposalBase": ProposalBase,
+        "PROPOSAL_ADAPTER": PROPOSAL_ADAPTER,
         "ProposalBoundaryValidationError": _ProposalBoundaryValidationError,
         "RejectionCode": _RejectionCode,
         "RejectionReason": _RejectionReason,
@@ -197,12 +199,20 @@ def _task_8_and_13_namespace() -> dict[str, object]:
         "RewardHackingFinding": RewardHackingFinding,
         "RewardValidityAssessment": RewardValidityAssessment,
         "TransactionDecision": _TransactionDecision,
+        "TypeAdapter": TypeAdapter,
         "ValidationInfo": ValidationInfo,
         "model_validator": model_validator,
         "parse_untrusted_harness_execution_trace": parse_untrusted_harness_execution_trace,
+        "proposal_json_is_within_depth_limit": lambda value: True,
         "suppress": __import__("contextlib").suppress,
     }
     exec(compile(task_8_source, "task-8-contract", "exec"), namespace)
+    governed_union = reduce(or_, namespace["GOVERNED_PROPOSAL_CLASSES"])
+    namespace["Proposal"] = Annotated[
+        governed_union,
+        Field(discriminator="proposal_type"),
+    ]
+    namespace["PROPOSAL_ADAPTER"] = TypeAdapter(namespace["Proposal"])
     exec(compile(adapter_source, "task-13-adapter-contract", "exec"), namespace)
     return namespace
 
@@ -234,6 +244,225 @@ GOVERNED_PROPOSAL_CLASS_NAMES = (
     "RecordHarnessExecutionTrace",
     "RecordRewardAssessment",
 )
+
+
+def _governed_proposal_examples(
+    namespace: dict[str, object],
+) -> tuple[BaseModel, ...]:
+    from super_scientist.domain.cognition import assess_diversity
+    from super_scientist.domain.collaboration import (
+        TopologyOperation,
+        TopologySnapshot,
+        evaluate_termination,
+        initial_collaboration_state,
+    )
+    from super_scientist.domain.procedures import (
+        MethodDirectionStatus,
+        ProcedureCompilationRecord,
+        canonical_model_hash,
+        compile_method,
+        procedure_to_progress_plan,
+    )
+    from tests.unit.cognition.test_diversity import (
+        _cohort,
+        _correlation,
+        _profile,
+    )
+    from tests.unit.collaboration.conftest import session_factory
+    from tests.unit.collaboration.test_engine import _contribution, _request
+    from tests.unit.collaboration.test_topology import _event
+    from tests.unit.harness_eval.test_guidance import (
+        _cell as guidance_cell,
+    )
+    from tests.unit.harness_eval.test_guidance import (
+        _protocol as guidance_protocol,
+    )
+    from tests.unit.harness_eval.test_model_harness_matrix import (
+        _cells as matrix_cells,
+    )
+    from tests.unit.harness_eval.test_model_harness_matrix import (
+        _protocol as matrix_protocol,
+    )
+    from tests.unit.harness_eval.test_model_harness_matrix import analyze_model_harness
+    from tests.unit.harness_eval.test_rewards import (
+        assess_reward_validity as valid_assessment,
+    )
+    from tests.unit.harness_eval.test_traces import valid_trace
+    from tests.unit.procedures.test_compiler import (
+        NOW as PROCEDURE_NOW,
+    )
+    from tests.unit.procedures.test_compiler import (
+        POLICY_HASH,
+        valid_request,
+    )
+
+    profiles = (
+        _profile("peer-a", prompt_strategy="direct"),
+        _profile("peer-b", prompt_strategy="critique-first"),
+    )
+    cohort = _cohort(*profiles)
+    correlation = _correlation()
+    diversity = assess_diversity(cohort, profiles, (correlation,))
+    profile_receipts = tuple(
+        CapabilityProfileReceiptRef(
+            proposal_id=f"profile-proposal-{index}",
+            proposal_hash=profile.content_hash,
+            audit_event_id=f"profile-audit-{index}",
+            audit_event_hash=str(index + 1) * 64,
+        )
+        for index, profile in enumerate(profiles)
+    )
+    cohort_receipt = CohortPlanReceiptRef(
+        proposal_id="cohort-proposal",
+        proposal_hash=cohort.content_hash,
+        audit_event_id="cohort-audit",
+        audit_event_hash="3" * 64,
+    )
+
+    make_session = session_factory.__wrapped__()
+    session = make_session("peer-a", "peer-b")
+    collaboration_state = initial_collaboration_state(session)
+    after_topology = TopologySnapshot.build(
+        active_peer_ids=collaboration_state.topology.active_peer_ids,
+        enabled_edges=(("peer-b", "peer-a"),),
+    )
+    topology_event = _event(
+        session,
+        collaboration_state.topology,
+        after_topology,
+        TopologyOperation.DISABLE_EDGE,
+        edge=("peer-a", "peer-b"),
+    )
+
+    compilation_result = compile_method(valid_request())
+    compilation = OpaqueProcedureCompilationEnvelope.build(
+        compilation_id="round-trip-compilation",
+        result=compilation_result,
+        created_at=PROCEDURE_NOW,
+        governing_policy_hash=POLICY_HASH,
+    )
+    compilation_record = ProcedureCompilationRecord.build(
+        compilation_id=compilation.compilation_id,
+        result=compilation_result,
+        created_at=PROCEDURE_NOW,
+        governing_policy_hash=POLICY_HASH,
+    )
+    compilation_receipt = ProcedureCompilationReceiptRef(
+        proposal_id="compilation-proposal",
+        proposal_hash="4" * 64,
+        audit_event_id="compilation-audit",
+        audit_event_hash="5" * 64,
+    )
+    progress_plan = procedure_to_progress_plan(
+        compilation_result,
+        run_id="round-trip-run",
+        plan_version_id="round-trip-plan",
+        version=1,
+        created_at=PROCEDURE_NOW,
+        governing_policy_hash=POLICY_HASH,
+    )
+    binding = CompiledProgressPlanBinding.build(
+        binding_id="round-trip-binding",
+        compilation_receipt=compilation_receipt,
+        compilation_id=compilation_record.compilation_id,
+        compilation_hash=compilation_record.content_hash,
+        procedure_id=compilation_result.procedure.procedure_id,
+        procedure_hash=compilation_result.procedure.content_hash,
+        plan=progress_plan,
+        plan_hash=canonical_model_hash(progress_plan),
+        created_at=PROCEDURE_NOW,
+        governing_policy_hash=POLICY_HASH,
+    )
+    direction_outcome = MethodDirectionOutcome.build(
+        outcome_id="round-trip-direction",
+        status=MethodDirectionStatus.UNSUPPORTED,
+        evidence_refs=(),
+        failed_method_ids=("method-a",),
+        rejected_procedure_ids=(compilation_result.procedure.procedure_id,),
+        budget_reference_ids=("budget-a",),
+        terminal_rule="Independent validation rejected the method",
+        created_at=PROCEDURE_NOW,
+        governing_policy_hash=POLICY_HASH,
+    )
+
+    guidance = guidance_protocol()
+    guidance_result = guidance_cell(protocol=guidance)
+    matrix = matrix_protocol()
+    matrix_results = matrix_cells(matrix)
+    matrix_analysis = analyze_model_harness(matrix, matrix_results)
+    trace = valid_trace()
+    assessment = valid_assessment(
+        trace.reward_observation,
+        trace,
+        findings=(),
+        verifier_succeeded=True,
+    )
+    metadata = namespace["HarnessTraceRecordMetadata"](
+        received_at=NOW,
+        source_id="all-proposals-round-trip",
+    )
+
+    def proposal(class_name: str, **values: object) -> BaseModel:
+        return namespace[class_name](
+            proposal_id=f"round-trip-{class_name}",
+            idempotency_key=f"round-trip-key-{class_name}",
+            proposer=_actor(),
+            **values,
+        )
+
+    return (
+        proposal("RecordCapabilityProfile", profile=profiles[0]),
+        proposal(
+            "RecordCohortPlan",
+            request=cohort.request_snapshot,
+            profile_receipts=profile_receipts,
+            plan=cohort,
+        ),
+        proposal(
+            "RecordDiversityAssessment",
+            cohort_plan_receipt=cohort_receipt,
+            profile_receipts=profile_receipts,
+            error_correlations=(correlation,),
+            assessment=diversity,
+        ),
+        proposal("RecordCollaborationSession", session=session),
+        proposal("AppendPeerRequest", request=_request(session, "peer-a")),
+        proposal(
+            "AppendPeerContribution",
+            contribution=_contribution(session, "peer-a"),
+        ),
+        proposal("AppendTopologyEvent", event=topology_event),
+        proposal(
+            "RecordCollaborationTermination",
+            termination=evaluate_termination(collaboration_state),
+        ),
+        proposal("RecordProcedureCompilation", compilation=compilation),
+        proposal("RecordMethodDirectionOutcome", outcome=direction_outcome),
+        proposal(
+            "BindCompiledProgressPlan",
+            compilation_receipt=compilation_receipt,
+            binding=binding,
+            plan=progress_plan,
+        ),
+        proposal("RecordGuidanceEvaluationProtocol", protocol=guidance),
+        proposal("AppendGuidanceEvaluationCell", cell=guidance_result),
+        proposal("RecordModelHarnessProtocol", protocol=matrix),
+        proposal("AppendModelHarnessCell", cell=matrix_results[0]),
+        proposal("RecordModelHarnessAnalysis", analysis=matrix_analysis),
+        proposal(
+            "RecordHarnessExecutionTrace",
+            envelope=namespace["HarnessExecutionTraceEnvelope"](
+                metadata=metadata,
+                trace=trace,
+            ),
+        ),
+        proposal(
+            "RecordRewardAssessment",
+            observation=assessment.observation,
+            findings=assessment.findings,
+            assessment=assessment,
+        ),
+    )
 
 
 def test_task_8_declares_every_governed_proposal_and_bounds_each_collection() -> None:
@@ -320,6 +549,132 @@ def test_task_8_declares_every_governed_proposal_and_bounds_each_collection() ->
             for constraint in field.metadata
             if hasattr(constraint, "max_length")
         }
+
+
+def test_task_8_all_governed_proposals_round_trip_through_fixed_parser() -> None:
+    namespace = _task_8_and_13_namespace()
+    proposals = _governed_proposal_examples(namespace)
+
+    assert tuple(type(proposal).__name__ for proposal in proposals) == (
+        GOVERNED_PROPOSAL_CLASS_NAMES
+    )
+    for proposal in proposals:
+        parsed = namespace["parse_untrusted_proposal_json"](proposal.model_dump_json())
+        assert parsed == proposal
+
+
+def test_task_8_reward_proposal_json_round_trip_preserves_tagged_value_kind() -> None:
+    namespace = _task_8_and_13_namespace()
+    from tests.unit.harness_eval.test_rewards import (
+        assess_reward_validity as valid_assessment,
+    )
+    from tests.unit.harness_eval.test_traces import reward_observation, valid_trace
+
+    for reward_value, expected_kind in (
+        (Decimal("0.9"), "numeric"),
+        ("PASS", "categorical"),
+    ):
+        observation = reward_observation(value=reward_value)
+        trace = valid_trace(observation=observation)
+        assessment = valid_assessment(
+            observation,
+            trace,
+            findings=(),
+            verifier_succeeded=True,
+        )
+        proposal = namespace["RecordRewardAssessment"](
+            proposal_id=f"tagged-{expected_kind}",
+            idempotency_key=f"tagged-{expected_kind}-key",
+            proposer=_actor(),
+            observation=assessment.observation,
+            findings=assessment.findings,
+            assessment=assessment,
+        )
+        payload = json.loads(proposal.model_dump_json())
+        assert payload["observation"]["value"]["kind"] == expected_kind
+
+        parsed = namespace["parse_untrusted_proposal_json"](proposal.model_dump_json())
+
+        assert parsed == proposal
+        assert type(parsed.observation.value) is type(reward_value)
+
+
+def test_task_8_governed_json_normalizer_bounds_collections() -> None:
+    namespace = _task_8_and_13_namespace()
+    normalize = namespace["_normalize_json_proposal_value"]
+    maximum = namespace["MAX_PROPOSAL_RECONSTRUCTION_ITEMS"]
+    exact_array = ["item"] * maximum
+
+    assert normalize(exact_array, tuple[str, ...]) == tuple(exact_array)
+    assert normalize(exact_array, list[str]) == exact_array
+    with pytest.raises(ValueError, match="tuple must be a bounded array"):
+        normalize([*exact_array, "excess"], tuple[str, ...])
+    with pytest.raises(ValueError, match="list must be a bounded array"):
+        normalize([*exact_array, "excess"], list[str])
+
+    proposals = _governed_proposal_examples(namespace)
+    cohort_proposal = next(
+        proposal for proposal in proposals if type(proposal).__name__ == "RecordCohortPlan"
+    )
+    values = BaseModel.model_dump(cohort_proposal, mode="python", warnings=False)
+    receipt = cohort_proposal.profile_receipts[0]
+    values["profile_receipts"] = (receipt,) * 256
+    maximum_proposal = namespace["RecordCohortPlan"](**values)
+    assert (
+        namespace["parse_untrusted_proposal_json"](maximum_proposal.model_dump_json())
+        == maximum_proposal
+    )
+
+    excessive_payload = maximum_proposal.model_dump(mode="json")
+    excessive_payload["profile_receipts"].append(receipt.model_dump(mode="json"))
+    with pytest.raises(_ProposalBoundaryValidationError) as error:
+        namespace["parse_untrusted_proposal_json"](json.dumps(excessive_payload))
+    _assert_detached_proposal_boundary_error(error.value)
+
+
+def test_task_8_governed_parser_detaches_coercive_and_oversized_json() -> None:
+    namespace = _task_8_and_13_namespace()
+    proposals = {
+        type(proposal).__name__: proposal for proposal in _governed_proposal_examples(namespace)
+    }
+    guidance = proposals["RecordGuidanceEvaluationProtocol"]
+    reward = proposals["RecordRewardAssessment"]
+    guidance_payload = guidance.model_dump(mode="json")
+    reward_payload = reward.model_dump(mode="json")
+
+    mutations: list[dict[str, object]] = []
+    coercive_identifier = json.loads(json.dumps(guidance_payload))
+    coercive_identifier["proposal_id"] = 1
+    mutations.append(coercive_identifier)
+
+    coercive_decimal = json.loads(json.dumps(guidance_payload))
+    coercive_decimal["protocol"]["evaluation_budget"]["wall_clock_seconds"] = 5
+    mutations.append(coercive_decimal)
+
+    untagged_numeric = json.loads(json.dumps(reward_payload))
+    untagged_numeric["observation"]["value"]["value"] = 0.9
+    mutations.append(untagged_numeric)
+
+    wrong_collection = json.loads(json.dumps(reward_payload))
+    wrong_collection["findings"] = {}
+    mutations.append(wrong_collection)
+
+    oversized_collection = json.loads(json.dumps(guidance_payload))
+    oversized_collection["protocol"]["artifact_ids"] = ["artifact"] * (
+        namespace["MAX_PROPOSAL_RECONSTRUCTION_ITEMS"] + 1
+    )
+    mutations.append(oversized_collection)
+
+    for payload in mutations:
+        with pytest.raises(_ProposalBoundaryValidationError) as error:
+            namespace["parse_untrusted_proposal_json"](json.dumps(payload))
+        _assert_detached_proposal_boundary_error(error.value)
+
+    with pytest.raises(ValidationError):
+        namespace["RecordGuidanceEvaluationProtocol"].model_validate(
+            guidance_payload,
+            strict=True,
+        )
 
 
 def test_task_8_governed_identifier_boundary_rejects_raw_string_subclasses() -> None:
@@ -1004,6 +1359,8 @@ def test_task_8_untrusted_proposal_parser_rejects_non_exact_text_without_hooks()
         "PROPOSAL_ADAPTER": Adapter(),
         "Proposal": object,
         "ProposalBoundaryValidationError": _ProposalBoundaryValidationError,
+        "_normalize_governed_proposal_json": lambda value: value,
+        "json": json,
         "proposal_json_is_within_depth_limit": lambda value: True,
         "suppress": __import__("contextlib").suppress,
     }
