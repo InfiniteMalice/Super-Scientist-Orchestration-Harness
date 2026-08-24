@@ -2438,6 +2438,11 @@ class AppendPeerContributionHandler:
 
 The accepted-history reader orders requests, contribution proposals, and topology
 events by their exact transaction audit events. It excludes rejected transactions.
+`collaboration_capabilities()` gives the reader the active
+`PolicySnapshot.policy_hash`. The reader replays an accepted transaction only when
+the audit event's `policy_hash` and `stored_policy_hash` both equal that active hash.
+If either field is missing, empty, or different, the reader raises a storage-integrity
+error before the invalid history can affect peer routing, topology, or resource budgets.
 For each accepted contribution, replay uses the `usage` retained by the accepted
 `AppendPeerContribution` proposal and verifies that the projected
 `PeerContribution` equals the proposal contribution before advancing state.

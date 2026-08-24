@@ -66,7 +66,11 @@ from super_scientist.providers.storage.database import (
     create_database_engine,
     upgrade_database,
 )
-from super_scientist.providers.storage.repositories import RepositorySet, StoredTransaction
+from super_scientist.providers.storage.repositories import (
+    RepositorySet,
+    StorageIntegrityError,
+    StoredTransaction,
+)
 from tests.unit.collaboration.conftest import artifact
 from tests.unit.collaboration.conftest import session_factory as session_factory_fixture
 
@@ -509,6 +513,7 @@ def test_accepted_collaboration_history_replays_audit_order_and_excludes_rejecti
         )
         audits.append(previous)
     reader = _AcceptedCollaborationHistoryReader(
+        governing_policy_hash=POLICY_HASH,
         transactions=_AllRecords(transactions),
         audit=_AllRecords(tuple(audits)),
         requests=_SessionRecords((request,)),
@@ -519,6 +524,90 @@ def test_accepted_collaboration_history_replays_audit_order_and_excludes_rejecti
     history = reader.list_for_session(session.session_id)
 
     assert history == (request, accepted_contribution)
+
+
+@pytest.mark.parametrize("proposal_kind", ("request", "contribution", "topology"))
+@pytest.mark.parametrize(
+    "audited_policy_fields",
+    (
+        {"policy_hash": "e" * 64, "stored_policy_hash": "e" * 64},
+        {"stored_policy_hash": POLICY_HASH},
+        {"policy_hash": "", "stored_policy_hash": POLICY_HASH},
+        {"policy_hash": POLICY_HASH},
+        {"policy_hash": POLICY_HASH, "stored_policy_hash": ""},
+        {"policy_hash": POLICY_HASH, "stored_policy_hash": "e" * 64},
+    ),
+    ids=(
+        "wrong-existing-policy",
+        "missing-policy-hash",
+        "empty-policy-hash",
+        "missing-stored-policy-hash",
+        "empty-stored-policy-hash",
+        "divergent-stored-policy-hash",
+    ),
+)
+def test_collaboration_history_with_unbound_policy_fails_closed_before_replay(
+    proposal_kind: str,
+    audited_policy_fields: dict[str, object],
+) -> None:
+    session = _session()
+    if proposal_kind == "request":
+        request = _request(session)
+        proposal = AppendPeerRequest(
+            proposal_id="accepted-request",
+            idempotency_key="accepted-request",
+            proposer=_model_actor("proposer"),
+            approval=_approval(),
+            request=request,
+        )
+        requests = (request,)
+        contributions = ()
+        topology_events = ()
+    elif proposal_kind == "contribution":
+        proposal = _contribution_proposal(session, usage=_usage(tokens=37))
+        requests = ()
+        contributions = (proposal.contribution,)
+        topology_events = ()
+    else:
+        event = _topology_event(session)
+        proposal = AppendTopologyEvent(
+            proposal_id="accepted-topology",
+            idempotency_key="accepted-topology",
+            proposer=_model_actor("proposer"),
+            approval=_approval(),
+            event=event,
+        )
+        requests = ()
+        contributions = ()
+        topology_events = (event,)
+    decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+    transaction = StoredTransaction(
+        proposal=proposal,
+        proposal_hash=sha256_hex(canonical_json_bytes(proposal.model_dump(mode="json"))),
+        decision=decision,
+        created_at=NOW,
+    )
+    audit_payload = {
+        "proposal": proposal.model_dump(mode="json"),
+        "decision": decision.model_dump(mode="json"),
+        "transaction_persisted": True,
+        **audited_policy_fields,
+    }
+    audit = append_event(None, "transaction_decision", audit_payload, NOW)
+    reader = _AcceptedCollaborationHistoryReader(
+        governing_policy_hash=POLICY_HASH,
+        transactions=_AllRecords((transaction,)),
+        audit=_AllRecords((audit,)),
+        requests=_SessionRecords(requests),
+        contributions=_SessionRecords(contributions),
+        topology_events=_SessionRecords(topology_events),
+    )
+
+    with pytest.raises(
+        StorageIntegrityError,
+        match="collaboration history lacks accepted provenance",
+    ):
+        reader.list_for_session(session.session_id)
 
 
 def test_topology_handler_accepts_current_event_and_rejects_stale_topology(

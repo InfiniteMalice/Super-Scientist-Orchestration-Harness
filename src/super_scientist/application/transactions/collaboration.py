@@ -61,6 +61,7 @@ type CollaborationProposal = (
 
 @dataclass(frozen=True, slots=True)
 class _AcceptedCollaborationHistoryReader:
+    governing_policy_hash: str
     transactions: TransactionRepository
     audit: AuditRepository
     requests: PeerRequestRepository
@@ -90,7 +91,11 @@ class _AcceptedCollaborationHistoryReader:
         }
         seen_transaction_ids: set[str] = set()
         for event in self.audit.list_all():
-            transaction = _transaction_for_audit_event(event, accepted_transactions)
+            transaction = _transaction_for_audit_event(
+                event,
+                accepted_transactions,
+                self.governing_policy_hash,
+            )
             if transaction is None:
                 continue
             if transaction.proposal.proposal_id in seen_transaction_ids:
@@ -281,11 +286,12 @@ def collaboration_capabilities(
         topology_events=topology_events,
         terminations=CollaborationTerminationRepository(connection),
         history=_AcceptedCollaborationHistoryReader(
-            TransactionRepository(connection),
-            AuditRepository(connection),
-            requests,
-            contributions,
-            topology_events,
+            governing_policy_hash=active_policy.policy_hash,
+            transactions=TransactionRepository(connection),
+            audit=AuditRepository(connection),
+            requests=requests,
+            contributions=contributions,
+            topology_events=topology_events,
         ),
         created_at=current_transaction_created_at,
     )
@@ -304,12 +310,17 @@ def _collaboration_session_id(
 def _transaction_for_audit_event(
     event: AuditEvent,
     transactions: dict[str, StoredTransaction],
+    governing_policy_hash: str,
 ) -> StoredTransaction | None:
     if getattr(event, "event_type", None) != "transaction_decision":
         return None
     try:
         payload = json_compatible_payload(event.payload)
-        if payload.get("transaction_persisted") is not True:
+        if (
+            payload.get("transaction_persisted") is not True
+            or payload.get("policy_hash") != governing_policy_hash
+            or payload.get("stored_policy_hash") != governing_policy_hash
+        ):
             return None
         proposal = parse_untrusted_proposal_json(canonical_json_bytes(payload["proposal"]))
         decision = TransactionDecision.model_validate_json(
