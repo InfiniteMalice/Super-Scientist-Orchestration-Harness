@@ -147,16 +147,22 @@ def _create_record_table(
         "governing_policy_hash",
     ):
         op.create_index(f"ix_{name}_{column_name}", name, [column_name])
-    _create_append_only_triggers(name)
+    _create_append_only_triggers(name, str(id_column.name))
 
 
-def _create_append_only_triggers(table_name: str) -> None:
+def _create_append_only_triggers(table_name: str, primary_key_column: str) -> None:
     op.execute(
         f"CREATE TRIGGER {table_name}_no_update BEFORE UPDATE ON {table_name} "
         "BEGIN SELECT RAISE(ABORT, 'append-only table'); END"
     )
     op.execute(
         f"CREATE TRIGGER {table_name}_no_delete BEFORE DELETE ON {table_name} "
+        "BEGIN SELECT RAISE(ABORT, 'append-only table'); END"
+    )
+    op.execute(
+        f"CREATE TRIGGER {table_name}_no_replace BEFORE INSERT ON {table_name} "
+        f"WHEN EXISTS (SELECT 1 FROM {table_name} "
+        f"WHERE {primary_key_column} = NEW.{primary_key_column}) "
         "BEGIN SELECT RAISE(ABORT, 'append-only table'); END"
     )
 
@@ -344,6 +350,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     for table_name in reversed(AUTHORITATIVE_TABLES):
+        op.execute(f"DROP TRIGGER IF EXISTS {table_name}_no_replace")
         op.execute(f"DROP TRIGGER IF EXISTS {table_name}_no_delete")
         op.execute(f"DROP TRIGGER IF EXISTS {table_name}_no_update")
         indexed_columns = (

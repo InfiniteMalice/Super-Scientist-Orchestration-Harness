@@ -163,7 +163,7 @@ def test_clean_upgrade_creates_exact_0007_tables_with_domain_keys_and_relationsh
             assert trigger_names == {
                 f"{table_name}_{operation}"
                 for table_name in TABLE_SPECS
-                for operation in ("no_update", "no_delete")
+                for operation in schema.GOVERNED_APPEND_ONLY_TRIGGER_SUFFIXES
             }
     finally:
         engine.dispose()
@@ -285,6 +285,63 @@ def test_every_0007_table_rejects_update_and_delete(database_url: str) -> None:
                     pytest.raises(IntegrityError, match="append-only table"),
                 ):
                     connection.execute(text(f"DELETE FROM {table_name}"))
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_every_0007_table_rejects_insert_or_replace_without_recursive_triggers(
+    database_url: str,
+) -> None:
+    _upgrade_to(database_url, REVISION)
+    engine = create_database_engine(database_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("PRAGMA recursive_triggers = OFF"))
+            assert connection.execute(text("PRAGMA recursive_triggers")).scalar_one() == 0
+            _insert_shared_references(connection)
+            _insert_complete_record_graph(connection)
+
+            for table_name, identifier, record_id, _ in _record_graph_rows():
+                before = _stored_row_bytes(connection, table_name, identifier, record_id)
+                replacement = dict(
+                    connection.execute(
+                        text(f"SELECT * FROM {table_name} WHERE {identifier} = :record_id"),
+                        {"record_id": record_id},
+                    )
+                    .mappings()
+                    .one()
+                )
+                replacement["record_json"] = '{"replacement":true}'
+                replacement["content_hash"] = "d" * 64
+
+                with (
+                    connection.begin_nested(),
+                    pytest.raises(IntegrityError, match="append-only table"),
+                ):
+                    _insert_or_replace_values(connection, table_name, replacement)
+
+                assert _stored_row_bytes(connection, table_name, identifier, record_id) == before
+
+            for table_name, identifier, record_id, _ in _record_graph_rows():
+                unique_values = dict(
+                    connection.execute(
+                        text(f"SELECT * FROM {table_name} WHERE {identifier} = :record_id"),
+                        {"record_id": record_id},
+                    )
+                    .mappings()
+                    .one()
+                )
+                unique_id = f"{record_id}-unique"
+                unique_values[identifier] = unique_id
+                _insert_values(connection, table_name, unique_values)
+                assert (
+                    connection.execute(
+                        text(f"SELECT COUNT(*) FROM {table_name} WHERE {identifier} = :record_id"),
+                        {"record_id": unique_id},
+                    ).scalar_one()
+                    == 1
+                )
     finally:
         engine.dispose()
 
@@ -803,6 +860,7 @@ def test_0007_downgrade_removes_only_0007_objects_and_reupgrade_restores_exact_s
     _downgrade_to(database_url, PREVIOUS_REVISION)
     assert _revision(database_url) == PREVIOUS_REVISION
     assert _table_names(database_url) == prior_tables
+    assert not _0007_trigger_names(database_url)
 
     _upgrade_to(database_url, REVISION)
     assert _schema_fingerprint(database_url) == expected_schema
@@ -956,6 +1014,42 @@ def _insert_values(
     )
 
 
+def _insert_or_replace_values(
+    connection: Connection,
+    table_name: str,
+    values: dict[str, object],
+) -> None:
+    columns = ", ".join(values)
+    parameters = ", ".join(f":{column}" for column in values)
+    connection.execute(
+        text(f"INSERT OR REPLACE INTO {table_name} ({columns}) VALUES ({parameters})"),
+        values,
+    )
+
+
+def _stored_row_bytes(
+    connection: Connection,
+    table_name: str,
+    identifier: str,
+    record_id: str,
+) -> tuple[object, ...]:
+    column_names = tuple(schema.metadata.tables[table_name].columns.keys())
+    storage_expressions = ", ".join(
+        expression
+        for column_name in column_names
+        for expression in (
+            f"typeof({column_name})",
+            f"hex(CAST({column_name} AS BLOB))",
+        )
+    )
+    return tuple(
+        connection.execute(
+            text(f"SELECT {storage_expressions} FROM {table_name} WHERE {identifier} = :record_id"),
+            {"record_id": record_id},
+        ).one()
+    )
+
+
 def _insert_policy(connection: Connection, governing_policy_hash: str) -> None:
     connection.execute(
         text(
@@ -1052,6 +1146,24 @@ def _table_names(database_url: str) -> set[str]:
     try:
         with engine.connect() as connection:
             return set(inspect(connection).get_table_names())
+    finally:
+        engine.dispose()
+
+
+def _0007_trigger_names(database_url: str) -> set[str]:
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            return {
+                str(row[0])
+                for row in connection.execute(
+                    text(
+                        "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                        "AND tbl_name IN "
+                        f"({', '.join(repr(name) for name in TABLE_SPECS)})"
+                    )
+                )
+            }
     finally:
         engine.dispose()
 

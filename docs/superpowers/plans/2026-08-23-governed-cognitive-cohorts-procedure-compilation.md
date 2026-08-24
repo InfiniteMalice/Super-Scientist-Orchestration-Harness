@@ -1841,7 +1841,8 @@ git commit -m "feat: add governed cognitive proposal contracts"
 
 **Interfaces:**
 - Consumes: migration head `0006_handbook_and_harness_evaluation` and the public append-only repository primitive.
-- Produces: 18 append-only tables, their reference indexes/constraints, and update/delete rejection triggers. Released tables are untouched.
+- Produces: 18 append-only tables, their reference indexes/constraints, and three
+  append-only triggers per table (54 total). Released tables are untouched.
 
 - [ ] **Step 1: Write migration-shape and legacy-upgrade failures**
 
@@ -1923,7 +1924,7 @@ def _create_record_table(
         _hash_constraint("governing_policy_hash", name),
         _bounded_text_constraint("created_at", name, maximum=40),
     )
-    _create_append_only_triggers(name)
+    _create_append_only_triggers(name, str(id_column.name))
 ```
 
 Give each table a domain ID primary key and indexed parent IDs: session ID for
@@ -1952,14 +1953,21 @@ one byte more. `created_at` requires nonempty NUL-free SQLite TEXT bounded to 40
 characters and 40 UTF-8 bytes.
 Both provenance foreign keys are `DEFERRABLE INITIALLY DEFERRED`, so the coordinator
 may persist the child before its accepted transaction and policy rows within one
-database transaction; unresolved parents still fail at commit. The downgrade drops
-only 0007 triggers, indexes, and tables in reverse dependency order.
+database transaction; unresolved parents still fail at commit. Each table has
+`BEFORE UPDATE` and `BEFORE DELETE` rejection triggers plus a primary-key-aware
+`BEFORE INSERT` guard. The insert guard raises `append-only table` whenever the
+primary key already exists, so `INSERT OR REPLACE` cannot erase immutable history
+even when SQLite `recursive_triggers` is disabled. The downgrade drops only the 54
+0007 triggers, indexes, and tables in reverse dependency order.
 
 - [ ] **Step 4: Prove append-only behavior and exact migration chain**
 
 Run: `python -m pytest tests/integration/storage/test_migration_0007.py tests/integration/storage/test_migrations.py tests/integration/storage/test_migration_0002.py tests/integration/storage/test_migration_0003.py tests/integration/storage/test_migration_0004.py tests/integration/storage/test_migration_0005.py tests/integration/storage/test_migration_0006.py -v`
 
-Expected: PASS; update/delete on every 0007 table raises `IntegrityError`, 0001-0006 fixtures upgrade, and downgrade/upgrade returns the same schema.
+Expected: PASS; update/delete and conflicting `INSERT OR REPLACE` on every 0007
+table raise `IntegrityError`, ordinary inserts with new primary keys still succeed,
+0001-0006 fixtures upgrade, and downgrade/upgrade returns the same schema with exactly
+54 append-only triggers.
 
 - [ ] **Step 5: Run static checks and commit**
 
