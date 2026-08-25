@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Protocol
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from typer.testing import CliRunner
 
@@ -191,6 +192,155 @@ def test_cognitive_workspace_connection_cannot_mutate_database(
                 connection.exec_driver_sql("CREATE TABLE forbidden_mutation (value INTEGER)")
     finally:
         engine.dispose()
+    assert _workspace_state(workspace) == before
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        pytest.param(" profile-peer-a", id="leading-space"),
+        pytest.param("profile-peer-a ", id="trailing-space"),
+        pytest.param("\tprofile-peer-a\n", id="ascii-whitespace"),
+        pytest.param("\N{NO-BREAK SPACE}profile-peer-a\N{NO-BREAK SPACE}", id="unicode-whitespace"),
+        pytest.param("   ", id="whitespace-only"),
+        pytest.param("x" * 201, id="max-plus-one"),
+    ],
+)
+def test_cognitive_reader_rejects_noncanonical_identifier_without_query(
+    populated_workspace: tuple[Path, object],
+    identifier: str,
+) -> None:
+    workspace, _ = populated_workspace
+    before = _workspace_state(workspace)
+    engine = create_database_engine(f"sqlite:///{(workspace / 'scientist-harness.db').as_posix()}")
+    statements: list[str] = []
+
+    event.listen(
+        engine,
+        "before_cursor_execute",
+        lambda _connection, _cursor, statement, _parameters, _context, _executemany: (
+            statements.append(statement)
+        ),
+    )
+    try:
+        with engine.connect() as connection:
+            reader = CognitiveRecordReader(connection)
+            with pytest.raises(ValueError, match="identifier"):
+                reader.get(CognitiveRecordKind.CAPABILITY_PROFILE, identifier)
+    finally:
+        engine.dispose()
+    assert statements == []
+    assert _workspace_state(workspace) == before
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        pytest.param("x" * 200, id="exact-maximum"),
+        pytest.param("\N{GREEK SMALL LETTER PI}-canonical", id="unicode"),
+    ],
+)
+def test_cognitive_reader_accepts_exact_canonical_bounded_identifiers(
+    populated_workspace: tuple[Path, object],
+    identifier: str,
+) -> None:
+    workspace, _ = populated_workspace
+    before = _workspace_state(workspace)
+    engine = create_database_engine(f"sqlite:///{(workspace / 'scientist-harness.db').as_posix()}")
+    try:
+        with engine.connect() as connection:
+            assert (
+                CognitiveRecordReader(connection).get(
+                    CognitiveRecordKind.CAPABILITY_PROFILE,
+                    identifier,
+                )
+                is None
+            )
+    finally:
+        engine.dispose()
+    assert _workspace_state(workspace) == before
+
+
+def test_cognitive_cli_rejects_noncanonical_identifiers_before_database_open(
+    populated_workspace: tuple[Path, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, _ = populated_workspace
+    before = _workspace_state(workspace)
+    engine_calls: list[Path] = []
+
+    def forbidden_engine(database: Path) -> object:
+        engine_calls.append(database)
+        raise AssertionError("identifier rejection must precede database open")
+
+    monkeypatch.setattr(cognitive_cli, "_read_only_engine", forbidden_engine)
+    invalid_identifiers = (
+        " profile-peer-a",
+        "profile-peer-a ",
+        "\tprofile-peer-a\n",
+        "\N{NO-BREAK SPACE}profile-peer-a\N{NO-BREAK SPACE}",
+        "   ",
+        "x" * 201,
+    )
+    for identifier in invalid_identifiers:
+        for json_output in (False, True):
+            arguments = [
+                "cognitive",
+                "inspect",
+                "--root",
+                str(workspace),
+                "--kind",
+                "capability-profile",
+                "--id",
+                identifier,
+            ]
+            if json_output:
+                arguments.append("--json")
+
+            result = runner.invoke(app, arguments)
+
+            assert result.exit_code == 2
+            envelope_text = (
+                result.stdout
+                if json_output
+                else result.stdout.removeprefix("cognitive inspect: rejected\n")
+            )
+            assert json.loads(envelope_text)["errors"][0]["code"] == "INVALID_ARGUMENT"
+    assert engine_calls == []
+    assert _workspace_state(workspace) == before
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        pytest.param("x" * 200, id="exact-maximum"),
+        pytest.param("\N{GREEK SMALL LETTER PI}-canonical", id="unicode"),
+    ],
+)
+def test_cognitive_cli_accepts_exact_canonical_bounded_identifiers_read_only(
+    populated_workspace: tuple[Path, object],
+    identifier: str,
+) -> None:
+    workspace, _ = populated_workspace
+    before = _workspace_state(workspace)
+
+    result = runner.invoke(
+        app,
+        [
+            "cognitive",
+            "inspect",
+            "--root",
+            str(workspace),
+            "--kind",
+            "capability-profile",
+            "--id",
+            identifier,
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert _payload(result)["errors"][0]["code"] == "MISSING_ENTITY"
     assert _workspace_state(workspace) == before
 
 

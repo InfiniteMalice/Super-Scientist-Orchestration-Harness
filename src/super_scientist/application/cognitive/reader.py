@@ -97,7 +97,11 @@ def validate_cognitive_record_id(value: object) -> str:
         raise ValueError("cognitive record identifier must be exact text")
     if not value or len(value) > MAX_COGNITIVE_RECORD_ID_LENGTH:
         raise ValueError("cognitive record identifier exceeds its fixed bound")
+    if value != value.strip():
+        raise ValueError("cognitive record identifier must already be canonical")
     identifier = _RECORD_ID_ADAPTER.validate_python(value, strict=True)
+    if type(identifier) is not str or identifier != value:
+        raise ValueError("cognitive record identifier must not be normalized")
     if (
         identifier in {".", ".."}
         or "/" in identifier
