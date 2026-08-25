@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import Connection, Engine
 
 from super_scientist.application.kernel_service import KernelService
@@ -583,6 +583,40 @@ def test_exact_governed_constructs_reject_hostile_nested_values_without_hooks(
         retained = unit_of_work.repositories().transactions.get_by_proposal_id(proposal_id)
         assert retained is not None
         assert retained.proposal.proposal_type == "invalid_proposal"
+
+
+@pytest.mark.integration
+def test_declared_maximum_model_harness_analysis_is_safe_and_reaches_its_handler(
+    runtime: Runtime,
+) -> None:
+    from tests.unit.harness_eval.test_harness_security_contracts import (
+        _maximum_shape_model_harness_analysis,
+    )
+
+    analysis, _ = _maximum_shape_model_harness_analysis()
+    assert len(analysis.comparisons) == 24_512
+    proposal = RecordModelHarnessAnalysis(
+        proposal_id="proposal-maximum-model-harness-analysis",
+        idempotency_key="key-maximum-model-harness-analysis",
+        proposer=runtime.actor,
+        analysis=analysis,
+    )
+    proposal_type = RecordModelHarnessAnalysis.model_fields["proposal_type"].default
+    runtime.coordinator._router = ProposalRouter(
+        ((proposal_type, _CapabilityProbeHandler(proposal_type)),)  # type: ignore[arg-type]
+    )
+
+    assert coordinator_module._governed_proposal_state_is_safe(
+        proposal,
+        RecordModelHarnessAnalysis,
+    )
+    with pytest.raises(_CapabilityObserved):
+        runtime.coordinator.submit(proposal)
+
+    values = analysis.model_dump(mode="python")
+    values["comparisons"] = (*analysis.comparisons, analysis.comparisons[-1])
+    with pytest.raises(ValidationError, match="comparisons"):
+        type(analysis).model_validate(values, strict=True)
 
 
 @pytest.mark.integration

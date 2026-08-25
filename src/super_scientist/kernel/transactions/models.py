@@ -19,6 +19,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic.fields import FieldInfo
 
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.behavioral_rules.models import (
@@ -1227,18 +1228,29 @@ def _require_safe_exact_value_shape(
     annotation: object,
     *,
     depth: int = 0,
+    collection_maximum: int = MAX_PROPOSAL_RECONSTRUCTION_ITEMS,
 ) -> None:
     if depth > MAX_PROPOSAL_RECONSTRUCTION_DEPTH:
         raise ValueError("proposal shape exceeds its depth bound")
     origin = get_origin(annotation)
     arguments = get_args(annotation)
     if origin is Annotated:
-        _require_safe_exact_value_shape(value, arguments[0], depth=depth + 1)
+        _require_safe_exact_value_shape(
+            value,
+            arguments[0],
+            depth=depth + 1,
+            collection_maximum=collection_maximum,
+        )
         return
     if origin in (Union, UnionType):
         for option in arguments:
             try:
-                _require_safe_exact_value_shape(value, option, depth=depth + 1)
+                _require_safe_exact_value_shape(
+                    value,
+                    option,
+                    depth=depth + 1,
+                    collection_maximum=collection_maximum,
+                )
                 return
             except (TypeError, ValueError):
                 continue
@@ -1277,14 +1289,16 @@ def _require_safe_exact_value_shape(
         if any(field_name not in annotation.model_fields for field_name in state):
             raise ValueError("model boundary received unexpected instance state")
         for field_name, field_value in state.items():
+            field = annotation.model_fields[field_name]
             _require_safe_exact_value_shape(
                 field_value,
-                annotation.model_fields[field_name].annotation,
+                field.annotation,
                 depth=depth + 1,
+                collection_maximum=_declared_collection_maximum(field),
             )
         return
     if origin is tuple:
-        if type(value) is not tuple or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
+        if type(value) is not tuple or len(value) > collection_maximum:
             raise ValueError("proposal tuple must be exact and bounded")
         if len(arguments) == 2 and arguments[1] is Ellipsis:
             for item in value:
@@ -1296,14 +1310,14 @@ def _require_safe_exact_value_shape(
             _require_safe_exact_value_shape(item, item_type, depth=depth + 1)
         return
     if origin is list:
-        if type(value) is not list or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
+        if type(value) is not list or len(value) > collection_maximum:
             raise ValueError("proposal list must be exact and bounded")
         item_type = arguments[0] if arguments else Any
         for item in value:
             _require_safe_exact_value_shape(item, item_type, depth=depth + 1)
         return
     if origin in (dict, Mapping):
-        if type(value) is not dict or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
+        if type(value) is not dict or len(value) > collection_maximum:
             raise ValueError("proposal mapping must be exact and bounded")
         if any(type(key) is not str for key in value):
             raise ValueError("proposal mapping keys must be exact built-in strings")
@@ -1313,6 +1327,15 @@ def _require_safe_exact_value_shape(
             _require_safe_exact_value_shape(item, item_type, depth=depth + 1)
         return
     raise ValueError("proposal shape contains an unsupported declared type")
+
+
+def _declared_collection_maximum(field: FieldInfo) -> int:
+    declared = tuple(
+        maximum
+        for constraint in field.metadata
+        if type(maximum := getattr(constraint, "max_length", None)) is int
+    )
+    return min(declared, default=MAX_PROPOSAL_RECONSTRUCTION_ITEMS)
 
 
 def _governed_proposal_state_is_safe(
