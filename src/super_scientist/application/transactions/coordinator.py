@@ -132,6 +132,8 @@ from super_scientist.kernel.transactions.models import (
     ReviseHypothesis,
     TransactionDecision,
     TransitionClaim,
+    _fresh_actor_identity,
+    _governed_proposal_state_is_safe,
     expected_hash_verified_evidence,
 )
 from super_scientist.providers.storage.artifacts import ArtifactStore
@@ -401,10 +403,19 @@ class TransactionCoordinator:
         intent_fingerprint: str | None = None,
     ) -> TransactionDecision:
         governed_type = _trusted_governed_proposal_type(proposal)
-        stored_proposal = _durable_proposal(proposal, governed_type)
+        governed_state_is_safe = governed_type is None or _governed_proposal_state_is_safe(
+            proposal,
+            governed_type,
+        )
+        stored_proposal = _durable_proposal(
+            proposal,
+            governed_type,
+            state_is_safe=governed_state_is_safe,
+        )
         invalid_governed_type = (
             governed_type
-            if governed_type is not None and type(proposal) is not governed_type
+            if governed_type is not None
+            and (type(proposal) is not governed_type or not governed_state_is_safe)
             else None
         )
         if governed_type is None and type(stored_proposal) is InvalidProposal:
@@ -865,15 +876,30 @@ def _trusted_model_dump(
 def _durable_proposal(
     proposal: Proposal,
     governed_type: type[BaseModel] | None,
+    *,
+    state_is_safe: bool | None = None,
 ) -> Proposal:
     if governed_type is None:
         return proposal
     try:
         if type(proposal) is not governed_type:
             raise TypeError("governed proposal subclasses are not durable input")
+        if state_is_safe is None:
+            state_is_safe = _governed_proposal_state_is_safe(proposal, governed_type)
+        if not state_is_safe:
+            raise TypeError("governed proposal contains unsafe exact state")
         dumped = _trusted_model_dump(proposal, governed_type, mode="python")
         return PROPOSAL_ADAPTER.validate_python(dumped)
-    except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
+    except (
+        AssertionError,
+        MemoryError,
+        OverflowError,
+        RecursionError,
+        RuntimeError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ):
         state = _safe_model_state(proposal) or {}
         proposal_id = _safe_identifier(state.get("proposal_id")) or (
             "invalid-reward-proposal"
@@ -1134,9 +1160,7 @@ def _safe_proposer_state(candidate: object) -> ActorIdentity | None:
         if type(candidate) is dict:
             return ActorIdentity.model_validate_json(canonical_json_bytes(candidate))
         if type(candidate) is ActorIdentity:
-            return ActorIdentity.model_validate(
-                _trusted_model_dump(candidate, ActorIdentity, mode="python")
-            )
+            return _fresh_actor_identity(candidate)
     except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
         return None
     return None

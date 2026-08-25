@@ -540,6 +540,52 @@ def test_every_hostile_governed_subclass_is_rejected_before_capability_attribute
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize(("proposal_type", "expected_code"), HOSTILE_GOVERNED_REJECTION_CASES)
+@pytest.mark.parametrize("error_type", (AssertionError, RuntimeError))
+def test_exact_governed_constructs_reject_hostile_nested_values_without_hooks(
+    runtime: Runtime,
+    proposal_type: type[BaseModel],
+    expected_code: RejectionCode,
+    error_type: type[Exception],
+) -> None:
+    hook_calls: list[str] = []
+
+    class HostileNestedValue:
+        def __getattribute__(self, name: str) -> object:
+            del self
+            hook_calls.append(name)
+            raise error_type("nested value hook must not run")
+
+    base_fields = {
+        "proposal_id",
+        "idempotency_key",
+        "proposer",
+        "approval",
+        "proposal_type",
+    }
+    payload_field = next(name for name in proposal_type.model_fields if name not in base_fields)
+    suffix = error_type.__name__.lower()
+    proposal_id = f"hostile-nested-{proposal_type.__name__}-{suffix}"
+    hostile_value = HostileNestedValue()
+    hostile_proposer = runtime.actor.model_copy(update={"created_at": hostile_value})
+    proposal = proposal_type.model_construct(
+        proposal_id=proposal_id,
+        idempotency_key=f"hostile-nested-key-{proposal_type.__name__}-{suffix}",
+        proposer=hostile_proposer,
+        **{payload_field: hostile_value},
+    )
+
+    decision = runtime.coordinator.submit(proposal)
+
+    assert decision.reasons[0].code is expected_code
+    assert hook_calls == []
+    with runtime.uow_factory() as unit_of_work:
+        retained = unit_of_work.repositories().transactions.get_by_proposal_id(proposal_id)
+        assert retained is not None
+        assert retained.proposal.proposal_type == "invalid_proposal"
+
+
+@pytest.mark.integration
 def test_mapping_ingress_preflights_deep_exact_builtins_without_hooks(
     runtime: Runtime,
     monkeypatch: pytest.MonkeyPatch,

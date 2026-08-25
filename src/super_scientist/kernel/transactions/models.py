@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, DecimalException
 from enum import Enum, StrEnum
 from types import UnionType
-from typing import Annotated, Any, Literal, Self, Union, cast, get_args, get_origin
+from typing import Annotated, Any, ForwardRef, Literal, Self, Union, cast, get_args, get_origin
 
 from pydantic import (
     BaseModel,
@@ -1220,6 +1220,112 @@ def _fresh_exact_value(
             for key, item in value.items()
         }
     raise ValueError("proposal state contains an unsupported declared type")
+
+
+def _require_safe_exact_value_shape(
+    value: object,
+    annotation: object,
+    *,
+    depth: int = 0,
+) -> None:
+    if depth > MAX_PROPOSAL_RECONSTRUCTION_DEPTH:
+        raise ValueError("proposal shape exceeds its depth bound")
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+    if origin is Annotated:
+        _require_safe_exact_value_shape(value, arguments[0], depth=depth + 1)
+        return
+    if origin in (Union, UnionType):
+        for option in arguments:
+            try:
+                _require_safe_exact_value_shape(value, option, depth=depth + 1)
+                return
+            except (TypeError, ValueError):
+                continue
+        raise ValueError("proposal union value has no safe exact type")
+    if origin is Literal:
+        if not any(type(value) is type(option) and value == option for option in arguments):
+            raise ValueError("proposal literal value is not exact")
+        return
+    if isinstance(annotation, ForwardRef):
+        if annotation.__forward_arg__ != "HarnessExecutionTrace":
+            raise ValueError("proposal shape contains an unsupported forward reference")
+        _require_safe_exact_value_shape(value, HarnessExecutionTrace, depth=depth + 1)
+        return
+    if annotation is Any:
+        if value is None or type(value) in (str, int, float, bool, bytes):
+            return
+        raise ValueError("untyped proposal state admits exact primitives only")
+    if annotation is type(None):
+        if value is not None:
+            raise ValueError("proposal value must be None")
+        return
+    if annotation in (datetime, Decimal, str, int, float, bool, bytes):
+        if type(value) is not annotation:
+            raise ValueError("proposal value must have the exact declared type")
+        return
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        if type(value) is not annotation:
+            raise ValueError("proposal enum must have the exact declared type")
+        return
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        if type(value) is not annotation:
+            raise ValueError("model boundary requires the exact declared type")
+        state = object.__getattribute__(value, "__dict__")
+        if type(state) is not dict or any(type(key) is not str for key in state):
+            raise ValueError("model boundary requires exact dictionary state")
+        if any(field_name not in annotation.model_fields for field_name in state):
+            raise ValueError("model boundary received unexpected instance state")
+        for field_name, field_value in state.items():
+            _require_safe_exact_value_shape(
+                field_value,
+                annotation.model_fields[field_name].annotation,
+                depth=depth + 1,
+            )
+        return
+    if origin is tuple:
+        if type(value) is not tuple or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
+            raise ValueError("proposal tuple must be exact and bounded")
+        if len(arguments) == 2 and arguments[1] is Ellipsis:
+            for item in value:
+                _require_safe_exact_value_shape(item, arguments[0], depth=depth + 1)
+            return
+        if len(value) != len(arguments):
+            raise ValueError("fixed proposal tuple has the wrong length")
+        for item, item_type in zip(value, arguments, strict=True):
+            _require_safe_exact_value_shape(item, item_type, depth=depth + 1)
+        return
+    if origin is list:
+        if type(value) is not list or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
+            raise ValueError("proposal list must be exact and bounded")
+        item_type = arguments[0] if arguments else Any
+        for item in value:
+            _require_safe_exact_value_shape(item, item_type, depth=depth + 1)
+        return
+    if origin in (dict, Mapping):
+        if type(value) is not dict or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
+            raise ValueError("proposal mapping must be exact and bounded")
+        if any(type(key) is not str for key in value):
+            raise ValueError("proposal mapping keys must be exact built-in strings")
+        key_type, item_type = arguments if len(arguments) == 2 else (str, Any)
+        for key, item in value.items():
+            _require_safe_exact_value_shape(key, key_type, depth=depth + 1)
+            _require_safe_exact_value_shape(item, item_type, depth=depth + 1)
+        return
+    raise ValueError("proposal shape contains an unsupported declared type")
+
+
+def _governed_proposal_state_is_safe(
+    value: object,
+    expected_type: type[BaseModel],
+) -> bool:
+    if expected_type not in GOVERNED_PROPOSAL_CLASSES:
+        return False
+    try:
+        _require_safe_exact_value_shape(value, expected_type)
+    except (AttributeError, MemoryError, RecursionError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _fresh_harness_trace_metadata(value: object) -> HarnessTraceRecordMetadata:
