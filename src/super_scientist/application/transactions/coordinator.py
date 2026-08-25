@@ -62,6 +62,7 @@ from super_scientist.domain.claims.models import AtomicClaim
 from super_scientist.domain.evidence.models import EvidenceRecord
 from super_scientist.domain.identity import ActorIdentity
 from super_scientist.domain.primitives import (
+    Sha256Hex,
     StableIdentifier,
     UtcTimestamp,
     canonical_json_bytes,
@@ -149,6 +150,19 @@ class Clock(Protocol):
 
 
 type ProposalFactory = Callable[[], object]
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedIntentProposalFactory:
+    """Replay one canonical proposal with its retained source intent identity."""
+
+    proposal: Proposal
+    proposal_hash: Sha256Hex
+    intent_fingerprint: Sha256Hex | None
+
+    def __call__(self) -> Proposal:
+        return cast(Proposal, object.__getattribute__(self, "proposal"))
+
 
 PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
 IDENTIFIER_ADAPTER: TypeAdapter[StableIdentifier] = TypeAdapter(StableIdentifier)
@@ -331,13 +345,27 @@ class TransactionCoordinator:
         attempt: ProposalAttempt,
         proposal_factory: ProposalFactory,
     ) -> TransactionDecision:
+        intent_fingerprint = (
+            object.__getattribute__(proposal_factory, "intent_fingerprint")
+            if type(proposal_factory) is RetainedIntentProposalFactory
+            else _attempt_fingerprint(attempt)
+        )
+        retained_proposal_hash = (
+            object.__getattribute__(proposal_factory, "proposal_hash")
+            if type(proposal_factory) is RetainedIntentProposalFactory
+            else None
+        )
         with self._uow_factory() as uow:
             repositories = uow.repositories()
             require_workspace_integrity(repositories, self._artifact_store)
             prior = repositories.transactions.get_by_idempotency_key(attempt.idempotency_key)
             if prior is not None:
                 if (
-                    prior.intent_fingerprint == _attempt_fingerprint(attempt)
+                    prior.intent_fingerprint == intent_fingerprint
+                    and (
+                        retained_proposal_hash is None
+                        or prior.proposal_hash == retained_proposal_hash
+                    )
                     and prior.proposal.proposal_id == attempt.proposal_id
                     and prior.decision.proposal_id == attempt.proposal_id
                 ):
@@ -358,7 +386,7 @@ class TransactionCoordinator:
                         decision,
                         repositories,
                         stored_policy,
-                        intent_fingerprint=_attempt_fingerprint(attempt),
+                        intent_fingerprint=intent_fingerprint,
                     )
                 return decision
             try:
@@ -391,7 +419,7 @@ class TransactionCoordinator:
                 normalized,
                 repositories,
                 _active_connection(uow.connection),
-                intent_fingerprint=_attempt_fingerprint(attempt),
+                intent_fingerprint=intent_fingerprint,
             )
 
     def _submit_locked(

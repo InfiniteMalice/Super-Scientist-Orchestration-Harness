@@ -5,12 +5,15 @@ from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from tempfile import TemporaryDirectory
 from types import TracebackType
-from typing import Literal, Protocol, cast
+from typing import Annotated, Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from sqlalchemy import Connection
 
-from super_scientist.application.transactions.coordinator import TransactionCoordinator
+from super_scientist.application.transactions.coordinator import (
+    RetainedIntentProposalFactory,
+    TransactionCoordinator,
+)
 from super_scientist.application.workspace_integrity import require_workspace_integrity
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.evidence.models import ArtifactRef
@@ -30,6 +33,7 @@ from super_scientist.kernel.transactions.models import (
     RecordCollaborationTermination,
     RejectionCode,
     TransactionDecision,
+    parse_untrusted_proposal_json,
 )
 from super_scientist.providers.storage.artifacts import ArtifactStore, FileArtifactStore
 from super_scientist.providers.storage.database import (
@@ -113,14 +117,34 @@ class WorkspaceArtifactReference(_StrictFrozenModel):
         )
 
 
+def _parse_workspace_proposal(value: object) -> object:
+    if type(value) is dict:
+        return parse_untrusted_proposal_json(canonical_json_bytes(value))
+    return value
+
+
+type WorkspaceProposal = Annotated[Proposal, BeforeValidator(_parse_workspace_proposal)]
+
+
+class WorkspaceReplayIntent(_StrictFrozenModel):
+    """Canonical source intent identity retained for deterministic audit replay."""
+
+    schema_version: Literal[1] = 1
+    intent_fingerprint: Sha256Hex | None
+
+
 class WorkspaceRecord(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     stable_identity: StableIdentifier
     replay_order: int = Field(strict=True, ge=0)
     governing_policy_hash: Sha256Hex
     proposal_hash: Sha256Hex
-    proposal: Proposal
+    proposal: WorkspaceProposal
     expected_decision: TransactionDecision
+    replay_intent: WorkspaceReplayIntent | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def require_exact_identity_and_hash(self) -> WorkspaceRecord:
@@ -244,6 +268,9 @@ def _export_workspace_snapshot(
                     proposal_hash=_proposal_hash(transaction.proposal),
                     proposal=transaction.proposal,
                     expected_decision=transaction.decision.model_copy(update={"replayed": False}),
+                    replay_intent=WorkspaceReplayIntent(
+                        intent_fingerprint=transaction.intent_fingerprint,
+                    ),
                 )
                 for transaction in transactions
             ),
@@ -425,7 +452,7 @@ def _commit_workspace(
                     _active_connection(unit_of_work.connection),
                     artifact_store,
                 )
-                if rebuilt != workspace:
+                if not _rebuilt_workspace_matches(workspace, rebuilt):
                     raise WorkspaceImportError(
                         "rebuilt workspace export does not match canonical bundle"
                     )
@@ -464,7 +491,7 @@ def _replay_records(
         attempt = _proposal_attempt(record)
         decision = coordinator.submit_intent(
             attempt,
-            _constant_proposal_factory(record.proposal),
+            _replay_proposal_factory(record),
         )
         if decision.replayed:
             replayed += 1
@@ -519,7 +546,7 @@ def _commit_conflicts(
                 artifact_store,
             ).submit_intent(
                 _proposal_attempt(record),
-                _constant_proposal_factory(record.proposal),
+                _replay_proposal_factory(record),
             )
             actual_code = _identity_conflict_code(decision)
             if actual_code is not expected_code:
@@ -553,10 +580,51 @@ def _constant_proposal_factory(proposal: Proposal) -> Callable[[], Proposal]:
     return factory
 
 
+def _replay_proposal_factory(record: WorkspaceRecord) -> Callable[[], Proposal]:
+    if record.replay_intent is None:
+        return _constant_proposal_factory(record.proposal)
+    return RetainedIntentProposalFactory(
+        proposal=record.proposal,
+        proposal_hash=record.proposal_hash,
+        intent_fingerprint=record.replay_intent.intent_fingerprint,
+    )
+
+
 def _workspace_export_hash(workspace: WorkspaceExport) -> str:
     payload = workspace.model_dump(mode="json")
     del payload["bundle_hash"]
     return sha256_hex(canonical_json_bytes(payload))
+
+
+def _rebuilt_workspace_matches(
+    source: WorkspaceExport,
+    rebuilt: WorkspaceExport,
+) -> bool:
+    """Compare a rebuild while preserving legacy records without intent metadata."""
+
+    if source == rebuilt:
+        return True
+    if all(record.replay_intent is not None for record in source.records):
+        return False
+    if (
+        source.schema_version != rebuilt.schema_version
+        or source.bootstrap_policy_hash != rebuilt.bootstrap_policy_hash
+        or source.active_policy_hash != rebuilt.active_policy_hash
+        or source.policies != rebuilt.policies
+        or source.projection_expectations != rebuilt.projection_expectations
+        or source.artifacts != rebuilt.artifacts
+        or len(source.records) != len(rebuilt.records)
+    ):
+        return False
+    return all(
+        source_record == rebuilt_record
+        or (
+            source_record.replay_intent is None
+            and source_record.model_copy(update={"replay_intent": rebuilt_record.replay_intent})
+            == rebuilt_record
+        )
+        for source_record, rebuilt_record in zip(source.records, rebuilt.records, strict=True)
+    )
 
 
 def _governing_policy_hashes(events: tuple[AuditEvent, ...]) -> dict[str, str]:

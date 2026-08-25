@@ -1608,6 +1608,12 @@ def trace_freshness_receipt(freshness: TraceFreshness) -> EvidenceReceipt:
     )
 
 
+# TraceFreshness is declared before HarnessExecutionTrace to keep the pure freshness
+# interfaces together. Resolve that one recursive annotation once the trace type exists so
+# bounded proposal/workspace JSON reconstruction never depends on incidental import order.
+TraceFreshness.model_rebuild(force=True)
+
+
 __all__ = [
     "AvailableValue",
     "CaptureRewardValidityStatus",

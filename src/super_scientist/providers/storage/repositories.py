@@ -4,10 +4,16 @@ import json
 from collections.abc import Mapping
 from datetime import datetime
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 from sqlalchemy import Connection, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+if TYPE_CHECKING:
+    from super_scientist.providers.storage.cognitive_records import (
+        GovernedProvenanceSnapshot,
+    )
 
 from super_scientist.config.loader import policy_hash
 from super_scientist.config.models import PolicyDocument, PolicySnapshot
@@ -1223,7 +1229,11 @@ class RepositorySet:
             heads=HypothesisHeadRepository(self._connection).list_all(),
         )
 
-    def cognitive_integrity_snapshot(self) -> CognitiveIntegritySnapshot:
+    def cognitive_integrity_snapshot(
+        self,
+        *,
+        _provenance: GovernedProvenanceSnapshot | None = None,
+    ) -> CognitiveIntegritySnapshot:
         from super_scientist.providers.storage.cognitive_records import (
             CapabilityProfileRepository,
             CohortPlanRepository,
@@ -1239,7 +1249,11 @@ class RepositorySet:
             _load_governed_provenance_snapshot,
         )
 
-        provenance = _load_governed_provenance_snapshot(self._connection)
+        provenance = (
+            _load_governed_provenance_snapshot(self._connection)
+            if _provenance is None
+            else _provenance
+        )
         return CognitiveIntegritySnapshot(
             capability_profiles=CapabilityProfileRepository(
                 self._connection
@@ -1278,6 +1292,8 @@ class RepositorySet:
 
     def evaluation_extension_integrity_snapshot(
         self,
+        *,
+        _provenance: GovernedProvenanceSnapshot | None = None,
     ) -> EvaluationExtensionIntegritySnapshot:
         from super_scientist.providers.storage.cognitive_records import (
             _load_governed_provenance_snapshot,
@@ -1292,7 +1308,11 @@ class RepositorySet:
             RewardAssessmentRepository,
         )
 
-        provenance = _load_governed_provenance_snapshot(self._connection)
+        provenance = (
+            _load_governed_provenance_snapshot(self._connection)
+            if _provenance is None
+            else _provenance
+        )
         return EvaluationExtensionIntegritySnapshot(
             guidance_protocols=GuidanceEvaluationProtocolRepository(
                 self._connection
@@ -1318,9 +1338,16 @@ class RepositorySet:
         )
 
     def cognitive_workspace_integrity_snapshot(self) -> CognitiveWorkspaceIntegritySnapshot:
+        from super_scientist.providers.storage.cognitive_records import (
+            _load_governed_provenance_snapshot,
+        )
+
+        provenance = _load_governed_provenance_snapshot(self._connection)
         return CognitiveWorkspaceIntegritySnapshot(
-            cognitive=self.cognitive_integrity_snapshot(),
-            evaluation_extension=self.evaluation_extension_integrity_snapshot(),
+            cognitive=self.cognitive_integrity_snapshot(_provenance=provenance),
+            evaluation_extension=self.evaluation_extension_integrity_snapshot(
+                _provenance=provenance
+            ),
         )
 
     def has_durable_state(self) -> bool:

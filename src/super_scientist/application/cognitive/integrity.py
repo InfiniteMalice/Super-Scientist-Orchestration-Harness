@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import cast
 
 from super_scientist.application.collaboration.service import (
@@ -38,8 +40,10 @@ from super_scientist.domain.harness_eval.guidance import (
     GuidanceEvaluationProtocol,
 )
 from super_scientist.domain.harness_eval.matrix import (
+    MAX_MODEL_HARNESS_GRID_CELLS,
     ModelHarnessAnalysis,
     ModelHarnessCell,
+    ModelHarnessCoordinate,
     ModelHarnessProtocol,
     analyze_model_harness,
 )
@@ -111,6 +115,12 @@ class _AcceptedBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class CognitiveReconstructionHistory:
+    accepted: tuple[StoredTransaction, ...]
+    bindings_by_id: Mapping[str, _AcceptedBinding]
+
+
+@dataclass(frozen=True, slots=True)
 class _SourceSnapshotBinding:
     snapshot_family_id: str
     snapshot_id: str
@@ -153,8 +163,18 @@ def _accepted_bindings(
     return bindings
 
 
+def build_cognitive_reconstruction_history(
+    transactions: tuple[StoredTransaction, ...],
+    events: tuple[AuditEvent, ...],
+) -> CognitiveReconstructionHistory:
+    return CognitiveReconstructionHistory(
+        accepted=_accepted(transactions),
+        bindings_by_id=MappingProxyType(_accepted_bindings(transactions, events)),
+    )
+
+
 def _source_snapshot_bindings(
-    bindings: dict[str, _AcceptedBinding],
+    bindings: Mapping[str, _AcceptedBinding],
     artifact_store: ArtifactStore | None,
     declared_snapshot_keys: frozenset[tuple[str, str]],
 ) -> tuple[_SourceSnapshotBinding, ...]:
@@ -272,7 +292,7 @@ def _receipt_binding(
     audit_event_id: str,
     audit_event_hash: str,
     expected_type: type[object],
-    bindings: dict[str, _AcceptedBinding],
+    bindings: Mapping[str, _AcceptedBinding],
     current_sequence: int,
     governing_policy_hash: str | None,
 ) -> StoredTransaction | None:
@@ -328,7 +348,7 @@ def _compilation_record(
 def _source_receipt_transaction(
     receipt: AcceptedSourceReceiptRef,
     *,
-    bindings: dict[str, _AcceptedBinding],
+    bindings: Mapping[str, _AcceptedBinding],
     current_sequence: int,
 ) -> StoredTransaction | None:
     expected_type: type[object] = (
@@ -371,7 +391,7 @@ def _source_receipt_transaction(
 def _require_compilation_source_receipts(
     compilation: ProcedureCompilationRecord,
     *,
-    bindings: dict[str, _AcceptedBinding],
+    bindings: Mapping[str, _AcceptedBinding],
     current_sequence: int,
     available_evidence: dict[tuple[str, int, str], int],
     source_snapshots: tuple[_SourceSnapshotBinding, ...],
@@ -456,9 +476,12 @@ def expected_cognitive_snapshot(
     transactions: tuple[StoredTransaction, ...],
     events: tuple[AuditEvent, ...] = (),
     artifact_store: ArtifactStore | None = None,
+    *,
+    history: CognitiveReconstructionHistory | None = None,
 ) -> CognitiveIntegritySnapshot:
-    accepted = _accepted(transactions)
-    bindings_by_id = _accepted_bindings(transactions, events)
+    reconstruction = history or build_cognitive_reconstruction_history(transactions, events)
+    accepted = reconstruction.accepted
+    bindings_by_id = reconstruction.bindings_by_id
     source_snapshots = _source_snapshot_bindings(
         bindings_by_id,
         artifact_store,
@@ -885,24 +908,107 @@ def _binding_coordinate_key(trace: HarnessExecutionTrace) -> tuple[object, ...]:
     return (binding.model, binding.harness, binding.partition)
 
 
+type _ModelEvidencePair = tuple[HarnessCellEvidenceChain, HarnessEvidenceSnapshotRecord]
+type _ModelEvidenceKey = tuple[str, tuple[object, ...], tuple[str, int, str]]
+
+
+@dataclass(frozen=True, slots=True)
+class _ModelEvidenceReplayIndex:
+    pairs_by_key: Mapping[_ModelEvidenceKey, tuple[_ModelEvidencePair, ...]]
+
+    def resolve(
+        self,
+        protocol: ModelHarnessProtocol,
+        cell: ModelHarnessCell,
+    ) -> _ModelEvidencePair:
+        receipt = cell.evidence_chain_receipt
+        key = (
+            protocol.protocol_id,
+            _coordinate_key(cell),
+            (receipt.record_id, receipt.schema_version, receipt.content_hash),
+        )
+        matches = self.pairs_by_key.get(key, ())
+        if len(matches) != 1:
+            raise ValueError("model-harness cell evidence chain is unavailable or ambiguous")
+        return matches[0]
+
+
+class _ModelEvidenceReplayIndexBuilder:
+    def __init__(self) -> None:
+        self._pairs_by_key: dict[_ModelEvidenceKey, list[_ModelEvidencePair]] = {}
+
+    def add(
+        self,
+        protocol: ModelHarnessProtocol,
+        trace: HarnessExecutionTrace,
+        assessment: RewardValidityAssessment,
+    ) -> None:
+        if (
+            not _trace_matches_matrix(trace, protocol)
+            or assessment.trace_id != trace.trace_id
+            or assessment.trace_hash != trace.content_hash
+        ):
+            return
+        partition = trace.observed_binding.partition
+        if partition is None:
+            return
+        pair = project_harness_evidence_snapshots(
+            protocol=protocol,
+            coordinate=ModelHarnessCoordinate(
+                model=trace.observed_binding.model,
+                harness=trace.observed_binding.harness,
+                partition=partition,
+            ),
+            trace=trace,
+            freshness=assessment.freshness,
+            assessment=assessment,
+        )
+        receipt = harness_cell_evidence_chain_receipt(pair[0])
+        key = (
+            protocol.protocol_id,
+            _binding_coordinate_key(trace),
+            (receipt.record_id, receipt.schema_version, receipt.content_hash),
+        )
+        matches = self._pairs_by_key.setdefault(key, [])
+        if len(matches) < 2:
+            matches.append(pair)
+
+    def resolve(
+        self,
+        protocol: ModelHarnessProtocol,
+        cell: ModelHarnessCell,
+    ) -> _ModelEvidencePair:
+        receipt = cell.evidence_chain_receipt
+        key = (
+            protocol.protocol_id,
+            _coordinate_key(cell),
+            (receipt.record_id, receipt.schema_version, receipt.content_hash),
+        )
+        matches = self._pairs_by_key.get(key, ())
+        if len(matches) != 1:
+            raise ValueError("model-harness cell evidence chain is unavailable or ambiguous")
+        return matches[0]
+
+    def freeze(self) -> _ModelEvidenceReplayIndex:
+        return _ModelEvidenceReplayIndex(
+            pairs_by_key=MappingProxyType(
+                {key: tuple(matches) for key, matches in self._pairs_by_key.items()}
+            )
+        )
+
+
 def _recomputed_model_analysis(
     analysis: ModelHarnessAnalysis,
-    protocols: tuple[ModelHarnessProtocol, ...],
+    protocol: ModelHarnessProtocol,
     cells: tuple[ModelHarnessCell, ...],
-    traces: tuple[HarnessExecutionTrace, ...],
-    rewards: tuple[RewardValidityAssessment, ...],
+    evidence: _ModelEvidenceReplayIndex,
 ) -> ModelHarnessAnalysis:
-    protocol = next(
-        (item for item in protocols if item.protocol_id == analysis.protocol_id),
-        None,
-    )
-    if protocol is None:
+    if protocol.protocol_id != analysis.protocol_id:
         raise ValueError("model-harness analysis protocol is unavailable")
-    selected_cells = tuple(item for item in cells if item.protocol_id == analysis.protocol_id)
     chains: list[HarnessCellEvidenceChain] = []
     snapshots: list[HarnessEvidenceSnapshotRecord] = []
-    for cell in selected_cells:
-        chain, snapshot = _resolve_model_cell_evidence(protocol, cell, traces, rewards)
+    for cell in cells:
+        chain, snapshot = evidence.resolve(protocol, cell)
         chains.append(chain)
         snapshots.append(snapshot)
     index = HarnessEvidenceSnapshotIndex.build(
@@ -910,39 +1016,10 @@ def _recomputed_model_analysis(
     )
     return analyze_model_harness(
         protocol,
-        selected_cells,
+        cells,
         evidence_chains=tuple(chains),
         evidence_index=index,
     )
-
-
-def _resolve_model_cell_evidence(
-    protocol: ModelHarnessProtocol,
-    cell: ModelHarnessCell,
-    traces: tuple[HarnessExecutionTrace, ...],
-    rewards: tuple[RewardValidityAssessment, ...],
-) -> tuple[HarnessCellEvidenceChain, HarnessEvidenceSnapshotRecord]:
-    matches: list[tuple[HarnessCellEvidenceChain, HarnessEvidenceSnapshotRecord]] = []
-    for trace in traces:
-        if trace.observed_binding.protocol_id != protocol.protocol_id or _binding_coordinate_key(
-            trace
-        ) != _coordinate_key(cell):
-            continue
-        for assessment in rewards:
-            if assessment.trace_id != trace.trace_id:
-                continue
-            pair = project_harness_evidence_snapshots(
-                protocol=protocol,
-                coordinate=cell.coordinate,
-                trace=trace,
-                freshness=assessment.freshness,
-                assessment=assessment,
-            )
-            if harness_cell_evidence_chain_receipt(pair[0]) == cell.evidence_chain_receipt:
-                matches.append(pair)
-    if len(matches) != 1:
-        raise ValueError("model-harness cell evidence chain is unavailable or ambiguous")
-    return matches[0]
 
 
 def _guidance_cell_matches_prior_evidence(
@@ -979,6 +1056,8 @@ def _guidance_cell_matches_prior_evidence(
         return False
     if cell.verifier_result_id is not None and cell.verifier_result_id != trace.verifier_result_id:
         return False
+    if cell.reward_assessment_id is not None and assessment is None:
+        return False
     return assessment is None or (
         assessment.trace_id == trace.trace_id and assessment.trace_hash == trace.content_hash
     )
@@ -1001,9 +1080,12 @@ def _exact_evidence_receipt(
 def expected_evaluation_extension_snapshot(
     transactions: tuple[StoredTransaction, ...],
     events: tuple[AuditEvent, ...] = (),
+    *,
+    history: CognitiveReconstructionHistory | None = None,
 ) -> EvaluationExtensionIntegritySnapshot:
-    accepted = _accepted(transactions)
-    bindings_by_id = _accepted_bindings(transactions, events)
+    reconstruction = history or build_cognitive_reconstruction_history(transactions, events)
+    accepted = reconstruction.accepted
+    bindings_by_id = reconstruction.bindings_by_id
     guidance_protocols: list[GuidanceEvaluationProtocol] = []
     guidance_cells: list[GuidanceEvaluationCell] = []
     model_protocols: list[ModelHarnessProtocol] = []
@@ -1015,6 +1097,8 @@ def expected_evaluation_extension_snapshot(
     model_by_id: dict[str, ModelHarnessProtocol] = {}
     traces_by_id: dict[str, HarnessExecutionTrace] = {}
     rewards_by_id: dict[str, RewardValidityAssessment] = {}
+    model_cells_by_protocol: dict[str, list[ModelHarnessCell]] = defaultdict(list)
+    model_evidence = _ModelEvidenceReplayIndexBuilder()
     available_receipts: dict[tuple[str, int, str], int] = {}
     available_record_ids: dict[str, int] = {}
 
@@ -1056,6 +1140,11 @@ def expected_evaluation_extension_snapshot(
             ):
                 if record_id is not None and record_id not in available_record_ids:
                     raise ValueError("guidance cell evidence must be prior accepted state")
+            if (
+                guidance_cell.reward_assessment_id is not None
+                and guidance_cell.reward_assessment_id not in rewards_by_id
+            ):
+                raise ValueError("guidance cell evidence must be prior accepted state")
             if not _guidance_cell_matches_prior_evidence(
                 guidance_cell,
                 traces_by_id,
@@ -1170,6 +1259,9 @@ def expected_evaluation_extension_snapshot(
                 raise ValueError("reward assessment does not match deterministic reconstruction")
             rewards.append(assessment)
             rewards_by_id[assessment.assessment_id] = assessment
+            retained_model_protocol = model_by_id.get(retained_trace.observed_binding.protocol_id)
+            if retained_model_protocol is not None:
+                model_evidence.add(retained_model_protocol, retained_trace, assessment)
             for receipt in (
                 reward_validity_receipt(assessment),
                 trace_freshness_receipt(assessment.freshness),
@@ -1183,6 +1275,9 @@ def expected_evaluation_extension_snapshot(
                 and retained_model_protocol.governing_policy_hash != governing_policy_hash
             ):
                 raise ValueError("model-harness cell protocol must be prior accepted state")
+            retained_model_cells = model_cells_by_protocol[model_cell.protocol_id]
+            if len(retained_model_cells) >= MAX_MODEL_HARNESS_GRID_CELLS:
+                raise ValueError("model-harness cell history exceeds its declared bound")
             expected_cell = ModelHarnessCell.from_protocol(
                 cell_id=model_cell.cell_id,
                 protocol=retained_model_protocol,
@@ -1193,21 +1288,19 @@ def expected_evaluation_extension_snapshot(
             )
             if expected_cell != model_cell:
                 raise ValueError("model-harness cell does not match deterministic reconstruction")
-            _resolve_model_cell_evidence(
-                retained_model_protocol,
-                model_cell,
-                tuple(traces),
-                tuple(rewards),
-            )
+            model_evidence.resolve(retained_model_protocol, model_cell)
             model_cells.append(model_cell)
+            retained_model_cells.append(model_cell)
         elif type(proposal) is RecordModelHarnessAnalysis:
             analysis = proposal.analysis
+            retained_model_protocol = model_by_id.get(analysis.protocol_id)
+            if retained_model_protocol is None:
+                raise ValueError("model-harness analysis protocol is unavailable")
             expected_analysis = _recomputed_model_analysis(
                 analysis,
-                tuple(model_protocols),
-                tuple(model_cells),
-                tuple(traces),
-                tuple(rewards),
+                retained_model_protocol,
+                tuple(model_cells_by_protocol[analysis.protocol_id]),
+                model_evidence.freeze(),
             )
             if expected_analysis != analysis:
                 raise ValueError(
@@ -1227,6 +1320,8 @@ def expected_evaluation_extension_snapshot(
 
 
 __all__ = [
+    "CognitiveReconstructionHistory",
+    "build_cognitive_reconstruction_history",
     "expected_cognitive_snapshot",
     "expected_evaluation_extension_snapshot",
 ]

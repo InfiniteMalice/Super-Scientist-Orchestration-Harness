@@ -225,6 +225,7 @@ from super_scientist.kernel.transactions.models import (
     TransactionDecision,
     TransitionClaim,
     expected_hash_verified_evidence,
+    parse_untrusted_proposal_json,
 )
 from super_scientist.providers.storage.artifacts import ArtifactStore
 from super_scientist.providers.storage.domain_records import (
@@ -278,7 +279,6 @@ from super_scientist.quality.imported_pattern_firewall import (
     quality_policy_hash as _quality_policy_hash,
 )
 
-PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
 SHA256_ADAPTER: TypeAdapter[Sha256Hex] = TypeAdapter(Sha256Hex)
 
 
@@ -659,6 +659,7 @@ def verify_workspace(
     quality_policy_binding: QualityPolicyBinding | None = None,
 ) -> AuditVerification:
     from super_scientist.application.cognitive.integrity import (
+        build_cognitive_reconstruction_history,
         expected_cognitive_snapshot,
         expected_evaluation_extension_snapshot,
     )
@@ -703,6 +704,10 @@ def verify_workspace(
             for record in audit_records
             if record.transaction_persisted and record.decision.accepted
         )
+        cognitive_history = build_cognitive_reconstruction_history(
+            accepted_transactions_in_audit_order,
+            events,
+        )
         cognitive_workspace = repositories.cognitive_workspace_integrity_snapshot()
         _require(
             cognitive_workspace.cognitive
@@ -710,6 +715,7 @@ def verify_workspace(
                 accepted_transactions_in_audit_order,
                 events,
                 artifact_store,
+                history=cognitive_history,
             ),
             "cognitive projections do not match accepted transactions",
         )
@@ -718,6 +724,7 @@ def verify_workspace(
             == expected_evaluation_extension_snapshot(
                 accepted_transactions_in_audit_order,
                 events,
+                history=cognitive_history,
             ),
             "evaluation extension projections do not match accepted transactions",
         )
@@ -794,7 +801,7 @@ def _validated_audit_records(
     for event in events:
         _require(event.event_type == "transaction_decision", "unexpected audit event type")
         payload = json_compatible_payload(event.payload)
-        proposal = PROPOSAL_ADAPTER.validate_json(
+        proposal = parse_untrusted_proposal_json(
             canonical_json_bytes(_mapping_value(payload, "proposal"))
         )
         decision = TransactionDecision.model_validate_json(

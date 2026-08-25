@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import text
 
+from super_scientist.application.cognitive import integrity as cognitive_integrity_module
 from super_scientist.application.cognitive.integrity import (
     expected_cognitive_snapshot,
     expected_evaluation_extension_snapshot,
@@ -29,6 +30,15 @@ from super_scientist.domain.cognition import (
 from super_scientist.domain.cognition.grounding import assess_capability
 from super_scientist.domain.collaboration import CollaborationSession
 from super_scientist.domain.evidence.models import ArtifactRef, EvidenceRecord
+from super_scientist.domain.harness_eval.evidence_chains import (
+    harness_cell_evidence_chain_receipt,
+)
+from super_scientist.domain.harness_eval.matrix import (
+    HarnessIdentity,
+    ModelBudgetBinding,
+    ModelHarnessCell,
+    ModelIdentity,
+)
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.improvement.classification import (
     ChangeTarget,
@@ -75,11 +85,19 @@ from super_scientist.providers.storage.cognitive_records import CapabilityProfil
 from super_scientist.providers.storage.database import create_database_engine, upgrade_database
 from super_scientist.providers.storage.repositories import RepositorySet, StoredTransaction
 from tests.integration.application import test_procedure_service as procedure_service_tests
+from tests.integration.application.test_harness_eval_extensions import (
+    _complete_trace_evidence,
+    _matched_guidance_cell_evidence,
+)
 from tests.integration.application.test_procedure_service import _retain_exact_sources
 from tests.unit.collaboration.conftest import POLICY_HASH, profile
 from tests.unit.collaboration.test_engine import _request as peer_request
 from tests.unit.harness_eval.test_guidance import _cell, _protocol
+from tests.unit.harness_eval.test_harness_security_contracts import _matrix_evidence_chain
+from tests.unit.harness_eval.test_model_harness_matrix import _budget as matrix_budget
 from tests.unit.harness_eval.test_model_harness_matrix import _cells as matrix_cells
+from tests.unit.harness_eval.test_model_harness_matrix import _grid as matrix_grid
+from tests.unit.harness_eval.test_model_harness_matrix import _metrics as matrix_metrics
 from tests.unit.harness_eval.test_model_harness_matrix import _protocol as matrix_protocol
 from tests.unit.harness_eval.test_rewards import assess_reward_validity
 from tests.unit.harness_eval.test_traces import valid_trace
@@ -953,6 +971,69 @@ def test_evaluation_reconstruction_rejects_cell_before_protocol() -> None:
         expected_evaluation_extension_snapshot((_stored(cell_proposal), _stored(protocol_proposal)))
 
 
+@pytest.mark.parametrize("include_later_reward", (False, True))
+def test_guidance_cell_reconstruction_requires_reward_to_be_prior_accepted(
+    include_later_reward: bool,
+) -> None:
+    cell, trace, assessment = _matched_guidance_cell_evidence()
+    protocol = trace.observed_binding.guidance_protocol
+    assert protocol is not None
+    protocol_proposal = RecordGuidanceEvaluationProtocol(
+        proposal_id="ordered-guidance-reward-protocol",
+        idempotency_key="ordered-guidance-reward-protocol",
+        proposer=_actor(),
+        protocol=protocol,
+    )
+    evidence_proposals = tuple(
+        AddEvidence(
+            proposal_id=f"ordered-guidance-evidence-{index}",
+            idempotency_key=f"ordered-guidance-evidence-{index}",
+            proposer=_actor(),
+            evidence=_unverified_evidence(record_id, retained.content_hash),
+        )
+        for index, (record_id, retained) in enumerate(
+            sorted(_complete_trace_evidence(trace).items()),
+            start=1,
+        )
+    )
+    trace_proposal = RecordHarnessExecutionTrace(
+        proposal_id="ordered-guidance-reward-trace",
+        idempotency_key="ordered-guidance-reward-trace",
+        proposer=_actor(),
+        envelope=HarnessExecutionTraceEnvelope(
+            metadata=HarnessTraceRecordMetadata(
+                received_at=NOW,
+                source_id="ordered-guidance-runtime",
+            ),
+            trace=trace,
+        ),
+    )
+    cell_proposal = AppendGuidanceEvaluationCell(
+        proposal_id="ordered-guidance-reward-cell",
+        idempotency_key="ordered-guidance-reward-cell",
+        proposer=_actor(),
+        cell=cell,
+    )
+    reward_proposal = RecordRewardAssessment(
+        proposal_id="ordered-guidance-reward-assessment",
+        idempotency_key="ordered-guidance-reward-assessment",
+        proposer=_actor(),
+        observation=assessment.observation,
+        findings=assessment.findings,
+        assessment=assessment,
+    )
+    history = (
+        _stored(protocol_proposal),
+        *(_stored(item) for item in evidence_proposals),
+        _stored(trace_proposal),
+        _stored(cell_proposal),
+        *((_stored(reward_proposal),) if include_later_reward else ()),
+    )
+
+    with pytest.raises(ValueError, match="guidance cell evidence"):
+        expected_evaluation_extension_snapshot(history)
+
+
 def test_collaboration_reconstruction_rejects_peer_request_before_session(
     session_factory: Callable[..., CollaborationSession],
 ) -> None:
@@ -1057,6 +1138,68 @@ def test_harness_reconstruction_rejects_model_cell_before_protocol() -> None:
         expected_evaluation_extension_snapshot((_stored(cell_proposal), _stored(protocol_proposal)))
 
 
+def test_model_analysis_replay_projects_large_history_once_and_reuses_frozen_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert hasattr(cognitive_integrity_module, "_ModelEvidenceReplayIndexBuilder")
+    models = tuple(
+        ModelIdentity(model_id=f"replay-model-{index:02d}", model_version="v1")
+        for index in range(8)
+    )
+    harnesses = tuple(
+        HarnessIdentity(harness_id=f"replay-harness-{index:02d}", harness_version="v1")
+        for index in range(8)
+    )
+    grid = matrix_grid(models=models, harnesses=harnesses)
+    protocol = matrix_protocol(
+        models=models,
+        harnesses=harnesses,
+        expected_grid=grid,
+        model_budgets=tuple(
+            ModelBudgetBinding.build(model=model, budget=matrix_budget(model)) for model in models
+        ),
+        governing_policy_hash=POLICY_HASH,
+    )
+    fixtures = tuple(
+        _matrix_evidence_chain(protocol, coordinate, index)
+        for index, coordinate in enumerate(protocol.expected_grid)
+    )
+    cells = tuple(
+        ModelHarnessCell.from_protocol(
+            cell_id=f"replay-cell-{index:03d}",
+            protocol=protocol,
+            coordinate=coordinate,
+            metrics=matrix_metrics(),
+            evidence_chain_receipt=harness_cell_evidence_chain_receipt(fixtures[index].chain),
+            observed_at=NOW,
+        )
+        for index, coordinate in enumerate(protocol.expected_grid)
+    )
+    projection_calls = 0
+    real_project = cognitive_integrity_module.project_harness_evidence_snapshots
+
+    def counted_project(**kwargs):
+        nonlocal projection_calls
+        projection_calls += 1
+        return real_project(**kwargs)
+
+    monkeypatch.setattr(
+        cognitive_integrity_module,
+        "project_harness_evidence_snapshots",
+        counted_project,
+    )
+    builder = cognitive_integrity_module._ModelEvidenceReplayIndexBuilder()
+    for fixture in fixtures:
+        builder.add(protocol, fixture.trace, fixture.assessment)
+    snapshot = builder.freeze()
+
+    first = tuple(snapshot.resolve(protocol, cell) for cell in cells)
+    second = tuple(snapshot.resolve(protocol, cell) for cell in cells)
+
+    assert len(first) == len(second) == len(cells) == 128
+    assert projection_calls == len(fixtures) == 128
+
+
 def test_cognitive_row_tampering_fails_workspace_reconstruction(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{(tmp_path / 'workspace.db').as_posix()}"
     upgrade_database(database_url)
@@ -1118,5 +1261,77 @@ def test_cognitive_row_tampering_fails_workspace_reconstruction(tmp_path) -> Non
             result = verify_workspace(RepositorySet(connection), artifacts)
             assert result.valid is False
             assert result.reason is not None and "workspace integrity error" in result.reason
+    finally:
+        engine.dispose()
+
+
+def test_combined_workspace_reconstruction_parses_audit_provenance_once(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'shared-history.db').as_posix()}"
+    upgrade_database(database_url)
+    engine = create_database_engine(database_url)
+    artifacts = FileArtifactStore(tmp_path / "shared-history-artifacts")
+    policy = _governed_policy()
+    proposal = RecordCapabilityProfile(
+        proposal_id="shared-history-profile-proposal",
+        idempotency_key="shared-history-profile-proposal",
+        proposer=_actor(),
+        approval=Approval(
+            approver=ActorIdentity(
+                actor_id="shared-history-reviewer",
+                kind=ActorKind.HUMAN,
+                created_at=NOW,
+            ),
+            approved_at=NOW,
+        ),
+        profile=_profile_for_policy(policy),
+    )
+    decision = TransactionDecision(proposal_id=proposal.proposal_id, accepted=True)
+    try:
+        with engine.connect() as connection, connection.begin():
+            repositories = RepositorySet(connection)
+            repositories.policies.add_and_activate(policy, NOW)
+            repositories.transactions.add(proposal, decision, NOW)
+            repositories.audit.add(
+                append_event(
+                    None,
+                    "transaction_decision",
+                    {
+                        "proposal": proposal.model_dump(mode="json"),
+                        "decision": decision.model_dump(mode="json"),
+                        "policy_hash": policy.policy_hash,
+                        "stored_policy_hash": policy.policy_hash,
+                        "transaction_persisted": True,
+                    },
+                    NOW,
+                )
+            )
+            CapabilityProfileRepository(connection).add_from_proposal(
+                proposal,
+                created_at=NOW,
+                transaction_id=proposal.proposal_id,
+                governing_policy_hash=policy.policy_hash,
+            )
+
+        calls = 0
+        real_parse = cognitive_integrity_module.parse_untrusted_proposal_json
+
+        def counted_parse(payload: bytes):
+            nonlocal calls
+            calls += 1
+            return real_parse(payload)
+
+        monkeypatch.setattr(
+            cognitive_integrity_module,
+            "parse_untrusted_proposal_json",
+            counted_parse,
+        )
+        with engine.connect() as connection:
+            result = verify_workspace(RepositorySet(connection), artifacts)
+
+        assert result.valid is True, result.reason
+        assert calls == 1
     finally:
         engine.dispose()

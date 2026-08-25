@@ -38,6 +38,7 @@ from super_scientist.kernel.transactions.models import (
     RejectionCode,
     TransactionDecision,
 )
+from super_scientist.providers.storage import cognitive_records as cognitive_records_module
 from super_scientist.providers.storage import repositories as repositories_module
 from super_scientist.providers.storage.cognitive_records import (
     CapabilityProfileRepository,
@@ -527,6 +528,38 @@ def test_bulk_reads_build_one_operation_scoped_provenance_snapshot(
                 assert verification_count == 1
             finally:
                 sqlalchemy_event.remove(connection, "before_cursor_execute", record_statement)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_combined_cognitive_snapshot_loads_governed_provenance_once(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'combined-provenance.db').as_posix()}"
+    upgrade_database(database_url)
+    engine = create_engine(database_url)
+    calls = 0
+    real_load = cognitive_records_module._load_governed_provenance_snapshot
+
+    def counted_load(connection):
+        nonlocal calls
+        calls += 1
+        return real_load(connection)
+
+    monkeypatch.setattr(
+        cognitive_records_module,
+        "_load_governed_provenance_snapshot",
+        counted_load,
+    )
+    try:
+        with engine.connect() as connection:
+            snapshot = RepositorySet(connection).cognitive_workspace_integrity_snapshot()
+
+        assert snapshot.cognitive.capability_profiles == ()
+        assert snapshot.evaluation_extension.guidance_protocols == ()
+        assert calls == 1
     finally:
         engine.dispose()
 
