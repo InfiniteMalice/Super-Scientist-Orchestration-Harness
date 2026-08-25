@@ -394,10 +394,9 @@ class TransactionCoordinator:
                     and prior.decision.proposal_id == attempt.proposal_id
                 ):
                     decision = prior.decision.model_copy(update={"replayed": True})
-                    if (
-                        replay_context is None
-                        or not _workspace_replay_decision_matches(decision, replay_context)
-                        or _workspace_replay_matches(
+                    if replay_context is None or (
+                        _workspace_replay_decision_matches(decision, replay_context)
+                        and _workspace_replay_matches(
                             repositories,
                             prior.proposal,
                             decision,

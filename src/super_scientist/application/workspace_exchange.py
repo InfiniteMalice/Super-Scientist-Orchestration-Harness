@@ -490,7 +490,9 @@ def _replay_records(
     imported = 0
     replayed = 0
     conflicts: list[WorkspaceImportConflict] = []
+    repositories = unit_of_work.repositories()
     for record in sorted(workspace.records, key=lambda item: item.replay_order):
+        prior = repositories.transactions.get_by_idempotency_key(record.proposal.idempotency_key)
         coordinator = TransactionCoordinator(
             borrowed_uow_factory,
             policies[record.governing_policy_hash],
@@ -502,6 +504,14 @@ def _replay_records(
             attempt,
             _replay_proposal_factory(record),
         )
+        if (
+            prior is not None
+            and prior.proposal_hash == record.proposal_hash
+            and prior.proposal == record.proposal
+            and prior.decision != record.expected_decision
+            and _identity_conflict_code(decision) is not None
+        ):
+            raise WorkspaceImportError(f"replayed decision changed for {record.stable_identity}")
         if decision.replayed:
             replayed += 1
             if decision.model_copy(update={"replayed": False}) != record.expected_decision:

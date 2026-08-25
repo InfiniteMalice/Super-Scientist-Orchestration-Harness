@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import BaseModel
 from pydantic_core import to_jsonable_python
+from sqlalchemy import Connection
 
 from super_scientist.application.transactions import coordinator as coordinator_module
 from super_scientist.application.transactions.harness_extensions import (
@@ -1208,6 +1209,70 @@ def test_internal_workspace_context_cannot_replay_changed_content(tmp_path) -> N
             context(record.proposal, proposal_hash="c" * 64),
         )
         assert ordinary_replay.accepted is True and ordinary_replay.replayed is True
+    finally:
+        runtime.engine.dispose()
+
+
+def test_internal_workspace_context_cannot_borrow_legacy_null_intent_identity(
+    tmp_path,
+) -> None:
+    policy = _governed_policy()
+    runtime = _runtime(tmp_path, "legacy-null-intent", policy_snapshot=policy)
+    proposal = RecordCapabilityProfile(
+        proposal_id="legacy-null-profile-proposal",
+        idempotency_key="legacy-null-profile-proposal",
+        proposer=_service_actor(),
+        approval=_approval(runtime),
+        profile=_profile_for_policy(policy),
+    )
+    try:
+        with runtime.uow_factory() as unit_of_work:
+            connection = unit_of_work.connection
+            assert isinstance(connection, Connection)
+            decision = runtime.coordinator._submit_locked(
+                proposal,
+                unit_of_work.repositories(),
+                connection,
+            )
+        assert decision.accepted is True
+        exported = export_workspace(
+            uow_factory=runtime.uow_factory,
+            artifact_store=runtime.artifact_store,
+        )
+        record = next(item for item in exported.records if item.proposal == proposal)
+        assert record.replay_intent is not None
+        assert record.replay_intent.intent_fingerprint is None
+        attempt = ProposalAttempt(
+            proposal_id=proposal.proposal_id,
+            idempotency_key=proposal.idempotency_key,
+            proposer=proposal.proposer,
+            proposal_kind=proposal.proposal_type,
+            intent_digest=record.proposal_hash,
+        )
+        forged_expectations = (
+            record.expected_decision.model_copy(update={"accepted": False}),
+            record.expected_decision.model_copy(update={"replayed": True}),
+        )
+        conflicts = tuple(
+            runtime.coordinator.submit_intent(
+                attempt,
+                coordinator_module._WorkspaceReplayProposalFactory(
+                    proposal=proposal,
+                    proposal_hash=record.proposal_hash,
+                    intent_fingerprint=None,
+                    governing_policy_hash=record.governing_policy_hash,
+                    expected_decision=forged_expected,
+                    audit_event_id=record.replay_intent.audit_event_id,
+                    audit_event_hash=record.replay_intent.audit_event_hash,
+                ),
+            )
+            for forged_expected in forged_expectations
+        )
+
+        assert all(conflict.replayed is False for conflict in conflicts)
+        assert all(
+            conflict.reasons[0].code is RejectionCode.IDEMPOTENCY_CONFLICT for conflict in conflicts
+        )
     finally:
         runtime.engine.dispose()
 
