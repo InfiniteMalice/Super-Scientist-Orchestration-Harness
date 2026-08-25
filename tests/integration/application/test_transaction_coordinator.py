@@ -358,6 +358,7 @@ def test_compatibility_router_declares_the_resolved_proposal_type(runtime: Runti
 @pytest.mark.integration
 def test_every_new_cognitive_proposal_has_one_fixed_route(runtime: Runtime) -> None:
     assert len(NEW_COGNITIVE_PROPOSAL_TYPES) == 18
+    assert not hasattr(coordinator_module, "RetainedIntentProposalFactory")
 
     assert (
         tuple(

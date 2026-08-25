@@ -70,6 +70,7 @@ from super_scientist.domain.primitives import (
 )
 from super_scientist.kernel.admission.engine import AdmissionContext, AdmissionEngine
 from super_scientist.kernel.audit.chain import append_event
+from super_scientist.kernel.audit.models import json_compatible_payload
 from super_scientist.kernel.transactions.models import (
     GOVERNED_PROPOSAL_CLASSES,
     MAX_PROPOSAL_BYTES,
@@ -153,12 +154,16 @@ type ProposalFactory = Callable[[], object]
 
 
 @dataclass(frozen=True, slots=True)
-class RetainedIntentProposalFactory:
-    """Replay one canonical proposal with its retained source intent identity."""
+class _WorkspaceReplayProposalFactory:
+    """Internal, independently verified input for canonical workspace replay."""
 
     proposal: Proposal
     proposal_hash: Sha256Hex
     intent_fingerprint: Sha256Hex | None
+    governing_policy_hash: Sha256Hex
+    expected_decision: TransactionDecision
+    audit_event_id: StableIdentifier
+    audit_event_hash: Sha256Hex
 
     def __call__(self) -> Proposal:
         return cast(Proposal, object.__getattribute__(self, "proposal"))
@@ -312,11 +317,17 @@ class TransactionCoordinator:
         normalized = _normalize_proposal(proposal)
         if type(normalized) is TransactionDecision:
             return normalized
+        governed_intent_fingerprint = _governed_intent_fingerprint(cast(Proposal, normalized))
         with self._uow_factory() as uow:
             repositories = uow.repositories()
             require_workspace_integrity(repositories, self._artifact_store)
             connection = _active_connection(uow.connection)
-            return self._submit_locked(cast(Proposal, normalized), repositories, connection)
+            return self._submit_locked(
+                cast(Proposal, normalized),
+                repositories,
+                connection,
+                intent_fingerprint=governed_intent_fingerprint,
+            )
 
     def submit_batch(
         self,
@@ -336,7 +347,14 @@ class TransactionCoordinator:
                     decisions.append(proposal)
                 else:
                     decisions.append(
-                        self._submit_locked(cast(Proposal, proposal), repositories, connection)
+                        self._submit_locked(
+                            cast(Proposal, proposal),
+                            repositories,
+                            connection,
+                            intent_fingerprint=_governed_intent_fingerprint(
+                                cast(Proposal, proposal)
+                            ),
+                        )
                     )
         return tuple(decisions)
 
@@ -345,16 +363,22 @@ class TransactionCoordinator:
         attempt: ProposalAttempt,
         proposal_factory: ProposalFactory,
     ) -> TransactionDecision:
-        intent_fingerprint = (
-            object.__getattribute__(proposal_factory, "intent_fingerprint")
-            if type(proposal_factory) is RetainedIntentProposalFactory
-            else _attempt_fingerprint(attempt)
+        replay_context = (
+            proposal_factory if type(proposal_factory) is _WorkspaceReplayProposalFactory else None
         )
-        retained_proposal_hash = (
-            object.__getattribute__(proposal_factory, "proposal_hash")
-            if type(proposal_factory) is RetainedIntentProposalFactory
-            else None
-        )
+        intent_fingerprint = _attempt_fingerprint(attempt)
+        retained_proposal_hash: str | None = None
+        normalized: Proposal | None = None
+        if replay_context is not None:
+            normalized = _proposal_from_factory(attempt, replay_context)
+            retained_proposal_hash = _canonical_proposal_hash(normalized)
+            if (
+                retained_proposal_hash != object.__getattribute__(replay_context, "proposal_hash")
+                or attempt.intent_digest != retained_proposal_hash
+            ):
+                replay_context = None
+            else:
+                intent_fingerprint = object.__getattribute__(replay_context, "intent_fingerprint")
         with self._uow_factory() as uow:
             repositories = uow.repositories()
             require_workspace_integrity(repositories, self._artifact_store)
@@ -369,7 +393,18 @@ class TransactionCoordinator:
                     and prior.proposal.proposal_id == attempt.proposal_id
                     and prior.decision.proposal_id == attempt.proposal_id
                 ):
-                    return prior.decision.model_copy(update={"replayed": True})
+                    decision = prior.decision.model_copy(update={"replayed": True})
+                    if (
+                        replay_context is None
+                        or not _workspace_replay_decision_matches(decision, replay_context)
+                        or _workspace_replay_matches(
+                            repositories,
+                            prior.proposal,
+                            decision,
+                            replay_context,
+                        )
+                    ):
+                        return decision
                 conflict_proposal = _invalid_attempt(
                     attempt,
                     "idempotency key was reused with a different trusted attempt envelope",
@@ -389,38 +424,26 @@ class TransactionCoordinator:
                         intent_fingerprint=intent_fingerprint,
                     )
                 return decision
-            try:
-                candidate = proposal_factory()
-            except ValidationError as error:
-                normalized: Proposal = _invalid_attempt(
-                    attempt,
-                    _sanitized_validation_message(error),
-                )
-            except UnicodeError:
-                normalized = _invalid_attempt(
-                    attempt,
-                    "proposal factory input decoding failed",
-                )
-            else:
-                normalized_result = _normalize_proposal(candidate)
-                if type(normalized_result) is TransactionDecision:
-                    normalized = _invalid_attempt(
-                        attempt,
-                        "proposal factory returned a malformed proposal",
-                    )
-                elif not _matches_attempt(cast(Proposal, normalized_result), attempt):
-                    normalized = _invalid_attempt(
-                        attempt,
-                        "proposal factory result did not match the trusted attempt envelope",
-                    )
-                else:
-                    normalized = cast(Proposal, normalized_result)
-            return self._submit_locked(
+            if normalized is None:
+                normalized = _proposal_from_factory(attempt, proposal_factory)
+            decision = self._submit_locked(
                 normalized,
                 repositories,
                 _active_connection(uow.connection),
                 intent_fingerprint=intent_fingerprint,
             )
+            if (
+                replay_context is not None
+                and _workspace_replay_decision_matches(decision, replay_context)
+                and not _workspace_replay_matches(
+                    repositories,
+                    normalized,
+                    decision,
+                    replay_context,
+                )
+            ):
+                raise ValueError("workspace replay did not reproduce its retained audit identity")
+            return decision
 
     def _submit_locked(
         self,
@@ -1214,6 +1237,107 @@ def _matches_attempt(proposal: Proposal, attempt: ProposalAttempt) -> bool:
         and proposal.proposer == attempt.proposer
         and proposal_kind == attempt.proposal_kind
     )
+
+
+def _canonical_proposal_hash(proposal: Proposal) -> str:
+    return sha256_hex(
+        canonical_json_bytes(BaseModel.model_dump(proposal, mode="json", warnings="none"))
+    )
+
+
+def _governed_intent_fingerprint(proposal: Proposal) -> str | None:
+    """Give only exact 0007 proposals one canonical direct/intent identity."""
+
+    proposal_type = type(proposal)
+    if proposal_type not in GOVERNED_PROPOSAL_CLASSES or not _governed_proposal_state_is_safe(
+        proposal, proposal_type
+    ):
+        return None
+    try:
+        proposal_hash = _canonical_proposal_hash(proposal)
+        attempt = ProposalAttempt.model_validate(
+            {
+                "proposal_id": proposal.proposal_id,
+                "idempotency_key": proposal.idempotency_key,
+                "proposer": proposal.proposer,
+                "proposal_kind": proposal.proposal_type,
+                "intent_digest": proposal_hash,
+            }
+        )
+    except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
+        return None
+    return _attempt_fingerprint(attempt)
+
+
+def _proposal_from_factory(
+    attempt: ProposalAttempt,
+    proposal_factory: ProposalFactory,
+) -> Proposal:
+    try:
+        candidate = proposal_factory()
+    except ValidationError as error:
+        return _invalid_attempt(attempt, _sanitized_validation_message(error))
+    except UnicodeError:
+        return _invalid_attempt(attempt, "proposal factory input decoding failed")
+    normalized_result = _normalize_proposal(candidate)
+    if type(normalized_result) is TransactionDecision:
+        return _invalid_attempt(attempt, "proposal factory returned a malformed proposal")
+    normalized = cast(Proposal, normalized_result)
+    if not _matches_attempt(normalized, attempt):
+        return _invalid_attempt(
+            attempt,
+            "proposal factory result did not match the trusted attempt envelope",
+        )
+    return normalized
+
+
+def _workspace_replay_matches(
+    repositories: RepositorySet,
+    proposal: Proposal,
+    decision: TransactionDecision,
+    replay_context: _WorkspaceReplayProposalFactory,
+) -> bool:
+    """Rebind a retained replay to the actual transaction and audit chain."""
+
+    expected_decision = object.__getattribute__(replay_context, "expected_decision")
+    expected_hash = object.__getattribute__(replay_context, "proposal_hash")
+    stored = repositories.transactions.get_by_idempotency_key(proposal.idempotency_key)
+    if (
+        stored is None
+        or stored.proposal_hash != expected_hash
+        or stored.proposal != proposal
+        or stored.decision != expected_decision
+        or stored.intent_fingerprint
+        != object.__getattribute__(replay_context, "intent_fingerprint")
+    ):
+        return False
+    expected_event_id = object.__getattribute__(replay_context, "audit_event_id")
+    expected_event_hash = object.__getattribute__(replay_context, "audit_event_hash")
+    expected_policy_hash = object.__getattribute__(replay_context, "governing_policy_hash")
+    matches = []
+    for event in repositories.audit.list_all():
+        if event.event_id != expected_event_id or event.event_hash != expected_event_hash:
+            continue
+        payload = json_compatible_payload(event.payload)
+        if (
+            payload.get("proposal") == proposal.model_dump(mode="json")
+            and payload.get("decision") == expected_decision.model_dump(mode="json")
+            and payload.get("policy_hash") == expected_policy_hash
+            and payload.get("transaction_persisted") is True
+        ):
+            matches.append(event)
+    return len(matches) == 1
+
+
+def _workspace_replay_decision_matches(
+    decision: TransactionDecision,
+    replay_context: _WorkspaceReplayProposalFactory,
+) -> bool:
+    expected: TransactionDecision = object.__getattribute__(
+        replay_context,
+        "expected_decision",
+    )
+    return decision.model_copy(update={"replayed": False}) == expected
 
 
 def _invalid_attempt(attempt: ProposalAttempt, message: str) -> InvalidProposal:

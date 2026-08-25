@@ -11,8 +11,8 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_valida
 from sqlalchemy import Connection
 
 from super_scientist.application.transactions.coordinator import (
-    RetainedIntentProposalFactory,
     TransactionCoordinator,
+    _WorkspaceReplayProposalFactory,
 )
 from super_scientist.application.workspace_integrity import require_workspace_integrity
 from super_scientist.config.models import PolicySnapshot
@@ -127,10 +127,12 @@ type WorkspaceProposal = Annotated[Proposal, BeforeValidator(_parse_workspace_pr
 
 
 class WorkspaceReplayIntent(_StrictFrozenModel):
-    """Canonical source intent identity retained for deterministic audit replay."""
+    """Source identity used to verify, never authorize, deterministic replay."""
 
     schema_version: Literal[1] = 1
     intent_fingerprint: Sha256Hex | None
+    audit_event_id: StableIdentifier
+    audit_event_hash: Sha256Hex
 
 
 class WorkspaceRecord(_StrictFrozenModel):
@@ -258,6 +260,7 @@ def _export_workspace_snapshot(
     events = repositories.audit.list_all()
     governing_hashes = _governing_policy_hashes(events)
     replay_orders = _transaction_replay_orders(events)
+    transaction_events = _transaction_audit_events(events)
     records = tuple(
         sorted(
             (
@@ -270,6 +273,12 @@ def _export_workspace_snapshot(
                     expected_decision=transaction.decision.model_copy(update={"replayed": False}),
                     replay_intent=WorkspaceReplayIntent(
                         intent_fingerprint=transaction.intent_fingerprint,
+                        audit_event_id=transaction_events[
+                            transaction.proposal.proposal_id
+                        ].event_id,
+                        audit_event_hash=transaction_events[
+                            transaction.proposal.proposal_id
+                        ].event_hash,
                     ),
                 )
                 for transaction in transactions
@@ -583,10 +592,14 @@ def _constant_proposal_factory(proposal: Proposal) -> Callable[[], Proposal]:
 def _replay_proposal_factory(record: WorkspaceRecord) -> Callable[[], Proposal]:
     if record.replay_intent is None:
         return _constant_proposal_factory(record.proposal)
-    return RetainedIntentProposalFactory(
+    return _WorkspaceReplayProposalFactory(
         proposal=record.proposal,
         proposal_hash=record.proposal_hash,
         intent_fingerprint=record.replay_intent.intent_fingerprint,
+        governing_policy_hash=record.governing_policy_hash,
+        expected_decision=record.expected_decision,
+        audit_event_id=record.replay_intent.audit_event_id,
+        audit_event_hash=record.replay_intent.audit_event_hash,
     )
 
 
@@ -658,6 +671,20 @@ def _transaction_replay_orders(events: tuple[AuditEvent, ...]) -> dict[str, int]
             raise ValueError("transaction has more than one persisted audit event")
         replay_orders[proposal_id] = len(replay_orders)
     return replay_orders
+
+
+def _transaction_audit_events(events: tuple[AuditEvent, ...]) -> dict[str, AuditEvent]:
+    retained: dict[str, AuditEvent] = {}
+    for event in events:
+        payload = json_compatible_payload(event.payload)
+        proposal = payload.get("proposal")
+        if not isinstance(proposal, Mapping) or not payload.get("transaction_persisted"):
+            continue
+        proposal_id = proposal.get("proposal_id")
+        if not isinstance(proposal_id, str) or proposal_id in retained:
+            raise ValueError("transaction lacks one unique persisted audit event")
+        retained[proposal_id] = event
+    return retained
 
 
 def _governing_hash(

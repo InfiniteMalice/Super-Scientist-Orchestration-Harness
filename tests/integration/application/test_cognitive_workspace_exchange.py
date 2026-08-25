@@ -6,6 +6,7 @@ import pytest
 from pydantic import BaseModel
 from pydantic_core import to_jsonable_python
 
+from super_scientist.application.transactions import coordinator as coordinator_module
 from super_scientist.application.transactions.harness_extensions import (
     _trace_hash_bound_evidence,
     _trace_id_only_evidence,
@@ -90,6 +91,8 @@ from super_scientist.kernel.transactions.models import (
     CreateResearchRun,
     HarnessExecutionTraceEnvelope,
     HarnessTraceRecordMetadata,
+    Proposal,
+    ProposalAttempt,
     RecordCapabilityProfile,
     RecordCohortPlan,
     RecordCollaborationSession,
@@ -102,6 +105,7 @@ from super_scientist.kernel.transactions.models import (
     RecordModelHarnessProtocol,
     RecordProcedureCompilation,
     RecordRewardAssessment,
+    RejectionCode,
 )
 from super_scientist.providers.storage.procedure_sources import (
     ProcedureSourceBinding,
@@ -1077,10 +1081,7 @@ def test_030_bundle_round_trip_retains_direct_submit_receipt_audit_identity(tmp_
         )
 
         assert result.projections_verified is True
-        assert all(
-            record.replay_intent is not None and record.replay_intent.intent_fingerprint is None
-            for record in exported.records
-        )
+        assert all(record.replay_intent is not None for record in exported.records)
         with source.uow_factory() as source_uow, target.uow_factory() as target_uow:
             source_repositories = source_uow.repositories()
             target_repositories = target_uow.repositories()
@@ -1092,6 +1093,123 @@ def test_030_bundle_round_trip_retains_direct_submit_receipt_audit_identity(tmp_
     finally:
         source.engine.dispose()
         target.engine.dispose()
+
+
+def test_governed_direct_submit_uses_normal_canonical_intent_identity(tmp_path) -> None:
+    policy = _governed_policy()
+    runtime = _runtime(tmp_path, "canonical-intent", policy_snapshot=policy)
+    try:
+        _record_cognition_and_collaboration(runtime)
+        exported = export_workspace(
+            uow_factory=runtime.uow_factory,
+            artifact_store=runtime.artifact_store,
+        )
+        record = next(
+            item for item in exported.records if type(item.proposal) is RecordCapabilityProfile
+        )
+        attempt = ProposalAttempt(
+            proposal_id=record.proposal.proposal_id,
+            idempotency_key=record.proposal.idempotency_key,
+            proposer=record.proposal.proposer,
+            proposal_kind=record.proposal.proposal_type,
+            intent_digest=record.proposal_hash,
+        )
+
+        replay = runtime.coordinator.submit_intent(attempt, lambda: record.proposal)
+        changed_profile = record.proposal.profile.model_copy(
+            update={"profile_id": "changed-profile"}
+        )
+        changed = record.proposal.model_copy(update={"profile": changed_profile})
+        changed_hash = sha256_hex(
+            canonical_json_bytes(changed.model_dump(mode="json", warnings="none"))
+        )
+        conflict = runtime.coordinator.submit_intent(
+            attempt.model_copy(update={"intent_digest": changed_hash}),
+            lambda: changed,
+        )
+
+        assert replay.accepted is True and replay.replayed is True
+        assert conflict.reasons[0].code is RejectionCode.IDEMPOTENCY_CONFLICT
+    finally:
+        runtime.engine.dispose()
+
+
+def test_internal_workspace_context_cannot_replay_changed_content(tmp_path) -> None:
+    policy = _governed_policy()
+    runtime = _runtime(tmp_path, "spoofed-replay-context", policy_snapshot=policy)
+    try:
+        _record_cognition_and_collaboration(runtime)
+        exported = export_workspace(
+            uow_factory=runtime.uow_factory,
+            artifact_store=runtime.artifact_store,
+        )
+        record = next(
+            item for item in exported.records if type(item.proposal) is RecordCapabilityProfile
+        )
+        assert record.replay_intent is not None
+        changed = record.proposal.model_copy(
+            update={
+                "profile": record.proposal.profile.model_copy(
+                    update={"profile_id": "spoofed-profile"}
+                )
+            }
+        )
+        attempt = ProposalAttempt(
+            proposal_id=record.proposal.proposal_id,
+            idempotency_key=record.proposal.idempotency_key,
+            proposer=record.proposal.proposer,
+            proposal_kind=record.proposal.proposal_type,
+            intent_digest=record.proposal_hash,
+        )
+
+        def context(
+            proposal: Proposal,
+            *,
+            proposal_hash: str = record.proposal_hash,
+            intent_fingerprint: str | None = record.replay_intent.intent_fingerprint,
+            audit_event_hash: str = record.replay_intent.audit_event_hash,
+        ) -> coordinator_module._WorkspaceReplayProposalFactory:
+            return coordinator_module._WorkspaceReplayProposalFactory(
+                proposal=proposal,
+                proposal_hash=proposal_hash,
+                intent_fingerprint=intent_fingerprint,
+                governing_policy_hash=record.governing_policy_hash,
+                expected_decision=record.expected_decision,
+                audit_event_id=record.replay_intent.audit_event_id,
+                audit_event_hash=audit_event_hash,
+            )
+
+        decisions = (
+            runtime.coordinator.submit_intent(attempt, context(changed)),
+            runtime.coordinator.submit_intent(
+                attempt.model_copy(update={"intent_digest": "f" * 64}),
+                context(record.proposal),
+            ),
+            runtime.coordinator.submit_intent(
+                attempt,
+                context(record.proposal, intent_fingerprint=None),
+            ),
+            runtime.coordinator.submit_intent(
+                attempt,
+                context(record.proposal, intent_fingerprint="e" * 64),
+            ),
+            runtime.coordinator.submit_intent(
+                attempt,
+                context(record.proposal, audit_event_hash="d" * 64),
+            ),
+        )
+
+        assert all(decision.replayed is False for decision in decisions)
+        assert all(
+            decision.reasons[0].code is RejectionCode.IDEMPOTENCY_CONFLICT for decision in decisions
+        )
+        ordinary_replay = runtime.coordinator.submit_intent(
+            attempt,
+            context(record.proposal, proposal_hash="c" * 64),
+        )
+        assert ordinary_replay.accepted is True and ordinary_replay.replayed is True
+    finally:
+        runtime.engine.dispose()
 
 
 def test_030_bundle_round_trip_preserves_complete_18_family_snapshot(
