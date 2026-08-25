@@ -185,6 +185,7 @@ from super_scientist.kernel.transactions.models import (
     AdmitPrimitiveVersion,
     AppendProgressEvent,
     AppendResearchRunEvent,
+    BindCompiledProgressPlan,
     BindReportSentence,
     ConsolidateBehavioralRule,
     CreateHarnessCampaign,
@@ -705,12 +706,19 @@ def verify_workspace(
         cognitive_workspace = repositories.cognitive_workspace_integrity_snapshot()
         _require(
             cognitive_workspace.cognitive
-            == expected_cognitive_snapshot(accepted_transactions_in_audit_order),
+            == expected_cognitive_snapshot(
+                accepted_transactions_in_audit_order,
+                events,
+                artifact_store,
+            ),
             "cognitive projections do not match accepted transactions",
         )
         _require(
             cognitive_workspace.evaluation_extension
-            == expected_evaluation_extension_snapshot(accepted_transactions_in_audit_order),
+            == expected_evaluation_extension_snapshot(
+                accepted_transactions_in_audit_order,
+                events,
+            ),
             "evaluation extension projections do not match accepted transactions",
         )
         _require_projection_consistency(
@@ -1082,7 +1090,7 @@ def _require_projection_consistency(
                 "research run event projection",
             )
             expected_run_heads[proposal.event.run_id] = proposal.event.run_event_id
-        elif isinstance(proposal, RecordProgressPlan):
+        elif isinstance(proposal, (BindCompiledProgressPlan, RecordProgressPlan)):
             plan = proposal.plan
             _require_governing_hash(
                 plan.governing_policy_hash,
