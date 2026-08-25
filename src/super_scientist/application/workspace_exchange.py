@@ -27,6 +27,7 @@ from super_scientist.kernel.transactions.models import (
     Proposal,
     ProposalAttempt,
     ProposalKind,
+    RecordCollaborationTermination,
     RejectionCode,
     TransactionDecision,
 )
@@ -674,7 +675,7 @@ def _projection_expectations(
         ("harness_campaign_head", item[0], item[1:])
         for item in repositories.harness_integrity_snapshot().heads
     )
-    return tuple(
+    existing = tuple(
         sorted(
             (
                 WorkspaceProjectionExpectation(
@@ -690,6 +691,120 @@ def _projection_expectations(
             ),
             key=lambda item: (item.projection_kind, item.stable_identity),
         )
+    )
+    return tuple(
+        sorted(
+            (*existing, *_governed_projection_expectations(repositories)),
+            key=lambda item: (item.projection_kind, item.stable_identity),
+        )
+    )
+
+
+def _governed_projection_expectations(
+    repositories: RepositorySet,
+) -> tuple[WorkspaceProjectionExpectation, ...]:
+    governed = repositories.cognitive_workspace_integrity_snapshot()
+    cognitive = governed.cognitive
+    evaluation = governed.evaluation_extension
+    termination_ids = tuple(
+        sorted(
+            transaction.proposal.session_id
+            for transaction in repositories.transactions.list_all()
+            if transaction.decision.accepted
+            and isinstance(transaction.proposal, RecordCollaborationTermination)
+        )
+    )
+    if len(termination_ids) != len(cognitive.terminations):
+        raise ValueError("collaboration termination projection identities do not match records")
+    values = [
+        *(
+            ("capability_profile_record", item.profile_id, item.content_hash)
+            for item in cognitive.capability_profiles
+        ),
+        *(
+            ("cohort_plan_record", item.cohort_plan_id, item.content_hash)
+            for item in cognitive.cohort_plans
+        ),
+        *(
+            (
+                "diversity_assessment_record",
+                item.diversity_assessment_id,
+                item.content_hash,
+            )
+            for item in cognitive.diversity_assessments
+        ),
+        *(
+            ("collaboration_session_record", item.session_id, item.content_hash)
+            for item in cognitive.collaboration_sessions
+        ),
+        *(
+            ("peer_request_record", item.request_id, item.content_hash)
+            for item in cognitive.peer_requests
+        ),
+        *(
+            ("peer_contribution_record", item.contribution_id, item.content_hash)
+            for item in cognitive.peer_contributions
+        ),
+        *(
+            ("topology_event_record", item.event_id, item.content_hash)
+            for item in cognitive.topology_events
+        ),
+        *(
+            (
+                "collaboration_termination_record",
+                identity,
+                sha256_hex(canonical_json_bytes(item.model_dump(mode="json"))),
+            )
+            for identity, item in zip(termination_ids, cognitive.terminations, strict=True)
+        ),
+        *(
+            ("procedure_compilation_record", item.compilation_id, item.content_hash)
+            for item in cognitive.compilations
+        ),
+        *(
+            ("method_direction_outcome_record", item.outcome_id, item.content_hash)
+            for item in cognitive.method_outcomes
+        ),
+        *(
+            ("compiled_progress_plan_binding_record", item.binding_id, item.content_hash)
+            for item in cognitive.bindings
+        ),
+        *(
+            ("guidance_protocol_record", item.protocol_id, item.content_hash)
+            for item in evaluation.guidance_protocols
+        ),
+        *(
+            ("guidance_cell_record", item.cell_id, item.content_hash)
+            for item in evaluation.guidance_cells
+        ),
+        *(
+            ("model_harness_protocol_record", item.protocol_id, item.content_hash)
+            for item in evaluation.model_harness_protocols
+        ),
+        *(
+            ("model_harness_cell_record", item.cell_id, item.content_hash)
+            for item in evaluation.model_harness_cells
+        ),
+        *(
+            ("model_harness_analysis_record", item.protocol_id, item.content_hash)
+            for item in evaluation.model_harness_analyses
+        ),
+        *(
+            ("harness_execution_trace_record", item.trace_id, item.content_hash)
+            for item in evaluation.harness_execution_traces
+        ),
+        *(
+            ("reward_assessment_record", item.assessment_id, item.content_hash)
+            for item in evaluation.reward_assessments
+        ),
+    ]
+    return tuple(
+        WorkspaceProjectionExpectation(
+            projection_kind=kind,
+            stable_identity=identity,
+            content_hash=content_hash,
+        )
+        for kind, identity, content_hash in values
     )
 
 

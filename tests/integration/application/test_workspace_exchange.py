@@ -289,6 +289,8 @@ def test_workspace_export_import_is_protected_safe_canonical_and_replayable(
     assert replayed.replayed == 1
     assert replayed.projections_verified is True
     assert target_export == exported
+    with target.uow_factory() as unit_of_work:
+        assert unit_of_work.repositories().cognitive_workspace_integrity_snapshot().is_empty()
 
 
 def test_procedure_source_snapshot_audit_metadata_round_trips_through_replay(
@@ -431,12 +433,15 @@ def test_workspace_export_validates_every_record_identity_and_decision_binding(
     replay_marker["records"][0]["expected_decision"]["replayed"] = True
     policy_mismatch = copy.deepcopy(base)
     policy_mismatch["policies"][0]["policy_hash"] = "0" * 64
+    unknown_version = copy.deepcopy(base)
+    unknown_version["schema_version"] = 2
 
     for payload, message in (
         (identity_mismatch, "stable identity"),
         (decision_mismatch, "decision identity"),
         (replay_marker, "replay marker"),
         (policy_mismatch, "policy hash"),
+        (unknown_version, "schema_version"),
     ):
         with pytest.raises(ValueError, match=message):
             exchange.WorkspaceExport.model_validate_json(json.dumps(payload))

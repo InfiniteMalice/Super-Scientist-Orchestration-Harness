@@ -31,6 +31,7 @@ from super_scientist.kernel.transactions.models import (
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
     CognitiveIntegritySnapshot,
+    CognitiveWorkspaceIntegritySnapshot,
     EvaluationExtensionIntegritySnapshot,
     HandbookIntegritySnapshot,
     HarnessIntegritySnapshot,
@@ -1314,6 +1315,12 @@ class RepositorySet:
             reward_assessments=RewardAssessmentRepository(
                 self._connection
             )._list_all_with_provenance(provenance),
+        )
+
+    def cognitive_workspace_integrity_snapshot(self) -> CognitiveWorkspaceIntegritySnapshot:
+        return CognitiveWorkspaceIntegritySnapshot(
+            cognitive=self.cognitive_integrity_snapshot(),
+            evaluation_extension=self.evaluation_extension_integrity_snapshot(),
         )
 
     def has_durable_state(self) -> bool:

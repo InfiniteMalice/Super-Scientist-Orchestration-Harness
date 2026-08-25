@@ -252,3 +252,14 @@ class EvaluationExtensionIntegritySnapshot:
                 self.reward_assessments,
             )
         )
+
+
+@dataclass(frozen=True)
+class CognitiveWorkspaceIntegritySnapshot:
+    """One restart-stable view of every governed record introduced by migration 0007."""
+
+    cognitive: CognitiveIntegritySnapshot
+    evaluation_extension: EvaluationExtensionIntegritySnapshot
+
+    def is_empty(self) -> bool:
+        return self.cognitive.is_empty() and self.evaluation_extension.is_empty()

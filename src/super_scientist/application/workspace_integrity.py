@@ -657,6 +657,11 @@ def verify_workspace(
     *,
     quality_policy_binding: QualityPolicyBinding | None = None,
 ) -> AuditVerification:
+    from super_scientist.application.cognitive.integrity import (
+        expected_cognitive_snapshot,
+        expected_evaluation_extension_snapshot,
+    )
+
     events: tuple[AuditEvent, ...] = ()
     try:
         approved_quality_policy = approved_quality_policy_binding()
@@ -689,6 +694,25 @@ def verify_workspace(
         )
         audit_records = _validated_audit_records(events, repositories, artifact_store)
         _require_transaction_audit_consistency(transactions, audit_records)
+        ordered_transactions_by_id = {
+            transaction.proposal.proposal_id: transaction for transaction in transactions
+        }
+        accepted_transactions_in_audit_order = tuple(
+            ordered_transactions_by_id[record.proposal.proposal_id]
+            for record in audit_records
+            if record.transaction_persisted and record.decision.accepted
+        )
+        cognitive_workspace = repositories.cognitive_workspace_integrity_snapshot()
+        _require(
+            cognitive_workspace.cognitive
+            == expected_cognitive_snapshot(accepted_transactions_in_audit_order),
+            "cognitive projections do not match accepted transactions",
+        )
+        _require(
+            cognitive_workspace.evaluation_extension
+            == expected_evaluation_extension_snapshot(accepted_transactions_in_audit_order),
+            "evaluation extension projections do not match accepted transactions",
+        )
         _require_projection_consistency(
             repositories,
             audit_records,
