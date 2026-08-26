@@ -16,6 +16,7 @@ from super_scientist.domain.collaboration import (
 from super_scientist.domain.procedures import compile_method
 from super_scientist.domain.procedures.models import (
     CandidateMethod,
+    OpaqueProcedureCompilationEnvelope,
     ProcedureAuthority,
     ProcedureBoundaryValidationError,
     ProcedureCompilationRequest,
@@ -24,7 +25,14 @@ from super_scientist.domain.procedures.models import (
     ProcedureStep,
     ProcedureValidationStatus,
 )
-from tests.integration.application.test_transaction_coordinator import Runtime
+from super_scientist.kernel.transactions.models import RecordProcedureCompilation
+from tests.integration.application.test_cognitive_workspace_exchange import (
+    _approval,
+    _governed_policy,
+    _record_procedure,
+    _service_actor,
+)
+from tests.integration.application.test_workspace_exchange import ExchangeRuntime, _runtime
 from tests.unit.collaboration.conftest import unit_usage
 from tests.unit.collaboration.test_engine import _contribution, _request
 from tests.unit.procedures.test_compiler import (
@@ -36,13 +44,10 @@ from tests.unit.procedures.test_compiler import (
     valid_request,
 )
 
-pytest_plugins = (
-    "tests.integration.application.test_transaction_coordinator",
-    "tests.unit.collaboration.conftest",
-)
+pytest_plugins = ("tests.unit.collaboration.conftest",)
 
 
-def _authority_heads(runtime: Runtime) -> tuple[object, ...]:
+def _authority_heads(runtime: ExchangeRuntime) -> tuple[object, ...]:
     with runtime.uow_factory() as unit_of_work:
         repositories = unit_of_work.repositories()
         return (
@@ -62,43 +67,81 @@ def _authority_heads(runtime: Runtime) -> tuple[object, ...]:
     ),
 )
 def test_procedure_inputs_and_tools_are_closed_to_declared_capabilities(
-    runtime: Runtime,
     request_factory: Callable[[], ProcedureCompilationRequest],
     expected_code: ProcedureFindingCode,
 ) -> None:
-    before = _authority_heads(runtime)
-
     result = compile_method(request_factory())
 
     assert result.report.status is ProcedureValidationStatus.INVALID
     assert expected_code in {finding.code for finding in result.report.findings}
-    assert _authority_heads(runtime) == before
 
 
-@pytest.mark.parametrize(
-    "authority",
-    (
-        ProcedureAuthority.GOVERNANCE_WRITE,
-        ProcedureAuthority.TRANSACTION_WRITE,
-        ProcedureAuthority.PROTECTED_EVALUATOR,
-        ProcedureAuthority.PROTECTED_ANSWER_ACCESS,
-    ),
-)
-def test_impossible_procedure_authority_is_reported_without_escalation(
-    runtime: Runtime,
-    authority: ProcedureAuthority,
+def test_coordinator_persists_invalid_impossible_authority_without_escalation(
+    tmp_path: Path,
 ) -> None:
-    before = _authority_heads(runtime)
-    request = valid_request()
-    forged_step = _rebuild_step(request.candidate.stages[0], required_authorities=(authority,))
+    policy = _governed_policy()
+    runtime = _runtime(tmp_path, "procedure-escalation", policy_snapshot=policy)
+    try:
+        _record_procedure(runtime)
+        with runtime.uow_factory() as unit_of_work:
+            repositories = unit_of_work.repositories()
+            original_compilations = repositories.cognitive_integrity_snapshot().compilations
+            assert len(original_compilations) == 1
+            request = original_compilations[0].result.parse_request()
+            before_counts = (
+                len(repositories.transactions.list_all()),
+                len(repositories.audit.list_all()),
+            )
+        before = _authority_heads(runtime)
+        expected_results = {}
+        for authority in (
+            ProcedureAuthority.GOVERNANCE_WRITE,
+            ProcedureAuthority.TRANSACTION_WRITE,
+            ProcedureAuthority.PROTECTED_EVALUATOR,
+            ProcedureAuthority.PROTECTED_ANSWER_ACCESS,
+        ):
+            forged_step = _rebuild_step(
+                request.candidate.stages[0], required_authorities=(authority,)
+            )
+            result = compile_method(_replace_step(request, 0, forged_step))
+            assert result.report.status is ProcedureValidationStatus.INVALID
+            assert ProcedureFindingCode.IMPOSSIBLE_AUTHORITY in {
+                finding.code for finding in result.report.findings
+            }
+            proposal = RecordProcedureCompilation(
+                proposal_id=f"record-impossible-{authority.value.lower()}",
+                idempotency_key=f"record-impossible-{authority.value.lower()}",
+                proposer=_service_actor(),
+                approval=_approval(runtime),
+                compilation=OpaqueProcedureCompilationEnvelope.build(
+                    compilation_id=f"compilation-impossible-{authority.value.lower()}",
+                    result=result,
+                    created_at=original_compilations[0].created_at,
+                    governing_policy_hash=policy.policy_hash,
+                ),
+            )
 
-    result = compile_method(_replace_step(request, 0, forged_step))
+            decision = runtime.coordinator.submit(proposal)
 
-    assert result.report.status is ProcedureValidationStatus.INVALID
-    assert ProcedureFindingCode.IMPOSSIBLE_AUTHORITY in {
-        finding.code for finding in result.report.findings
-    }
-    assert _authority_heads(runtime) == before
+            assert decision.accepted
+            expected_results[proposal.compilation.compilation_id] = result
+
+        assert _authority_heads(runtime) == before
+        with runtime.uow_factory() as unit_of_work:
+            repositories = unit_of_work.repositories()
+            retained = repositories.cognitive_integrity_snapshot().compilations
+            retained_by_id = {item.compilation_id: item.result for item in retained}
+            assert {
+                compilation_id: retained_by_id[compilation_id]
+                for compilation_id in expected_results
+            } == expected_results
+            assert repositories.progress_integrity_snapshot().heads == before[3]
+            assert (
+                len(repositories.transactions.list_all()),
+                len(repositories.audit.list_all()),
+            ) == (before_counts[0] + 4, before_counts[1] + 4)
+    finally:
+        runtime.engine.dispose()
 
 
 @pytest.mark.parametrize(
@@ -150,10 +193,7 @@ def test_procedure_input_injection_is_rejected_as_extra_data(field_name: str) ->
         ProcedureStep.model_validate(payload, strict=True)
 
 
-def test_prompt_injection_remains_inert_public_objective_text(
-    runtime: Runtime,
-) -> None:
-    before = _authority_heads(runtime)
+def test_prompt_injection_remains_inert_public_objective_text() -> None:
     request = valid_request()
     injected = _rebuild_step(
         request.candidate.stages[0],
@@ -168,13 +208,9 @@ def test_prompt_injection_remains_inert_public_objective_text(
     assert compiled.operation is ProcedureOperation.INSPECT_DECLARED_ARTIFACT
     assert compiled.required_authorities == (ProcedureAuthority.READ_DECLARED_ARTIFACT,)
     assert "command" not in compiled.__class__.model_fields
-    assert _authority_heads(runtime) == before
 
 
-def test_method_anchoring_rehashes_changes_and_rejects_stale_copies(
-    runtime: Runtime,
-) -> None:
-    before = _authority_heads(runtime)
+def test_method_anchoring_rehashes_changes_and_rejects_stale_copies() -> None:
     request = valid_request()
     changed_step = _rebuild_step(
         request.candidate.stages[0], objective="Inspect only the declared source twice."
@@ -192,14 +228,11 @@ def test_method_anchoring_rehashes_changes_and_rejects_stale_copies(
     stale_request = request.model_copy(update={"candidate": stale_candidate})
     with pytest.raises(ProcedureBoundaryValidationError):
         compile_method(stale_request)
-    assert _authority_heads(runtime) == before
 
 
 def test_recursive_delegation_is_bounded_and_rolls_back_state(
-    runtime: Runtime,
     session_factory: Callable[..., CollaborationSession],
 ) -> None:
-    before_authority = _authority_heads(runtime)
     session = session_factory("peer-a", "peer-b", max_parent_depth=0)
     initial = initial_collaboration_state(session)
     first = advance_collaboration(
@@ -228,7 +261,6 @@ def test_recursive_delegation_is_bounded_and_rolls_back_state(
         advance_collaboration(session, first, second_request, recursive, unit_usage())
 
     assert first.contributions == (_contribution(session, "peer-a"),)
-    assert _authority_heads(runtime) == before_authority
 
 
 def test_delegation_schema_has_no_nested_or_executable_request_escape(
