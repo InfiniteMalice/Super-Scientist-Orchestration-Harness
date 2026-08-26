@@ -107,6 +107,7 @@ _MAX_UNC_SERVER_NAME_LENGTH = 255
 _MAX_UNC_SHARE_NAME_LENGTH = 80
 _UNC_SERVER_ILLEGAL_CHARACTERS = frozenset(' <>:"|?*')
 _UNC_SHARE_ILLEGAL_CHARACTERS = frozenset('"\\/[]:|<>+=;,*?')
+_WINDOWS_NATIVE_NAMESPACE_TOKENS = frozenset({"??", "device", "global??", "dosdevices"})
 
 
 def _contains_ascii_control(value: str) -> bool:
@@ -136,6 +137,18 @@ def _windows_unc_share_is_noncanonical(share: str) -> bool:
     )
 
 
+def _require_not_windows_native_namespace(value: str) -> None:
+    if not value or value[0] not in {"/", "\\"}:
+        return
+    remainder = value[1:]
+    token_end = next(
+        (index for index, character in enumerate(remainder) if character in {"/", "\\"}),
+        len(remainder),
+    )
+    if remainder[:token_end].casefold() in _WINDOWS_NATIVE_NAMESPACE_TOKENS:
+        _raise_noncanonical_windows_root()
+
+
 def _require_canonical_unc_root(value: str) -> bool:
     if len(value) < 2 or value[0] not in {"/", "\\"} or value[1] not in {"/", "\\"}:
         return False
@@ -160,7 +173,10 @@ def _require_canonical_unc_root(value: str) -> bool:
 
 
 def _require_canonical_windows_root_text(value: str) -> None:
-    if os.name != "nt" or _require_canonical_unc_root(value):
+    if os.name != "nt":
+        return
+    _require_not_windows_native_namespace(value)
+    if _require_canonical_unc_root(value):
         return
     _root, tail = ntpath.splitdrive(value)
     canonical_tail = tail.replace("/", "\\")

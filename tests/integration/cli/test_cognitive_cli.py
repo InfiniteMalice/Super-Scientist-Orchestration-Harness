@@ -589,12 +589,74 @@ def test_cognitive_cli_rejects_unc_aliases_before_path_or_database_access(
     assert _workspace_state(workspace) == before
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Win32 NT namespace parsing is Windows-specific")
+@pytest.mark.parametrize(
+    "namespace_root",
+    (
+        "\\??\\C:\\workspace",
+        "\\dEvIcE\\HarddiskVolume1\\workspace",
+        "\\GLOBAL??\\C:\\workspace",
+        "\\dosDEVICES\\C:\\workspace",
+        "/??/C:/workspace",
+        "/DEVICE/HarddiskVolume1/workspace",
+        "/global??\\C:\\workspace",
+        "\\DosDevices/C:/workspace",
+    ),
+)
+def test_cognitive_cli_rejects_single_leading_native_namespace_before_path_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    namespace_root: str,
+) -> None:
+    before = _workspace_state(tmp_path)
+    path_calls: list[object] = []
+    engine_calls: list[Path] = []
+
+    def forbidden_path(value: object) -> object:
+        path_calls.append(value)
+        raise AssertionError("native namespace rejection must precede Path construction")
+
+    def forbidden_engine(database: Path) -> object:
+        engine_calls.append(database)
+        raise AssertionError("native namespace rejection must precede database open")
+
+    monkeypatch.setattr(cognitive_cli, "Path", forbidden_path)
+    monkeypatch.setattr(cognitive_cli, "_read_only_engine", forbidden_engine)
+    for json_output in (False, True):
+        arguments = [
+            "cognitive",
+            "inspect",
+            "--root",
+            namespace_root,
+            "--kind",
+            "capability-profile",
+            "--id",
+            "profile-peer-a",
+        ]
+        if json_output:
+            arguments.append("--json")
+
+        result = runner.invoke(app, arguments)
+
+        assert result.exit_code == 2
+        envelope_text = (
+            result.stdout
+            if json_output
+            else result.stdout.removeprefix("cognitive inspect: rejected\n")
+        )
+        assert json.loads(envelope_text)["errors"][0]["code"] == "INVALID_ARGUMENT"
+    assert path_calls == []
+    assert engine_calls == []
+    assert _workspace_state(tmp_path) == before
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Win32 path normalization is Windows-specific")
 def test_windows_root_spelling_gate_preserves_root_syntax_and_canonical_unicode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     accepted = (
         "C:\\",
+        "\\workspace",
         "\\\\server\\share",
         "\\\\server\\share\\",
         "\\\\server\\share\\path",
