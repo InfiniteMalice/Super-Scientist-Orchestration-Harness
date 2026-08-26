@@ -12,13 +12,20 @@ from super_scientist.config.models import GovernancePolicy, PolicySnapshot
 from super_scientist.domain.evidence.models import EvidenceRecord
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
-from super_scientist.kernel.transactions.models import AddEvidence
+from super_scientist.kernel.transactions.models import (
+    AddEvidence,
+    RecordCapabilityProfile,
+    RejectionCode,
+)
 from super_scientist.providers.storage.artifacts import FileArtifactStore
 from super_scientist.providers.storage.database import (
     DatabaseUnitOfWork,
     create_database_engine,
     upgrade_database,
 )
+from tests.integration.application.test_transaction_coordinator import Runtime
+
+pytest_plugins = ("tests.integration.application.test_transaction_coordinator",)
 
 NOW = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
 
@@ -73,10 +80,43 @@ def test_replaying_a_submission_is_stable(content: bytes) -> None:
         service = KernelService(uow_factory, policy, FixedClock(), artifact_store)
 
         first = service.submit(proposal)
+        with DatabaseUnitOfWork(engine) as unit_of_work:
+            repositories = unit_of_work.repositories()
+            before_replay = (
+                len(repositories.transactions.list_all()),
+                len(repositories.audit.list_all()),
+                len(repositories.evidence.list_all()),
+            )
         replay = service.submit(proposal)
+        with DatabaseUnitOfWork(engine) as unit_of_work:
+            repositories = unit_of_work.repositories()
+            after_replay = (
+                len(repositories.transactions.list_all()),
+                len(repositories.audit.list_all()),
+                len(repositories.evidence.list_all()),
+            )
 
         engine.dispose()
 
     assert first.accepted
     assert replay.replayed
     assert replay.model_copy(update={"replayed": False}) == first
+    assert after_replay == before_replay == (1, 1, 1)
+
+
+def test_exact_rejected_governed_replay_appends_nothing(runtime: Runtime) -> None:
+    invalid = RecordCapabilityProfile.model_construct(
+        proposal_id="proposal-property-invalid-capability",
+        idempotency_key="key-property-invalid-capability",
+        proposer=runtime.actor,
+    )
+
+    first = runtime.coordinator.submit(invalid)
+    before_replay = runtime.transaction_and_audit_counts()
+    replay = runtime.coordinator.submit(invalid)
+
+    assert not first.accepted
+    assert first.reasons[0].code is RejectionCode.DERIVATION_MISMATCH
+    assert replay.replayed
+    assert replay.model_copy(update={"replayed": False}) == first
+    assert runtime.transaction_and_audit_counts() == before_replay == (1, 1)
