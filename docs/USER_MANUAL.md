@@ -21,6 +21,7 @@ This manual is STE-aligned. It serves human operators and Large Language Model (
 | `MAN-13` | Security and Safe Operation | State actual security controls and residual risks. | Implemented |
 | `MAN-14` | Glossary | Define approved project terms. | Reference |
 | `MAN-15` | Source Map | Map manual sections to sources and tests. | Reference |
+| `MAN-16` | Cognitive Cohorts and Procedure Compilation | Run the governed cognitive and procedure workflow. | Implemented with example-only actors |
 
 ## `MAN-01` — Document Control
 
@@ -28,14 +29,14 @@ This manual is STE-aligned. It serves human operators and Large Language Model (
 | --- | --- |
 | Manual title | Super Scientist Orchestration Harness User Manual |
 | Repository | `InfiniteMalice/Super-Scientist-Orchestration-Harness` |
-| Repository commit | `b5b4ad9fa99713bd6e5722268412ef06884e6fa3` |
-| Package version | `0.2.0` |
+| Repository commit | `d2d4a5d64ea44d9e1d3dc65cbf1e44aac5907450` |
+| Package version | `0.3.0` |
 | Manual status | STE-aligned manual for the named commit |
 | Python | Python 3.12 or newer |
 | Operating systems | Windows PowerShell and POSIX shells are documented. SQLite and local filesystem behavior apply. |
 | Intended audience | Operators, researchers, developers, reviewers, and LLM agents |
-| Scope | Local transactional admission, durable records, examples, audit, workspace exchange, and development quality checks |
-| Out of scope | Live providers, autonomous orchestration, live experiments, arbitrary execution, training, and scientific-truth certification |
+| Scope | Local transactional admission, governed cognitive evidence, procedure compilation, durable records, read-only inspection, examples, audit, workspace exchange, and development quality checks |
+| Out of scope | Live providers, live peer or model execution, live experiments, arbitrary execution, reinforcement learning, automatic promotion, and scientific-truth certification |
 
 “STE-aligned” means the manual applies ASD-STE100 Issue 9 principles.
 
@@ -52,19 +53,14 @@ The project did not validate the complete controlled dictionary or every applica
 | Deferred | Project documents describe future work. |
 | Prohibited | The security boundary intentionally prevents the capability. |
 
-### Known documentation issues
+### Controlled release facts
 
 `are_independent()` rejects actors that share any declared operational identity dimension.
 
-`GOVERNANCE.md` describes a less strict tuple comparison for model actors.
+Operational diversity does not satisfy reviewer independence.
 
-Use the code and authority tests. Treat the narrative statement as an open documentation issue.
-
-`quality.runner.CHECKS` contains nine checks, including `wheel-install`.
-
-`README.md` and `GOVERNANCE.md` say that the registry contains eight checks.
-
-Use the nine-entry code registry. Treat the narrative count as an open documentation issue.
+`quality.runner.CHECKS` contains exactly nine checks: `format`, `lint`, `types`,
+`tests`, `security`, `dependencies`, `build`, `package`, and `wheel-install`.
 
 ## `MAN-02` — Safety and Authority Summary
 
@@ -88,7 +84,7 @@ Only registered deterministic simulators can execute in the current hypothesis s
 
 Human authority is mandatory when the active policy requires human approval.
 
-The repository contains no live model provider or autonomous orchestration loop.
+The repository contains no live model provider or autonomous model-execution loop.
 
 ### Authority types
 
@@ -119,6 +115,13 @@ Operators must administer actor identities truthfully.
 
 ## `MAN-03` — System Overview
 
+The control plane owns policy, admission, transaction, audit, storage, artifact,
+integrity, workspace-exchange, progress-head, and protected-evaluator authority. The
+cognitive plane produces typed evidence and pure analyses. A cognitive record cannot
+change a claim head, policy, harness head, progress head, model weight, tool permission,
+or protected answer. Only a separate fixed control-plane handler can perform an
+authorized transition.
+
 1. A human, model, tool, or service creates a proposal.
 2. The coordinator treats the proposal as untrusted.
 3. The coordinator validates identity and policy.
@@ -133,11 +136,12 @@ Operators must administer actor identities truthfully.
 [Human / model / tool / service]
               |
               v
-       UNTRUSTED PROPOSAL
+   UNTRUSTED TYPED PROPOSAL
+   cognitive plane may supply evidence and pure analysis
               |
               v
   +-----------------------------+
-  | DETERMINISTIC CONTROL       |
+  | CONTROL PLANE               |
   | integrity -> replay ->      |
   | schema -> policy -> identity|
   | -> domain gates             |
@@ -153,6 +157,10 @@ Operators must administer actor identities truthfully.
 Human authority enters only at explicit approval gates.
 PROHIBITED: record -> shell, network, dynamic import, eval, exec, or live model provider.
 ```
+
+`CognitiveOrchestrationService` and `ResearchCoordinator` are sealed and stateless.
+Each operation receives the exact `TransactionCoordinator` only as a call-local
+argument. Neither facade retains storage, artifact, execution, or protected authority.
 
 The SQLite transaction uses `BEGIN IMMEDIATE`.
 
@@ -175,7 +183,7 @@ Exact replay returns the stored decision without another mutation or audit event
 
 | Command | Purpose | Expected result | Common failure | Corrective action |
 | --- | --- | --- | --- | --- |
-| `python -m pip install .` | Install core runtime dependencies. | Pip installs package version `0.2.0`. | Package index access fails. | Restore approved index access and retry. |
+| `python -m pip install .` | Install core runtime dependencies. | Pip installs package version `0.3.0`. | Package index access fails. | Restore approved index access and retry. |
 | `python -m pip install -e ".[dev]"` | Install development checks. | Pip installs the editable package and tools. | A build dependency is unavailable. | Preserve the pip log and restore index access. |
 | `scientist-harness --help` | Verify the CLI entry point. | The command list appears. | The command is not found. | Activate the environment and reinstall the package. |
 | `scientist-harness init --root .kernel --json` | Initialize an empty workspace. | JSON reports success. | The target contains orphaned or incompatible state. | Preserve the target and choose a new empty root. |
@@ -805,6 +813,309 @@ Use one field order for every role. A role name describes responsibility, not a 
 
 **Source references:** `FileArtifactStore`; artifact and Windows reparse-point tests.
 
+#### `ROLE-RESEARCH-COORDINATOR` — Research Coordinator
+
+**Capability status:** Implemented stateless sequencing service; live research planning
+is interface only.
+
+**Purpose:** Submit one declared tuple of governed proposals and stop after the first
+rejection.
+
+**Recommended actor type:** Human researcher using the fixed service.
+
+**Suggested model type:** No LLM is required for sequencing. A scientific-reasoning
+model may prepare proposals outside the service authority boundary.
+
+**Required capabilities:** Typed proposal construction, stable identifiers, policy
+awareness, and interpretation of fixed transaction decisions.
+
+**Authority:** The role can arrange submissions. The role cannot retain the coordinator,
+admit a proposal, access storage, execute a method, or read protected answers.
+
+**Independence requirement:** The role grants no reviewer independence. Each submitted
+proposal must satisfy its own actor-independence rule.
+
+**Inputs:** Exact `CognitiveOrchestrationService`, exact `TransactionCoordinator`, and an
+exact tuple of typed proposals.
+
+**Outputs:** An ordered prefix of `TransactionDecision` records ending at the first
+rejection or at the declared tuple boundary.
+
+**Common failures:** Wrong facade type, wrong coordinator type, non-tuple input, malformed
+proposal, or a rejected stage.
+
+**Resolution:** Preserve the decisions. Correct the rejected proposal and use a new
+stable identity when its content changes. Do not retry with weaker constraints.
+
+**Unsuitable model types:** Autonomous agents that require retained storage, provider,
+tool-execution, or policy authority.
+
+**Source references:** `src/super_scientist/application/cognitive/service.py`:
+`ResearchCoordinator.run_declared_slice()` and `CognitiveOrchestrationService.submit()`;
+`tests/integration/application/test_cognitive_service.py`.
+
+#### `ROLE-CAPABILITY-GROUNDER` — Capability Grounder
+
+**Capability status:** Implemented pure grounding and governed persistence; live model
+grounding is interface only.
+
+**Purpose:** Classify each declared capability as verified, self-reported, unknown, or
+unsupported from exact accepted evidence.
+
+**Recommended actor type:** Deterministic service with human-curated evidence.
+
+**Suggested model type:** No LLM is required for grounding. A bounded extraction model
+may propose assertions before deterministic validation.
+
+**Required capabilities:** Exact receipt resolution, evidence-status classification,
+task-conditioned requirement matching, and canonical structured output.
+
+**Authority:** The role can propose a `CapabilityProfile`. A profile is evidence only and
+cannot authorize review, claim transition, tool access, or procedure binding.
+
+**Independence requirement:** Capability evidence does not establish actor independence.
+Later reviewer gates compare operational identities separately.
+
+**Inputs:** `CapabilityRequirement` values, capability assertions, exact accepted
+evidence receipts, task identity, actor identity, and active policy hash.
+
+**Outputs:** `CapabilityProfile`, `CapabilityAssessment`, coverage, exclusions, and an
+accepted transaction receipt when admission succeeds.
+
+**Common failures:** Self-report presented as verification, unknown capability,
+unsupported requirement, stale receipt, or hash mismatch.
+
+**Resolution:** Retain the fail-closed status. Add accepted source evidence or select a
+different actor. Never relabel self-reported evidence as verified.
+
+**Unsuitable model types:** Models that infer capability from reputation, fluent output,
+or unretained assertions.
+
+**Source references:** `src/super_scientist/domain/cognition/grounding.py`:
+`assess_capability()`; `src/super_scientist/application/cognition/service.py`:
+`RecordCapabilityProfileHandler`; `tests/unit/cognition` and
+`tests/integration/application/test_cognitive_service.py`.
+
+#### `ROLE-PEER-REASONER` — Peer Reasoner
+
+**Capability status:** Implemented collaboration contracts and persistence; fixed peers
+are example only and live peer adapters are interface only.
+
+**Purpose:** Produce bounded requests, observable contributions, topology proposals, and
+termination evidence within one collaboration session.
+
+**Recommended actor type:** Human or model actor selected through a grounded cohort.
+
+**Suggested model type:** A task-appropriate reasoning model with strict structured
+output and bounded context.
+
+**Required capabilities:** Session and receipt binding, bounded contribution production,
+uncertainty reporting, topology discipline, and termination-code compliance.
+
+**Authority:** The role can append collaboration evidence. Peer majority or unanimity
+cannot transition a claim, change policy, bind a procedure, or promote a candidate.
+
+**Independence requirement:** Same-provider, model, adapter, or operational aliases are
+not independent reviewers even when prompts or contributions differ.
+
+**Inputs:** Accepted cohort receipt, collaboration session, peer request, declared
+budget, prior topology, and accepted evidence references.
+
+**Outputs:** `PeerRequest`, `PeerContribution`, `TopologyEvent`, or
+`CollaborationTermination` records.
+
+**Common failures:** Undeclared peer, stale session, recursive delegation, routing loop,
+budget exhaustion, topology monopoly, or fabricated evidence reference.
+
+**Resolution:** Preserve the rejected or terminated history. Use a declared peer and a
+new bounded request. Do not convert consensus into authority.
+
+**Unsuitable model types:** Unbounded autonomous agents, agents that delegate
+recursively, or correlated models presented as independent reviewers.
+
+**Source references:** `src/super_scientist/domain/collaboration/models.py`;
+`src/super_scientist/application/collaboration/service.py`:
+`AppendPeerContributionHandler` and `AppendTopologyEventHandler`;
+`tests/integration/application/test_collaboration_service.py` and
+`tests/adversarial/test_cognitive_authority.py`.
+
+#### `ROLE-PROCEDURE-COMPILER` — Procedure Compiler
+
+**Capability status:** Implemented deterministic compiler and governed persistence;
+candidate-method authorship is interface only.
+
+**Purpose:** Compile one candidate method from declared current evidence into an
+immutable procedure result with explicit findings.
+
+**Recommended actor type:** Deterministic service consuming a human- or model-authored
+candidate method.
+
+**Suggested model type:** A scientific planning model may draft `CandidateMethod`; no
+LLM performs compilation or admission.
+
+**Required capabilities:** Exact receipt resolution, directed-acyclic-graph validation,
+artifact-flow analysis, catalog matching, resource bounds, termination rules, and
+canonical plan mapping.
+
+**Authority:** The role can create an accepted compilation record with domain status
+`VALID` or `INVALID`. The role cannot execute steps or create a progress plan directly.
+
+**Independence requirement:** Compilation does not satisfy reviewer or human approval.
+Validator and binding requirements remain separate.
+
+**Inputs:** Candidate method plus exact current capability-profile, artifact-catalog,
+tool-catalog, validator-catalog, and procedure-source-snapshot receipts.
+
+**Outputs:** `ProcedureCompilationRecord`, `ExecutableProcedure`, validation report,
+findings, terminal outcomes, and canonical progress-plan mapping when valid.
+
+**Common failures:** Invalid graph, missing artifact flow, unsupported capability,
+undeclared tool or validator, resource excess, recursive delegation, forbidden
+operation, or invalid termination rule.
+
+**Resolution:** Retain the accepted `INVALID` compilation as history. Correct the
+candidate or declared evidence and submit a new compilation. Bind only a `VALID` record.
+
+**Unsuitable model types:** Agents that require Python imports, shell commands, dynamic
+providers, arbitrary tools, hidden execution, or self-selected validators.
+
+**Source references:** `src/super_scientist/domain/procedures/compiler.py`:
+`compile_method()`; `src/super_scientist/application/procedures/service.py`:
+`RecordProcedureCompilationHandler` and `BindCompiledProgressPlanHandler`;
+`tests/unit/procedures` and `tests/integration/application/test_procedure_service.py`.
+
+#### `ROLE-PROCEDURE-VALIDATOR` — Procedure Validator
+
+**Capability status:** Implemented validation contracts; the registered deterministic
+toy validator is example only. Arbitrary validator execution is prohibited.
+
+**Purpose:** Recompute declared deterministic checks and produce bounded validation
+findings without executing arbitrary artifact content.
+
+**Recommended actor type:** Registered deterministic tool.
+
+**Suggested model type:** No LLM required. Use a fixed checker or formal solver for the
+declared validation operation.
+
+**Required capabilities:** Exact artifact-byte reading, SHA-256 comparison, catalog
+identity checks, bounded output, and typed pass/fail reporting.
+
+**Authority:** The role can report a deterministic validation result. It cannot claim
+human provenance, admit a compilation, execute the procedure, or bind progress.
+
+**Independence requirement:** Automated checker provenance is `TOOL`, never `HUMAN`.
+Policy-defined human or reviewer independence remains unsatisfied.
+
+**Inputs:** Declared procedure artifacts, expected hashes, registered validator identity,
+procedure step, and retained source receipts.
+
+**Outputs:** A typed pass/fail validator outcome. The deterministic compiler records the
+corresponding `ProcedureFinding` values in the compilation result.
+
+**Common failures:** Tampered bytes, digest mismatch, unavailable artifact, undeclared
+validator, hostile envelope, or fabricated success flag.
+
+**Resolution:** Preserve the finding. Restore exact retained bytes or declare the correct
+expected hash. Re-run the registered checker; do not override its result.
+
+**Unsuitable model types:** Learned judges used as exact validators or agents that
+execute artifact bytes, imports, commands, or provider calls.
+
+**Source references:** `src/super_scientist/domain/procedures/compiler.py`:
+`validate_procedure()`; `examples/governed_cognitive_procedure_vertical_slice.py`:
+`DeterministicToyValidator`; `tests/e2e/test_governed_cognitive_procedure_vertical_slice.py`
+and `tests/adversarial/test_procedure_escalation.py`.
+
+#### `ROLE-COHORT-DIVERSITY-AUDITOR` — Cohort/Diversity Auditor
+
+**Capability status:** Implemented pure analysis and governed persistence; operational
+diversity diagnostics are experimental.
+
+**Purpose:** Assess declared model, prompt, tool, evidence, method, topology, and error-
+correlation differences without converting diversity into authority.
+
+**Recommended actor type:** Deterministic service reviewed by a human researcher.
+
+**Suggested model type:** No LLM required for the assessment. A model may summarize the
+retained diagnostics without changing them.
+
+**Required capabilities:** Exact cohort/profile receipt resolution, canonical axis
+comparison, correlation classification, bounded cohort checks, and identity separation.
+
+**Authority:** The role can record `DiversityAssessment`. The assessment cannot satisfy
+reviewer independence or authorize a claim, policy, procedure, harness, or promotion.
+
+**Independence requirement:** Operational diversity and reviewer independence are
+separate checks. Shared operational identity fails independence even when diversity is
+high.
+
+**Inputs:** Accepted cohort and capability-profile receipts, diversity fingerprints,
+declared axes, error-correlation evidence, and active policy hash.
+
+**Outputs:** `DiversityAssessment`, axis statuses, correlation diagnostics, and explicit
+gaps or exclusions.
+
+**Common failures:** Same-model prompt variants counted as independent, missing profile,
+stale cohort receipt, undeclared axis, or ambiguous correlation evidence.
+
+**Resolution:** Keep the diagnostic result. Assign operationally independent reviewers
+when authority requires independence. Do not change the diversity result to pass policy.
+
+**Unsuitable model types:** The cohort members being audited or any model asked to infer
+independence from style, agreement, or prompt variation.
+
+**Source references:** `src/super_scientist/domain/cognition/diversity.py`:
+`assess_diversity()`; `src/super_scientist/application/cognition/service.py`:
+`RecordDiversityAssessmentHandler`; `tests/unit/cognition` and
+`tests/adversarial/test_cognitive_authority.py`.
+
+#### `ROLE-HARNESS-TRACE-RECORDER` — Harness Trace Recorder
+
+**Capability status:** Implemented typed trace admission and persistence;
+provider-native generation-metadata ingestion is interface only.
+
+**Purpose:** Retain one exact observable execution trace and explicit metadata
+availability state for a declared protocol cell.
+
+**Recommended actor type:** Deterministic service at the harness boundary.
+
+**Suggested model type:** No LLM required. The evaluated model supplies observable
+output only and is not the recorder.
+
+**Required capabilities:** Exact protocol/cell binding, artifact and verifier receipt
+binding, canonical metadata capture, resource accounting, freshness checks, and strict
+size bounds.
+
+**Authority:** The role can propose trace evidence. A trace cannot grant claim, policy,
+harness-head, progress-head, reward, tool, or protected-evaluator authority.
+
+**Independence requirement:** Trace capture does not establish evaluator independence.
+The matched protocol retains evaluator and audit requirements separately.
+
+**Inputs:** Accepted protocol and cell identity, output artifact, verifier result,
+environment and transformation events, tool observations, generation metadata, resource
+usage, termination, reward observation, and exact provenance receipts.
+
+**Outputs:** `HarnessExecutionTrace` and an accepted transaction receipt, or a fixed
+rejection such as `UNMATCHED_EVALUATION`, `STALE_REFERENCE`, or `UNMATCHED_BUDGETS`.
+
+**Common failures:** Cross-protocol evidence, stale receipt, fabricated value marked
+`UNAVAILABLE`, context-hash mismatch, token or log-probability tampering, surplus
+evidence, or caller mutation between admission stages.
+
+**Resolution:** Reconstruct one trace from the exact accepted evidence chain. Use
+`UNAVAILABLE` without a value when metadata is not exposed. Submit a new trace identity
+when content changes.
+
+**Unsuitable model types:** Passive secret-capture agents, hidden-reasoning collectors,
+or evaluated models that self-certify trace provenance.
+
+**Source references:** `src/super_scientist/domain/harness_eval/traces.py`:
+`HarnessExecutionTrace` and `trace_freshness()`;
+`src/super_scientist/application/harness_eval/extensions.py`:
+`RecordHarnessExecutionTraceHandler`; `tests/integration/application/test_harness_eval_extensions.py`
+and `tests/adversarial/test_trace_reward_tampering.py`.
+
 ## `MAN-06` — Model Assignment Guidance
 
 | Role | Preferred model class | Context need | Creativity | Determinism | Tool use | Independent review required | Human approval required |
@@ -820,6 +1131,13 @@ Use one field order for every role. A role name describes responsibility, not a 
 | Rule review | Independent evaluator model | Medium | Medium | Medium | Evidence tools | Yes | Consolidation policy dependent |
 | Rule integration | Strong synthesis model and human | High | Medium | Medium | Diff and test tools | Five reviewers | Yes when policy requires |
 | Harness evaluation | Deterministic service | High | None | Exact | Protected checker | Independent audit | Admission requires human authority |
+| Research coordination | Human researcher with stateless service | Declared proposal tuple | Medium | Exact sequencing | Proposal submission only | Per proposal | Per active policy |
+| Capability grounding | Deterministic service with curated evidence | Task and receipts | Low | High | Evidence resolution | Does not establish independence | No |
+| Peer reasoning | Task-appropriate reasoning model | Bounded session | Medium | Medium | Declared collaboration tools only | Yes for authority | Per active policy |
+| Procedure compilation | Deterministic compiler with authored candidate | Declared sources and catalogs | None in compiler | Exact | Registered catalog lookup | Separate validator | Binding policy only |
+| Procedure validation | Registered deterministic tool | Declared artifacts | None | Exact | Bounded artifact hash checker | Automated result is not human review | No |
+| Cohort/diversity audit | Deterministic service | Cohort and fingerprints | None | Exact | Receipt and identity comparison | Diversity never substitutes | Per authority gate |
+| Harness trace recording | Deterministic service | One matched cell | None | Exact | Observable evidence capture | Does not establish evaluator independence | No |
 | Audit and policy enforcement | Deterministic service | Full workspace | None | Exact | Fixed local tools | No | No LLM decision |
 
 Use the least capable model that reliably satisfies the role.
@@ -830,7 +1148,10 @@ Use stronger reasoning models for hypotheses, scientific planning, and synthesis
 
 Prefer deterministic tools for hashes, schemas, audits, calculations, simulation, policy, idempotency, and formal checks.
 
-A second prompt to the same model is not necessarily independent review.
+Operational diversity does not satisfy reviewer independence.
+
+A second prompt to the same model is not independent review when the operational
+identity dimensions remain shared.
 
 ## `MAN-07` — Core Kernel Admission Stages
 
@@ -962,7 +1283,9 @@ The stage order follows `TransactionCoordinator`, `AdmissionEngine`, and replay 
 
 1. Read the stored active policy.
 2. Compare the configured policy hash.
-3. Reject mismatches under stored authority when possible.
+3. If the stored policy is absent or its hash differs, return `POLICY_HASH_MISMATCH`.
+4. If the stored policy exists, persist and audit the rejection under that stored
+   policy. If no stored policy exists, return the rejection without mutation.
 
 **Outputs:** Policy context or `POLICY_HASH_MISMATCH`.
 
@@ -2315,6 +2638,13 @@ Preserve the database, artifact bytes, input files, command, JSON output, packag
 | Budget mismatch | `UNMATCHED_BUDGETS` | Variant budgets differ | Match execution, search, evaluation, judging, and human budgets | Recompute comparisons | Budget records |
 | Regression failure | Non-admitted decision | Required regression failed | Repair candidate; rerun the declared regression | Inspect report metrics | Negative results |
 | Missing rollback target | Lineage or admission rejection | Successor lacks a valid predecessor binding | Register and bind the current approved target | Inspect decision | Old and new records |
+| Capability is self-reported or unknown | Profile records fail-closed capability status | Accepted evidence does not verify the requirement | Add exact accepted evidence or choose a qualified actor | Inspect `capability-profile` | Assertions and receipts |
+| Diverse cohort fails independence | Authority rejection despite varied prompts or outputs | Peers share an operational identity dimension | Assign operationally independent reviewers | Inspect diversity and actor identities separately | Cohort and diversity records |
+| Compilation has domain status `INVALID` | Compilation transaction is accepted; no plan exists | Deterministic findings invalidate the candidate method | Preserve the compilation; correct the candidate and submit a new identity | Inspect `procedure-compilation` | Compilation and findings |
+| Invalid compilation binding | `INVALID_PROCEDURE` | The binding references an accepted compilation with domain status `INVALID` | Bind only an accepted current `VALID` compilation | Inspect compilation and binding decision | Compilation receipt |
+| Evaluation evidence does not match | `UNMATCHED_EVALUATION` | Protocol, cell, trace, output, verifier, reward, budget, or receipt chain differs | Rebuild from one exact accepted evidence chain | Inspect protocol, cell, trace, and reward records | All referenced receipts |
+| Invalidating high reward | Reward assessment is accepted with domain status `INVALID`; `promotion_evidence` is false | A verifier, environment, trace, contamination, termination, resource, or reward-hacking finding invalidates the reward | Preserve the assessment; repair and rerun the evaluated method | Inspect `reward-assessment` | Trace and findings |
+| Cognitive record is absent | `MISSING_ENTITY` | The exact kind and identifier do not resolve after integrity verification | Correct the canonical kind or identifier; do not mutate the workspace | Retry `cognitive inspect --json` | Command and JSON |
 | Audit-chain corruption | Nonzero audit verification | Hash, link, sequence, payload, or row changed | Stop mutation; restore from a verified source | `audit verify` | Database and logs |
 | Missing artifact bytes | Integrity failure | Referenced digest path is absent | Restore exact verified bytes through the store | `audit verify` | Artifact metadata |
 | Import into nonempty target | Import conflict or error | Import is not a general merge | Use an empty target or exact replay | Re-export and compare | Source bundle and target |
@@ -2420,15 +2750,35 @@ The source registry currently runs nine fixed checks.
 
 Treat evidence, proposals, reviewer output, manifests, results, and imported bundles as untrusted.
 
+Treat capability assertions, peer contributions, candidate methods, procedure envelopes,
+generation metadata, traces, tool observations, reward values, and cognitive record
+identifiers as untrusted.
+
 Content-addressed artifacts use SHA-256-derived paths below a private local root.
 
 The runtime rejects absolute paths, traversal, symlinks, non-regular files, and Windows reparse-point escapes.
 
 The scientific runtime has no arbitrary network, subprocess, dynamic import, `eval`, `exec`, or shell authority.
 
+Procedure steps cannot name Python imports, shell commands, model providers, dynamic
+entry points, unauthorized tools, hidden execution, or protected evaluators. The
+example's deterministic toy validator has `TOOL` provenance. The validator reads bounded
+artifact bytes, compares the declared SHA-256 digest, and never executes artifact bytes.
+
+Hidden chain-of-thought is not persisted.
+
+Public schemas retain only bounded observable outputs, artifacts, decisions,
+diagnostics, and provenance. Do not submit private reasoning, credentials, protected
+answers, or reversible protected locators as rationale or trace metadata.
+
 The quality gate is separate development authority. The dependency audit can use network access.
 
 Protected evaluation uses separate role-specific capabilities. Export prohibits protected answers and live protected-store references.
+
+The trace handler owns one freshly reconstructed exact proposal snapshot for admission,
+decision, projection, transaction storage, and audit. Metadata marked `UNAVAILABLE`
+cannot contain a fabricated value. A reward assessment is evidence only; a high number
+cannot override an invalidating finding or authorize promotion.
 
 Audit verification checks the chain, policy attribution, transactions, projections, histories, receipts, and artifact bytes.
 
@@ -2453,8 +2803,12 @@ The runtime has no secret store. Do not store credentials, tokens, regulated dat
 | Approval | A typed authority record from an actor other than the proposer. |
 | Artifact | Immutable bytes addressed by SHA-256 digest. |
 | Audit event | An immutable, hash-linked event that records an attributable decision. |
+| Capability profile | A task-conditioned record of verified, self-reported, unknown, and unsupported capability assertions. |
 | Canonical record | An append-only durable domain record. |
 | Claim | A versioned `AtomicClaim` with scope, modality, status, assumptions, and evidence links. |
+| Cognitive plane | Typed evidence construction and pure analysis with no retained control-plane authority. |
+| Cohort | A bounded selected set of actors whose capability and exclusion evidence remains explicit. |
+| Control plane | Policy, admission, transaction, audit, storage, integrity, progress, artifact, and protected-evaluator authority. |
 | Counterexample | A retained input and observation that falsifies a candidate under the recorded mechanism. |
 | Evidence | Source metadata and content-addressed bytes used for grounding. |
 | Evidence span | Exact text with start and end offsets in retained evidence. |
@@ -2463,9 +2817,14 @@ The runtime has no secret store. Do not store credentials, tokens, regulated dat
 | Harness candidate | A proposed harness variant evaluated against a baseline. |
 | Hypothesis head | The effective-state pointer to the admitted hypothesis version. |
 | Idempotency | Exact replay behavior for one stable intent identity. |
+| Metadata availability | An explicit `AVAILABLE`, `UNAVAILABLE`, or `UNKNOWN` state kept separately from a metadata value. |
+| Operational diversity | Declared differences in model, prompt, tools, evidence, method, topology, or errors; not reviewer independence. |
 | Projection | A rebuildable effective-state view derived from canonical records. |
 | Proposal | Untrusted typed input submitted for admission. |
+| Procedure compilation | An immutable deterministic result with domain status `VALID` or `INVALID` and retained findings. |
 | Receipt | An exact reference to an accepted proposal and audit event. |
+| Reviewer independence | A policy authority property based on distinct declared operational identities, not output diversity or agreement. |
+| Reward validity | A recomputed assessment of exact trace, verifier, environment, budget, termination, contamination, and reward-hacking evidence. |
 | Revision | An append-only successor that preserves its failed predecessor. |
 | Rollback target | A retained approved predecessor bound to a candidate transition. |
 | Transaction | One atomic proposal decision, projection update, and audit append boundary. |
@@ -2490,18 +2849,157 @@ The runtime has no secret store. Do not store credentials, tokens, regulated dat
 
 | Manual section | Primary code source | Primary document source | Validation tests |
 | --- | --- | --- | --- |
-| `MAN-01` | `pyproject.toml`, `identity.py`, `quality/runner.py` | `README.md`, `GOVERNANCE.md` | package, identity, quality-runner tests |
+| `MAN-01` | `pyproject.toml`, `identity.py`, `quality/runner.py` at `d2d4a5d64ea44d9e1d3dc65cbf1e44aac5907450` | `README.md`, `GOVERNANCE.md` | `tests/unit/docs/test_user_manual.py`, package, identity, and quality-runner tests |
 | `MAN-02` | identity, admission, policy, protected-evaluation models | `GOVERNANCE.md`, `SECURITY.md` | authority, leakage, governance tests |
-| `MAN-03` | `transactions/coordinator.py`, audit chain | `ARCHITECTURE.md` | coordinator, replay, audit tests |
+| `MAN-03` | `transactions/coordinator.py`, `application/cognitive/service.py`, audit chain | `ARCHITECTURE.md` | coordinator, cognitive-service, replay, and audit tests |
 | `MAN-04` | CLI bootstrap and kernel commands | `README.md`, `REPRODUCIBILITY.md` | CLI integration and JSON-envelope tests |
-| `MAN-05` | domain models and application services | subsystem documents | domain, integration, and adversarial tests |
-| `MAN-06` | actor and verification contracts | governance and hypothesis documents | identity, evaluator, and hypothesis tests |
+| `MAN-05` | cognition, collaboration, procedure, harness-evaluation domain models and application services | subsystem documents | cognition, collaboration, procedure, harness, and authority tests |
+| `MAN-06` | actor, capability, independence, procedure-validator, and trace contracts | governance, procedure, and harness documents | identity, cognitive-authority, procedure-escalation, and trace-tampering tests |
 | `MAN-07` | coordinator, admission engine, workspace integrity | `ARCHITECTURE.md` | admission, coordinator, replay, audit tests |
 | `MAN-08` | hypothesis models, handlers, simulators | `docs/hypothesis-model-checker-loop.md` | hypothesis service, simulator, transfer tests |
 | `MAN-09` | governed example `STEP_CODES` and step functions | governed example guide | governed example end-to-end tests |
 | `MAN-10` | behavioral-rule models, service, capabilities | `docs/behavioral-rules.md` | reviewer-authority and rule-service tests |
-| `MAN-11` | rejection codes and CLI boundaries | security and reproducibility documents | negative, adversarial, and integrity tests |
+| `MAN-11` | rejection codes, cognitive reader, procedure and evaluation handlers | security and reproducibility documents | negative, adversarial, procedure, harness, and integrity tests |
 | `MAN-12` | CLI commands and workspace exchange | example guides | CLI, examples, and workspace-exchange tests |
-| `MAN-13` | artifact store, protected evaluation, workspace integrity | `SECURITY.md`, `THREAT_MODEL.md` | artifact, leakage, reparse, and audit tests |
+| `MAN-13` | artifact store, protected evaluation, single-snapshot trace admission, workspace integrity | `SECURITY.md`, `THREAT_MODEL.md` | artifact, leakage, reparse, cognitive-authority, trace-tampering, and audit tests |
 | `MAN-14` | domain contracts | architecture and subsystem documents | strict parsing and domain-model tests |
-| `MAN-15` | all listed sources | source register and research inspirations | `tests/unit/docs/test_source_register.py` |
+| `MAN-15` | all listed sources | source register and research inspirations | `tests/unit/docs/test_user_manual.py`, `tests/unit/docs/test_source_register.py`, and handbook verification tests |
+| `MAN-16` | cognitive facade, 18 fixed handlers, procedure binding, harness evidence, reader, integrity, and workspace exchange | governed cognitive/procedure example guide | cognitive-service, procedure-service, harness-extension, reader/CLI, integrity, exchange, replay, and end-to-end tests |
+
+## MAN-16 — Cognitive Cohorts and Procedure Compilation
+
+**Capability status:** Strict contracts, pure computations, governed persistence,
+read-only inspection, integrity verification, workspace exchange, and replay are
+implemented. Fixed peers, synthetic evidence, deterministic procedure validation,
+guidance cells, and model-by-harness cells are example only. Live LLM grounding, live
+peer adapters, provider-native metadata ingestion, and training-payload handoff are
+interface only. Diversity, guidance, model-by-harness interaction, and reward-hacking
+diagnostics are experimental. Reinforcement learning, live model proxies, online
+weights, arbitrary harnesses, learned admission, and self-modifying governance are
+deferred or prohibited.
+
+**Authority boundary:** The Research Coordinator sequences typed proposals through the
+control plane. The Research Coordinator cannot retain the transaction coordinator or
+any storage, artifact, execution, tool, provider, policy, or protected-answer authority.
+Every durable action below remains a separate governed transaction.
+
+**Prerequisites:** Initialize an empty workspace, retain source artifacts, record the
+active policy, and construct exact accepted receipts for every declared input. Use
+stable new proposal identifiers when content changes.
+
+### Ordered workflow
+
+1. **Declare capability requirements.** The human researcher records task-conditioned
+   `CapabilityRequirement` values before selecting peers. Each requirement names the
+   capability, evidence threshold, and task scope. The observable result is a bounded
+   canonical requirement tuple used by capability grounding.
+2. **Record grounded profiles.** The Capability Grounder calls `assess_capability()`
+   over exact accepted evidence and submits `RecordCapabilityProfile`. The accepted
+   `CapabilityProfile` preserves verified, self-reported, unknown, unsupported, and gap
+   states. Self-reported or unknown capability never becomes verified implicitly.
+3. **Select a bounded cohort.** The deterministic selector calls `build_cohort()` with
+   accepted current profile receipts and a bounded `CohortRequest`. The accepted
+   `CohortPlan` records selected members, exclusions, coverage, stable ties, and gaps.
+4. **Inspect diversity separately from independence.** The Cohort/Diversity Auditor
+   calls `assess_diversity()` and submits `RecordDiversityAssessment`. Inspect declared
+   diversity axes and error-correlation evidence. Then apply the policy identity check
+   separately. Operational diversity does not satisfy reviewer independence.
+5. **Open a collaboration session.** Submit `RecordCollaborationSession`, then append
+   bounded peer requests, observable contributions, and topology events. Finish with an
+   explicit termination record. Peer agreement remains evidence and cannot transition
+   a claim, policy, harness, procedure, or promotion state.
+6. **Compile a candidate method.** The Procedure Compiler resolves only the declared,
+   current, accepted profile, catalog, and procedure-source-snapshot receipts. Submit
+   `RecordProcedureCompilation`. The compiler recomputes the procedure graph, artifact
+   flow, tools, validators, resources, termination rules, and progress mapping.
+7. **Inspect invalid or inconclusive findings.** A well-formed compilation with domain
+   status `INVALID` is accepted and retained as history. It creates no progress plan.
+   Preserve every `ProcedureFinding` and terminal outcome. Malformed, stale,
+   source-mismatched, or derivation-mismatched compilation proposals are rejected.
+8. **Bind only a valid procedure.** Submit `BindCompiledProgressPlan` only for an
+   accepted current compilation with domain status `VALID`. The binding handler
+   delegates the canonical plan to `RecordProgressPlanHandler` in the same transaction.
+   An attempt to bind an accepted `INVALID` compilation is rejected with transaction
+   code `INVALID_PROCEDURE`; no plan or binding is projected.
+9. **Record matched evaluations, traces, and reward validity.** Record all four guidance
+   conditions and the declared model-by-harness grid. Each cell must bind one exact
+   protocol, model, harness, partition, budget, output, verifier, trace, and reward
+   evidence chain. Record metadata availability separately from values. A correctly
+   recomputed reward assessment with an invalidating finding is accepted and retained
+   with domain status `INVALID`, but `promotion_evidence` is `false`. Fabricated, stale,
+   ambiguous, surplus, or derivation-mismatched evidence is rejected.
+10. **Inspect records.** Run the integrity-first read-only command for one exact record:
+
+    ```powershell
+    scientist-harness cognitive inspect --root .cognitive-workspace --kind capability-profile --id PROFILE_ID --json
+    ```
+
+    Replace `PROFILE_ID` with an exact canonical identifier. `CognitiveRecordKind`
+    exposes exactly 18 kinds. The command validates the complete workspace before one
+    point lookup. The command does not list, aggregate, mutate, execute, import, or call
+    a model, tool, command, provider, or protected evaluator.
+11. **Verify, export, import, and replay.** Run `scientist-harness audit verify --root
+    .cognitive-workspace --json`. Export only after integrity succeeds. Import the
+    canonical version-0.3 bundle into an empty workspace through
+    `TransactionCoordinator.submit_intent()`. Verify the imported workspace, export it
+    again, compare the canonical bundle, and replay an identical stable intent. Exact
+    replay returns the stored decision and appends no transaction or audit event.
+
+### Model-free executable example
+
+Run the complete fixed workflow against a new empty root:
+
+```powershell
+python examples/governed_cognitive_procedure_vertical_slice.py --root .cognitive-example --json
+```
+
+The command emits one canonical JSON object. Verify that the summary reports verified,
+self-reported, and unknown capabilities; same-model diversity without independence; a
+topology update; a bounded challenge; retained `INVALID` and `VALID` compilations; one
+accepted progress binding; all four guidance conditions; a two-model by two-harness
+grid; available and unavailable metadata; an accepted invalidating high reward with
+`promotion_evidence` equal to `false`; `verified` equal to `true`; `import_verified`
+equal to `true`; and successful exact replay. The registered toy validator is a `TOOL`
+actor. It compares bounded artifact bytes with the declared SHA-256 digest and never
+executes artifact content.
+
+### Verification and source boundary
+
+MAN-16 maps to these exact implementation sources:
+
+- `src/super_scientist/application/cognitive/service.py`
+- `src/super_scientist/domain/cognition/grounding.py`
+- `src/super_scientist/domain/cognition/diversity.py`
+- `src/super_scientist/application/collaboration/service.py`
+- `src/super_scientist/domain/procedures/compiler.py`
+- `src/super_scientist/application/procedures/service.py`
+- `src/super_scientist/application/harness_eval/extensions.py`
+- `src/super_scientist/application/cognitive/reader.py`
+- `src/super_scientist/application/cognitive/integrity.py`
+- `src/super_scientist/application/workspace_exchange.py`
+
+Run these focused checks:
+
+```powershell
+python -m pytest `
+  tests/integration/application/test_cognitive_service.py `
+  tests/integration/application/test_collaboration_service.py `
+  tests/integration/application/test_procedure_service.py `
+  tests/integration/application/test_harness_eval_extensions.py `
+  tests/integration/application/test_cognitive_workspace_integrity.py `
+  tests/integration/application/test_cognitive_workspace_exchange.py `
+  tests/integration/application/test_transaction_coordinator.py `
+  tests/integration/cli/test_cognitive_cli.py `
+  tests/e2e/test_governed_cognitive_procedure_vertical_slice.py `
+  -q
+```
+
+For the complete release gate, run `scientist-harness quality-gate`. The command runs
+exactly nine checks in this order: `format`, `lint`, `types`, `tests`, `security`,
+`dependencies`, `build`, `package`, and `wheel-install`.
+
+S30-S35 informed the vocabulary and design constraints. Their paper, benchmark,
+training, modularity, cohort, and agentic-reasoning results were not reproduced. No
+source code from S30-S35 was imported or reused. The source register separates each
+external proposal and reported result from this project's adaptation, original
+synthesis, adoption status, reproduction status, and limitations.
