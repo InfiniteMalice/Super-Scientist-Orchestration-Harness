@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib
 import json
 import subprocess
@@ -21,6 +22,37 @@ def _write_test_wheel(path: Path) -> None:
             "package-0.2.0.dist-info/entry_points.txt",
             "[console_scripts]\nscientist-harness = super_scientist.cli.bootstrap:main\n",
         )
+
+
+def test_cognitive_vertical_slice_imports_only_wheel_and_standard_offline_modules() -> None:
+    example = (
+        Path(__file__).resolve().parents[3]
+        / "examples"
+        / "governed_cognitive_procedure_vertical_slice.py"
+    )
+    tree = ast.parse(example.read_text(encoding="utf-8"))
+    imported_roots = {
+        node.names[0].name.split(".", 1)[0]
+        if isinstance(node, ast.Import)
+        else (node.module or "").split(".", 1)[0]
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    }
+
+    assert imported_roots == {
+        "__future__",
+        "argparse",
+        "collections",
+        "dataclasses",
+        "datetime",
+        "decimal",
+        "itertools",
+        "json",
+        "pathlib",
+        "pydantic",
+        "sqlalchemy",
+        "super_scientist",
+    }
 
 
 def test_wheel_smoke_uses_built_distribution_and_fixed_cli_command() -> None:
