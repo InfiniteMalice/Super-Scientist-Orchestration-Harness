@@ -34,6 +34,25 @@ def test_toy_validator_derives_success_and_failure_from_artifact_bytes() -> None
     assert tampered.actual_sha256 == hashlib.sha256(b"tampered deterministic bytes").hexdigest()
 
 
+def test_toy_validator_provenance_is_automated() -> None:
+    step = example._procedure_step(
+        "validated-step",
+        1,
+        inputs=("source",),
+        output_id="validated-output",
+        dependencies=(),
+        operation=example.ProcedureOperation.EVALUATE_WITH_REGISTERED_VALIDATOR,
+        authority=(example.ProcedureAuthority.RUN_REGISTERED_TOOL,),
+    )
+
+    assert step.validator.kind is example.ActorKind.TOOL
+    assert step.validator.kind is not example.ActorKind.HUMAN
+    assert example._toy_validator_actor().kind is example.ActorKind.TOOL
+    registration = example._registered_toy_validator()
+    assert registration.validator.kind is example.ActorKind.TOOL
+    assert registration.validator.kind is not example.ActorKind.HUMAN
+
+
 class _FailOnceResearchCoordinator:
     def __init__(self, failure: str) -> None:
         self._failure = failure
@@ -174,6 +193,7 @@ def test_example_is_cross_root_deterministic_before_round_trip(
     assert first["invalid_compilation"]["accepted"] is True
     assert first["valid_compilation"]["status"] == "VALID"
     assert first["valid_compilation"]["validator_passed"] is True
+    assert first["valid_compilation"]["validator_kind"] == "tool"
     assert first["valid_binding"]["accepted"] is True
     assert first["valid_binding"]["compilation_id"] == first["valid_compilation"]["compilation_id"]
     assert first["valid_binding"]["plan_id"] == "offline-progress-plan-v1"
@@ -226,8 +246,10 @@ def test_json_script_emits_one_stable_object_without_stderr(tmp_path: Path) -> N
     assert payload["workspace"]["verified"] is True
     assert payload["workspace"]["import_verified"] is True
     assert payload["workspace"]["replay_verified"] is True
+    assert payload["workspace"]["replayed_validator_kinds"] == ["tool"]
     assert payload["workspace"]["exported_record_count"] > 0
     assert payload["valid_compilation"]["validator_passed"] is True
+    assert payload["valid_compilation"]["validator_kind"] == "tool"
     assert payload["model_harness"]["checker_passed"] is True
     assert payload["invalid_reward"]["checker_passed"] is False
     assert payload["invalid_reward"]["promotion_evidence"] is False

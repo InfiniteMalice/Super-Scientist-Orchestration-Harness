@@ -50,14 +50,15 @@ Important report fields include:
 - `diversity.independent`: `false`, alongside the shared model family and different
   prompt strategies that justify that result;
 - `collaboration`: the accepted topology operation and bounded challenge receipt;
-- `invalid_compilation` and `valid_compilation`: retained compiler report status and
-  finding evidence;
+- `invalid_compilation` and `valid_compilation`: retained compiler report status,
+  finding evidence, and the registered toy checker identified as an automated tool;
 - `valid_binding`: the accepted binding, exact compilation ID, and progress-plan ID;
 - `guidance` and `model_harness`: the actual admitted cell inventories;
 - `invalid_reward`: the accepted history decision, observed high value, checker-derived
   expected/actual artifact hashes, invalid assessment status, and empty
   promotion-evidence result; and
-- `workspace`: the source/import integrity results and replay outcome.
+- `workspace`: the source/import integrity results, replay outcome, and the toy
+  checker's retained automated provenance after replay.
 
 ## Trust Boundary
 

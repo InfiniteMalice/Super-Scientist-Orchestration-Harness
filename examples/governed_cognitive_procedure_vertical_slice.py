@@ -885,11 +885,7 @@ def _procedure_step(
         preconditions=("Declared inputs are available",),
         completion_criteria=("Structured output matches schema",),
         evidence_requirements=("retained-output",),
-        validator=ActorIdentity(
-            actor_id=TOY_VALIDATOR_ID,
-            kind=ActorKind.HUMAN,
-            created_at=NOW,
-        ),
+        validator=_toy_validator_actor(),
         validator_version=TOY_VALIDATOR_VERSION,
         failure_signals=("validator-rejected",),
         recovery=RecoveryDirective(terminal_outcome=ProcedureTerminalOutcome.ABANDONED),
@@ -897,6 +893,22 @@ def _procedure_step(
         progress_budget_category=category,
         resource_budget=_resource_budget(1),
         progress_weight=Decimal("0.50"),
+    )
+
+
+def _toy_validator_actor() -> ActorIdentity:
+    return ActorIdentity(
+        actor_id=TOY_VALIDATOR_ID,
+        kind=ActorKind.TOOL,
+        created_at=NOW,
+    )
+
+
+def _registered_toy_validator() -> RegisteredValidator:
+    return RegisteredValidator(
+        validator=_toy_validator_actor(),
+        validator_version=TOY_VALIDATOR_VERSION,
+        registration=CatalogFactStatus.PRESENT,
     )
 
 
@@ -1047,17 +1059,7 @@ def _record_procedures_and_binding(
             authorization=CatalogFactStatus.PRESENT,
         ),
     )
-    validator_catalog = (
-        RegisteredValidator(
-            validator=ActorIdentity(
-                actor_id=TOY_VALIDATOR_ID,
-                kind=ActorKind.HUMAN,
-                created_at=NOW,
-            ),
-            validator_version=TOY_VALIDATOR_VERSION,
-            registration=CatalogFactStatus.PRESENT,
-        ),
-    )
+    validator_catalog = (_registered_toy_validator(),)
     catalogs: tuple[tuple[ProcedureEvidenceSourceKind, tuple[BaseModel, ...]], ...] = (
         (ProcedureEvidenceSourceKind.ARTIFACT_CATALOG, artifact_catalog),
         (ProcedureEvidenceSourceKind.TOOL_CATALOG, tool_catalog),
@@ -1320,6 +1322,7 @@ def _record_procedures_and_binding(
             "procedure_id": valid_record.result.procedure.procedure_id,
             "status": valid_record.result.report.status.value,
             "validator_passed": source_validation.passed,
+            "validator_kind": first.validator.kind.value,
         },
         {
             "accepted": binding_decision.accepted,
@@ -2404,6 +2407,20 @@ def _verify_export_import_replay(
             source_artifact_store=source.artifact_store,
             clock=FixedClock(),
         )
+        with target.uow_factory() as unit_of_work:
+            target_compilations = (
+                unit_of_work.repositories().cognitive_integrity_snapshot().compilations
+            )
+        replayed_validator_kinds = sorted(
+            {
+                stage.validator.kind.value
+                for compilation in target_compilations
+                for stage in compilation.result.procedure.steps
+                if stage.validator.actor_id == TOY_VALIDATOR_ID
+            }
+        )
+        if replayed_validator_kinds != [ActorKind.TOOL.value]:
+            raise RuntimeError("replayed toy validator provenance is not automated")
     finally:
         target.engine.dispose()
     return {
@@ -2411,6 +2428,7 @@ def _verify_export_import_replay(
         "import_verified": imported.projections_verified,
         "replay_count": replayed.replayed,
         "replay_verified": replayed.projections_verified and not replayed.conflicts,
+        "replayed_validator_kinds": replayed_validator_kinds,
         "verified": source_verification.valid,
     }
 

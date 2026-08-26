@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import importlib
 import json
+import site
 import subprocess
 import sys
 import zipfile
@@ -12,10 +13,54 @@ from types import ModuleType
 import pytest
 
 EXAMPLE_WHEEL_MEMBER = "super_scientist_examples/governed_cognitive_procedure_vertical_slice.py"
+INSTALLED_EXAMPLE_BOOTSTRAP = """
+import importlib
+import pathlib
+import sys
+import sysconfig
+
+install_root = pathlib.Path(sysconfig.get_paths()["purelib"]).resolve()
+example = importlib.import_module(
+    "super_scientist_examples.governed_cognitive_procedure_vertical_slice"
+)
+
+
+def require_installed_project_modules() -> None:
+    origins = []
+    for name, module in tuple(sys.modules.items()):
+        if name != "super_scientist" and not name.startswith("super_scientist."):
+            continue
+        module_file = getattr(module, "__file__", None)
+        if module_file is not None:
+            origins.append(pathlib.Path(module_file).resolve())
+    if not origins or any(not origin.is_relative_to(install_root) for origin in origins):
+        raise SystemExit("project module resolved outside the fresh wheel install")
+    example_file = pathlib.Path(example.__file__).resolve()
+    if not example_file.is_relative_to(install_root):
+        raise SystemExit("example resolved outside the fresh wheel install")
+
+
+require_installed_project_modules()
+exit_code = example.main(tuple(sys.argv[1:]))
+require_installed_project_modules()
+raise SystemExit(exit_code)
+"""
 
 
 def _wheel_smoke() -> ModuleType:
     return importlib.import_module("super_scientist.quality.wheel_smoke")
+
+
+def _installed_example_argv(venv_python: Path, workspace_root: Path) -> tuple[str, ...]:
+    return (
+        str(venv_python),
+        "-I",
+        "-c",
+        INSTALLED_EXAMPLE_BOOTSTRAP,
+        "--root",
+        str(workspace_root),
+        "--json",
+    )
 
 
 def _write_test_wheel(path: Path) -> None:
@@ -189,6 +234,130 @@ def test_built_wheel_contains_and_loads_installed_cognitive_example(tmp_path: Pa
     )
     assert load.returncode == 0, load.stderr
     assert "usage:" in load.stdout
+
+
+def test_installed_example_command_is_fixed_json_workload_in_fresh_root(
+    tmp_path: Path,
+) -> None:
+    venv_python = tmp_path / "venv" / "Scripts" / "python.exe"
+    workspace_root = tmp_path / "installed-workspace"
+
+    argv = _installed_example_argv(venv_python, workspace_root)
+
+    assert argv[0] == str(venv_python)
+    assert argv[-3:] == ("--root", str(workspace_root), "--json")
+    assert "--help" not in argv
+    assert "--target" not in argv
+
+
+@pytest.mark.e2e
+@pytest.mark.integration
+def test_fresh_venv_executes_complete_installed_cognitive_example(
+    tmp_path: Path,
+) -> None:
+    wheel_smoke = _wheel_smoke()
+    project_root = Path(__file__).resolve().parents[3]
+    dist = tmp_path / "dist"
+    built = subprocess.run(
+        [sys.executable, "-m", "build", "--wheel", "--outdir", str(dist)],
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert built.returncode == 0, built.stdout + built.stderr
+    wheels = tuple(dist.glob("*.whl"))
+    assert len(wheels) == 1
+    wheel_smoke._verify_project_wheel(wheels[0])
+    with zipfile.ZipFile(wheels[0]) as archive:
+        assert archive.namelist().count(EXAMPLE_WHEEL_MEMBER) == 1
+
+    venv_root = tmp_path / "venv"
+    created = subprocess.run(
+        [sys.executable, "-m", "venv", "--system-site-packages", str(venv_root)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert created.returncode == 0, created.stdout + created.stderr
+    executable_name = "python.exe" if sys.platform == "win32" else "python"
+    executable_directory = "Scripts" if sys.platform == "win32" else "bin"
+    venv_python = venv_root / executable_directory / executable_name
+    assert venv_python.is_file()
+
+    purelib_probe = subprocess.run(
+        [
+            str(venv_python),
+            "-I",
+            "-c",
+            "import sysconfig; print(sysconfig.get_paths()['purelib'])",
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert purelib_probe.returncode == 0, purelib_probe.stdout + purelib_probe.stderr
+    venv_purelib = Path(purelib_probe.stdout.strip()).resolve()
+    dependency_roots = tuple(
+        candidate.resolve()
+        for raw_path in site.getsitepackages()
+        if (candidate := Path(raw_path)).is_dir()
+        and (candidate / "pydantic").is_dir()
+        and (candidate / "sqlalchemy").is_dir()
+    )
+    assert len(dependency_roots) == 1
+    # A stdlib venv cannot inherit an invoking venv. This fixed path supplies the
+    # already-installed declared dependencies; the bootstrap below rejects any
+    # project module that does not come from the newly installed wheel.
+    (venv_purelib / "_declared_dependency_site.pth").write_text(
+        f"{dependency_roots[0]}\n",
+        encoding="utf-8",
+    )
+
+    installed = subprocess.run(
+        [
+            str(venv_python),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--no-index",
+            "--no-deps",
+            str(wheels[0]),
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+
+    workspace_root = tmp_path / "installed-workspace"
+    completed = subprocess.run(
+        _installed_example_argv(venv_python, workspace_root),
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=14400,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stderr == ""
+    assert completed.stdout.count("\n") == 1
+    payload = json.loads(completed.stdout)
+    assert payload["valid_compilation"]["validator_kind"] == "tool"
+    assert payload["workspace"]["replayed_validator_kinds"] == ["tool"]
+    assert payload["workspace"]["verified"] is True
+    assert payload["workspace"]["import_verified"] is True
+    assert payload["workspace"]["replay_verified"] is True
 
 
 def test_dependency_free_smoke_bootstrap_returns_successful_version_envelope(
