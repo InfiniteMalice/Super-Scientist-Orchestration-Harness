@@ -54,7 +54,7 @@ from super_scientist.domain.harness_eval.rewards import (
     RewardValidityStatus,
     valid_reward_evidence,
 )
-from super_scientist.domain.harness_eval.traces import HarnessExecutionTrace
+from super_scientist.domain.harness_eval.traces import HarnessExecutionTrace, ToolObservation
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.kernel.audit.chain import append_event
 from super_scientist.kernel.transactions.models import (
@@ -624,7 +624,7 @@ def test_trace_adapter_parses_untrusted_payload_and_handler_rejects_stale_runtim
 
     assert type(proposal) is RecordHarnessExecutionTrace
     assert accepted.accepted is True
-    assert stale.reasons[0].code is RejectionCode.STALE_REFERENCE
+    assert stale.reasons[0].code is RejectionCode.UNMATCHED_EVALUATION
 
 
 def test_trace_handler_rejects_tools_outside_the_exact_protocol_budget() -> None:
@@ -636,8 +636,18 @@ def test_trace_handler_rejects_tools_outside_the_exact_protocol_budget() -> None
         "key-budget-trace",
         _actor(),
     )
-    unauthorized_tool = trace.tool_observations[0].model_copy(update={"tool_id": "undeclared-tool"})
-    copied_trace = trace.model_copy(update={"tool_observations": (unauthorized_tool,)})
+    tool_values = trace.tool_observations[0].model_dump(
+        mode="python",
+        exclude={"content_hash"},
+    )
+    tool_values["tool_id"] = "undeclared-tool"
+    unauthorized_tool = ToolObservation.build(**tool_values)
+    trace_values = trace.model_dump(
+        mode="python",
+        exclude={"content_hash", "tool_observations_hash"},
+    )
+    trace_values["tool_observations"] = (unauthorized_tool,)
+    copied_trace = HarnessExecutionTrace.build(**trace_values)
     copied_proposal = proposal.model_copy(
         update={"envelope": proposal.envelope.model_copy(update={"trace": copied_trace})}
     )

@@ -58,6 +58,7 @@ from super_scientist.kernel.transactions.models import (
     TransactionDecision,
     _fresh_actor_identity,
     _fresh_governed_identifier,
+    _fresh_harness_execution_trace_proposal,
     _fresh_harness_trace_metadata,
     _fresh_reward_assessment_proposal,
     _invalid_reward_decision,
@@ -111,6 +112,7 @@ class _ModelAnalysisContext(_StrictContext):
 
 
 class _TraceContext(_StrictContext):
+    validated: RecordHarnessExecutionTrace | None
     guidance_protocol: GuidanceEvaluationProtocol | None
     matrix_protocol: ModelHarnessProtocol | None
     existing: HarnessExecutionTrace | None
@@ -591,9 +593,29 @@ class RecordHarnessExecutionTraceHandler:
         reads: HandlerReadCapability,
     ) -> _TraceContext:
         capability = cast(_TraceReads, reads)
-        trace = proposal.envelope.trace
+        validated: RecordHarnessExecutionTrace | None = None
+        with suppress(
+            ArithmeticError,
+            MemoryError,
+            OverflowError,
+            RecursionError,
+            TypeError,
+            UnicodeError,
+            ValueError,
+        ):
+            validated = _fresh_harness_execution_trace_proposal(proposal)
+        if validated is None:
+            return _TraceContext(
+                validated=None,
+                guidance_protocol=None,
+                matrix_protocol=None,
+                existing=None,
+                evidence_current=False,
+            )
+        trace = validated.envelope.trace
         protocol_id = trace.observed_binding.protocol_id
         return _TraceContext(
+            validated=validated,
             guidance_protocol=capability.get_guidance_protocol(protocol_id),
             matrix_protocol=capability.get_model_harness_protocol(protocol_id),
             existing=capability.get_harness_execution_trace(trace.trace_id),
@@ -605,7 +627,26 @@ class RecordHarnessExecutionTraceHandler:
         proposal: RecordHarnessExecutionTrace,
         context: _TraceContext,
     ) -> TransactionDecision:
-        trace = proposal.envelope.trace
+        validated = context.validated
+        if validated is None:
+            proposal_id = "invalid-harness-trace-proposal"
+            with suppress(
+                AttributeError,
+                MemoryError,
+                RecursionError,
+                TypeError,
+                ValueError,
+            ):
+                state = object.__getattribute__(proposal, "__dict__")
+                if type(state) is not dict:
+                    raise ValueError("unsafe proposal state")
+                proposal_id = _fresh_governed_identifier(state.get("proposal_id"))
+            return _rejected(
+                proposal_id,
+                RejectionCode.UNMATCHED_EVALUATION,
+                "harness evaluation proposal is invalid",
+            )
+        trace = validated.envelope.trace
         guidance_matched = context.guidance_protocol is not None and _trace_matches_guidance(
             trace, context.guidance_protocol
         )
@@ -652,7 +693,8 @@ class RecordHarnessExecutionTraceHandler:
         decision: TransactionDecision,
         writes: HandlerWriteCapability,
     ) -> None:
-        _project(decision, writes, proposal.envelope.trace)
+        validated = _fresh_harness_execution_trace_proposal(proposal)
+        _project(decision, writes, validated.envelope.trace)
 
 
 class RecordRewardAssessmentHandler:

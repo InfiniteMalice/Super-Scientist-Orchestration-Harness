@@ -1415,6 +1415,17 @@ def _fresh_reward_assessment_proposal(value: object) -> RecordRewardAssessment:
     )
 
 
+def _fresh_harness_execution_trace_proposal(
+    value: object,
+) -> RecordHarnessExecutionTrace:
+    """Reconstruct an exact trace proposal without trusting nested model state."""
+
+    return cast(
+        RecordHarnessExecutionTrace,
+        _fresh_exact_value(value, RecordHarnessExecutionTrace),
+    )
+
+
 def _invalid_reward_decision(value: object) -> TransactionDecision:
     proposal_id = "invalid-reward-proposal"
     with suppress(AttributeError, MemoryError, RecursionError, TypeError, ValueError):

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from super_scientist.application.harness_eval.extensions import (
+    HarnessTraceProposalAdapter,
+    RecordHarnessExecutionTraceHandler,
+)
 from super_scientist.domain.harness_eval.rewards import (
     RewardHackingFamily,
     RewardInvalidationReason,
@@ -21,19 +26,33 @@ from super_scientist.domain.harness_eval.traces import (
     ToolObservationStatus,
     trace_hash,
 )
-from tests.integration.application.test_transaction_coordinator import Runtime
+from super_scientist.kernel.transactions.models import (
+    HarnessTraceRecordMetadata,
+    RecordGuidanceEvaluationProtocol,
+    RejectionCode,
+)
+from tests.integration.application.test_cognitive_workspace_exchange import (
+    _approval,
+    _governed_policy,
+    _service_actor,
+)
+from tests.integration.application.test_harness_eval_extensions import (
+    _actor,
+    _Capabilities,
+    _run,
+)
+from tests.integration.application.test_workspace_exchange import ExchangeRuntime, _runtime
 from tests.unit.harness_eval.test_rewards import assess_reward_validity, reward_hacking_finding
 from tests.unit.harness_eval.test_traces import (
     HASH_D,
+    NOW,
     available,
     reward_observation,
     valid_trace,
 )
 
-pytest_plugins = ("tests.integration.application.test_transaction_coordinator",)
 
-
-def _authority_heads(runtime: Runtime) -> tuple[object, ...]:
+def _authority_heads(runtime: ExchangeRuntime) -> tuple[object, ...]:
     with runtime.uow_factory() as unit_of_work:
         repositories = unit_of_work.repositories()
         return (
@@ -44,17 +63,172 @@ def _authority_heads(runtime: Runtime) -> tuple[object, ...]:
         )
 
 
-def test_context_hash_tampering_fails_closed_without_head_changes(runtime: Runtime) -> None:
-    before = _authority_heads(runtime)
+def _hostile_trace(trace: HarnessExecutionTrace, attack: str) -> HarnessExecutionTrace:
+    if attack in {"log_probabilities", "token_ids", "availability_evidence"}:
+        field_name = "token_count" if attack == "availability_evidence" else attack
+        value: object = 1 if attack == "availability_evidence" else (1,)
+        metadata = AvailableValue.model_construct(
+            status=(
+                MetadataAvailability.AVAILABLE
+                if attack == "availability_evidence"
+                else MetadataAvailability.UNAVAILABLE
+            ),
+            value=value,
+            evidence_id=None,
+        )
+        generation = trace.generation_metadata.model_copy(update={field_name: metadata})
+        return trace.model_copy(update={"generation_metadata": generation})
+    values = trace.model_dump(mode="python", exclude={"content_hash"})
+    values["final_context_hash"] = HASH_D
+    return HarnessExecutionTrace.model_construct(
+        **values,
+        content_hash=trace_hash(values),
+    )
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ("log_probabilities", "token_ids", "availability_evidence", "context_hash"),
+)
+def test_trace_handler_fresh_validates_every_nested_hostile_copy(attack: str) -> None:
     trace = valid_trace()
-    payload = trace.model_dump(mode="python")
-    payload["final_context_hash"] = HASH_D
-    payload["content_hash"] = trace_hash(payload)
+    proposal = HarnessTraceProposalAdapter().from_untrusted_payload(
+        trace.model_dump_json(),
+        HarnessTraceRecordMetadata(received_at=NOW, source_id="handler-runtime"),
+        f"handler-{attack}",
+        f"handler-{attack}",
+        _actor(),
+    )
+    hostile = proposal.model_copy(
+        update={
+            "envelope": proposal.envelope.model_copy(
+                update={"trace": _hostile_trace(trace, attack)}
+            )
+        }
+    )
+    capabilities = _Capabilities(
+        guidance_protocol=trace.observed_binding.guidance_protocol,
+        current=True,
+    )
 
-    with pytest.raises(ValidationError, match="context"):
-        HarnessExecutionTrace.model_validate(payload, strict=True)
+    decision = _run(RecordHarnessExecutionTraceHandler(), hostile, capabilities)
 
-    assert _authority_heads(runtime) == before
+    assert decision.reasons[0].code is RejectionCode.UNMATCHED_EVALUATION
+    assert capabilities.projected == []
+
+
+def test_trace_handler_still_accepts_a_fresh_valid_trace() -> None:
+    trace = valid_trace()
+    proposal = HarnessTraceProposalAdapter().from_untrusted_payload(
+        trace.model_dump_json(),
+        HarnessTraceRecordMetadata(received_at=NOW, source_id="handler-runtime-valid"),
+        "handler-valid-trace",
+        "handler-valid-trace",
+        _actor(),
+    )
+    capabilities = _Capabilities(
+        guidance_protocol=trace.observed_binding.guidance_protocol,
+        current=True,
+    )
+
+    decision = _run(RecordHarnessExecutionTraceHandler(), proposal, capabilities)
+
+    assert decision.accepted
+    assert capabilities.projected == [trace]
+
+
+def test_coordinator_rejects_fabricated_generation_and_context_tamper(
+    tmp_path: Path,
+) -> None:
+    policy = _governed_policy()
+    runtime = _runtime(tmp_path, "trace-tamper", policy_snapshot=policy)
+    try:
+        trace = valid_trace()
+        guidance_protocol = trace.observed_binding.guidance_protocol
+        assert guidance_protocol is not None
+        prerequisite = runtime.coordinator.submit(
+            RecordGuidanceEvaluationProtocol(
+                proposal_id="trace-tamper-guidance-protocol",
+                idempotency_key="trace-tamper-guidance-protocol",
+                proposer=_service_actor(),
+                approval=_approval(runtime),
+                protocol=guidance_protocol,
+            )
+        )
+        assert prerequisite.accepted
+        fabricated_logprobs = AvailableValue[tuple[Decimal, ...]].model_construct(
+            status=MetadataAvailability.UNAVAILABLE,
+            value=(Decimal("-0.1"),),
+            evidence_id=None,
+        )
+        fabricated_generation = trace.generation_metadata.model_copy(
+            update={"log_probabilities": fabricated_logprobs}
+        )
+        fabricated_trace = trace.model_copy(update={"generation_metadata": fabricated_generation})
+        context_values = trace.model_dump(mode="python", exclude={"content_hash"})
+        context_values["final_context_hash"] = HASH_D
+        context_trace = HarnessExecutionTrace.model_construct(
+            **context_values,
+            content_hash=trace_hash(context_values),
+        )
+        adapter = HarnessTraceProposalAdapter()
+        valid_proposal = adapter.from_untrusted_payload(
+            trace.model_dump_json(),
+            HarnessTraceRecordMetadata(received_at=NOW, source_id="adversarial-runtime"),
+            "trace-tamper-template",
+            "trace-tamper-template",
+            _service_actor(),
+        ).model_copy(update={"approval": _approval(runtime)})
+        attacks = (
+            valid_proposal.model_copy(
+                update={
+                    "proposal_id": "trace-fabricated-logprobs",
+                    "idempotency_key": "trace-fabricated-logprobs",
+                    "envelope": valid_proposal.envelope.model_copy(
+                        update={"trace": fabricated_trace}
+                    ),
+                }
+            ),
+            valid_proposal.model_copy(
+                update={
+                    "proposal_id": "trace-forged-context-hash",
+                    "idempotency_key": "trace-forged-context-hash",
+                    "envelope": valid_proposal.envelope.model_copy(update={"trace": context_trace}),
+                }
+            ),
+        )
+        before = _authority_heads(runtime)
+        with runtime.uow_factory() as unit_of_work:
+            repositories = unit_of_work.repositories()
+            assert (
+                repositories.evaluation_extension_integrity_snapshot().harness_execution_traces
+                == ()
+            )
+            before_counts = (
+                len(repositories.transactions.list_all()),
+                len(repositories.audit.list_all()),
+            )
+
+        decisions = tuple(runtime.coordinator.submit(proposal) for proposal in attacks)
+
+        assert all(not decision.accepted for decision in decisions)
+        assert tuple(decision.reasons[0].code for decision in decisions) == (
+            RejectionCode.UNMATCHED_EVALUATION,
+            RejectionCode.UNMATCHED_EVALUATION,
+        )
+        assert _authority_heads(runtime) == before
+        with runtime.uow_factory() as unit_of_work:
+            repositories = unit_of_work.repositories()
+            assert (
+                repositories.evaluation_extension_integrity_snapshot().harness_execution_traces
+                == ()
+            )
+            assert (
+                len(repositories.transactions.list_all()),
+                len(repositories.audit.list_all()),
+            ) == (before_counts[0] + 2, before_counts[1] + 2)
+    finally:
+        runtime.engine.dispose()
 
 
 @pytest.mark.parametrize(
@@ -65,12 +239,9 @@ def test_context_hash_tampering_fails_closed_without_head_changes(runtime: Runti
     ),
 )
 def test_fabricated_token_and_logprob_metadata_cannot_claim_unavailability(
-    runtime: Runtime,
     value: object,
     evidence_id: str | None,
 ) -> None:
-    before = _authority_heads(runtime)
-
     with pytest.raises(ValidationError, match="metadata"):
         AvailableValue[tuple[object, ...]](
             status=MetadataAvailability.UNAVAILABLE,
@@ -78,11 +249,8 @@ def test_fabricated_token_and_logprob_metadata_cannot_claim_unavailability(
             evidence_id=evidence_id,
         )
 
-    assert _authority_heads(runtime) == before
 
-
-def test_generation_metadata_rejects_fabricated_nested_values(runtime: Runtime) -> None:
-    before = _authority_heads(runtime)
+def test_generation_metadata_rejects_fabricated_nested_values() -> None:
     valid = valid_trace().generation_metadata
     payload = valid.model_dump(mode="python")
     payload["token_ids"] = {
@@ -94,18 +262,14 @@ def test_generation_metadata_rejects_fabricated_nested_values(runtime: Runtime) 
     with pytest.raises(ValidationError, match="metadata"):
         GenerationMetadata.model_validate(payload, strict=True)
 
-    assert _authority_heads(runtime) == before
-
 
 @pytest.mark.parametrize(
     "forbidden_field",
     ("protected_answer", "evaluator_payload", "raw_provider_log", "chain_of_thought"),
 )
 def test_trace_schema_cannot_leak_protected_answers_or_evaluator_state(
-    runtime: Runtime,
     forbidden_field: str,
 ) -> None:
-    before = _authority_heads(runtime)
     payload = valid_trace().model_dump(mode="python")
     payload[forbidden_field] = "literal-held-out-answer"
 
@@ -114,7 +278,6 @@ def test_trace_schema_cannot_leak_protected_answers_or_evaluator_state(
 
     assert "literal-held-out-answer" not in str(caught.value)
     assert forbidden_field not in HarnessExecutionTrace.model_fields
-    assert _authority_heads(runtime) == before
 
 
 def test_reward_observation_cannot_embed_a_reward_channel_or_answer() -> None:
@@ -131,20 +294,11 @@ def test_reward_observation_cannot_embed_a_reward_channel_or_answer() -> None:
 
 @pytest.mark.parametrize(
     "family",
-    (
-        RewardHackingFamily.REWARD_CHANNEL_MANIPULATION,
-        RewardHackingFamily.PROXY_GAMING,
-        RewardHackingFamily.METRIC_CHERRY_PICKING,
-        RewardHackingFamily.PREMATURE_TERMINATION,
-        RewardHackingFamily.RESOURCE_ACCOUNTING_EVASION,
-        RewardHackingFamily.DISTRIBUTION_OR_PARTITION_CONTAMINATION,
-    ),
+    tuple(RewardHackingFamily),
 )
 def test_reward_spoof_families_never_produce_promotion_evidence(
-    runtime: Runtime,
     family: RewardHackingFamily,
 ) -> None:
-    before = _authority_heads(runtime)
     observation = reward_observation(value=Decimal("1000"))
     trace = valid_trace(observation=observation)
     assessment = assess_reward_validity(
@@ -157,7 +311,6 @@ def test_reward_spoof_families_never_produce_promotion_evidence(
     assert assessment.status is RewardValidityStatus.INVALID
     assert RewardInvalidationReason.REWARD_HACKING_FINDING in assessment.reasons
     assert valid_reward_evidence((assessment,)) == ()
-    assert _authority_heads(runtime) == before
 
 
 @pytest.mark.parametrize(
@@ -205,13 +358,10 @@ def test_reward_spoof_families_never_produce_promotion_evidence(
     ),
 )
 def test_environment_verifier_and_runtime_spoofs_fail_closed(
-    runtime: Runtime,
     trace: HarnessExecutionTrace,
     verifier_succeeded: bool,
     reason: RewardInvalidationReason,
 ) -> None:
-    before = _authority_heads(runtime)
-
     assessment = assess_reward_validity(
         trace.reward_observation,
         trace,
@@ -222,7 +372,6 @@ def test_environment_verifier_and_runtime_spoofs_fail_closed(
     assert assessment.status is RewardValidityStatus.INVALID
     assert reason in assessment.reasons
     assert valid_reward_evidence((assessment,)) == ()
-    assert _authority_heads(runtime) == before
 
 
 def test_trace_log_surfaces_are_hash_only_and_have_no_provider_escape() -> None:
