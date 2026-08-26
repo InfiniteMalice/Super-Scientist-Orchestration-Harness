@@ -103,8 +103,37 @@ def _raise_noncanonical_windows_root() -> Never:
     )
 
 
-def _windows_segment_is_noncanonical(segment: str) -> bool:
+_MAX_UNC_SERVER_NAME_LENGTH = 255
+_MAX_UNC_SHARE_NAME_LENGTH = 80
+_UNC_SERVER_ILLEGAL_CHARACTERS = frozenset(' <>:"|?*')
+_UNC_SHARE_ILLEGAL_CHARACTERS = frozenset('"\\/[]:|<>+=;,*?')
+
+
+def _contains_ascii_control(value: str) -> bool:
+    return any(ord(character) < 32 for character in value)
+
+
+def _windows_tail_segment_is_noncanonical(segment: str) -> bool:
     return not segment or segment in {".", ".."} or segment.endswith((" ", "."))
+
+
+def _windows_unc_server_is_noncanonical(server: str) -> bool:
+    return (
+        not 1 <= len(server) <= _MAX_UNC_SERVER_NAME_LENGTH
+        or server in {".", ".."}
+        or server.endswith(".")
+        or _contains_ascii_control(server)
+        or any(character in _UNC_SERVER_ILLEGAL_CHARACTERS for character in server)
+    )
+
+
+def _windows_unc_share_is_noncanonical(share: str) -> bool:
+    return (
+        not 1 <= len(share) <= _MAX_UNC_SHARE_NAME_LENGTH
+        or share in {".", ".."}
+        or _contains_ascii_control(share)
+        or any(character in _UNC_SHARE_ILLEGAL_CHARACTERS for character in share)
+    )
 
 
 def _require_canonical_unc_root(value: str) -> bool:
@@ -121,15 +150,11 @@ def _require_canonical_unc_root(value: str) -> bool:
     if len(components) < 2:
         _raise_noncanonical_windows_root()
     server, share, *tail = components
-    if (
-        server == "?"
-        or _windows_segment_is_noncanonical(server)
-        or _windows_segment_is_noncanonical(share)
-    ):
+    if _windows_unc_server_is_noncanonical(server) or _windows_unc_share_is_noncanonical(share):
         _raise_noncanonical_windows_root()
     if tail == [""]:
         return True
-    if any(_windows_segment_is_noncanonical(segment) for segment in tail):
+    if any(_windows_tail_segment_is_noncanonical(segment) for segment in tail):
         _raise_noncanonical_windows_root()
     return True
 
@@ -143,7 +168,9 @@ def _require_canonical_windows_root_text(value: str) -> None:
         canonical_tail = canonical_tail[1:]
     if not canonical_tail:
         return
-    if any(_windows_segment_is_noncanonical(segment) for segment in canonical_tail.split("\\")):
+    if any(
+        _windows_tail_segment_is_noncanonical(segment) for segment in canonical_tail.split("\\")
+    ):
         _raise_noncanonical_windows_root()
 
 

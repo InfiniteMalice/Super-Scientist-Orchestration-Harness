@@ -56,6 +56,44 @@ EXPECTED_KINDS = {
     "reward-assessment",
 }
 
+WINDOWS_PROHIBITED_UNC_SERVER_CHARACTERS = tuple(chr(code) for code in range(32)) + tuple(
+    ' <>:"|?*'
+)
+WINDOWS_PROHIBITED_UNC_SHARE_CHARACTERS = tuple(chr(code) for code in range(32)) + tuple(
+    '"[]:|<>+=;,*?'
+)
+
+
+def _windows_character_id(character: str) -> str:
+    return (
+        f"control-{ord(character):02x}"
+        if ord(character) < 32
+        else {
+            " ": "space",
+            "<": "less-than",
+            ">": "greater-than",
+            ":": "colon",
+            '"': "quote",
+            "[": "left-bracket",
+            "]": "right-bracket",
+            "|": "pipe",
+            "+": "plus",
+            "=": "equals",
+            ";": "semicolon",
+            ",": "comma",
+            "?": "question",
+            "*": "asterisk",
+        }[character]
+    )
+
+
+WINDOWS_PROHIBITED_UNC_SERVER_CHARACTER_IDS = tuple(
+    _windows_character_id(character) for character in WINDOWS_PROHIBITED_UNC_SERVER_CHARACTERS
+)
+WINDOWS_PROHIBITED_UNC_SHARE_CHARACTER_IDS = tuple(
+    _windows_character_id(character) for character in WINDOWS_PROHIBITED_UNC_SHARE_CHARACTERS
+)
+
 
 class CliResult(Protocol):
     stdout: str
@@ -414,15 +452,78 @@ def test_cognitive_cli_rejects_windows_root_aliases_before_path_or_database_acce
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Win32 UNC parsing is Windows-specific")
+@pytest.mark.parametrize(
+    ("component", "invalid_character"),
+    (
+        *(("server", character) for character in WINDOWS_PROHIBITED_UNC_SERVER_CHARACTERS),
+        *(("share", character) for character in WINDOWS_PROHIBITED_UNC_SHARE_CHARACTERS),
+    ),
+    ids=(
+        *(
+            f"server-{_windows_character_id(character)}"
+            for character in WINDOWS_PROHIBITED_UNC_SERVER_CHARACTERS
+        ),
+        *(
+            f"share-{_windows_character_id(character)}"
+            for character in WINDOWS_PROHIBITED_UNC_SHARE_CHARACTERS
+        ),
+    ),
+)
+def test_unc_components_reject_every_prohibited_character_before_path_or_database_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+    invalid_character: str,
+) -> None:
+    server = f"serv{invalid_character}er" if component == "server" else "server"
+    share = f"sha{invalid_character}re" if component == "share" else "share"
+    root = f"\\\\{server}\\{share}"
+    before = _workspace_state(tmp_path)
+    path_calls: list[object] = []
+    engine_calls: list[Path] = []
+
+    def forbidden_path(value: object) -> object:
+        path_calls.append(value)
+        raise AssertionError("UNC rejection must precede Path construction")
+
+    def forbidden_engine(database: Path) -> object:
+        engine_calls.append(database)
+        raise AssertionError("UNC rejection must precede database open")
+
+    monkeypatch.setattr(cognitive_cli, "Path", forbidden_path)
+    monkeypatch.setattr(cognitive_cli, "_read_only_engine", forbidden_engine)
+    result = runner.invoke(
+        app,
+        [
+            "cognitive",
+            "inspect",
+            "--root",
+            root,
+            "--kind",
+            "capability-profile",
+            "--id",
+            "profile-peer-a",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert _payload(result)["errors"][0]["code"] == "INVALID_ARGUMENT"
+    assert path_calls == []
+    assert engine_calls == []
+    assert _workspace_state(tmp_path) == before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 UNC parsing is Windows-specific")
 def test_cognitive_cli_rejects_unc_aliases_before_path_or_database_access(
     populated_workspace: tuple[Path, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace, _ = populated_workspace
     aliases = (
-        "\\\\server\\share ",
-        "\\\\server\\share.",
-        "\\\\server\\share...   ",
+        "\\\\server\\share\\folder...   ",
+        f"\\\\server\\{'s' * 81}",
+        f"\\\\{'s' * 256}\\share",
         "\\\\server\\\\share",
         "//server//share",
         "\\\\server \\share",
@@ -436,8 +537,14 @@ def test_cognitive_cli_rejects_unc_aliases_before_path_or_database_access(
         "\\\\server\\",
         "\\\\.\\share",
         "\\\\server\\..",
+        "\\\\??\\C:\\workspace",
         "\\\\?\\C:\\workspace",
         "\\\\.\\C:\\workspace",
+        "//??/C:/workspace",
+        "//?/C:/workspace",
+        "//./C:/workspace",
+        "\\/??\\C:\\workspace",
+        "/\\?/C:/workspace",
     )
     before = _workspace_state(workspace)
     path_calls: list[object] = []
@@ -491,10 +598,17 @@ def test_windows_root_spelling_gate_preserves_root_syntax_and_canonical_unicode(
         "\\\\server\\share",
         "\\\\server\\share\\",
         "\\\\server\\share\\path",
+        "\\\\server\\share.",
+        "\\\\server\\share.\\folder",
+        "\\\\server\\share ",
+        "\\\\server\\share \\folder",
+        f"\\\\server\\{'s' * 80}",
+        f"\\\\{'s' * 255}\\share",
         "//server/share",
         "//server/share/",
         "//server/share/path",
-        "\\\\server name\\share.name\\ leading\\inner space.and.dot\\unicode\N{NO-BREAK SPACE}",
+        "\\\\server-name\\share.name\\ leading\\inner space.and.dot\\unicode\N{NO-BREAK SPACE}",
+        "\\\\serveur\N{NO-BREAK SPACE}unicode\\partage\N{NO-BREAK SPACE}\\path.name",
         "//serveur\N{NO-BREAK SPACE}/partage\N{NO-BREAK SPACE}/path.name",
         "C:\\ leading\\inner space.and.dot\\unicode\N{NO-BREAK SPACE}",
         "x" * cognitive_cli.MAX_WORKSPACE_PATH_LENGTH,
