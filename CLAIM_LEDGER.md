@@ -120,8 +120,12 @@ claims:
   evidence, the harness handlers reject the proposal and leave claim, policy, harness,
   and progress heads unchanged. When a correctly recomputed reward assessment contains
   invalidating evidence, the handler accepts and retains domain status `INVALID` but
-  excludes the assessment from positive and promotion evidence. Verify with
-  `python -m pytest tests/adversarial/test_trace_reward_tampering.py -q`.
+  excludes the assessment from positive and promotion evidence. Verify the invalidating
+  finding matrix with `python -m pytest
+  tests/adversarial/test_trace_reward_tampering.py::test_reward_spoof_families_never_produce_promotion_evidence
+  -q`. Verify accepted retention with `python -m pytest
+  tests/integration/application/test_harness_eval_extensions.py::test_invalid_reward_is_retained_but_excluded_from_positive_evidence
+  -q`.
 
 Capability profiles, cohort agreement, topology, compiled procedures, guidance cells,
 model-by-harness analyses, traces, and rewards are not `AtomicClaim` evidence links by
