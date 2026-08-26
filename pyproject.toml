@@ -1,5 +1,7 @@
 [build-system]
-requires = ["hatchling>=1.27"]
+# The fixed Twine 6.2 gate accepts Hatchling 1.31's Core Metadata 2.4 but rejects
+# Hatchling 1.32's default Core Metadata 2.5.
+requires = ["hatchling>=1.27,<1.32"]
 build-backend = "hatchling.build"
 
 [project]

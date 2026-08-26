@@ -106,16 +106,18 @@ generic failure label.
 The 0.3.0 procedure compiler consumes only explicitly declared, current, accepted
 capability-profile, artifact-catalog, tool-catalog, validator-catalog, and source-snapshot
 receipts. It recomputes the compilation method, procedure DAG, artifact flow, required
-tools, validators, resources, termination rules, and plan mapping. Invalid compilation
-history is durable as `INVALID_PROCEDURE`, but it creates no procedure plan.
+tools, validators, resources, termination rules, and plan mapping. A compilation with
+domain status `INVALID` is accepted and retained as history, but it creates no procedure
+plan.
 
 When a valid `ProcedureCompilationRecord` is bound to progress, the binding handler
 requires the exact compilation receipt, active policy, plan identifier/version,
 subtasks, dependencies, weights, evidence requirements, validator identities, and
 termination mapping. The handler then calls the canonical `RecordProgressPlanHandler`
-inside the same coordinator transaction. If either validation or either projection
-fails, the coordinator rolls back the binding, progress plan, transaction, and audit
-together. The compiler has no direct progress-head authority.
+inside the same coordinator transaction. Attempting to bind an `INVALID` compilation is
+rejected with transaction code `INVALID_PROCEDURE`. If either validation or either
+projection fails, the coordinator rolls back the binding, progress plan, transaction,
+and audit together. The compiler has no direct progress-head authority.
 
 Run `python -m pytest tests/unit/procedures tests/integration/application/test_procedure_service.py
 -q` to verify compilation and atomic binding. Run

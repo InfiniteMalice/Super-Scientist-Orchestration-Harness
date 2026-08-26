@@ -61,9 +61,10 @@ research state, not a claim that automation can replace scientific judgment.
 - Record verified, self-reported, and unknown capabilities; form a bounded cohort;
   retain peer contributions and topology events; and diagnose diversity without
   treating diversity as reviewer independence.
-- Compile accepted method evidence into an immutable procedure, reject an invalid
-  procedure as `INVALID_PROCEDURE`, and bind only a valid compilation to one canonical
-  `ProgressPlan`.
+- Compile accepted method evidence into immutable `VALID` or `INVALID` procedure
+  history, retain either status in an accepted transaction, and bind only a `VALID`
+  compilation to one canonical `ProgressPlan`. Attempting to bind an `INVALID`
+  compilation is rejected with transaction code `INVALID_PROCEDURE`.
 - Retain all four guidance conditions, exact model-by-harness cells, generation-metadata
   availability, matched execution traces, and reward-hacking findings without granting
   those records promotion authority.
@@ -74,6 +75,17 @@ research state, not a claim that automation can replace scientific judgment.
 - Run the model-free governed cognitive/procedure example, including verify, export,
   fresh import, and exact replay.
 - Run the repository quality gate that CI uses.
+
+Run this focused command to verify the `INVALID` domain-status and rejection-code
+distinction:
+
+```powershell
+python -m pytest `
+  tests/integration/application/test_procedure_service.py::test_invalid_compilation_is_history_but_creates_no_plan `
+  tests/integration/application/test_procedure_service.py::test_binding_rejects_invalid_compilation_without_projecting_plan `
+  tests/integration/application/test_harness_eval_extensions.py::test_invalid_reward_is_retained_but_excluded_from_positive_evidence `
+  -q
+```
 
 See `docs/examples/kernel-vertical-slice.md` for the original byte-compatible kernel
 walk-through and `docs/examples/governed-adaptation-vertical-slice.md` for the 0.2.0

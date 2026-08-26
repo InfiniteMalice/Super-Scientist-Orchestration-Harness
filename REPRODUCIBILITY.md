@@ -48,15 +48,21 @@ The walkthrough and the semantic meaning of every step are documented in
 
 The cognitive example must report verified, self-reported, and unknown capability
 evidence; same-model diversity without independence; a topology update; a bounded
-challenge; rejected invalid and accepted valid procedure compilations; one accepted
-progress binding; all four guidance conditions; a 2-model by 2-harness grid; available
-and unavailable generation metadata; and an invalidating high reward with
-`promotion_evidence: false`. The same summary must report `verified: true`,
+challenge; accepted compilation records with domain statuses `INVALID` and `VALID`;
+one accepted valid progress binding; all four guidance conditions; a 2-model by
+2-harness grid; available and unavailable generation metadata; and an accepted
+invalidating high reward with domain status `INVALID` and `promotion_evidence: false`.
+The same summary must report `verified: true`,
 `import_verified: true`, and successful exact replay. The deterministic toy validator
 is a `TOOL` actor that compares bounded artifact bytes with the declared SHA-256 digest;
 it does not infer validation from a caller's success flag or execute artifact content.
 Run `python -m pytest tests/e2e/test_governed_cognitive_procedure_vertical_slice.py -q`
 to verify the output contract.
+
+Separately, the procedure service rejects an attempt to bind an accepted `INVALID`
+compilation with transaction code `INVALID_PROCEDURE`. Run `python -m pytest
+tests/integration/application/test_procedure_service.py::test_binding_rejects_invalid_compilation_without_projecting_plan
+-q` to verify that rejection and the absence of a progress projection.
 
 Run the example against two different empty roots and compare canonical JSON bytes.
 Path, event time, database, and artifact-store locations are excluded from the stable

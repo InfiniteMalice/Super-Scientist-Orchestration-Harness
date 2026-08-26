@@ -111,13 +111,16 @@ claims:
   analyzer may record operational diversity, but the authority checks do not count the
   variants as independent reviewers. Verify with
   `python -m pytest tests/adversarial/test_cognitive_authority.py -q`.
-- When a procedure compilation is invalid, the coordinator retains the rejected
-  transaction and audit history but creates no compiled plan or progress binding.
-  Verify with `python -m pytest tests/integration/application/test_procedure_service.py
+- When a recomputed procedure compilation has domain status `INVALID`, the coordinator
+  accepts and retains that compilation history but creates no progress plan or binding.
+  A later binding attempt is rejected with transaction code `INVALID_PROCEDURE`. Verify
+  with `python -m pytest tests/integration/application/test_procedure_service.py
   tests/adversarial/test_procedure_escalation.py -q`.
-- When a trace or reward proposal contains fabricated, stale, mismatched, or invalidating
+- When a trace or reward proposal contains fabricated, stale, or derivation-mismatched
   evidence, the harness handlers reject the proposal and leave claim, policy, harness,
-  and progress heads unchanged. Verify with
+  and progress heads unchanged. When a correctly recomputed reward assessment contains
+  invalidating evidence, the handler accepts and retains domain status `INVALID` but
+  excludes the assessment from positive and promotion evidence. Verify with
   `python -m pytest tests/adversarial/test_trace_reward_tampering.py -q`.
 
 Capability profiles, cohort agreement, topology, compiled procedures, guidance cells,

@@ -129,12 +129,14 @@ transition an `AtomicClaim`. The same adversarial command above verifies both ru
 
 The procedure lifecycle has four control-plane steps. First, the compiler resolves only
 declared, current, accepted capability/catalog/source-snapshot receipts. Second, the
-compiler emits either an accepted immutable compilation or `INVALID_PROCEDURE`; invalid
-history persists without an executable plan. Third, the validator checks the compiled
-DAG, artifact flow, tools, validators, budgets, termination, and forbidden operations.
-Fourth, the binding handler delegates the exact plan to the canonical progress handler
-in the same database transaction. If any binding check or projection fails, the
-coordinator rolls back the compilation binding and progress projection together. Run
+compiler accepts an immutable compilation record with domain status `VALID` or
+`INVALID`; an `INVALID` record persists as history without an executable plan. Third,
+the validator checks the compiled DAG, artifact flow, tools, validators, budgets,
+termination, and forbidden operations. Fourth, the binding handler delegates the exact
+plan to the canonical progress handler in the same database transaction. An attempt to
+bind an `INVALID` compilation is rejected with transaction code `INVALID_PROCEDURE`. If
+any binding check or projection fails, the coordinator rolls back the compilation
+binding and progress projection together. Run
 `python -m pytest tests/unit/procedures tests/integration/application/test_procedure_service.py
 tests/adversarial/test_procedure_escalation.py -q` to verify the lifecycle.
 
