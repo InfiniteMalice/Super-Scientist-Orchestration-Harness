@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ntpath
+import os
 import sqlite3
 import stat
 from pathlib import Path
@@ -94,6 +96,26 @@ def _require_static_namespace(path: Path) -> None:
             )
 
 
+def _require_canonical_windows_root_text(value: str) -> None:
+    if os.name != "nt":
+        return
+    _root, tail = ntpath.splitdrive(value)
+    canonical_tail = tail.replace("/", "\\")
+    if canonical_tail.startswith("\\"):
+        canonical_tail = canonical_tail[1:]
+    if not canonical_tail:
+        return
+    segments = canonical_tail.split("\\")
+    if any(
+        not segment or segment in {".", ".."} or segment.endswith((" ", "."))
+        for segment in segments
+    ):
+        raise CliBoundaryError(
+            "INVALID_ARGUMENT",
+            "workspace path must use exact canonical Windows segments",
+        )
+
+
 def _validated_workspace_root(value: object) -> Path:
     if type(value) is not str:
         raise CliBoundaryError("INVALID_ARGUMENT", "workspace path must be exact text")
@@ -102,6 +124,7 @@ def _validated_workspace_root(value: object) -> Path:
     try:
         if len(value.encode("utf-8")) > MAX_WORKSPACE_PATH_BYTES:
             raise CliBoundaryError("INVALID_ARGUMENT", "workspace path is invalid")
+        _require_canonical_windows_root_text(value)
         absolute = Path(value).absolute()
         _require_static_namespace(absolute)
         resolved = absolute.resolve(strict=True)

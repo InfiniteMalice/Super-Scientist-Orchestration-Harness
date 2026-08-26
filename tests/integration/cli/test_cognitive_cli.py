@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Protocol
@@ -16,6 +17,7 @@ from super_scientist.application.cognitive.reader import (
 )
 from super_scientist.application.transactions.coordinator import TransactionCoordinator
 from super_scientist.cli import cognitive as cognitive_cli
+from super_scientist.cli.kernel import CliBoundaryError
 from super_scientist.cli.main import app
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.kernel.transactions.models import Approval, RecordCapabilityProfile
@@ -85,11 +87,15 @@ def _workspace_state(root: Path) -> tuple[tuple[str, int, bytes | None], ...]:
 
 @pytest.fixture
 def populated_workspace(tmp_path: Path) -> tuple[Path, object]:
+    workspace = (
+        tmp_path / " leading-space" / "inner space.and.dot" / "unicode-root\N{NO-BREAK SPACE}"
+    )
+    workspace.mkdir(parents=True)
     policy = _governed_policy()
-    database_url = f"sqlite:///{(tmp_path / 'scientist-harness.db').as_posix()}"
+    database_url = f"sqlite:///{(workspace / 'scientist-harness.db').as_posix()}"
     upgrade_database(database_url)
     engine = create_database_engine(database_url)
-    artifacts = FileArtifactStore(tmp_path / "artifacts")
+    artifacts = FileArtifactStore(workspace / "artifacts")
     try:
         with DatabaseUnitOfWork(engine) as unit_of_work:
             unit_of_work.repositories().policies.add_and_activate(policy, FixedClock().now())
@@ -123,7 +129,7 @@ def populated_workspace(tmp_path: Path) -> tuple[Path, object]:
         assert decision.accepted is True, decision
     finally:
         engine.dispose()
-    return tmp_path, profile
+    return workspace, profile
 
 
 def test_cognitive_record_kind_is_closed_and_reader_has_only_point_lookup() -> None:
@@ -342,6 +348,98 @@ def test_cognitive_cli_accepts_exact_canonical_bounded_identifiers_read_only(
     assert result.exit_code == 2
     assert _payload(result)["errors"][0]["code"] == "MISSING_ENTITY"
     assert _workspace_state(workspace) == before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 path normalization is Windows-specific")
+def test_cognitive_cli_rejects_windows_root_aliases_before_path_or_database_access(
+    populated_workspace: tuple[Path, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, _ = populated_workspace
+    canonical = str(workspace)
+    parent, leaf = canonical.rsplit("\\", maxsplit=1)
+    grandparent, intermediate = parent.rsplit("\\", maxsplit=1)
+    aliases = (
+        canonical + " ",
+        canonical + "   ",
+        canonical + ".",
+        canonical + "...   ",
+        f"{grandparent}\\{intermediate} \\{leaf}",
+        f"{grandparent}\\{intermediate}.\\{leaf}",
+        f"{parent}\\\\{leaf}",
+        f"{parent}\\.\\{leaf}",
+        canonical + "\\",
+    )
+    before = _workspace_state(workspace)
+    path_calls: list[object] = []
+    engine_calls: list[Path] = []
+
+    def forbidden_path(value: object) -> object:
+        path_calls.append(value)
+        raise AssertionError("raw root rejection must precede Path construction")
+
+    def forbidden_engine(database: Path) -> object:
+        engine_calls.append(database)
+        raise AssertionError("raw root rejection must precede database open")
+
+    monkeypatch.setattr(cognitive_cli, "Path", forbidden_path)
+    monkeypatch.setattr(cognitive_cli, "_read_only_engine", forbidden_engine)
+    for alias in aliases:
+        for json_output in (False, True):
+            arguments = [
+                "cognitive",
+                "inspect",
+                "--root",
+                alias,
+                "--kind",
+                "capability-profile",
+                "--id",
+                "profile-peer-a",
+            ]
+            if json_output:
+                arguments.append("--json")
+
+            result = runner.invoke(app, arguments)
+
+            assert result.exit_code == 2
+            envelope_text = (
+                result.stdout
+                if json_output
+                else result.stdout.removeprefix("cognitive inspect: rejected\n")
+            )
+            assert json.loads(envelope_text)["errors"][0]["code"] == "INVALID_ARGUMENT"
+    assert path_calls == []
+    assert engine_calls == []
+    assert _workspace_state(workspace) == before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 path normalization is Windows-specific")
+def test_windows_root_spelling_gate_preserves_root_syntax_and_canonical_unicode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accepted = (
+        "C:\\",
+        "\\\\server\\share",
+        "\\\\server\\share\\",
+        "C:\\ leading\\inner space.and.dot\\unicode\N{NO-BREAK SPACE}",
+        "x" * cognitive_cli.MAX_WORKSPACE_PATH_LENGTH,
+    )
+    path_calls: list[object] = []
+
+    class PathBoundaryReached(Exception):
+        pass
+
+    def reached_path_boundary(value: object) -> object:
+        path_calls.append(value)
+        raise PathBoundaryReached
+
+    monkeypatch.setattr(cognitive_cli, "Path", reached_path_boundary)
+    for value in accepted:
+        with pytest.raises(PathBoundaryReached):
+            cognitive_cli._validated_workspace_root(value)
+    with pytest.raises(CliBoundaryError, match="workspace path is invalid"):
+        cognitive_cli._validated_workspace_root("x" * (cognitive_cli.MAX_WORKSPACE_PATH_LENGTH + 1))
+    assert path_calls == list(accepted)
 
 
 def test_cognitive_inspect_returns_canonical_json_without_workspace_mutation(
