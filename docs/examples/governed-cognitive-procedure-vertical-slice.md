@@ -19,7 +19,8 @@ The fixed scenario demonstrates:
 - all four guidance conditions;
 - a two-model by two-harness evaluation grid with both available and unavailable
   generation metadata;
-- rejection of a high, reward-hacking-invalid assessment as promotion evidence; and
+- a registered deterministic toy validator that hashes declared bytes without executing
+  them, including rejection of a tampered high-reward artifact as promotion evidence; and
 - source verification, workspace 0.3 export, fresh import, and idempotent replay.
 
 The fixtures are architecture demonstrations, not scientific observations or model
@@ -53,8 +54,9 @@ Important report fields include:
   finding evidence;
 - `valid_binding`: the accepted binding, exact compilation ID, and progress-plan ID;
 - `guidance` and `model_harness`: the actual admitted cell inventories;
-- `invalid_reward`: the accepted history decision, observed high value, invalid
-  assessment status, and empty promotion-evidence result; and
+- `invalid_reward`: the accepted history decision, observed high value, checker-derived
+  expected/actual artifact hashes, invalid assessment status, and empty
+  promotion-evidence result; and
 - `workspace`: the source/import integrity results and replay outcome.
 
 ## Trust Boundary

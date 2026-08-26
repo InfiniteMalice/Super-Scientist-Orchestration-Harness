@@ -37,7 +37,10 @@ scientist-harness = "super_scientist.cli.bootstrap:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/super_scientist"]
-force-include = { "alembic" = "super_scientist/_migrations" }
+
+[tool.hatch.build.targets.wheel.force-include]
+alembic = "super_scientist/_migrations"
+"examples/governed_cognitive_procedure_vertical_slice.py" = "super_scientist_examples/governed_cognitive_procedure_vertical_slice.py"
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers --strict-config"

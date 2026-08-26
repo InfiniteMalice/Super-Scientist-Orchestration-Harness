@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import stat
 from collections.abc import Callable, Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -78,6 +80,7 @@ from super_scientist.domain.harness_eval import (
     ModelHarnessProtocol,
     ModelIdentity,
     ObservableArtifactRef,
+    PhaseAResourceUsage,
     ReferenceMissingness,
     ResolvedEvidenceInventory,
     ResolvedEvidenceKind,
@@ -206,6 +209,55 @@ from super_scientist.providers.storage.procedure_sources import (
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 BASE_EVIDENCE = b"deterministic-offline-evidence-v1"
 BASE_HASH = sha256_hex(BASE_EVIDENCE)
+TAMPERED_EVIDENCE = b"tampered-deterministic-offline-evidence-v1"
+TOY_VALIDATOR_ID = "offline-toy-validator"
+TOY_VALIDATOR_VERSION = "v1"
+MAX_TOY_VALIDATION_BYTES = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ToyValidationResult:
+    artifact_id: str
+    expected_sha256: str
+    actual_sha256: str
+    passed: bool
+
+
+@dataclass(frozen=True)
+class DeterministicToyValidator:
+    validator_id: str = TOY_VALIDATOR_ID
+    validator_version: str = TOY_VALIDATOR_VERSION
+
+    def validate(
+        self,
+        *,
+        artifact_id: str,
+        artifact_bytes: bytes,
+        expected_sha256: str,
+    ) -> ToyValidationResult:
+        if (
+            type(artifact_id) is not str
+            or not artifact_id
+            or artifact_id != artifact_id.strip()
+            or len(artifact_id.encode("utf-8")) > 200
+        ):
+            raise ValueError("toy validator requires a bounded canonical artifact identifier")
+        if type(artifact_bytes) is not bytes or len(artifact_bytes) > MAX_TOY_VALIDATION_BYTES:
+            raise ValueError("toy validator artifact bytes exceed the fixed bound")
+        if (
+            type(expected_sha256) is not str
+            or len(expected_sha256) != 64
+            or expected_sha256 != expected_sha256.casefold()
+            or any(character not in "0123456789abcdef" for character in expected_sha256)
+        ):
+            raise ValueError("toy validator requires a canonical SHA-256 expectation")
+        actual_sha256 = sha256_hex(artifact_bytes)
+        return ToyValidationResult(
+            artifact_id=artifact_id,
+            expected_sha256=expected_sha256,
+            actual_sha256=actual_sha256,
+            passed=actual_sha256 == expected_sha256,
+        )
 
 
 class FixedClock:
@@ -231,6 +283,7 @@ class EvaluationFixture:
     assessment: RewardValidityAssessment
     findings: tuple[RewardHackingFinding, ...]
     evidence: dict[str, bytes]
+    diagnostic_validation: ToyValidationResult
 
 
 def fixed_policy() -> PolicySnapshot:
@@ -254,29 +307,62 @@ def fixed_policy() -> PolicySnapshot:
 
 def create_local_runtime(workspace_root: Path, policy: PolicySnapshot) -> LocalRuntime:
     workspace_root.mkdir(parents=True, exist_ok=False)
-    database_url = f"sqlite:///{(workspace_root / 'scientist-harness.db').as_posix()}"
-    upgrade_database(database_url)
-    engine = create_database_engine(database_url)
-    artifacts = FileArtifactStore(workspace_root / "artifacts")
-    reviewer = ActorIdentity(
-        actor_id="offline-reviewer",
-        kind=ActorKind.HUMAN,
-        created_at=NOW,
-    )
+    database_path = workspace_root / "scientist-harness.db"
+    artifact_root = workspace_root / "artifacts"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    engine: Engine | None = None
+    try:
+        upgrade_database(database_url)
+        engine = create_database_engine(database_url)
+        artifacts = FileArtifactStore(artifact_root)
+        reviewer = ActorIdentity(
+            actor_id="offline-reviewer",
+            kind=ActorKind.HUMAN,
+            created_at=NOW,
+        )
 
-    def uow_factory() -> DatabaseUnitOfWork:
-        return DatabaseUnitOfWork(engine)
+        def uow_factory() -> DatabaseUnitOfWork:
+            return DatabaseUnitOfWork(engine)
 
-    with uow_factory() as unit_of_work:
-        unit_of_work.repositories().policies.add_and_activate(policy, NOW)
-    return LocalRuntime(
-        engine=engine,
-        uow_factory=uow_factory,
-        coordinator=TransactionCoordinator(uow_factory, policy, FixedClock(), artifacts),
-        artifact_store=artifacts,
-        policy=policy,
-        reviewer=reviewer,
-    )
+        with uow_factory() as unit_of_work:
+            unit_of_work.repositories().policies.add_and_activate(policy, NOW)
+        return LocalRuntime(
+            engine=engine,
+            uow_factory=uow_factory,
+            coordinator=TransactionCoordinator(uow_factory, policy, FixedClock(), artifacts),
+            artifact_store=artifacts,
+            policy=policy,
+            reviewer=reviewer,
+        )
+    except Exception:
+        if engine is not None:
+            with suppress(Exception):
+                engine.dispose()
+        _remove_failed_runtime_workspace(workspace_root, database_path, artifact_root)
+        raise
+
+
+def _remove_failed_runtime_workspace(
+    workspace_root: Path,
+    database_path: Path,
+    artifact_root: Path,
+) -> None:
+    for path in (
+        database_path,
+        Path(f"{database_path}-journal"),
+        Path(f"{database_path}-shm"),
+        Path(f"{database_path}-wal"),
+    ):
+        try:
+            if stat.S_ISREG(path.lstat().st_mode):
+                path.unlink()
+        except OSError:
+            continue
+    for directory in (artifact_root, workspace_root):
+        try:
+            directory.rmdir()
+        except OSError:
+            continue
 
 
 def _service_actor() -> ActorIdentity:
@@ -520,13 +606,14 @@ def _record_cognition_and_collaboration(
         }
         for profile in (profiles[0], profiles[2], profiles[3])
     ]
+    prompt_strategies = tuple(profile.diversity_fingerprint.prompt_strategy for profile in selected)
+    if any(value is None for value in prompt_strategies):
+        raise RuntimeError("selected model peers require declared prompt strategies")
     diversity_summary = {
         "independent": diversity.axes.model_family is DiversityAxisStatus.DIFFERENT,
         "member_ids": list(diversity.member_actor_ids),
         "model_family": selected[0].diversity_fingerprint.model_family,
-        "prompt_strategies": sorted(
-            profile.diversity_fingerprint.prompt_strategy for profile in selected
-        ),
+        "prompt_strategies": sorted(value for value in prompt_strategies if value is not None),
     }
 
     collaboration_artifact = runtime.artifact_store.put(
@@ -717,11 +804,14 @@ class EvidenceRetainer:
         evidence_type: str = "offline-evaluation",
     ) -> tuple[AddEvidence, ...]:
         proposals: list[AddEvidence] = []
+        pending: list[tuple[str, bytes]] = []
         for record_id, data in sorted(evidence.items()):
             prior = self._retained.get(record_id)
             if prior is not None:
                 if prior != data:
-                    raise RuntimeError("one evidence identifier resolved to different content")
+                    raise RuntimeError(
+                        f"evidence identifier {record_id!r} resolved to different content"
+                    )
                 continue
             artifact = self._runtime.artifact_store.put(data, "application/json")
             digest = sha256_hex(record_id.encode("utf-8"))[:32]
@@ -741,7 +831,7 @@ class EvidenceRetainer:
                     ),
                 )
             )
-            self._retained[record_id] = data
+            pending.append((record_id, data))
         if proposals:
             _run_slice(
                 self._research,
@@ -749,6 +839,7 @@ class EvidenceRetainer:
                 self._runtime,
                 tuple(proposals),
             )
+            self._retained.update(pending)
         return tuple(proposals)
 
 
@@ -795,11 +886,11 @@ def _procedure_step(
         completion_criteria=("Structured output matches schema",),
         evidence_requirements=("retained-output",),
         validator=ActorIdentity(
-            actor_id="offline-validator",
+            actor_id=TOY_VALIDATOR_ID,
             kind=ActorKind.HUMAN,
             created_at=NOW,
         ),
-        validator_version="v1",
+        validator_version=TOY_VALIDATOR_VERSION,
         failure_signals=("validator-rejected",),
         recovery=RecoveryDirective(terminal_outcome=ProcedureTerminalOutcome.ABANDONED),
         capability_requirement_ids=("procedure-capability",),
@@ -895,8 +986,8 @@ def _record_procedures_and_binding(
                 task_family_id=requirement.task_family_id,
                 status=CapabilityEvidenceStatus.VERIFIED,
                 evidence_ids=("offline-procedure-capability-evidence",),
-                validator_id="offline-validator",
-                validator_version="v1",
+                validator_id=TOY_VALIDATOR_ID,
+                validator_version=TOY_VALIDATOR_VERSION,
                 evidence_snapshot_hash=capability_snapshot_hash,
             ),
         ),
@@ -926,10 +1017,18 @@ def _record_procedures_and_binding(
         ),
     )
 
+    declared_source_bytes = b"declared offline source"
     source_artifact = runtime.artifact_store.put(
-        b"declared offline source",
+        declared_source_bytes,
         "application/json",
     )
+    source_validation = DeterministicToyValidator().validate(
+        artifact_id="source",
+        artifact_bytes=declared_source_bytes,
+        expected_sha256=source_artifact.sha256,
+    )
+    if not source_validation.passed:
+        raise RuntimeError("declared procedure source failed deterministic validation")
     artifact_catalog = (
         ArtifactCatalogEntry(
             artifact_id="source",
@@ -951,11 +1050,11 @@ def _record_procedures_and_binding(
     validator_catalog = (
         RegisteredValidator(
             validator=ActorIdentity(
-                actor_id="offline-validator",
+                actor_id=TOY_VALIDATOR_ID,
                 kind=ActorKind.HUMAN,
                 created_at=NOW,
             ),
-            validator_version="v1",
+            validator_version=TOY_VALIDATOR_VERSION,
             registration=CatalogFactStatus.PRESENT,
         ),
     )
@@ -1050,7 +1149,7 @@ def _record_procedures_and_binding(
         evidence_refs=(candidate_evidence,),
         claimed_capability_requirement_ids=(requirement.requirement_id,),
         expected_output_ids=("final",),
-        verifier_requirement_ids=("offline-validator:v1",),
+        verifier_requirement_ids=(f"{TOY_VALIDATOR_ID}:{TOY_VALIDATOR_VERSION}",),
         resource_estimate=_resource_budget(2),
         termination_conditions=("The validator accepts or the method is abandoned",),
         provenance_contribution_ids=("challenge-contribution",),
@@ -1220,6 +1319,7 @@ def _record_procedures_and_binding(
             "compilation_id": valid_record.compilation_id,
             "procedure_id": valid_record.result.procedure.procedure_id,
             "status": valid_record.result.report.status.value,
+            "validator_passed": source_validation.passed,
         },
         {
             "accepted": binding_decision.accepted,
@@ -1250,15 +1350,24 @@ def _evaluation_budget(model: ModelIdentity | None = None) -> EvaluationBudget:
     )
 
 
-def _evaluation_metrics(score: str = "0.8") -> EvaluationMetricVector:
+def _evaluation_metrics(
+    score: str = "0.8",
+    *,
+    artifact_bytes: bytes = BASE_EVIDENCE,
+) -> EvaluationMetricVector:
+    validation = DeterministicToyValidator().validate(
+        artifact_id="guidance-output",
+        artifact_bytes=artifact_bytes,
+        expected_sha256=BASE_HASH,
+    )
     return EvaluationMetricVector(
         task_score=Decimal(score),
         procedure_compilation_status=ProcedureValidationStatus.VALID,
-        procedure_execution_success=True,
+        procedure_execution_success=validation.passed,
         method_selection_result=MethodDirectionStatus.SUPPORTED,
         execution_failure_events=(),
         recovery_attempt_events=(),
-        resource_usage=ResourceUsage(
+        resource_usage=PhaseAResourceUsage(
             cost_usd=0.1,
             compute_units=1.0,
             tokens=10,
@@ -1266,7 +1375,9 @@ def _evaluation_metrics(score: str = "0.8") -> EvaluationMetricVector:
             tool_calls=1,
             human_interventions=0,
         ),
-        final_validation=AssessmentOutcome.PASSED,
+        final_validation=(
+            AssessmentOutcome.PASSED if validation.passed else AssessmentOutcome.FAILED
+        ),
         missingness=(),
     )
 
@@ -1287,10 +1398,10 @@ def _record_guidance_grid(
         model_version="v1",
         harness_id="guidance-harness",
         harness_version="v1",
-        verifier_id="offline-validator",
-        verifier_version="v1",
-        checker_id="offline-checker",
-        checker_version="v1",
+        verifier_id=TOY_VALIDATOR_ID,
+        verifier_version=TOY_VALIDATOR_VERSION,
+        checker_id=TOY_VALIDATOR_ID,
+        checker_version=TOY_VALIDATOR_VERSION,
         artifact_ids=("guidance-artifact",),
         declared_distractor_artifact_ids=("guidance-distractor",),
         random_seed=7,
@@ -1468,19 +1579,34 @@ def _verification(
         trace.observed_binding.checker_id,
         trace.observed_binding.checker_hash,
     )
+    verifier_validation = DeterministicToyValidator().validate(
+        artifact_id=trace.verifier_result_id,
+        artifact_bytes=BASE_EVIDENCE,
+        expected_sha256=trace.verifier_result_hash,
+    )
+    checker_validation = DeterministicToyValidator().validate(
+        artifact_id=trace.checker_result_id,
+        artifact_bytes=BASE_EVIDENCE,
+        expected_sha256=trace.checker_result_hash,
+    )
 
     def result_snapshot(
         role: str,
         executor: object,
         result_id: str,
         result_hash: str,
+        validation: ToyValidationResult,
     ) -> ResolvedVerificationResultSnapshot:
         snapshot_id = f"{role}-snapshot"
         values: dict[str, object] = {
             "snapshot_id": snapshot_id,
             "executor": executor,
             "result": _receipt(result_id, result_hash),
-            "status": VerificationOutcomeStatus.SUCCEEDED,
+            "status": (
+                VerificationOutcomeStatus.SUCCEEDED
+                if validation.passed
+                else VerificationOutcomeStatus.FAILED
+            ),
             "observable_evidence": (_receipt(f"{role}-evidence"),),
             "resolver": _receipt("verification-resolver"),
         }
@@ -1495,12 +1621,14 @@ def _verification(
         verifier,
         trace.verifier_result_id,
         trace.verifier_result_hash,
+        verifier_validation,
     )
     checker_result = result_snapshot(
         "checker",
         checker,
         trace.checker_result_id,
         trace.checker_result_hash,
+        checker_validation,
     )
     outcome = VerificationOutcomeEvidence.build(
         outcome_id=f"verification-outcome-{suffix}",
@@ -1529,7 +1657,7 @@ def _findings_and_coverage(
     trace: HarnessExecutionTrace,
     *,
     suffix: str,
-    invalid: bool,
+    validation: ToyValidationResult,
 ) -> tuple[
     tuple[RewardHackingFinding, ...],
     RewardHackingCoverageAttestation,
@@ -1538,20 +1666,23 @@ def _findings_and_coverage(
     observation = trace.reward_observation
     if observation is None:
         raise RuntimeError("evaluation fixture requires a reward observation")
+    validation_failed = not validation.passed
     findings = tuple(
         RewardHackingFinding.build(
             finding_id=f"finding-{index:02d}-{suffix}",
             family=family,
             status=(
                 RewardHackingFindingStatus.INVALIDATING
-                if invalid and index == 0
+                if validation_failed and index == 0
                 else RewardHackingFindingStatus.CLEARED
             ),
             trace_id=trace.trace_id,
             trace_hash=trace.content_hash,
             observation_id=observation.observation_id,
             observation_hash=observation.content_hash,
-            evidence_ids=(f"diagnostic-evidence-{index:02d}",),
+            evidence_ids=(
+                validation.artifact_id if index == 0 else f"diagnostic-evidence-{index:02d}",
+            ),
         )
         for index, family in enumerate(RewardHackingFamily)
     )
@@ -1562,13 +1693,17 @@ def _findings_and_coverage(
             "family": finding.family,
             "status": finding.status,
             "observable_evidence": tuple(
-                _receipt(evidence_id) for evidence_id in finding.evidence_ids
+                _receipt(
+                    evidence_id,
+                    validation.actual_sha256 if index == 0 else BASE_HASH,
+                )
+                for evidence_id in finding.evidence_ids
             ),
             "resolver": _receipt("diagnostic-resolver"),
         }
         source_id = (
             f"diagnostic-source-invalid-{index:02d}"
-            if invalid and index == 0
+            if validation_failed and index == 0
             else f"diagnostic-source-{index:02d}"
         )
         values["source"] = _receipt(
@@ -1774,10 +1909,18 @@ def _evaluation_fixture(
     coordinate: ModelHarnessCoordinate,
     index: int,
     *,
-    invalid: bool = False,
+    diagnostic_artifact_bytes: bytes = BASE_EVIDENCE,
     trace: HarnessExecutionTrace | None = None,
 ) -> EvaluationFixture:
-    suffix = f"matrix-{index:02d}" if not invalid else f"matrix-invalid-{index:02d}"
+    diagnostic_content_hash = sha256_hex(diagnostic_artifact_bytes)
+    diagnostic_validation = DeterministicToyValidator().validate(
+        artifact_id=f"diagnostic-artifact-{diagnostic_content_hash[:12]}",
+        artifact_bytes=diagnostic_artifact_bytes,
+        expected_sha256=BASE_HASH,
+    )
+    suffix = (
+        f"matrix-{index:02d}" if diagnostic_validation.passed else f"matrix-invalid-{index:02d}"
+    )
     if trace is None:
         context_artifact = ObservableArtifactRef.build(
             artifact_id="matrix-artifact",
@@ -1804,7 +1947,7 @@ def _evaluation_fixture(
             validator_hash=BASE_HASH,
             checker_hash=BASE_HASH,
         )
-        observation = RewardObservation.build(
+        reward_observation = RewardObservation.build(
             observation_id=f"matrix-reward-{index:02d}",
             task_id=protocol.task_set_id,
             task_input_hash=protocol.task_set_hash,
@@ -1855,6 +1998,11 @@ def _evaluation_fixture(
             size_bytes=len(BASE_EVIDENCE),
             media_type="application/json",
         )
+        output_validation = DeterministicToyValidator().validate(
+            artifact_id=output.artifact_id,
+            artifact_bytes=BASE_EVIDENCE,
+            expected_sha256=output.sha256,
+        )
         trace = HarnessExecutionTrace.build(
             trace_id=f"matrix-trace-{index:02d}",
             observed_binding=binding,
@@ -1870,11 +2018,11 @@ def _evaluation_fixture(
             verifier_result_hash=BASE_HASH,
             checker_result_id="checker-result",
             checker_result_hash=BASE_HASH,
-            reward_observation=observation,
+            reward_observation=reward_observation,
             reward_observation_hash=AvailableValue[str](
                 status=MetadataAvailability.AVAILABLE,
-                value=observation.content_hash,
-                evidence_id=observation.observation_id,
+                value=reward_observation.content_hash,
+                evidence_id=reward_observation.observation_id,
             ),
             capture_reward_validity=AvailableValue[CaptureRewardValidityStatus](
                 status=MetadataAvailability.AVAILABLE,
@@ -1921,10 +2069,14 @@ def _evaluation_fixture(
                 tool_calls=1,
                 human_interventions=0,
             ),
-            execution_status=ExecutionStatus.COMPLETED,
+            execution_status=(
+                ExecutionStatus.COMPLETED
+                if output_validation.passed
+                else ExecutionStatus.INCOMPLETE
+            ),
             artifact_integrity=AvailableValue[bool](
                 status=MetadataAvailability.AVAILABLE,
-                value=True,
+                value=output_validation.passed,
                 evidence_id="artifact-integrity",
             ),
             protected_boundary_crossed=AvailableValue[bool](
@@ -1934,7 +2086,7 @@ def _evaluation_fixture(
             ),
             evaluator_succeeded=AvailableValue[bool](
                 status=MetadataAvailability.AVAILABLE,
-                value=True,
+                value=output_validation.passed,
                 evidence_id="evaluator-run",
             ),
             provenance_evidence_ids=(
@@ -1951,10 +2103,10 @@ def _evaluation_fixture(
     findings, coverage, diagnostic_entries = _findings_and_coverage(
         trace,
         suffix=suffix,
-        invalid=invalid,
+        validation=diagnostic_validation,
     )
-    observation = trace.reward_observation
-    if observation is None or observation.evidence_id is None:
+    retained_observation = trace.reward_observation
+    if retained_observation is None or retained_observation.evidence_id is None:
         raise RuntimeError("evaluation fixture requires retained reward evidence")
     inventory = _resolved_inventory(
         (
@@ -1962,7 +2114,7 @@ def _evaluation_fixture(
             *verification_entries,
             *diagnostic_entries,
             (
-                _receipt(observation.evidence_id, observation.content_hash),
+                _receipt(retained_observation.evidence_id, retained_observation.content_hash),
                 ResolvedEvidenceKind.OBSERVABLE_EVIDENCE,
             ),
         ),
@@ -1970,7 +2122,7 @@ def _evaluation_fixture(
         resolver_id="reward-inventory-resolver",
     )
     assessment = assess_reward_validity(
-        observation,
+        retained_observation,
         trace,
         findings,
         expectation=expectation,
@@ -1986,6 +2138,12 @@ def _evaluation_fixture(
         assessment=assessment,
     )
     evidence = _trace_supporting_evidence(trace)
+    _add_evidence_bytes(
+        evidence,
+        diagnostic_validation.artifact_id,
+        diagnostic_validation.actual_sha256,
+        diagnostic_artifact_bytes,
+    )
     _assessment_supporting_evidence(assessment, evidence)
     return EvaluationFixture(
         chain=chain,
@@ -1994,6 +2152,7 @@ def _evaluation_fixture(
         assessment=assessment,
         findings=findings,
         evidence=evidence,
+        diagnostic_validation=diagnostic_validation,
     )
 
 
@@ -2027,10 +2186,10 @@ def _record_model_harness_grid(
         partitions=partitions,
         task_set_id="offline-model-harness-task-set",
         task_set_hash=BASE_HASH,
-        verifier_id="offline-validator",
-        verifier_version="v1",
-        checker_id="offline-checker",
-        checker_version="v1",
+        verifier_id=TOY_VALIDATOR_ID,
+        verifier_version=TOY_VALIDATOR_VERSION,
+        checker_id=TOY_VALIDATOR_ID,
+        checker_version=TOY_VALIDATOR_VERSION,
         artifact_ids=("matrix-artifact",),
         random_seed=7,
         output_schema_hash=BASE_HASH,
@@ -2156,6 +2315,7 @@ def _record_model_harness_grid(
     return (
         {
             "cell_count": len(cells),
+            "checker_passed": fixtures[0].diagnostic_validation.passed,
             "harnesses": [item.harness_id for item in protocol.harnesses],
             "metadata_availability": availability,
             "models": [item.model_id for item in protocol.models],
@@ -2178,7 +2338,7 @@ def _record_invalid_high_reward(
         protocol,
         coordinate,
         0,
-        invalid=True,
+        diagnostic_artifact_bytes=TAMPERED_EVIDENCE,
         trace=valid_fixture.trace,
     )
     if invalid.assessment.status is not RewardValidityStatus.INVALID:
@@ -2206,6 +2366,9 @@ def _record_invalid_high_reward(
         "accepted": decision.accepted,
         "assessment_id": invalid.assessment.assessment_id,
         "decision_code": reason,
+        "checker_actual_hash": invalid.diagnostic_validation.actual_sha256,
+        "checker_expected_hash": invalid.diagnostic_validation.expected_sha256,
+        "checker_passed": invalid.diagnostic_validation.passed,
         "promotion_evidence": bool(valid_reward_evidence((invalid.assessment,))),
         "reward": invalid.assessment.observation.value,
         "status": invalid.assessment.status.value,

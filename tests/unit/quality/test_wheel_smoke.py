@@ -11,6 +11,8 @@ from types import ModuleType
 
 import pytest
 
+EXAMPLE_WHEEL_MEMBER = "super_scientist_examples/governed_cognitive_procedure_vertical_slice.py"
+
 
 def _wheel_smoke() -> ModuleType:
     return importlib.import_module("super_scientist.quality.wheel_smoke")
@@ -22,6 +24,7 @@ def _write_test_wheel(path: Path) -> None:
             "package-0.2.0.dist-info/entry_points.txt",
             "[console_scripts]\nscientist-harness = super_scientist.cli.bootstrap:main\n",
         )
+        archive.writestr(EXAMPLE_WHEEL_MEMBER, "def run_example(workspace_root): return {}\n")
 
 
 def test_cognitive_vertical_slice_imports_only_wheel_and_standard_offline_modules() -> None:
@@ -43,6 +46,7 @@ def test_cognitive_vertical_slice_imports_only_wheel_and_standard_offline_module
         "__future__",
         "argparse",
         "collections",
+        "contextlib",
         "dataclasses",
         "datetime",
         "decimal",
@@ -51,6 +55,7 @@ def test_cognitive_vertical_slice_imports_only_wheel_and_standard_offline_module
         "pathlib",
         "pydantic",
         "sqlalchemy",
+        "stat",
         "super_scientist",
     }
 
@@ -83,6 +88,107 @@ def test_project_wheel_rejects_path_configuration_files(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="path configuration"):
         wheel_smoke._verify_project_wheel(wheel)
+
+
+def test_project_wheel_requires_exact_cognitive_example_member(tmp_path: Path) -> None:
+    wheel_smoke = _wheel_smoke()
+    wheel = tmp_path / "package-0.2.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            "package-0.2.0.dist-info/entry_points.txt",
+            "[console_scripts]\nscientist-harness = super_scientist.cli.bootstrap:main\n",
+        )
+
+    with pytest.raises(ValueError, match="governed cognitive example"):
+        wheel_smoke._verify_project_wheel(wheel)
+
+
+def test_cognitive_example_passes_strict_mypy() -> None:
+    project_root = Path(__file__).resolve().parents[3]
+    checked = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--strict",
+            "examples/governed_cognitive_procedure_vertical_slice.py",
+        ],
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+
+
+@pytest.mark.integration
+def test_built_wheel_contains_and_loads_installed_cognitive_example(tmp_path: Path) -> None:
+    wheel_smoke = _wheel_smoke()
+    project_root = Path(__file__).resolve().parents[3]
+    dist = tmp_path / "dist"
+    built = subprocess.run(
+        [sys.executable, "-m", "build", "--wheel", "--outdir", str(dist)],
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert built.returncode == 0, built.stderr
+    wheels = tuple(dist.glob("*.whl"))
+    assert len(wheels) == 1
+    wheel_smoke._verify_project_wheel(wheels[0])
+    with zipfile.ZipFile(wheels[0]) as archive:
+        assert archive.namelist().count(EXAMPLE_WHEEL_MEMBER) == 1
+
+    installed = tmp_path / "installed"
+    install = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--no-index",
+            "--no-deps",
+            "--target",
+            str(installed),
+            str(wheels[0]),
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert install.returncode == 0, install.stderr
+    load = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            (
+                "import importlib,pathlib,sys;"
+                "root=pathlib.Path(sys.argv[1]).resolve();"
+                "sys.path.insert(0,str(root));"
+                "module=importlib.import_module("
+                "'super_scientist_examples.governed_cognitive_procedure_vertical_slice');"
+                "assert pathlib.Path(module.__file__).resolve().is_relative_to(root);"
+                "assert callable(module.run_example);"
+                "module.main(('--help',))"
+            ),
+            str(installed),
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert load.returncode == 0, load.stderr
+    assert "usage:" in load.stdout
 
 
 def test_dependency_free_smoke_bootstrap_returns_successful_version_envelope(
