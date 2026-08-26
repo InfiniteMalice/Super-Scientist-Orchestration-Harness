@@ -135,6 +135,7 @@ from super_scientist.kernel.transactions.models import (
     TransactionDecision,
     TransitionClaim,
     _fresh_actor_identity,
+    _fresh_harness_execution_trace_proposal,
     _governed_proposal_state_is_safe,
     expected_hash_verified_evidence,
 )
@@ -317,7 +318,12 @@ class TransactionCoordinator:
         normalized = _normalize_proposal(proposal)
         if type(normalized) is TransactionDecision:
             return normalized
-        governed_intent_fingerprint = _governed_intent_fingerprint(cast(Proposal, normalized))
+        derive_trace_fingerprint = type(normalized) is RecordHarnessExecutionTrace
+        governed_intent_fingerprint = (
+            None
+            if derive_trace_fingerprint
+            else _governed_intent_fingerprint(cast(Proposal, normalized))
+        )
         with self._uow_factory() as uow:
             repositories = uow.repositories()
             require_workspace_integrity(repositories, self._artifact_store)
@@ -327,6 +333,7 @@ class TransactionCoordinator:
                 repositories,
                 connection,
                 intent_fingerprint=governed_intent_fingerprint,
+                derive_trace_intent_fingerprint=derive_trace_fingerprint,
             )
 
     def submit_batch(
@@ -346,14 +353,18 @@ class TransactionCoordinator:
                 if type(proposal) is TransactionDecision:
                     decisions.append(proposal)
                 else:
+                    derive_trace_fingerprint = type(proposal) is RecordHarnessExecutionTrace
                     decisions.append(
                         self._submit_locked(
                             cast(Proposal, proposal),
                             repositories,
                             connection,
-                            intent_fingerprint=_governed_intent_fingerprint(
-                                cast(Proposal, proposal)
+                            intent_fingerprint=(
+                                None
+                                if derive_trace_fingerprint
+                                else _governed_intent_fingerprint(cast(Proposal, proposal))
                             ),
+                            derive_trace_intent_fingerprint=derive_trace_fingerprint,
                         )
                     )
         return tuple(decisions)
@@ -451,11 +462,13 @@ class TransactionCoordinator:
         connection: Connection,
         *,
         intent_fingerprint: str | None = None,
+        derive_trace_intent_fingerprint: bool = False,
     ) -> TransactionDecision:
         governed_type = _trusted_governed_proposal_type(proposal)
-        governed_state_is_safe = governed_type is None or _governed_proposal_state_is_safe(
-            proposal,
-            governed_type,
+        governed_state_is_safe = (
+            type(proposal) is RecordHarnessExecutionTrace
+            if governed_type is RecordHarnessExecutionTrace
+            else governed_type is None or _governed_proposal_state_is_safe(proposal, governed_type)
         )
         stored_proposal = _durable_proposal(
             proposal,
@@ -465,13 +478,22 @@ class TransactionCoordinator:
         invalid_governed_type = (
             governed_type
             if governed_type is not None
-            and (type(proposal) is not governed_type or not governed_state_is_safe)
+            and (
+                type(proposal) is not governed_type
+                or not governed_state_is_safe
+                or (
+                    governed_type is RecordHarnessExecutionTrace
+                    and type(stored_proposal) is InvalidProposal
+                )
+            )
             else None
         )
         if governed_type is None and type(stored_proposal) is InvalidProposal:
             invalid_governed_type = _attempted_governed_proposal_type(stored_proposal)
         if invalid_governed_type is not None:
             governed_type = None
+        if derive_trace_intent_fingerprint:
+            intent_fingerprint = _governed_intent_fingerprint(stored_proposal)
         proposal_hash = sha256_hex(
             canonical_json_bytes(BaseModel.model_dump(stored_proposal, mode="json"))
         )
@@ -538,7 +560,12 @@ class TransactionCoordinator:
             )
             return decision
 
-        admitted_proposal: Proposal = proposal
+        admitted_proposal: Proposal = (
+            stored_proposal
+            if governed_type is RecordHarnessExecutionTrace
+            and type(stored_proposal) is RecordHarnessExecutionTrace
+            else proposal
+        )
         if governed_type is None and isinstance(proposal, AddEvidence):
             try:
                 admitted_proposal = self._verified_evidence_proposal(proposal)
@@ -934,6 +961,8 @@ def _durable_proposal(
     try:
         if type(proposal) is not governed_type:
             raise TypeError("governed proposal subclasses are not durable input")
+        if governed_type is RecordHarnessExecutionTrace:
+            return _fresh_harness_execution_trace_proposal(proposal)
         if state_is_safe is None:
             state_is_safe = _governed_proposal_state_is_safe(proposal, governed_type)
         if not state_is_safe:

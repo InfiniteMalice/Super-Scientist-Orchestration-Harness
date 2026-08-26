@@ -623,6 +623,9 @@ class HarnessTraceCapabilities:
     def policy_snapshot(self) -> PolicySnapshot:
         return self.active_policy
 
+    def admitted_harness_trace_proposal(self) -> RecordHarnessExecutionTrace:
+        return self.proposal
+
     def get_guidance_protocol(self, protocol_id: str) -> GuidanceEvaluationProtocol | None:
         return self.guidance_protocols.get(protocol_id)
 

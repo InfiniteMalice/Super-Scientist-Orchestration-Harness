@@ -25,7 +25,10 @@ from super_scientist.kernel.transactions.models import (
     AppendPeerContribution,
     AppendPeerRequest,
     AppendTopologyEvent,
+    Approval,
     BindCompiledProgressPlan,
+    HarnessExecutionTraceEnvelope,
+    HarnessTraceRecordMetadata,
     RecordCapabilityProfile,
     RecordCohortPlan,
     RecordCollaborationSession,
@@ -403,10 +406,26 @@ def test_each_new_proposal_uses_only_its_focused_capability_factory(
                         (proposal_type, _CapabilityProbeHandler(proposal_type)),
                     )
                 )
-                proposal = proposal_class.model_construct(
-                    proposal_id=f"probe-{proposal_type}",
-                    idempotency_key=f"probe-key-{proposal_type}",
-                    proposer=runtime.actor,
+                proposal = (
+                    RecordHarnessExecutionTrace(
+                        proposal_id=f"probe-{proposal_type}",
+                        idempotency_key=f"probe-key-{proposal_type}",
+                        proposer=runtime.actor,
+                        approval=Approval(approver=runtime.actor, approved_at=NOW),
+                        envelope=HarnessExecutionTraceEnvelope(
+                            metadata=HarnessTraceRecordMetadata(
+                                received_at=NOW,
+                                source_id="capability-probe",
+                            ),
+                            trace=valid_trace(),
+                        ),
+                    )
+                    if proposal_class is RecordHarnessExecutionTrace
+                    else proposal_class.model_construct(
+                        proposal_id=f"probe-{proposal_type}",
+                        idempotency_key=f"probe-key-{proposal_type}",
+                        proposer=runtime.actor,
+                    )
                 )
                 with pytest.raises(_CapabilityObserved):
                     runtime.coordinator._submit_locked(

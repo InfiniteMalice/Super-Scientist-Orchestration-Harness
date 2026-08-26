@@ -58,7 +58,6 @@ from super_scientist.kernel.transactions.models import (
     TransactionDecision,
     _fresh_actor_identity,
     _fresh_governed_identifier,
-    _fresh_harness_execution_trace_proposal,
     _fresh_harness_trace_metadata,
     _fresh_reward_assessment_proposal,
     _invalid_reward_decision,
@@ -159,6 +158,8 @@ class _ModelAnalysisReads(_ModelProtocolReads, Protocol):
 
 
 class _TraceReads(_GuidanceProtocolReads, _ModelProtocolReads, Protocol):
+    def admitted_harness_trace_proposal(self) -> RecordHarnessExecutionTrace | None: ...
+
     def get_harness_execution_trace(self, trace_id: str) -> HarnessExecutionTrace | None: ...
 
     def trace_evidence_is_current(self, trace: HarnessExecutionTrace) -> bool: ...
@@ -592,18 +593,9 @@ class RecordHarnessExecutionTraceHandler:
         proposal: RecordHarnessExecutionTrace,
         reads: HandlerReadCapability,
     ) -> _TraceContext:
+        del proposal
         capability = cast(_TraceReads, reads)
-        validated: RecordHarnessExecutionTrace | None = None
-        with suppress(
-            ArithmeticError,
-            MemoryError,
-            OverflowError,
-            RecursionError,
-            TypeError,
-            UnicodeError,
-            ValueError,
-        ):
-            validated = _fresh_harness_execution_trace_proposal(proposal)
+        validated = capability.admitted_harness_trace_proposal()
         if validated is None:
             return _TraceContext(
                 validated=None,
@@ -627,22 +619,11 @@ class RecordHarnessExecutionTraceHandler:
         proposal: RecordHarnessExecutionTrace,
         context: _TraceContext,
     ) -> TransactionDecision:
+        del proposal
         validated = context.validated
         if validated is None:
-            proposal_id = "invalid-harness-trace-proposal"
-            with suppress(
-                AttributeError,
-                MemoryError,
-                RecursionError,
-                TypeError,
-                ValueError,
-            ):
-                state = object.__getattribute__(proposal, "__dict__")
-                if type(state) is not dict:
-                    raise ValueError("unsafe proposal state")
-                proposal_id = _fresh_governed_identifier(state.get("proposal_id"))
             return _rejected(
-                proposal_id,
+                "invalid-harness-trace-proposal",
                 RejectionCode.UNMATCHED_EVALUATION,
                 "harness evaluation proposal is invalid",
             )
@@ -655,7 +636,7 @@ class RecordHarnessExecutionTraceHandler:
         )
         if not guidance_matched and not matrix_matched:
             return _rejected(
-                proposal.proposal_id,
+                validated.proposal_id,
                 RejectionCode.STALE_REFERENCE,
                 "harness trace does not bind current accepted execution evidence",
             )
@@ -675,17 +656,17 @@ class RecordHarnessExecutionTraceHandler:
         )
         if budget is None or not _trace_within_budget(trace, budget):
             return _rejected(
-                proposal.proposal_id,
+                validated.proposal_id,
                 RejectionCode.UNMATCHED_BUDGETS,
                 "harness trace exceeds or changes the exact protocol budget",
             )
         if not context.evidence_current:
             return _rejected(
-                proposal.proposal_id,
+                validated.proposal_id,
                 RejectionCode.STALE_REFERENCE,
                 "harness trace references stale accepted execution evidence",
             )
-        return _existing_or_accept(proposal.proposal_id, context.existing)
+        return _existing_or_accept(validated.proposal_id, context.existing)
 
     def project(
         self,
@@ -693,7 +674,11 @@ class RecordHarnessExecutionTraceHandler:
         decision: TransactionDecision,
         writes: HandlerWriteCapability,
     ) -> None:
-        validated = _fresh_harness_execution_trace_proposal(proposal)
+        del proposal
+        capability = cast(_TraceReads, writes)
+        validated = capability.admitted_harness_trace_proposal()
+        if validated is None:
+            raise ValueError("trace projection requires its admitted proposal snapshot")
         _project(decision, writes, validated.envelope.trace)
 
 

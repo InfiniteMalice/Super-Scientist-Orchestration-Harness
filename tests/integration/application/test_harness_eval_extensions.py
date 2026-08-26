@@ -172,15 +172,18 @@ class _Capabilities:
     matrix_cells: tuple[ModelHarnessCell, ...] = ()
     matrix_analysis: ModelHarnessAnalysis | None = None
     trace: HarnessExecutionTrace | None = None
+    admitted_trace_proposal: RecordHarnessExecutionTrace | None = None
     reward: RewardValidityAssessment | None = None
     current: bool = True
     matched: bool = True
     projected: list[BaseModel] = field(default_factory=list)
+    trace_repository_reads: int = 0
 
     def policy_snapshot(self) -> PolicySnapshot:
         return self.policy
 
     def get_guidance_protocol(self, protocol_id: str) -> GuidanceEvaluationProtocol | None:
+        self.trace_repository_reads += 1
         if self.guidance_protocol is not None and self.guidance_protocol.protocol_id == protocol_id:
             return self.guidance_protocol
         return None
@@ -199,6 +202,7 @@ class _Capabilities:
         return self.matched
 
     def get_model_harness_protocol(self, protocol_id: str) -> ModelHarnessProtocol | None:
+        self.trace_repository_reads += 1
         if self.matrix_protocol is not None and self.matrix_protocol.protocol_id == protocol_id:
             return self.matrix_protocol
         return None
@@ -241,13 +245,18 @@ class _Capabilities:
         )
 
     def get_harness_execution_trace(self, trace_id: str) -> HarnessExecutionTrace | None:
+        self.trace_repository_reads += 1
         if self.trace is not None and self.trace.trace_id == trace_id:
             return self.trace
         return None
 
     def trace_evidence_is_current(self, trace: HarnessExecutionTrace) -> bool:
+        self.trace_repository_reads += 1
         del trace
         return self.current
+
+    def admitted_harness_trace_proposal(self) -> RecordHarnessExecutionTrace | None:
+        return self.admitted_trace_proposal
 
     def get_reward_assessment(self, assessment_id: str) -> RewardValidityAssessment | None:
         if self.reward is not None and self.reward.assessment_id == assessment_id:
@@ -600,7 +609,10 @@ def test_trace_adapter_parses_untrusted_payload_and_handler_rejects_stale_runtim
     accepted = _run(
         RecordHarnessExecutionTraceHandler(),
         proposal,
-        _Capabilities(guidance_protocol=trace.observed_binding.guidance_protocol),
+        _Capabilities(
+            guidance_protocol=trace.observed_binding.guidance_protocol,
+            admitted_trace_proposal=proposal,
+        ),
     )
     stale_trace = trace.model_copy(
         update={
@@ -625,6 +637,38 @@ def test_trace_adapter_parses_untrusted_payload_and_handler_rejects_stale_runtim
     assert type(proposal) is RecordHarnessExecutionTrace
     assert accepted.accepted is True
     assert stale.reasons[0].code is RejectionCode.UNMATCHED_EVALUATION
+
+
+def test_trace_handler_projects_one_owned_snapshot_after_caller_mutation() -> None:
+    trace = valid_trace()
+    owned = HarnessTraceProposalAdapter().from_untrusted_payload(
+        trace.model_dump_json(),
+        HarnessTraceRecordMetadata(received_at=NOW, source_id="owned-runtime"),
+        "proposal-owned-trace",
+        "key-owned-trace",
+        _actor(),
+    )
+    caller = owned.model_copy(deep=True)
+    changed = owned.model_copy(
+        update={
+            "proposal_id": "proposal-mutated-trace",
+            "idempotency_key": "key-mutated-trace",
+        }
+    )
+    capabilities = _Capabilities(
+        guidance_protocol=trace.observed_binding.guidance_protocol,
+        admitted_trace_proposal=owned,
+    )
+    handler = RecordHarnessExecutionTraceHandler()
+    context = handler.build_context(caller, capabilities)
+    object.__setattr__(caller, "proposal_id", changed.proposal_id)
+    object.__setattr__(caller, "idempotency_key", changed.idempotency_key)
+
+    decision = handler.decide(caller, context)
+    handler.project(caller, decision, capabilities)
+
+    assert decision.proposal_id == "proposal-owned-trace"
+    assert capabilities.projected == [trace]
 
 
 def test_trace_handler_rejects_tools_outside_the_exact_protocol_budget() -> None:
@@ -655,7 +699,10 @@ def test_trace_handler_rejects_tools_outside_the_exact_protocol_budget() -> None
     decision = _run(
         RecordHarnessExecutionTraceHandler(),
         copied_proposal,
-        _Capabilities(guidance_protocol=trace.observed_binding.guidance_protocol),
+        _Capabilities(
+            guidance_protocol=trace.observed_binding.guidance_protocol,
+            admitted_trace_proposal=copied_proposal,
+        ),
     )
 
     assert decision.reasons[0].code is RejectionCode.UNMATCHED_BUDGETS
