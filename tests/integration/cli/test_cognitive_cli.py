@@ -413,6 +413,75 @@ def test_cognitive_cli_rejects_windows_root_aliases_before_path_or_database_acce
     assert _workspace_state(workspace) == before
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Win32 UNC parsing is Windows-specific")
+def test_cognitive_cli_rejects_unc_aliases_before_path_or_database_access(
+    populated_workspace: tuple[Path, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, _ = populated_workspace
+    aliases = (
+        "\\\\server\\share ",
+        "\\\\server\\share.",
+        "\\\\server\\share...   ",
+        "\\\\server\\\\share",
+        "//server//share",
+        "\\\\server \\share",
+        "\\\\server.\\share",
+        "\\/server\\share",
+        "/\\server/share",
+        "\\\\server/share",
+        "//server\\share",
+        "\\\\\\share",
+        "\\\\server",
+        "\\\\server\\",
+        "\\\\.\\share",
+        "\\\\server\\..",
+        "\\\\?\\C:\\workspace",
+        "\\\\.\\C:\\workspace",
+    )
+    before = _workspace_state(workspace)
+    path_calls: list[object] = []
+    engine_calls: list[Path] = []
+
+    def forbidden_path(value: object) -> object:
+        path_calls.append(value)
+        raise AssertionError("UNC rejection must precede Path construction")
+
+    def forbidden_engine(database: Path) -> object:
+        engine_calls.append(database)
+        raise AssertionError("UNC rejection must precede database open")
+
+    monkeypatch.setattr(cognitive_cli, "Path", forbidden_path)
+    monkeypatch.setattr(cognitive_cli, "_read_only_engine", forbidden_engine)
+    for alias in aliases:
+        for json_output in (False, True):
+            arguments = [
+                "cognitive",
+                "inspect",
+                "--root",
+                alias,
+                "--kind",
+                "capability-profile",
+                "--id",
+                "profile-peer-a",
+            ]
+            if json_output:
+                arguments.append("--json")
+
+            result = runner.invoke(app, arguments)
+
+            assert result.exit_code == 2
+            envelope_text = (
+                result.stdout
+                if json_output
+                else result.stdout.removeprefix("cognitive inspect: rejected\n")
+            )
+            assert json.loads(envelope_text)["errors"][0]["code"] == "INVALID_ARGUMENT"
+    assert path_calls == []
+    assert engine_calls == []
+    assert _workspace_state(workspace) == before
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Win32 path normalization is Windows-specific")
 def test_windows_root_spelling_gate_preserves_root_syntax_and_canonical_unicode(
     monkeypatch: pytest.MonkeyPatch,
@@ -421,6 +490,12 @@ def test_windows_root_spelling_gate_preserves_root_syntax_and_canonical_unicode(
         "C:\\",
         "\\\\server\\share",
         "\\\\server\\share\\",
+        "\\\\server\\share\\path",
+        "//server/share",
+        "//server/share/",
+        "//server/share/path",
+        "\\\\server name\\share.name\\ leading\\inner space.and.dot\\unicode\N{NO-BREAK SPACE}",
+        "//serveur\N{NO-BREAK SPACE}/partage\N{NO-BREAK SPACE}/path.name",
         "C:\\ leading\\inner space.and.dot\\unicode\N{NO-BREAK SPACE}",
         "x" * cognitive_cli.MAX_WORKSPACE_PATH_LENGTH,
     )

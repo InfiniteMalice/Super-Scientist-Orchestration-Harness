@@ -96,8 +96,46 @@ def _require_static_namespace(path: Path) -> None:
             )
 
 
+def _raise_noncanonical_windows_root() -> Never:
+    raise CliBoundaryError(
+        "INVALID_ARGUMENT",
+        "workspace path must use exact canonical Windows segments",
+    )
+
+
+def _windows_segment_is_noncanonical(segment: str) -> bool:
+    return not segment or segment in {".", ".."} or segment.endswith((" ", "."))
+
+
+def _require_canonical_unc_root(value: str) -> bool:
+    if len(value) < 2 or value[0] not in {"/", "\\"} or value[1] not in {"/", "\\"}:
+        return False
+    separator = value[0]
+    if value[1] != separator:
+        _raise_noncanonical_windows_root()
+    alternate_separator = "\\" if separator == "/" else "/"
+    body = value[2:]
+    if alternate_separator in body:
+        _raise_noncanonical_windows_root()
+    components = body.split(separator)
+    if len(components) < 2:
+        _raise_noncanonical_windows_root()
+    server, share, *tail = components
+    if (
+        server == "?"
+        or _windows_segment_is_noncanonical(server)
+        or _windows_segment_is_noncanonical(share)
+    ):
+        _raise_noncanonical_windows_root()
+    if tail == [""]:
+        return True
+    if any(_windows_segment_is_noncanonical(segment) for segment in tail):
+        _raise_noncanonical_windows_root()
+    return True
+
+
 def _require_canonical_windows_root_text(value: str) -> None:
-    if os.name != "nt":
+    if os.name != "nt" or _require_canonical_unc_root(value):
         return
     _root, tail = ntpath.splitdrive(value)
     canonical_tail = tail.replace("/", "\\")
@@ -105,15 +143,8 @@ def _require_canonical_windows_root_text(value: str) -> None:
         canonical_tail = canonical_tail[1:]
     if not canonical_tail:
         return
-    segments = canonical_tail.split("\\")
-    if any(
-        not segment or segment in {".", ".."} or segment.endswith((" ", "."))
-        for segment in segments
-    ):
-        raise CliBoundaryError(
-            "INVALID_ARGUMENT",
-            "workspace path must use exact canonical Windows segments",
-        )
+    if any(_windows_segment_is_noncanonical(segment) for segment in canonical_tail.split("\\")):
+        _raise_noncanonical_windows_root()
 
 
 def _validated_workspace_root(value: object) -> Path:
