@@ -109,13 +109,55 @@ authority. They must nevertheless respect the trusted lower bound of committed
 dependencies and the trusted upper bound of the current transaction persistence time;
 audit sequence preserves durable order and breaks equal-time ties.
 
+## Cognitive And Procedure Authority
+
+When a cognitive actor submits a capability, cohort, peer, topology, procedure,
+guidance, matrix, trace, or reward proposal, `TransactionCoordinator` applies the exact
+fixed handler and active-policy requirement before appending any authoritative record.
+An accepted cognitive record is evidence only: it cannot change a claim head, policy,
+harness head, progress head, model weight, tool permission, or protected evaluator.
+Run `python -m pytest tests/adversarial/test_cognitive_authority.py
+tests/property/test_cognitive_append_only.py -q` to verify these unchanged-state and
+append-only results.
+
+Operational diversity describes differences in model, prompt, tools, evidence, method,
+and topology. Reviewer independence describes distinct authority identities under the
+policy. When the same model uses different prompts, the cohort analyzer may record
+diversity, but the admission engine must not count the variants as independent
+reviewers. When peers agree unanimously, their contributions remain evidence and cannot
+transition an `AtomicClaim`. The same adversarial command above verifies both rules.
+
+The procedure lifecycle has four control-plane steps. First, the compiler resolves only
+declared, current, accepted capability/catalog/source-snapshot receipts. Second, the
+compiler emits either an accepted immutable compilation or `INVALID_PROCEDURE`; invalid
+history persists without an executable plan. Third, the validator checks the compiled
+DAG, artifact flow, tools, validators, budgets, termination, and forbidden operations.
+Fourth, the binding handler delegates the exact plan to the canonical progress handler
+in the same database transaction. If any binding check or projection fails, the
+coordinator rolls back the compilation binding and progress projection together. Run
+`python -m pytest tests/unit/procedures tests/integration/application/test_procedure_service.py
+tests/adversarial/test_procedure_escalation.py -q` to verify the lifecycle.
+
+When an evaluation cell is retained, its handler must match the exact protocol,
+condition, model, harness, budget, trace, output, verifier, and reward evidence. Missing,
+stale, ambiguous, surplus, or cross-protocol evidence produces a fixed rejection and no
+evaluation projection. Generation metadata records `AVAILABLE`, `UNAVAILABLE`, or
+`UNKNOWN`; an unavailable value cannot carry fabricated token, log-probability, request,
+or context data. A high numeric reward is valid promotion evidence only when its exact
+trace is current and every invalidating reward-hacking finding is absent. Run
+`python -m pytest tests/integration/application/test_harness_eval_extensions.py
+tests/adversarial/test_trace_reward_tampering.py -q` to verify these results.
+
 ## Quality Policy Protection
 
-`scientist-harness quality-gate` has a source-controlled registry of exactly eight
-checks: format, lint, types, tests, security, dependencies, build, and package. The
-runner accepts no arbitrary command, path, check selection, skip, or threshold. JSON is
-an output mode only. The test command fixes branch coverage at 90 percent, and CI invokes
-the same installed command.
+`scientist-harness quality-gate` has a source-controlled registry of exactly nine
+checks: `format`, `lint`, `types`, `tests`, `security`, `dependencies`, `build`,
+`package`, and `wheel-install`. The runner accepts no arbitrary command, path, check
+selection, skip, or threshold. JSON is an output mode only. The test command fixes
+branch coverage at 90 percent. The final check installs the exact built wheel in a fresh
+environment and executes the installed governed cognitive example without repository
+import fallback. Run `python -m pytest tests/unit/quality/test_runner.py
+tests/unit/quality/test_wheel_smoke.py -q` to verify the inventory and wheel boundary.
 
 Changes to the registry, `pyproject.toml`, or the CI workflow are protected as reviewed
 source changes. This slice does not yet persist a runtime quality-policy hash or provide

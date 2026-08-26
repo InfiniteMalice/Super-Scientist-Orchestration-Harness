@@ -97,3 +97,30 @@ policy and verifies the resulting heads and history; it does not trust the expor
 projection expectation as authority. Exact content may replay idempotently. Changed
 content under an existing identity is an audited conflict and cannot revise claim
 history.
+
+## Governed Cognitive Evidence Boundary
+
+The 0.3.0 test suite supports these implementation claims and no broader scientific
+claims:
+
+- When unanimous peer contributions are accepted and later cited without the required
+  authoritative claim evidence, the claim-transition handler rejects the transition
+  and leaves the claim head unchanged. Verify with
+  `python -m pytest tests/adversarial/test_cognitive_authority.py -q`.
+- When same-model prompt variants produce different contributions, the diversity
+  analyzer may record operational diversity, but the authority checks do not count the
+  variants as independent reviewers. Verify with
+  `python -m pytest tests/adversarial/test_cognitive_authority.py -q`.
+- When a procedure compilation is invalid, the coordinator retains the rejected
+  transaction and audit history but creates no compiled plan or progress binding.
+  Verify with `python -m pytest tests/integration/application/test_procedure_service.py
+  tests/adversarial/test_procedure_escalation.py -q`.
+- When a trace or reward proposal contains fabricated, stale, mismatched, or invalidating
+  evidence, the harness handlers reject the proposal and leave claim, policy, harness,
+  and progress heads unchanged. Verify with
+  `python -m pytest tests/adversarial/test_trace_reward_tampering.py -q`.
+
+Capability profiles, cohort agreement, topology, compiled procedures, guidance cells,
+model-by-harness analyses, traces, and rewards are not `AtomicClaim` evidence links by
+themselves. Findings reported by S30-S35 remain external source evidence marked
+`not_reproduced`; this ledger does not claim those findings as project results.

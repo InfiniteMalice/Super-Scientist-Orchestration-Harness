@@ -356,6 +356,45 @@ All nine sources have `reproduction_status: not_reproduced` in the source regist
 Their exact consulted versions, repository commits, licenses, evidence boundaries, and
 limitations are recorded there.
 
+### S30-S35 - Governed cognitive cohorts and procedure compilation
+
+- **S30**, arXiv `2608.11924v1` and the MIT-licensed companion repository at
+  `c17149def034bc777462de612926c8e3b6d01b8c`, motivates stage-shaped method
+  development, persistent artifact interfaces, planning before result observation, and
+  bounded self-refutation. SSOH independently specifies compilation, validation,
+  policy, and progress binding. The reported small generated-topic evaluation is not
+  reproduced.
+- **S31**, arXiv `2608.13567v1` (CC BY 4.0) and the MIT-licensed repository at
+  `e3ac7fbb3a6caea05c88343a8de6ec04a4035db8`, motivates functional specialization
+  and query-conditioned routing. Treating internal neuronal modularity as a benefit for
+  external agents is project inference. Operational diversity does not establish
+  reviewer independence or correctness.
+- **S32**, arXiv `2608.17271v1` (CC BY 4.0) and the Apache-2.0 repository at
+  `9a86de643331d2b3a3d95744040881a95aa3fdc6`, motivates capability grounding,
+  guidance conditions, model-by-harness evaluation, and explicit resource consequences.
+  SSOH does not adopt the paper's ASI framing; benchmark scores are contextual evidence,
+  not scientific truth or safe-autonomy evidence.
+- **S33**, arXiv `2608.17253v1` and the Apache-2.0 repository at
+  `ff476f06e42eeca4d5c198b93eadd7547876e5e5`, motivates heterogeneous cohorts,
+  contribution accounting, correlated-error diagnostics, and diversity-aware peer
+  evaluation. SSOH implements no live reinforcement learning or policy update. Peer
+  reward and consensus have no claim, policy, procedure, or promotion authority.
+- **S34**, arXiv `2608.17282v1`, motivates task-conditioned capability grounding,
+  peer routing, and adaptive local topology. Code was unavailable until acceptance and
+  was not inspected or reused. SSOH keeps governance centralized in the control plane,
+  persists no hidden reasoning, and does not generalize reasoning/QA results to
+  scientific governance.
+- **S35**, arXiv `2608.17393v1` (CC0 1.0) and the Apache-2.0 repository at
+  `58f89aa039373afc962ad836d67eca8436b48af6`, motivates reusable procedure structure,
+  harness-native trace fidelity, train/inference mismatch awareness, environment
+  isolation, and reward-hacking diagnostics. SSOH implements no live reinforcement
+  learning, online weights, or scientific-training claim.
+
+All six sources have `reproduction_status: not_reproduced`. Their source proposals,
+reported evidence, project adaptations, original synthesis, exact authors, versions,
+licenses, repository boundaries, and limitations are separate fields in the source
+register. No source code from S30-S35 is imported or reused.
+
 ## Architecture Attribution Matrix
 
 | Project capability | Primary inspiration | Project-specific adaptation |
@@ -388,6 +427,11 @@ limitations are recorded there.
 | Behavioral-rule retention | S27 | Independent review and governed consolidation |
 | Behavior-to-code handbook | S28 | Deterministic rebuildable source projection |
 | Hypothesis/checker loop | S29 | Domain-neutral contracts with independently specified safety boundaries |
+| Method and procedure lifecycle | S30 | Immutable compilation, deterministic validation, and atomic canonical progress binding |
+| Cognitive roles and topology | S31, S34 | Bounded append-only evidence under centralized control-plane authority |
+| Capability and guidance evidence | S32 | Exact accepted provenance and fail-closed model-by-harness matching |
+| Cohort diagnostics | S33 | Peer evidence and correlated-error analysis without training or consensus authority |
+| Trace and reward validity | S35 | Availability-aware exact evidence chains without reinforcement learning or promotion authority |
 
 ## Language Rules
 

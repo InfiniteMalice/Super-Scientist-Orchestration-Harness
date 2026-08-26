@@ -101,6 +101,29 @@ Termination remains a separate typed fact: `SUCCESS`, `TIMEOUT`, `BUDGET_EXHAUST
 `VALIDATOR_ERROR`, `SAFETY_BLOCK`, and `UNRECOVERABLE_STATE` are never collapsed into a
 generic failure label.
 
+## Compiled procedure binding
+
+The 0.3.0 procedure compiler consumes only explicitly declared, current, accepted
+capability-profile, artifact-catalog, tool-catalog, validator-catalog, and source-snapshot
+receipts. It recomputes the compilation method, procedure DAG, artifact flow, required
+tools, validators, resources, termination rules, and plan mapping. Invalid compilation
+history is durable as `INVALID_PROCEDURE`, but it creates no procedure plan.
+
+When a valid `ProcedureCompilationRecord` is bound to progress, the binding handler
+requires the exact compilation receipt, active policy, plan identifier/version,
+subtasks, dependencies, weights, evidence requirements, validator identities, and
+termination mapping. The handler then calls the canonical `RecordProgressPlanHandler`
+inside the same coordinator transaction. If either validation or either projection
+fails, the coordinator rolls back the binding, progress plan, transaction, and audit
+together. The compiler has no direct progress-head authority.
+
+Run `python -m pytest tests/unit/procedures tests/integration/application/test_procedure_service.py
+-q` to verify compilation and atomic binding. Run
+`python -m pytest tests/adversarial/test_procedure_escalation.py -q` to verify that
+recursive delegation, method anchoring, procedure-input injection, forbidden imports,
+shells, providers, tools, and impossible governance authority cannot create a plan or
+advance a progress head.
+
 ## Durability and reconstruction
 
 Plans, subtasks, validation events, budgets, checkpoints, and completion decisions use
