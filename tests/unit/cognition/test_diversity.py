@@ -17,6 +17,7 @@ from super_scientist.domain.cognition import (
     assess_diversity,
     build_cohort,
 )
+from super_scientist.domain.cognition.models import MAX_COGNITION_ITEMS
 from super_scientist.domain.identity import ActorIdentity, ActorKind, are_independent
 from super_scientist.domain.primitives import canonical_json_bytes, sha256_hex
 
@@ -284,3 +285,53 @@ def test_diversity_direct_parser_rejects_correlation_policy_mismatch() -> None:
 
     with pytest.raises(ValidationError, match="governing policy"):
         DiversityAssessment.model_validate_json(json.dumps(payload), strict=True)
+
+
+@pytest.mark.parametrize("field", ("profiles", "correlations"))
+def test_diversity_requires_exact_tuple_inputs(field: str) -> None:
+    retained = _profile("peer-a", prompt_strategy="direct")
+    profiles: object = (retained,)
+    correlations: object = ()
+    if field == "profiles":
+        profiles = [retained]
+    else:
+        correlations = []
+
+    with pytest.raises(TypeError, match="exact tuples"):
+        assess_diversity(  # type: ignore[arg-type]
+            _cohort(retained),
+            profiles,
+            correlations,
+        )
+
+
+@pytest.mark.parametrize("field", ("profiles", "correlations"))
+def test_diversity_bounds_each_declared_collection(field: str) -> None:
+    retained = _profile("peer-a", prompt_strategy="direct")
+    profiles = (retained,)
+    correlations: tuple[ErrorCorrelationRecord, ...] = ()
+    if field == "profiles":
+        profiles = (retained,) * (MAX_COGNITION_ITEMS + 1)
+    else:
+        correlations = (_correlation(),) * (MAX_COGNITION_ITEMS + 1)
+
+    with pytest.raises(ValueError, match="at most 64"):
+        assess_diversity(_cohort(retained), profiles, correlations)
+
+
+def test_diversity_rejects_error_correlation_outside_cohort() -> None:
+    left = _profile("peer-a", prompt_strategy="direct")
+    outsider = ErrorCorrelationRecord(
+        correlation_id="correlation-outsider",
+        left_actor_id="peer-a",
+        right_actor_id="peer-z",
+        evaluation_set_id="evaluation-a",
+        sample_count=10,
+        method="pearson",
+        status=ErrorCorrelationStatus.KNOWN,
+        value=0.5,
+        governing_policy_hash=POLICY,
+    )
+
+    with pytest.raises(ValueError, match="only cohort members"):
+        assess_diversity(_cohort(left), (left,), (outsider,))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import importlib
 import json
+import os
 import site
 import subprocess
 import sys
@@ -49,6 +50,14 @@ raise SystemExit(exit_code)
 
 def _wheel_smoke() -> ModuleType:
     return importlib.import_module("super_scientist.quality.wheel_smoke")
+
+
+def _without_parent_coverage() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("COV_CORE_") and key != "COVERAGE_PROCESS_START"
+    }
 
 
 def _installed_example_argv(venv_python: Path, workspace_root: Path) -> tuple[str, ...]:
@@ -227,6 +236,7 @@ def test_built_wheel_contains_and_loads_installed_cognitive_example(tmp_path: Pa
             str(installed),
         ],
         cwd=tmp_path,
+        env=_without_parent_coverage(),
         check=False,
         capture_output=True,
         text=True,
@@ -343,6 +353,7 @@ def test_fresh_venv_executes_complete_installed_cognitive_example(
     completed = subprocess.run(
         _installed_example_argv(venv_python, workspace_root),
         cwd=tmp_path,
+        env=_without_parent_coverage(),
         check=False,
         capture_output=True,
         text=True,
@@ -358,6 +369,23 @@ def test_fresh_venv_executes_complete_installed_cognitive_example(
     assert payload["workspace"]["verified"] is True
     assert payload["workspace"]["import_verified"] is True
     assert payload["workspace"]["replay_verified"] is True
+
+
+def test_installed_wheel_children_do_not_expand_parent_coverage_source_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COV_CORE_SOURCE", "super_scientist")
+    monkeypatch.setenv("COV_CORE_CONFIG", "pyproject.toml")
+    monkeypatch.setenv("COV_CORE_DATAFILE", ".coverage")
+    monkeypatch.setenv("COV_CORE_BRANCH", "enabled")
+    monkeypatch.setenv("COVERAGE_PROCESS_START", "pyproject.toml")
+    monkeypatch.setenv("UNRELATED_ENVIRONMENT", "retained")
+
+    environment = _without_parent_coverage()
+
+    assert all(not key.startswith("COV_CORE_") for key in environment)
+    assert "COVERAGE_PROCESS_START" not in environment
+    assert environment["UNRELATED_ENVIRONMENT"] == "retained"
 
 
 def test_dependency_free_smoke_bootstrap_returns_successful_version_envelope(

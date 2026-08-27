@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 import pytest
+import typer
 from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from typer.testing import CliRunner
@@ -19,7 +20,9 @@ from super_scientist.application.transactions.coordinator import TransactionCoor
 from super_scientist.cli import cognitive as cognitive_cli
 from super_scientist.cli.kernel import CliBoundaryError
 from super_scientist.cli.main import app
+from super_scientist.domain.evidence.models import ArtifactRef
 from super_scientist.domain.identity import ActorIdentity, ActorKind
+from super_scientist.domain.primitives import sha256_hex
 from super_scientist.kernel.transactions.models import Approval, RecordCapabilityProfile
 from super_scientist.providers.storage.artifacts import FileArtifactStore
 from super_scientist.providers.storage.database import (
@@ -187,6 +190,25 @@ def test_cognitive_record_kind_is_closed_and_reader_has_only_point_lookup() -> N
         }
         == set()
     )
+
+
+def test_cognitive_reader_is_final_and_rejects_nonexact_kinds() -> None:
+    with pytest.raises(TypeError, match="final"):
+
+        class ForbiddenReader(CognitiveRecordReader):
+            pass
+
+    reader = CognitiveRecordReader(object())  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="exact CognitiveRecordKind"):
+        reader.get("capability-profile", "profile-peer-a")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("identifier", (".", "..", "profile/peer", "profile\\peer", "bad\x01id"))
+def test_cognitive_reader_rejects_path_shaped_identifiers(identifier: str) -> None:
+    reader = CognitiveRecordReader(object())  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="must not be a path"):
+        reader.get(CognitiveRecordKind.CAPABILITY_PROFILE, identifier)
 
 
 def test_cognitive_reader_routes_every_fixed_kind_with_point_lookups_only(
@@ -691,6 +713,132 @@ def test_windows_root_spelling_gate_preserves_root_syntax_and_canonical_unicode(
     with pytest.raises(CliBoundaryError, match="workspace path is invalid"):
         cognitive_cli._validated_workspace_root("x" * (cognitive_cli.MAX_WORKSPACE_PATH_LENGTH + 1))
     assert path_calls == list(accepted)
+
+
+def _artifact_ref(data: bytes, *, relative_path: str | None = None) -> ArtifactRef:
+    digest = sha256_hex(data)
+    return ArtifactRef(
+        sha256=digest,
+        size_bytes=len(data),
+        media_type="application/octet-stream",
+        relative_path=relative_path or f"sha256/{digest[:2]}/{digest}",
+    )
+
+
+def test_read_only_artifact_store_accepts_only_exact_contained_content(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    data = b"governed artifact"
+    ref = _artifact_ref(data)
+    target = root / ref.relative_path
+    target.parent.mkdir(parents=True)
+    target.write_bytes(data)
+    store = cognitive_cli._ReadOnlyArtifactStore(root)
+
+    assert store.read(ref) == data
+    with pytest.raises(PermissionError, match="read-only"):
+        store.put(b"mutation", "application/octet-stream")
+
+
+@pytest.mark.parametrize(
+    ("condition", "message"),
+    (
+        ("wrong-path", "content address"),
+        ("missing", "unavailable"),
+        ("directory", "regular file"),
+        ("wrong-bytes", "hash mismatch"),
+        ("wrong-size", "hash mismatch"),
+    ),
+)
+def test_read_only_artifact_store_rejects_each_artifact_boundary(
+    tmp_path: Path,
+    condition: str,
+    message: str,
+) -> None:
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    data = b"governed artifact"
+    ref = _artifact_ref(data)
+    if condition == "wrong-path":
+        ref = ref.model_copy(update={"relative_path": "sha256/aa/not-the-digest"})
+    elif condition == "directory":
+        (root / ref.relative_path).mkdir(parents=True)
+    elif condition == "wrong-bytes":
+        target = root / ref.relative_path
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"tampered artifact")
+    elif condition == "wrong-size":
+        target = root / ref.relative_path
+        target.parent.mkdir(parents=True)
+        target.write_bytes(data)
+        ref = ref.model_copy(update={"size_bytes": len(data) + 1})
+    store = cognitive_cli._ReadOnlyArtifactStore(root)
+
+    with pytest.raises(ValueError, match=message):
+        store.read(ref)
+
+
+def test_read_only_artifact_store_requires_initialized_directory(tmp_path: Path) -> None:
+    with pytest.raises(CliBoundaryError, match="artifact store is unavailable"):
+        cognitive_cli._ReadOnlyArtifactStore(tmp_path / "missing")
+
+
+def test_workspace_root_rejects_nontext_before_path_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden_path(value: object) -> object:
+        raise AssertionError(f"Path must not receive nontext input: {value!r}")
+
+    monkeypatch.setattr(cognitive_cli, "Path", forbidden_path)
+    with pytest.raises(CliBoundaryError, match="exact text"):
+        cognitive_cli._validated_workspace_root(42)
+
+
+def test_workspace_root_rejects_active_database_journal(
+    populated_workspace: tuple[Path, object],
+) -> None:
+    workspace, _ = populated_workspace
+    journal = Path(f"{workspace / 'scientist-harness.db'}-wal")
+    journal.touch()
+    try:
+        with pytest.raises(CliBoundaryError, match="active database journal"):
+            cognitive_cli._validated_workspace_root(str(workspace))
+    finally:
+        journal.unlink()
+
+
+def test_read_only_database_connection_closes_when_query_only_setup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingConnection:
+        closed = False
+
+        def execute(self, statement: str) -> None:
+            assert statement == "PRAGMA query_only=ON"
+            raise RuntimeError("query-only setup failed")
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = FailingConnection()
+    monkeypatch.setattr(cognitive_cli.sqlite3, "connect", lambda *args, **kwargs: connection)
+
+    with pytest.raises(RuntimeError, match="query-only setup failed"):
+        cognitive_cli._read_only_database_connection(tmp_path / "workspace.db")
+    assert connection.closed is True
+
+
+def test_cognitive_inspect_rejects_nonexact_kind_before_workspace_access() -> None:
+    with pytest.raises(typer.Exit) as rejected:
+        cognitive_cli.cognitive_inspect(
+            "unused-workspace",
+            "capability-profile",  # type: ignore[arg-type]
+            "profile-peer-a",
+        )
+    assert rejected.value.exit_code == 2
 
 
 def test_cognitive_inspect_returns_canonical_json_without_workspace_mutation(

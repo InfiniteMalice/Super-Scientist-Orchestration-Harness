@@ -10,6 +10,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import Connection, Engine
 
+import super_scientist.application.transactions as transactions_module
 from super_scientist.application.kernel_service import KernelService
 from super_scientist.application.transactions import coordinator as coordinator_module
 from super_scientist.application.transactions.coordinator import TransactionCoordinator
@@ -53,6 +54,14 @@ from tests.unit.harness_eval.test_rewards import assess_reward_validity
 from tests.unit.harness_eval.test_traces import valid_trace
 
 NOW = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+
+
+def test_transaction_package_lazy_exports_are_exact_and_fail_closed() -> None:
+    assert transactions_module.__getattr__("TransactionCoordinator") is TransactionCoordinator
+    assert transactions_module.__getattr__("ProposalRouter") is ProposalRouter
+    with pytest.raises(AttributeError, match="unsupported-export"):
+        transactions_module.__getattr__("unsupported-export")
+
 
 NEW_COGNITIVE_PROPOSAL_CLASSES = (
     RecordCapabilityProfile,

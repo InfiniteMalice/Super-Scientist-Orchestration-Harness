@@ -10,6 +10,7 @@ from sqlalchemy import Engine, update
 from super_scientist.application.transactions.coordinator import TransactionCoordinator
 from super_scientist.application.transactions.governance import (
     ProposeGovernancePolicyTransitionHandler,
+    _GovernanceTransitionContext,
 )
 from super_scientist.application.workspace_integrity import verify_workspace
 from super_scientist.config.loader import policy_hash
@@ -369,6 +370,417 @@ def test_unexpected_fault_after_transition_projection_rolls_back_every_row(
     runtime.engine.dispose()
 
 
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    (
+        (
+            lambda proposal: proposal.model_copy(
+                update={
+                    "research_run": proposal.research_run.model_copy(
+                        update={"creator": _model_actor("other-run-creator")}
+                    )
+                }
+            ),
+            RejectionCode.ENTITY_ID_MISMATCH,
+        ),
+        (
+            lambda proposal: proposal.model_copy(
+                update={
+                    "evaluator_audit": proposal.evaluator_audit.model_copy(
+                        update={"proposer": _model_actor("other-audit-proposer")}
+                    )
+                }
+            ),
+            RejectionCode.ENTITY_ID_MISMATCH,
+        ),
+        (
+            lambda proposal: proposal.model_copy(
+                update={
+                    "measurement": proposal.measurement.model_copy(
+                        update={"proposer": _model_actor("other-measurement-proposer")}
+                    )
+                }
+            ),
+            RejectionCode.ENTITY_ID_MISMATCH,
+        ),
+        (
+            lambda proposal: proposal.model_copy(
+                update={
+                    "measurement": proposal.measurement.model_copy(
+                        update={"decision_authority": _human_actor("other-authority")}
+                    )
+                }
+            ),
+            RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+        ),
+        (
+            lambda proposal: _with_classification(
+                proposal,
+                target=ChangeTarget.OUTPUT,
+            ),
+            RejectionCode.PERMISSION_DENIED,
+        ),
+        (
+            lambda proposal: _with_classification(
+                proposal,
+                persistence=PersistenceScope.EPHEMERAL_OUTPUT,
+            ),
+            RejectionCode.PERMISSION_DENIED,
+        ),
+        (
+            lambda proposal: _with_classification(
+                proposal,
+                loop_closure=LoopClosure.CLOSED_LOOP,
+            ),
+            RejectionCode.PROHIBITED_CLOSED_LOOP,
+        ),
+        (
+            lambda proposal: _with_classification(
+                proposal,
+                verification_level=VerificationLevel.MODEL_CONFIDENCE,
+            ),
+            RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+        ),
+        (
+            lambda proposal: _with_classification(
+                proposal,
+                grounding=ExternalGrounding.NONE,
+            ),
+            RejectionCode.INSUFFICIENT_GROUNDING,
+        ),
+        (
+            lambda proposal: _with_classification(
+                proposal,
+                signal=ImprovementSignal.INTRINSIC_EVALUATIVE_FEEDBACK,
+            ),
+            RejectionCode.INSUFFICIENT_GROUNDING,
+        ),
+        (
+            lambda proposal: proposal.model_copy(
+                update={
+                    "research_run": proposal.research_run.model_copy(
+                        update={"active_governance_policy_hash": "f" * 64}
+                    )
+                }
+            ),
+            RejectionCode.POLICY_HASH_MISMATCH,
+        ),
+        (
+            lambda proposal: proposal.model_copy(
+                update={
+                    "measurement": proposal.measurement.model_copy(
+                        update={"run_id": "unrelated-run"}
+                    )
+                }
+            ),
+            RejectionCode.INVALID_LINEAGE,
+        ),
+        (
+            lambda proposal: proposal.model_copy(
+                update={
+                    "measurement": proposal.measurement.model_copy(
+                        update={
+                            "classification": proposal.classification.model_copy(
+                                update={"loop_closure": LoopClosure.HUMAN_ON_LOOP}
+                            )
+                        }
+                    )
+                }
+            ),
+            RejectionCode.INVALID_LINEAGE,
+        ),
+        (
+            lambda proposal: proposal.model_copy(
+                update={
+                    "measurement": proposal.measurement.model_copy(
+                        update={"baseline_version_id": "f" * 64}
+                    )
+                }
+            ),
+            RejectionCode.INVALID_LINEAGE,
+        ),
+        (
+            lambda proposal: proposal.model_copy(
+                update={
+                    "measurement": proposal.measurement.model_copy(
+                        update={"decision": MeasurementDecision.REJECTED}
+                    )
+                }
+            ),
+            RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+        ),
+        (
+            lambda proposal: proposal.model_copy(
+                update={
+                    "measurement": proposal.measurement.model_copy(update={"protected_metrics": ()})
+                }
+            ),
+            RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
+        ),
+    ),
+)
+def test_governance_handler_revalidates_every_constitutional_boundary(
+    tmp_path: Path,
+    mutation: Callable[[ProposeGovernancePolicyTransition], ProposeGovernancePolicyTransition],
+    expected_code: RejectionCode,
+) -> None:
+    runtime = _runtime(tmp_path)
+    proposal = _transition(runtime.prior, runtime.candidate, "boundary")
+    handler = ProposeGovernancePolicyTransitionHandler()
+    context = handler.build_context(proposal, _TransitionReadCapabilities(runtime.prior))
+
+    decision = handler.decide(mutation(proposal), context)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is expected_code
+    runtime.engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("proposal_factory", "context_update", "expected_code"),
+    (
+        (
+            lambda prior, candidate: _transition(prior, candidate, "active-mismatch"),
+            lambda proposal, context: context.model_copy(
+                update={
+                    "active_policy": _v2_snapshot(required_claim_checks=("different-active-check",))
+                }
+            ),
+            RejectionCode.POLICY_HASH_MISMATCH,
+        ),
+        (
+            lambda prior, candidate: _transition(prior, candidate, "missing-rollback"),
+            lambda proposal, context: context.model_copy(update={"rollback_policy": None}),
+            RejectionCode.INVALID_LINEAGE,
+        ),
+        (
+            lambda prior, candidate: _transition(prior, candidate, "existing-run"),
+            lambda proposal, context: context.model_copy(
+                update={"existing_run": proposal.research_run}
+            ),
+            RejectionCode.ENTITY_ALREADY_EXISTS,
+        ),
+        (
+            lambda prior, candidate: _transition(prior, prior, "v1-candidate"),
+            lambda proposal, context: context,
+            RejectionCode.INVALID_LINEAGE,
+        ),
+        (
+            lambda prior, candidate: _transition(
+                prior,
+                _v2_snapshot(required_claim_checks=("candidate-only-check",)),
+                "weakened-checks",
+            ),
+            lambda proposal, context: context,
+            RejectionCode.PERMISSION_DENIED,
+        ),
+        (
+            lambda prior, candidate: _transition(
+                prior,
+                _snapshot_for_policy(
+                    candidate.policy.model_copy(update={"human_approval_for": frozenset()})
+                ),
+                "missing-human-approval",
+            ),
+            lambda proposal, context: context,
+            RejectionCode.PERMISSION_DENIED,
+        ),
+        (
+            lambda prior, candidate: _transition(prior, candidate, "stored-mismatch"),
+            lambda proposal, context: context.model_copy(
+                update={
+                    "stored_candidate": _v2_snapshot(
+                        required_claim_checks=("different-stored-check",)
+                    )
+                }
+            ),
+            RejectionCode.POLICY_HASH_MISMATCH,
+        ),
+    ),
+)
+def test_governance_handler_revalidates_context_and_candidate_lineage(
+    tmp_path: Path,
+    proposal_factory: Callable[[PolicySnapshot, PolicySnapshot], ProposeGovernancePolicyTransition],
+    context_update: Callable[
+        [ProposeGovernancePolicyTransition, _GovernanceTransitionContext],
+        _GovernanceTransitionContext,
+    ],
+    expected_code: RejectionCode,
+) -> None:
+    runtime = _runtime(tmp_path)
+    proposal = proposal_factory(runtime.prior, runtime.candidate)
+    handler = ProposeGovernancePolicyTransitionHandler()
+    context = handler.build_context(proposal, _TransitionReadCapabilities(runtime.prior))
+
+    decision = handler.decide(proposal, context_update(proposal, context))
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is expected_code
+    runtime.engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    (
+        ("missing-requirement", RejectionCode.PERMISSION_DENIED),
+        ("missing-approval", RejectionCode.INDEPENDENT_REVIEW_REQUIRED),
+        ("missing-protected", RejectionCode.INDEPENDENT_REVIEW_REQUIRED),
+        ("missing-rollback", RejectionCode.INVALID_LINEAGE),
+    ),
+)
+def test_active_v2_policy_revalidates_each_transition_requirement(
+    mutation: str,
+    expected_code: RejectionCode,
+) -> None:
+    active = _v2_snapshot()
+    if mutation == "missing-requirement":
+        active_policy = active.policy.model_copy(
+            update={
+                "adaptation_requirements": (
+                    active.policy.adaptation_requirements[0].model_copy(
+                        update={
+                            "change_target": ChangeTarget.PROMPT,
+                            "persistence": PersistenceScope.PERSISTENT_SKILL,
+                        }
+                    ),
+                )
+            }
+        )
+        active = _snapshot_for_policy(active_policy)
+    candidate = _v2_snapshot(required_claim_checks=active.policy.required_claim_checks)
+    proposal = _transition(active, candidate, f"active-v2-{mutation}")
+    rollback: PolicySnapshot | None = active
+    if mutation == "missing-approval":
+        proposal = proposal.model_copy(update={"approval": None})
+    elif mutation == "missing-protected":
+        proposal = proposal.model_copy(
+            update={
+                "measurement": proposal.measurement.model_copy(update={"protected_metrics": ()})
+            }
+        )
+    elif mutation == "missing-rollback":
+        rollback = None
+    context = _GovernanceTransitionContext(
+        active_policy=active,
+        prior_policy=active,
+        rollback_policy=rollback,
+        existing_run=None,
+        existing_audit=None,
+        existing_measurement=None,
+        stored_candidate=None,
+    )
+
+    decision = ProposeGovernancePolicyTransitionHandler().decide(proposal, context)
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is expected_code
+
+
+def test_active_v2_policy_accepts_exact_requirement_before_candidate_checks() -> None:
+    active = _v2_snapshot()
+    candidate = _v2_snapshot(required_claim_checks=active.policy.required_claim_checks)
+    proposal = _transition(active, candidate, "active-v2-valid")
+    context = _GovernanceTransitionContext(
+        active_policy=active,
+        prior_policy=active,
+        rollback_policy=active,
+        existing_run=None,
+        existing_audit=None,
+        existing_measurement=None,
+        stored_candidate=None,
+    )
+
+    decision = ProposeGovernancePolicyTransitionHandler().decide(proposal, context)
+
+    assert decision.accepted is True
+
+
+def test_governance_handler_rejects_candidate_hash_and_weak_v2_requirement(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    handler = ProposeGovernancePolicyTransitionHandler()
+    proposal = _transition(runtime.prior, runtime.candidate, "candidate-boundary")
+    context = handler.build_context(proposal, _TransitionReadCapabilities(runtime.prior))
+    forged_hash = proposal.model_copy(
+        update={
+            "candidate_policy_snapshot": proposal.candidate_policy_snapshot.model_copy(
+                update={"policy_hash": "e" * 64}
+            )
+        }
+    )
+    weak_policy = runtime.candidate.policy.model_copy(
+        update={
+            "adaptation_requirements": (
+                runtime.candidate.policy.adaptation_requirements[0].model_copy(
+                    update={"required_approver_kind": ActorKind.MODEL}
+                ),
+            )
+        }
+    )
+    weak_candidate = _snapshot_for_policy(weak_policy)
+    weak_proposal = _transition(runtime.prior, weak_candidate, "weak-v2-candidate")
+    weak_context = handler.build_context(
+        weak_proposal,
+        _TransitionReadCapabilities(runtime.prior),
+    )
+
+    hash_decision = handler.decide(forged_hash, context)
+    weak_decision = handler.decide(weak_proposal, weak_context)
+
+    assert hash_decision.reasons[0].code is RejectionCode.POLICY_HASH_MISMATCH
+    assert weak_decision.reasons[0].code is RejectionCode.PERMISSION_DENIED
+    runtime.engine.dispose()
+
+
+def test_governance_projection_rejects_rejected_decision(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    handler = ProposeGovernancePolicyTransitionHandler()
+    proposal = _transition(runtime.prior, runtime.candidate, "rejected-projection")
+    context = handler.build_context(proposal, _TransitionReadCapabilities(runtime.prior))
+    rejected = handler.decide(proposal.model_copy(update={"approval": None}), context)
+
+    with pytest.raises(ValueError, match="rejected proposals cannot be projected"):
+        handler.project(proposal, rejected, object())  # type: ignore[arg-type]
+    runtime.engine.dispose()
+
+
+def test_active_v2_rejects_wrong_approver_kind_and_allows_exact_v1_rollback() -> None:
+    active = _v2_snapshot()
+    v2_candidate = _v2_snapshot(required_claim_checks=active.policy.required_claim_checks)
+    wrong_approver = _transition(active, v2_candidate, "wrong-approver-kind")
+    wrong_approver = wrong_approver.model_copy(
+        update={
+            "approval": Approval(
+                approver=_model_actor("model-approver"),
+                approved_at=NOW,
+            )
+        }
+    )
+    v1_policy = GovernancePolicy(
+        required_claim_checks=active.policy.required_claim_checks,
+        human_approval_for=frozenset({"governance_change"}),
+    )
+    v1_candidate = PolicySnapshot(policy_hash=policy_hash(v1_policy), policy=v1_policy)
+    rollback = _transition(active, v1_candidate, "exact-v1-rollback")
+    context = _GovernanceTransitionContext(
+        active_policy=active,
+        prior_policy=active,
+        rollback_policy=active,
+        existing_run=None,
+        existing_audit=None,
+        existing_measurement=None,
+        stored_candidate=None,
+    )
+    handler = ProposeGovernancePolicyTransitionHandler()
+
+    wrong_decision = handler.decide(wrong_approver, context)
+    rollback_decision = handler.decide(rollback, context)
+
+    assert wrong_decision.reasons[0].code is RejectionCode.INDEPENDENT_REVIEW_REQUIRED
+    assert rollback_decision.accepted is True
+
+
 class _Clock:
     def now(self) -> datetime:
         return NOW
@@ -477,6 +889,19 @@ def _v2_snapshot(
         ),
     )
     return PolicySnapshot(policy_hash=policy_hash(policy), policy=policy)
+
+
+def _snapshot_for_policy(policy: GovernancePolicyV2) -> PolicySnapshot:
+    return PolicySnapshot(policy_hash=policy_hash(policy), policy=policy)
+
+
+def _with_classification(
+    proposal: ProposeGovernancePolicyTransition,
+    **updates: object,
+) -> ProposeGovernancePolicyTransition:
+    return proposal.model_copy(
+        update={"classification": proposal.classification.model_copy(update=updates)}
+    )
 
 
 def _transition(
