@@ -177,7 +177,9 @@ git commit -m "fix: verify released rule and harness workspace state"
 - [ ] **Step 1: Add characterization tests for strict decode and rollback**
 
 ```python
-def test_append_only_repository_rejects_unknown_payload_field(repository: FixtureRepository) -> None:
+def test_append_only_repository_rejects_unknown_payload_field(
+    repository: FixtureRepository,
+) -> None:
     repository.insert_raw_payload('{"record_id":"record-1","unknown":true}')
     with pytest.raises(StorageIntegrityError, match="stored record is invalid"):
         repository.list_all()
@@ -206,15 +208,15 @@ class StrictFrozenStorageRecord(BaseModel):
 
 class AppendOnlyRecordRepository[RecordT: BaseModel]:
     def get(self, record_id: str) -> RecordT | None:
-        row = self._connection.execute(
-            select(self._table).where(self._id_column == record_id)
-        ).mappings().one_or_none()
+        row = (
+            self._connection.execute(select(self._table).where(self._id_column == record_id))
+            .mappings()
+            .one_or_none()
+        )
         return None if row is None else self._decode_row(row)
 
     def list_all(self) -> tuple[RecordT, ...]:
-        rows = self._connection.execute(
-            select(self._table).order_by(self._id_column)
-        ).mappings()
+        rows = self._connection.execute(select(self._table).order_by(self._id_column)).mappings()
         return tuple(self._decode_row(row) for row in rows)
 
     def add(self, record_id: str, record: RecordT, created_at: UtcTimestamp) -> None:
@@ -683,7 +685,9 @@ def test_unavailable_log_probabilities_cannot_carry_values() -> None:
 
 
 def test_high_invalid_reward_is_excluded() -> None:
-    trace, expectation, inventory, verification, diagnostic_coverage, findings = stale_reward_bundle()
+    trace, expectation, inventory, verification, diagnostic_coverage, findings = (
+        stale_reward_bundle()
+    )
     freshness = trace_freshness(expectation, trace, inventory=inventory)
     assessment = assess_reward_validity(
         trace.reward_observation,
@@ -965,9 +969,7 @@ def _fresh_actor_identity(value: object) -> ActorIdentity:
             "provider_id": _fresh_optional_identifier(state["provider_id"]),
             "model_id": _fresh_optional_identifier(state["model_id"]),
             "adapter_id": _fresh_optional_identifier(state["adapter_id"]),
-            "configuration_hash": _fresh_optional_sha256(
-                state["configuration_hash"]
-            ),
+            "configuration_hash": _fresh_optional_sha256(state["configuration_hash"]),
         },
         strict=True,
     )
@@ -1009,6 +1011,7 @@ def _fresh_bounded_resource_usage(value: object) -> ResourceUsage:
         if type(scalar) is not int or scalar > MAX_COLLABORATION_RESOURCE_SCALAR:
             raise ValueError("collaboration usage integral scalars must be exact and bounded")
     return ResourceUsage.model_validate(dict(state), strict=True)
+
 
 BoundedGovernedProposalIdentifier = Annotated[
     StableIdentifier,
@@ -1095,9 +1098,7 @@ class AppendTopologyEvent(GovernedProposalBase):
 
 
 class RecordCollaborationTermination(GovernedProposalBase):
-    proposal_type: Literal["record_collaboration_termination"] = (
-        "record_collaboration_termination"
-    )
+    proposal_type: Literal["record_collaboration_termination"] = "record_collaboration_termination"
     session_id: BoundedDomainRecordIdentifier
     termination: CollaborationTermination
 
@@ -1113,9 +1114,7 @@ class RecordProcedureCompilation(GovernedProposalBase):
 
 
 class RecordMethodDirectionOutcome(GovernedProposalBase):
-    proposal_type: Literal["record_method_direction_outcome"] = (
-        "record_method_direction_outcome"
-    )
+    proposal_type: Literal["record_method_direction_outcome"] = "record_method_direction_outcome"
     compilation_id: BoundedDomainRecordIdentifier
     outcome: MethodDirectionOutcome
 
@@ -1140,16 +1139,12 @@ class RecordGuidanceEvaluationProtocol(GovernedProposalBase):
 
 
 class AppendGuidanceEvaluationCell(GovernedProposalBase):
-    proposal_type: Literal["append_guidance_evaluation_cell"] = (
-        "append_guidance_evaluation_cell"
-    )
+    proposal_type: Literal["append_guidance_evaluation_cell"] = "append_guidance_evaluation_cell"
     cell: GuidanceEvaluationCell
 
 
 class RecordModelHarnessProtocol(GovernedProposalBase):
-    proposal_type: Literal["record_model_harness_protocol"] = (
-        "record_model_harness_protocol"
-    )
+    proposal_type: Literal["record_model_harness_protocol"] = "record_model_harness_protocol"
     protocol: ModelHarnessProtocol
 
 
@@ -1159,9 +1154,7 @@ class AppendModelHarnessCell(GovernedProposalBase):
 
 
 class RecordModelHarnessAnalysis(GovernedProposalBase):
-    proposal_type: Literal["record_model_harness_analysis"] = (
-        "record_model_harness_analysis"
-    )
+    proposal_type: Literal["record_model_harness_analysis"] = "record_model_harness_analysis"
     analysis: ModelHarnessAnalysis
 
 
@@ -1245,15 +1238,11 @@ class RecordRewardAssessment(GovernedProposalBase):
             self.observation != self.assessment.observation
             or self.findings != self.assessment.findings
         ):
-            raise ValueError(
-                "reward assessment proposal must bind exact observation and findings"
-            )
+            raise ValueError("reward assessment proposal must bind exact observation and findings")
         return self
 
 
-_HARNESS_TRACE_METADATA_STATE_FIELDS = frozenset(
-    {"schema_version", "received_at", "source_id"}
-)
+_HARNESS_TRACE_METADATA_STATE_FIELDS = frozenset({"schema_version", "received_at", "source_id"})
 _REWARD_PROPOSAL_STATE_FIELDS = frozenset(
     {
         "proposal_id",
@@ -1329,10 +1318,7 @@ def _fresh_exact_value(
         if type(value) is not tuple or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
             raise ValueError("proposal tuple must be exact and bounded")
         if len(arguments) == 2 and arguments[1] is Ellipsis:
-            return tuple(
-                _fresh_exact_value(item, arguments[0], depth=depth + 1)
-                for item in value
-            )
+            return tuple(_fresh_exact_value(item, arguments[0], depth=depth + 1) for item in value)
         if len(value) != len(arguments):
             raise ValueError("fixed proposal tuple has the wrong length")
         return tuple(
@@ -1343,10 +1329,7 @@ def _fresh_exact_value(
         if type(value) is not list or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
             raise ValueError("proposal list must be exact and bounded")
         item_type = arguments[0] if arguments else Any
-        return [
-            _fresh_exact_value(item, item_type, depth=depth + 1)
-            for item in value
-        ]
+        return [_fresh_exact_value(item, item_type, depth=depth + 1) for item in value]
     if origin in (dict, Mapping):
         if type(value) is not dict or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
             raise ValueError("proposal mapping must be exact and bounded")
@@ -1411,10 +1394,7 @@ def _fresh_reward_assessment_proposal(value: object) -> RecordRewardAssessment:
         approval=_fresh_approval(state["approval"]),
         proposal_type="record_reward_assessment",
         observation=_fresh_exact_value(observation, RewardObservation),
-        findings=tuple(
-            _fresh_exact_value(finding, RewardHackingFinding)
-            for finding in findings
-        ),
+        findings=tuple(_fresh_exact_value(finding, RewardHackingFinding) for finding in findings),
         assessment=_fresh_exact_value(
             assessment,
             RewardValidityAssessment,
@@ -1477,19 +1457,14 @@ def _normalize_untyped_json_value(value: object, *, depth: int) -> object:
     if type(value) is list:
         if len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
             raise ValueError("proposal JSON array exceeds its item bound")
-        return [
-            _normalize_untyped_json_value(item, depth=depth + 1)
-            for item in value
-        ]
+        return [_normalize_untyped_json_value(item, depth=depth + 1) for item in value]
     if type(value) is dict:
-        if (
-            len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS
-            or any(type(key) is not str for key in value)
+        if len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS or any(
+            type(key) is not str for key in value
         ):
             raise ValueError("proposal JSON object exceeds its exact bounded contract")
         return {
-            key: _normalize_untyped_json_value(item, depth=depth + 1)
-            for key, item in value.items()
+            key: _normalize_untyped_json_value(item, depth=depth + 1) for key, item in value.items()
         }
     raise ValueError("proposal JSON contains a non-JSON runtime type")
 
@@ -1501,11 +1476,7 @@ def _base_json_annotation(annotation: object) -> object:
 
 
 def _bounded_json_decimal(value: object) -> Decimal:
-    if (
-        type(value) is not str
-        or not value
-        or len(value) > MAX_PROPOSAL_JSON_DECIMAL_CHARACTERS
-    ):
+    if type(value) is not str or not value or len(value) > MAX_PROPOSAL_JSON_DECIMAL_CHARACTERS:
         raise ValueError("proposal JSON decimal must be bounded exact text")
     decimal_value: Decimal | None = None
     try:
@@ -1634,17 +1605,13 @@ def _normalize_json_proposal_value(
         if type(value) is not list or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
             raise ValueError("proposal JSON list must be a bounded array")
         item_type = arguments[0] if arguments else Any
-        return [
-            _normalize_json_proposal_value(item, item_type, depth=depth + 1)
-            for item in value
-        ]
+        return [_normalize_json_proposal_value(item, item_type, depth=depth + 1) for item in value]
     if origin is frozenset:
         if type(value) is not list or len(value) > MAX_PROPOSAL_RECONSTRUCTION_ITEMS:
             raise ValueError("proposal JSON frozen set must be a bounded array")
         item_type = arguments[0] if arguments else Any
         return frozenset(
-            _normalize_json_proposal_value(item, item_type, depth=depth + 1)
-            for item in value
+            _normalize_json_proposal_value(item, item_type, depth=depth + 1) for item in value
         )
     if origin in (dict, Mapping):
         if (
@@ -1673,6 +1640,8 @@ def _normalize_governed_proposal_json(value: object) -> object:
     if proposal_model is None:
         return value
     return _normalize_json_proposal_value(value, proposal_model)
+
+
 # <!-- task-8-13-trace-contract:end -->
 
 
@@ -1714,9 +1683,8 @@ def proposal_json_is_within_depth_limit(value: object) -> bool:
         if depth > MAX_PROPOSAL_JSON_DEPTH or visited_nodes > MAX_PROPOSAL_JSON_NODES:
             return False
         if type(current) is dict:
-            if (
-                len(current) > MAX_PROPOSAL_JSON_CONTAINER_ITEMS
-                or any(type(key) is not str for key in current)
+            if len(current) > MAX_PROPOSAL_JSON_CONTAINER_ITEMS or any(
+                type(key) is not str for key in current
             ):
                 return False
             stack.extend((item, depth + 1) for item in current.values())
@@ -1744,9 +1712,8 @@ def parse_untrusted_proposal_json(value: str | bytes) -> Proposal:
             ValueError,
         ):
             serialized_bytes = value.encode("utf-8") if type(value) is str else value
-            if (
-                len(serialized_bytes) <= MAX_PROPOSAL_BYTES
-                and proposal_json_is_within_depth_limit(value)
+            if len(serialized_bytes) <= MAX_PROPOSAL_BYTES and proposal_json_is_within_depth_limit(
+                value
             ):
                 normalizer = globals().get("_normalize_governed_proposal_json")
                 if normalizer is None:
@@ -1763,9 +1730,7 @@ def parse_untrusted_proposal_json(value: str | bytes) -> Proposal:
                         )
                     )
     if proposal is None:
-        raise ProposalBoundaryValidationError(
-            "transaction proposal failed validation"
-        ) from None
+        raise ProposalBoundaryValidationError("transaction proposal failed validation") from None
     return proposal
 ```
 
@@ -1894,13 +1859,24 @@ git commit -m "feat: add governed cognitive proposal contracts"
 
 ```python
 EXPECTED_0007_TABLES = {
-    "capability_profiles", "cohort_plans", "diversity_assessments",
-    "collaboration_sessions", "peer_requests", "peer_contributions",
-    "topology_events", "collaboration_terminations", "procedure_compilations",
-    "method_direction_outcomes", "compiled_progress_plan_bindings",
-    "guidance_protocols", "guidance_cells", "model_harness_protocols",
-    "model_harness_cells", "model_harness_analyses",
-    "harness_execution_traces", "reward_assessments",
+    "capability_profiles",
+    "cohort_plans",
+    "diversity_assessments",
+    "collaboration_sessions",
+    "peer_requests",
+    "peer_contributions",
+    "topology_events",
+    "collaboration_terminations",
+    "procedure_compilations",
+    "method_direction_outcomes",
+    "compiled_progress_plan_bindings",
+    "guidance_protocols",
+    "guidance_cells",
+    "model_harness_protocols",
+    "model_harness_cells",
+    "model_harness_analyses",
+    "harness_execution_traces",
+    "reward_assessments",
 }
 
 
@@ -1958,9 +1934,7 @@ def _create_record_table(
             for column in (id_column, *relationship_columns)
         ),
         _identifier_constraint("transaction_id", name),
-        sa.CheckConstraint(
-            "typeof(schema_version) = 'integer' AND schema_version = 1"
-        ),
+        sa.CheckConstraint("typeof(schema_version) = 'integer' AND schema_version = 1"),
         _bounded_text_constraint(
             "record_json",
             name,
@@ -2080,7 +2054,8 @@ def test_guidance_cells_are_returned_in_canonical_identity_order(runtime) -> Non
         governing_policy_hash="b" * 64,
     )
     assert tuple(item.cell_id for item in repository.list_for_protocol("protocol-1")) == (
-        "cell-a", "cell-b"
+        "cell-a",
+        "cell-b",
     )
 
 
@@ -2091,9 +2066,7 @@ def test_procedure_source_reader_rejects_any_receipt_or_snapshot_mismatch(runtim
 
 
 @pytest.mark.parametrize("case", ALL_18_GOVERNED_REPOSITORY_CASES)
-def test_every_governed_repository_real_add_get_and_relationship_tamper(
-    runtime, case
-) -> None:
+def test_every_governed_repository_real_add_get_and_relationship_tamper(runtime, case) -> None:
     repository = case.repository(runtime.connection)
     repository.add_from_proposal(
         case.proposal,
@@ -2126,9 +2099,7 @@ Expected: FAIL because the repository modules do not exist.
 - [ ] **Step 3: Add focused model-bound repositories**
 
 ```python
-class CapabilityProfileRepository(
-    GovernedAppendOnlyRecordRepository[CapabilityProfile]
-):
+class CapabilityProfileRepository(GovernedAppendOnlyRecordRepository[CapabilityProfile]):
     def __init__(self, connection: Connection) -> None:
         super().__init__(
             connection,
@@ -2138,9 +2109,7 @@ class CapabilityProfileRepository(
         )
 
 
-class PeerContributionRepository(
-    GovernedAppendOnlyRecordRepository[PeerContribution]
-):
+class PeerContributionRepository(GovernedAppendOnlyRecordRepository[PeerContribution]):
     def list_for_session(self, session_id: str) -> tuple[PeerContribution, ...]:
         return self._list_by_relationship("session_id", session_id)
 ```
@@ -2207,9 +2176,7 @@ class MethodDirectionOutcomeStorageEnvelope(_StrictGovernedStorageEnvelope):
     record: MethodDirectionOutcome
 
     @classmethod
-    def from_method_direction_outcome_proposal(
-        cls, proposal: RecordMethodDirectionOutcome
-    ) -> Self:
+    def from_method_direction_outcome_proposal(cls, proposal: RecordMethodDirectionOutcome) -> Self:
         return cls(
             outcome_id=proposal.outcome.outcome_id,
             compilation_id=proposal.compilation_id,
@@ -2506,12 +2473,14 @@ class RecordProcedureCompilationHandler:
 
     def decide(self, proposal, context) -> TransactionDecision:
         try:
+            # fmt: off
             envelope = parse_untrusted_procedure_compilation_envelope(
                 proposal.compilation
             )
             supplied_result = parse_untrusted_procedure_compilation_result(
                 envelope
             )
+            # fmt: on
             supplied_request = supplied_result.parse_request()
         except ProcedureBoundaryValidationError:
             return rejected(proposal, RejectionCode.INVALID_PROCEDURE)
@@ -2529,18 +2498,13 @@ class RecordProcedureCompilationHandler:
         expected = compile_method(supplied_request)
         if expected != supplied_result:
             return rejected(proposal, RejectionCode.DERIVATION_MISMATCH)
-        if (
-            envelope.governing_policy_hash
-            != context.active_policy.policy_hash
-        ):
+        if envelope.governing_policy_hash != context.active_policy.policy_hash:
             return rejected(proposal, RejectionCode.STALE_REFERENCE)
         return reject_existing_or_accept(proposal, context.existing_compilation)
 
     def project(self, proposal, decision, writes) -> None:
         require_accepted(decision)
-        record = ProcedureCompilationRecord.build_from_untrusted_envelope(
-            proposal.compilation
-        )
+        record = ProcedureCompilationRecord.build_from_untrusted_envelope(proposal.compilation)
         cast(ProcedureWriteCapability, writes).append_compilation(record)
 ```
 
@@ -2632,7 +2596,9 @@ class BindCompiledProgressPlanHandler:
 
     def project(self, proposal, decision, writes) -> None:
         capability = cast(ProcedureBindingCapabilities, writes)
-        capability.progress_handler.project(capability.progress_proposal, decision, capability.progress)
+        capability.progress_handler.project(
+            capability.progress_proposal, decision, capability.progress
+        )
         capability.append_binding(proposal.binding)
 ```
 
@@ -2690,7 +2656,9 @@ def test_invalid_reward_is_stored_but_not_positive_cell_evidence(runtime) -> Non
     runtime.record_current_trace()
     decision = runtime.coordinator.submit(record_invalid_reward(value=Decimal("999")))
     assert decision.accepted is True
-    assert runtime.rewards.get("reward-assessment-1").assessment.status is RewardValidityStatus.INVALID
+    assert (
+        runtime.rewards.get("reward-assessment-1").assessment.status is RewardValidityStatus.INVALID
+    )
     assert runtime.promotion_reward_values() == ()
 ```
 
@@ -2946,7 +2914,13 @@ def test_every_new_proposal_has_one_fixed_route(runtime) -> None:
 
 
 def test_research_coordinator_object_graph_has_no_storage_or_execution_authority(runtime) -> None:
-    forbidden = {RepositorySet, DatabaseUnitOfWork, Connection, ArtifactStore, ProtectedAnswerReader}
+    forbidden = {
+        RepositorySet,
+        DatabaseUnitOfWork,
+        Connection,
+        ArtifactStore,
+        ProtectedAnswerReader,
+    }
     assert walk_object_graph_types(runtime.research_coordinator).isdisjoint(forbidden)
 ```
 
@@ -3129,26 +3103,18 @@ def expected_cognitive_snapshot(
         capability_profiles=tuple(
             item.profile for item in accepted if isinstance(item, RecordCapabilityProfile)
         ),
-        cohort_plans=tuple(
-            item.plan for item in accepted if isinstance(item, RecordCohortPlan)
-        ),
+        cohort_plans=tuple(item.plan for item in accepted if isinstance(item, RecordCohortPlan)),
         diversity_assessments=tuple(
-            item.assessment
-            for item in accepted
-            if isinstance(item, RecordDiversityAssessment)
+            item.assessment for item in accepted if isinstance(item, RecordDiversityAssessment)
         ),
         collaboration_sessions=tuple(
-            item.session
-            for item in accepted
-            if isinstance(item, RecordCollaborationSession)
+            item.session for item in accepted if isinstance(item, RecordCollaborationSession)
         ),
         peer_requests=tuple(
             item.request for item in accepted if isinstance(item, AppendPeerRequest)
         ),
         peer_contributions=tuple(
-            item.contribution
-            for item in accepted
-            if isinstance(item, AppendPeerContribution)
+            item.contribution for item in accepted if isinstance(item, AppendPeerContribution)
         ),
         topology_events=tuple(
             item.event for item in accepted if isinstance(item, AppendTopologyEvent)
@@ -3164,9 +3130,7 @@ def expected_cognitive_snapshot(
             if isinstance(item, RecordProcedureCompilation)
         ),
         method_outcomes=tuple(
-            item.outcome
-            for item in accepted
-            if isinstance(item, RecordMethodDirectionOutcome)
+            item.outcome for item in accepted if isinstance(item, RecordMethodDirectionOutcome)
         ),
         bindings=tuple(
             item.binding for item in accepted if isinstance(item, BindCompiledProgressPlan)
@@ -3217,8 +3181,17 @@ git commit -m "feat: replay cognitive workspace records"
 def test_cognitive_inspect_returns_canonical_json(cli, populated_workspace) -> None:
     result = cli.invoke(
         app,
-        ["cognitive", "inspect", "--root", str(populated_workspace),
-         "--kind", "procedure-compilation", "--id", "compilation-1", "--json"],
+        [
+            "cognitive",
+            "inspect",
+            "--root",
+            str(populated_workspace),
+            "--kind",
+            "procedure-compilation",
+            "--id",
+            "compilation-1",
+            "--json",
+        ],
     )
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
@@ -3394,16 +3367,19 @@ def test_compiler_rejects_executable_operation(operation: str) -> None:
 
 def test_hidden_reasoning_and_forbidden_runtime_imports_are_absent(source_tree) -> None:
     assert source_tree.find_schema_field("chain_of_thought") == ()
-    assert source_tree.forbidden_imports(
-        roots=("domain/cognition", "domain/collaboration", "domain/procedures"),
-        names=(
-            "subprocess",
-            "socket",
-            "requests",
-            "to" + "rch",
-            "trans" + "formers",
-        ),
-    ) == ()
+    assert (
+        source_tree.forbidden_imports(
+            roots=("domain/cognition", "domain/collaboration", "domain/procedures"),
+            names=(
+                "subprocess",
+                "socket",
+                "requests",
+                "to" + "rch",
+                "trans" + "formers",
+            ),
+        )
+        == ()
+    )
 ```
 
 - [ ] **Step 3: Add trace, evaluator, and reward attacks**
@@ -3463,7 +3439,12 @@ git commit -m "test: harden cognitive orchestration authority"
 ```python
 def test_source_register_has_exact_new_ids_and_versions(register) -> None:
     assert tuple(item.id for item in register.sources[-6:]) == (
-        "S30", "S31", "S32", "S33", "S34", "S35"
+        "S30",
+        "S31",
+        "S32",
+        "S33",
+        "S34",
+        "S35",
     )
     assert register.by_id("S30").version_consulted == "arXiv:2608.11924v1"
     assert register.by_id("S35").reproduction_status == "not_reproduced"
