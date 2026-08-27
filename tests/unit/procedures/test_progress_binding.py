@@ -4,15 +4,6 @@ from decimal import Decimal, getcontext, localcontext
 
 import pytest
 from pydantic import ValidationError
-from test_compiler import (
-    NOW,
-    POLICY_HASH,
-    _candidate,
-    _rebuild_step,
-    _replace_catalog,
-    _step,
-    valid_request,
-)
 
 from super_scientist.domain.evidence.models import ArtifactRef
 from super_scientist.domain.improvement.models import AssessmentOutcome
@@ -34,6 +25,16 @@ from super_scientist.domain.procedures import (
 )
 from super_scientist.domain.progress.calculations import calculate_progress, detect_false_finish
 from super_scientist.domain.progress.models import FalseFinishResult
+
+from .test_compiler import (
+    NOW,
+    POLICY_HASH,
+    _candidate,
+    _rebuild_step,
+    _replace_catalog,
+    _step,
+    valid_request,
+)
 
 PRIVATE_MARKER = "PRIVATE_PROCEDURE_MARKER_" + ("x" * 200)
 
@@ -136,7 +137,7 @@ def test_only_valid_compilations_can_create_progress_plans(status_kind: str) -> 
 
 
 def test_rehashed_valid_report_cannot_map_an_impossible_governance_procedure() -> None:
-    from test_compiler import _rebuild_step, _replace_step
+    from .test_compiler import _rebuild_step, _replace_step
 
     request = valid_request()
     first = _rebuild_step(

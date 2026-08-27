@@ -5,15 +5,6 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
-from test_compiler import (
-    _actor,
-    _artifact,
-    _assessment,
-    _rebuild_step,
-    _replace_catalog,
-    _replace_step,
-    valid_request,
-)
 
 from super_scientist.domain.cognition.models import (
     CapabilityDisposition,
@@ -41,6 +32,16 @@ from super_scientist.domain.procedures import (
     compile_method,
     parse_untrusted_procedure_compilation_result,
     validate_procedure,
+)
+
+from .test_compiler import (
+    _actor,
+    _artifact,
+    _assessment,
+    _rebuild_step,
+    _replace_catalog,
+    _replace_step,
+    valid_request,
 )
 
 

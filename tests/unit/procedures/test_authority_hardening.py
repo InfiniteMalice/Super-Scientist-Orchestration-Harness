@@ -7,7 +7,6 @@ from typing import Any, Literal
 
 import pytest
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
-from test_compiler import _actor, _assessment, _rebuild_step, _replace_step, valid_request
 
 from super_scientist.domain.cognition.models import (
     CapabilityAssertion,
@@ -37,6 +36,8 @@ from super_scientist.domain.procedures import (
     validate_procedure,
 )
 from super_scientist.domain.procedures.compiler import compile_declared_stages
+
+from .test_compiler import _actor, _assessment, _rebuild_step, _replace_step, valid_request
 
 REQUEST_BYTE_LIMIT = 65_536
 PRIVATE_MARKER = "PRIVATE_PROCEDURE_MARKER_" + ("x" * 200)
