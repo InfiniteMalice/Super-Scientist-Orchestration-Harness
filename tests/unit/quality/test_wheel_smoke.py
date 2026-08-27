@@ -371,7 +371,7 @@ def test_dependency_free_smoke_bootstrap_returns_successful_version_envelope(
 
     assert json.loads(capsys.readouterr().out) == {
         "command": "version",
-        "data": {"version": "0.2.0"},
+        "data": {"version": "0.3.0"},
         "decision": None,
         "errors": [],
         "schema_version": 1,
@@ -713,7 +713,7 @@ def test_executor_uses_fixed_argv_accepts_successful_version_json_and_cleans_tem
     envelope = json.dumps(
         {
             "command": "version",
-            "data": {"version": "0.2.0"},
+            "data": {"version": "0.3.0"},
             "decision": None,
             "errors": [],
             "schema_version": 1,

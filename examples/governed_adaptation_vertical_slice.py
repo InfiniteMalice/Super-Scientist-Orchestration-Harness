@@ -1118,14 +1118,15 @@ class VerticalSlice:
         self._complete(9)
 
     def _step_10_false_finish(self) -> None:
+        plan = _required(self.progress_plan)
         finding = detect_false_finish(
             voluntary_termination=True,
             claims_completion=True,
             final_validator_result=AssessmentOutcome.FAILED,
-            validated_weight=self.progress_summary.official_weight,
+            plan=plan,
+            events=self.progress_events,
             unused_budget=True,
         )
-        plan = _required(self.progress_plan)
         evidence_id = _required(self.evidence).evidence_id
         checklist = tuple(
             CompletionChecklistItem(

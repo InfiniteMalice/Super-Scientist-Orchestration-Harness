@@ -359,6 +359,12 @@ def test_new_rejection_codes_are_appended_with_stable_values() -> None:
         "DUPLICATE_RULE",
         "UNRESOLVED_RULE_CONFLICT",
         "EXPERIMENTAL_PRIMITIVE_QUARANTINED",
+        "DERIVATION_MISMATCH",
+        "STALE_REFERENCE",
+        "COLLABORATION_BOUND_EXCEEDED",
+        "INVALID_PROCEDURE",
+        "UNMATCHED_EVALUATION",
+        "INVALID_REWARD",
     )
     existing = tuple(RejectionCode)[:11]
 
@@ -378,7 +384,7 @@ def test_new_rejection_codes_are_appended_with_stable_values() -> None:
     )
 
 
-def test_proposal_union_has_thirty_seven_fixed_additive_persistent_kinds() -> None:
+def test_proposal_union_has_fifty_five_fixed_additive_persistent_kinds() -> None:
     proposal_types = (
         CreateResearchRun,
         AppendResearchRunEvent,
@@ -417,6 +423,24 @@ def test_proposal_union_has_thirty_seven_fixed_additive_persistent_kinds() -> No
         transaction_models.RecordHarnessProtectedResult,
         transaction_models.RecordHarnessConfound,
         transaction_models.DecideHarnessCampaign,
+        transaction_models.RecordCapabilityProfile,
+        transaction_models.RecordCohortPlan,
+        transaction_models.RecordDiversityAssessment,
+        transaction_models.RecordCollaborationSession,
+        transaction_models.AppendPeerRequest,
+        transaction_models.AppendPeerContribution,
+        transaction_models.AppendTopologyEvent,
+        transaction_models.RecordCollaborationTermination,
+        transaction_models.RecordProcedureCompilation,
+        transaction_models.RecordMethodDirectionOutcome,
+        transaction_models.BindCompiledProgressPlan,
+        transaction_models.RecordGuidanceEvaluationProtocol,
+        transaction_models.AppendGuidanceEvaluationCell,
+        transaction_models.RecordModelHarnessProtocol,
+        transaction_models.AppendModelHarnessCell,
+        transaction_models.RecordModelHarnessAnalysis,
+        transaction_models.RecordHarnessExecutionTrace,
+        transaction_models.RecordRewardAssessment,
     )
     expected = (
         "create_research_run",
@@ -456,6 +480,24 @@ def test_proposal_union_has_thirty_seven_fixed_additive_persistent_kinds() -> No
         "record_harness_protected_result",
         "record_harness_confound",
         "decide_harness_campaign",
+        "record_capability_profile",
+        "record_cohort_plan",
+        "record_diversity_assessment",
+        "record_collaboration_session",
+        "append_peer_request",
+        "append_peer_contribution",
+        "append_topology_event",
+        "record_collaboration_termination",
+        "record_procedure_compilation",
+        "record_method_direction_outcome",
+        "bind_compiled_progress_plan",
+        "record_guidance_evaluation_protocol",
+        "append_guidance_evaluation_cell",
+        "record_model_harness_protocol",
+        "append_model_harness_cell",
+        "record_model_harness_analysis",
+        "record_harness_execution_trace",
+        "record_reward_assessment",
     )
     legacy = ("add_evidence", "propose_claim", "transition_claim")
 

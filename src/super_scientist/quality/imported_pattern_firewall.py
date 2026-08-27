@@ -561,7 +561,10 @@ def _contains_imported_contract(path: Path, relative: str, text: str) -> bool:
             tree = ast.parse(text)
         except SyntaxError:
             return False
-        return _identifier_set_has_imported_contract(_python_scope_identifiers(tree))
+        return any(
+            _identifier_set_has_imported_contract(identifiers)
+            for identifiers in _python_lexical_scope_identifiers(tree)
+        )
     elif suffix == ".json":
         try:
             payload = json.loads(text)
@@ -579,18 +582,40 @@ def _contains_imported_contract(path: Path, relative: str, text: str) -> bool:
     return False
 
 
-def _python_scope_identifiers(root: ast.AST) -> list[str]:
-    identifiers: list[str] = []
-    for node in ast.walk(root):
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            identifiers.append(node.name)
-        elif isinstance(node, ast.arg):
-            identifiers.append(node.arg)
-        elif isinstance(node, ast.Name):
-            identifiers.append(node.id)
-        elif isinstance(node, ast.Attribute):
-            identifiers.append(node.attr)
-    return identifiers
+def _python_lexical_scope_identifiers(root: ast.AST) -> tuple[list[str], ...]:
+    lexical_scopes = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    collected: list[list[str]] = []
+
+    def collect_scope(scope: ast.AST, inherited: tuple[str, ...] = ()) -> None:
+        identifiers = list(inherited)
+        if isinstance(scope, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            identifiers.append(scope.name)
+
+        def visit(node: ast.AST) -> None:
+            if node is not scope and isinstance(node, lexical_scopes):
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    identifiers.append(node.name)
+                if isinstance(scope, ast.ClassDef) and isinstance(
+                    node, (ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    identifiers.extend(argument.arg for argument in node.args.args)
+                enclosing_class = (scope.name,) if isinstance(scope, ast.ClassDef) else ()
+                collect_scope(node, enclosing_class)
+                return
+            if isinstance(node, ast.arg):
+                identifiers.append(node.arg)
+            elif isinstance(node, ast.Name):
+                identifiers.append(node.id)
+            elif isinstance(node, ast.Attribute):
+                identifiers.append(node.attr)
+            for child in ast.iter_child_nodes(node):
+                visit(child)
+
+        visit(scope)
+        collected.append(identifiers)
+
+    collect_scope(root)
+    return tuple(collected)
 
 
 def _structured_keys(value: object) -> tuple[str, ...]:

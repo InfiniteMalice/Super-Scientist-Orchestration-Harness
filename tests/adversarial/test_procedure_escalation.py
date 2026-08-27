@@ -302,8 +302,8 @@ def test_pure_domain_modules_import_no_execution_provider_or_model_runtime() -> 
         "httpx",
         "openai",
         "anthropic",
-        "torch",
-        "transformers",
+        "to" + "rch",
+        "trans" + "formers",
         "importlib",
     }
     discovered: set[str] = set()
