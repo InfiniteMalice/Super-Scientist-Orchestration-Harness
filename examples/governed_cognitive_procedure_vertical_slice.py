@@ -306,7 +306,7 @@ def fixed_policy() -> PolicySnapshot:
 
 
 def create_local_runtime(workspace_root: Path, policy: PolicySnapshot) -> LocalRuntime:
-    workspace_root.mkdir(parents=True, exist_ok=False)
+    workspace_root_created = _prepare_runtime_workspace(workspace_root)
     database_path = workspace_root / "scientist-harness.db"
     artifact_root = workspace_root / "artifacts"
     database_url = f"sqlite:///{database_path.as_posix()}"
@@ -338,14 +338,31 @@ def create_local_runtime(workspace_root: Path, policy: PolicySnapshot) -> LocalR
         if engine is not None:
             with suppress(Exception):
                 engine.dispose()
-        _remove_failed_runtime_workspace(workspace_root, database_path, artifact_root)
+        _remove_failed_runtime_workspace(
+            workspace_root,
+            database_path,
+            artifact_root,
+            remove_workspace_root=workspace_root_created,
+        )
         raise
+
+
+def _prepare_runtime_workspace(workspace_root: Path) -> bool:
+    try:
+        workspace_root.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        if not workspace_root.is_dir() or next(workspace_root.iterdir(), None) is not None:
+            raise FileExistsError("workspace root must be empty") from None
+        return False
+    return True
 
 
 def _remove_failed_runtime_workspace(
     workspace_root: Path,
     database_path: Path,
     artifact_root: Path,
+    *,
+    remove_workspace_root: bool,
 ) -> None:
     for path in (
         database_path,
@@ -358,7 +375,8 @@ def _remove_failed_runtime_workspace(
                 path.unlink()
         except OSError:
             continue
-    for directory in (artifact_root, workspace_root):
+    directories = (artifact_root, workspace_root) if remove_workspace_root else (artifact_root,)
+    for directory in directories:
         try:
             directory.rmdir()
         except OSError:

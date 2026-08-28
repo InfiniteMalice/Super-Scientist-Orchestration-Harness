@@ -148,6 +148,78 @@ def test_runtime_initialization_failure_disposes_engine_and_removes_owned_root(
     assert not workspace_root.exists()
 
 
+def test_runtime_accepts_an_existing_empty_caller_owned_root(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "existing-empty-runtime"
+    workspace_root.mkdir()
+
+    runtime = example.create_local_runtime(workspace_root, example.fixed_policy())
+    try:
+        assert (workspace_root / "scientist-harness.db").is_file()
+        assert workspace_root.is_dir()
+    finally:
+        runtime.engine.dispose()
+
+
+def test_runtime_rejects_an_existing_nonempty_root_without_mutation(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "existing-nonempty-runtime"
+    workspace_root.mkdir()
+    sentinel = workspace_root / "caller-owned.txt"
+    sentinel.write_bytes(b"caller-owned")
+
+    with pytest.raises(FileExistsError, match="workspace root must be empty"):
+        example.create_local_runtime(workspace_root, example.fixed_policy())
+
+    assert sentinel.read_bytes() == b"caller-owned"
+    assert tuple(workspace_root.iterdir()) == (sentinel,)
+
+
+def test_runtime_initialization_failure_preserves_existing_empty_caller_owned_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_root = tmp_path / "existing-empty-failed-runtime"
+    workspace_root.mkdir()
+
+    class EngineProbe:
+        dispose_calls = 0
+
+        def dispose(self) -> None:
+            self.dispose_calls += 1
+
+    engine = EngineProbe()
+
+    def upgrade_database(_database_url: str) -> None:
+        (workspace_root / "scientist-harness.db").write_bytes(b"partial database")
+
+    class FailingPolicies:
+        def add_and_activate(self, _policy, _created_at) -> None:
+            raise RuntimeError("injected policy initialization failure")
+
+    class FailingRepositories:
+        policies = FailingPolicies()
+
+    class FailingUnitOfWork:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback) -> None:
+            return None
+
+        def repositories(self) -> FailingRepositories:
+            return FailingRepositories()
+
+    monkeypatch.setattr(example, "upgrade_database", upgrade_database)
+    monkeypatch.setattr(example, "create_database_engine", lambda _database_url: engine)
+    monkeypatch.setattr(example, "DatabaseUnitOfWork", lambda _engine: FailingUnitOfWork())
+
+    with pytest.raises(RuntimeError, match="injected policy initialization failure"):
+        example.create_local_runtime(workspace_root, example.fixed_policy())
+
+    assert engine.dispose_calls == 1
+    assert workspace_root.is_dir()
+    assert tuple(workspace_root.iterdir()) == ()
+
+
 @pytest.mark.e2e
 def test_example_is_cross_root_deterministic_before_round_trip(
     tmp_path: Path,
