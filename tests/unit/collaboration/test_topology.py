@@ -137,6 +137,44 @@ def test_rehashed_semantically_false_topology_event_is_rejected(
         apply_topology_event(session, state, parsed)
 
 
+@pytest.mark.parametrize(
+    "operation",
+    (TopologyOperation.DEACTIVATE_PEER, TopologyOperation.DISABLE_EDGE),
+)
+def test_topology_application_rejects_nonvalidating_event_without_operation_target(
+    session_factory: Callable[..., CollaborationSession],
+    operation: TopologyOperation,
+) -> None:
+    session = session_factory("peer-a", "peer-b")
+    state = initial_collaboration_state(session)
+    if operation is TopologyOperation.DEACTIVATE_PEER:
+        after = TopologySnapshot.build(active_peer_ids=("peer-a",), enabled_edges=())
+        valid = _event(
+            session,
+            state.topology,
+            after,
+            operation,
+            peer_id="peer-b",
+        )
+        forged = TopologyEvent.model_construct(**(valid.__dict__ | {"peer_id": None}))
+    else:
+        after = TopologySnapshot.build(
+            active_peer_ids=state.topology.active_peer_ids,
+            enabled_edges=(("peer-b", "peer-a"),),
+        )
+        valid = _event(
+            session,
+            state.topology,
+            after,
+            operation,
+            edge=("peer-a", "peer-b"),
+        )
+        forged = TopologyEvent.model_construct(**(valid.__dict__ | {"edge": None}))
+
+    with pytest.raises(ValueError, match="exactly one operation target"):
+        apply_topology_event(session, state, forged)
+
+
 def test_topology_envelope_rejects_impractical_edge_and_history_limits() -> None:
     peers = tuple(f"peer-{index:02d}" for index in range(16))
     too_many_edges = tuple(

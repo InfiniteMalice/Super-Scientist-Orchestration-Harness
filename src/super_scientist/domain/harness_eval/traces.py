@@ -462,7 +462,8 @@ class _RewardObservationPayload(_StrictFrozenModel):
             return None
         if isinstance(value, Decimal):
             return {"kind": "numeric", "value": str(value)}
-        assert isinstance(value, str)
+        if not isinstance(value, str):
+            raise ValueError("reward observation value must be numeric, categorical, or absent")
         return {"kind": "categorical", "value": value}
 
     @field_validator("value")

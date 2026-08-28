@@ -1083,7 +1083,8 @@ class CohortPlan(_CohortPlanPayload):
                     raise ValueError("cohort serialized plan exceeds the Phase A byte limit")
                 normalized_json = json_data
         else:
-            assert isinstance(json_data, bytes)
+            if not isinstance(json_data, bytes):
+                raise ValueError("cohort plan JSON input must be an exact str or bytes value")
             if len(json_data) > MAX_COHORT_PLAN_BYTES:
                 raise ValueError("cohort serialized plan exceeds the Phase A byte limit")
             try:

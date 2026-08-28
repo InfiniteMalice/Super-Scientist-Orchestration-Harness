@@ -1387,7 +1387,8 @@ def _apply_topology_operation(
     declared_peers = {peer.actor_id for peer in session.peers}
     declared_edges = set(session.declared_edges)
     if event.operation in {TopologyOperation.ACTIVATE_PEER, TopologyOperation.DEACTIVATE_PEER}:
-        assert event.peer_id is not None
+        if event.peer_id is None:
+            raise ValueError("topology event must declare exactly one operation target")
         if event.peer_id not in declared_peers:
             raise ValueError("topology event peer must be a declared peer")
         if event.operation is TopologyOperation.ACTIVATE_PEER:
@@ -1400,7 +1401,8 @@ def _apply_topology_operation(
             peers.remove(event.peer_id)
             edges = {edge for edge in edges if event.peer_id not in edge}
     else:
-        assert event.edge is not None
+        if event.edge is None:
+            raise ValueError("topology event must declare exactly one operation target")
         if event.edge not in declared_edges:
             raise ValueError("topology event edge must be a declared edge")
         if not set(event.edge).issubset(peers):

@@ -6,6 +6,7 @@ from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
+from pydantic_core import PydanticSerializationError
 
 import super_scientist.domain.harness_eval as harness_eval
 from super_scientist.domain.evidence.models import ArtifactRef
@@ -1215,6 +1216,17 @@ def reward_observation(
         evidence_id="reward-evidence" if value is not None else None,
         observed_at=NOW,
     )
+
+
+@pytest.mark.parametrize("invalid_value", (1, object()))
+def test_reward_observation_wire_serializer_rejects_nonvalidating_value(
+    invalid_value: object,
+) -> None:
+    valid = reward_observation()
+    forged = RewardObservation.model_construct(**(valid.__dict__ | {"value": invalid_value}))
+
+    with pytest.raises(PydanticSerializationError, match="reward observation value"):
+        forged.model_dump_json(warnings=False)
 
 
 def generation_metadata() -> GenerationMetadata:

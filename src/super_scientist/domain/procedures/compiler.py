@@ -1025,11 +1025,10 @@ def _strict_canonical_request(
                 request_bytes,
                 strict=True,
             )
-    if parsed is None or parsed != request:
+    if parsed is None or request_bytes is None or parsed != request:
         raise ProcedureBoundaryValidationError(
             "procedure compilation request failed canonical validation"
         ) from None
-    assert request_bytes is not None
     return parsed, request_bytes
 
 
