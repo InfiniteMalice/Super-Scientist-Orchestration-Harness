@@ -362,6 +362,202 @@ def test_untrusted_result_boundary_accepts_valid_dictionary_and_json() -> None:
     assert parse_untrusted_procedure_compilation_result(result_json) == result
 
 
+def test_untrusted_result_boundary_does_not_dispatch_unrelated_model_serializer() -> None:
+    calls: list[str] = []
+
+    class HostileModel(BaseModel):
+        marker: str = PRIVATE_MARKER
+
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            del args, kwargs
+            calls.append(self.marker)
+            raise RuntimeError(self.marker)
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_result(HostileModel())
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation result failed validation",
+    )
+    assert calls == []
+
+
+def test_untrusted_envelope_boundary_does_not_dispatch_unrelated_model_serializer() -> None:
+    calls: list[str] = []
+
+    class HostileModel(BaseModel):
+        marker: str = PRIVATE_MARKER
+
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            del args, kwargs
+            calls.append(self.marker)
+            raise RuntimeError(self.marker)
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_envelope(HostileModel())
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation envelope failed validation",
+    )
+    assert calls == []
+
+
+def test_untrusted_result_boundary_rejects_model_subclass_without_dispatch() -> None:
+    result = compile_method(valid_request())
+    calls: list[str] = []
+
+    class HostileResult(ProcedureCompilationResult):
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            del args, kwargs
+            calls.append(PRIVATE_MARKER)
+            raise RuntimeError(PRIVATE_MARKER)
+
+    hostile = HostileResult.model_construct(**result.__dict__)
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_result(hostile)
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation result failed validation",
+    )
+    assert calls == []
+
+
+def test_untrusted_result_boundary_rejects_injected_instance_serializer_state() -> None:
+    result = compile_method(valid_request())
+    calls: list[str] = []
+
+    def hostile_model_dump(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        calls.append(PRIVATE_MARKER)
+        raise RuntimeError(PRIVATE_MARKER)
+
+    object.__setattr__(result, "model_dump", hostile_model_dump)
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_result(result)
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation result failed validation",
+    )
+    assert calls == []
+
+
+def test_untrusted_result_boundary_does_not_read_injected_pydantic_serializer() -> None:
+    result = compile_method(valid_request())
+    calls: list[str] = []
+
+    class HostileSerializer:
+        def to_python(self, *args: object, **kwargs: object) -> dict[str, object]:
+            del args, kwargs
+            calls.append(PRIVATE_MARKER)
+            raise RuntimeError(PRIVATE_MARKER)
+
+    object.__setattr__(result, "__pydantic_serializer__", HostileSerializer())
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_result(result)
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation result failed validation",
+    )
+    assert calls == []
+
+
+def test_untrusted_envelope_boundary_rejects_model_subclass_without_dispatch() -> None:
+    result = compile_method(valid_request())
+    envelope = OpaqueProcedureCompilationEnvelope.build(
+        compilation_id="compilation-opaque",
+        result=result,
+        created_at=NOW,
+        governing_policy_hash="f" * 64,
+    )
+    calls: list[str] = []
+
+    class HostileEnvelope(OpaqueProcedureCompilationEnvelope):
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            del args, kwargs
+            calls.append(PRIVATE_MARKER)
+            raise RuntimeError(PRIVATE_MARKER)
+
+    hostile = HostileEnvelope.model_validate(envelope.model_dump(mode="python"))
+
+    for parser, message in (
+        (
+            parse_untrusted_procedure_compilation_envelope,
+            "procedure compilation envelope failed validation",
+        ),
+        (
+            parse_untrusted_procedure_compilation_result,
+            "procedure compilation result failed validation",
+        ),
+    ):
+        with pytest.raises(ProcedureBoundaryValidationError) as caught:
+            parser(hostile)
+        _assert_sanitized_boundary_error(caught.value, message)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "value_factory",
+    (
+        lambda payload: bytearray(payload),
+        lambda payload: type("HostileBytes", (bytes,), {})(payload),
+        lambda payload: type("HostileString", (str,), {})(payload.decode("utf-8")),
+    ),
+)
+def test_untrusted_result_boundary_rejects_mutable_or_subclassed_json_inputs(
+    value_factory: Any,
+) -> None:
+    result = compile_method(valid_request())
+    payload = canonical_json_bytes(result.model_dump(mode="json"))
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_result(value_factory(payload))
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation result failed validation",
+    )
+
+
+def test_untrusted_envelope_boundary_rejects_mutable_json_bytes() -> None:
+    envelope = OpaqueProcedureCompilationEnvelope.build(
+        compilation_id="compilation-opaque",
+        result=compile_method(valid_request()),
+        created_at=NOW,
+        governing_policy_hash="f" * 64,
+    )
+    payload = bytearray(canonical_json_bytes(envelope.model_dump(mode="json")))
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_envelope(payload)
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation envelope failed validation",
+    )
+
+
+def test_untrusted_result_boundary_rejects_mapping_subclass() -> None:
+    result = compile_method(valid_request())
+    hostile = type("HostileMapping", (dict,), {})(result.model_dump(mode="python"))
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_result(hostile)
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation result failed validation",
+    )
+
+
 def test_proposal_parser_keeps_schema_invalid_result_opaque_until_safe_boundary() -> None:
     result = compile_method(valid_request())
     payload = result.model_dump(mode="json")

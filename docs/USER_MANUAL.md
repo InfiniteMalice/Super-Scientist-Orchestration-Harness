@@ -2817,7 +2817,7 @@ The runtime has no secret store. Do not store credentials, tokens, regulated dat
 | Harness candidate | A proposed harness variant evaluated against a baseline. |
 | Hypothesis head | The effective-state pointer to the admitted hypothesis version. |
 | Idempotency | Exact replay behavior for one stable intent identity. |
-| Metadata availability | An explicit `AVAILABLE`, `UNAVAILABLE`, or `UNKNOWN` state kept separately from a metadata value. |
+| Metadata availability | Metadata availability states: `AVAILABLE`, `UNAVAILABLE`, and `NOT_APPLICABLE`. `AVAILABLE` requires a value and exact retained evidence; `UNAVAILABLE` means the metadata applies but is not exposed; `NOT_APPLICABLE` means the field does not apply. The latter two carry neither value nor evidence. |
 | Operational diversity | Declared differences in model, prompt, tools, evidence, method, topology, or errors; not reviewer independence. |
 | Projection | A rebuildable effective-state view derived from canonical records. |
 | Proposal | Untrusted typed input submitted for admission. |

@@ -827,6 +827,13 @@ class CohortPlanRepository(GovernedAppendOnlyRecordRepository[CohortPlan]):
     def list_for_request(self, request_id: str) -> tuple[CohortPlan, ...]:
         return self._list_by_relationship("request_id", request_id)
 
+    def get_many_with_provenance(
+        self,
+        record_ids: tuple[str, ...],
+        snapshot: GovernedProvenanceSnapshot,
+    ) -> tuple[CohortPlan, ...]:
+        return self._get_many_with_provenance(record_ids, snapshot)
+
 
 class DiversityAssessmentRepository(GovernedAppendOnlyRecordRepository[DiversityAssessment]):
     def __init__(self, connection: Connection) -> None:

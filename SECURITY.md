@@ -167,10 +167,13 @@ therefore fail closed.
 
 Harness traces bind exact protocol/cell coordinates, output artifacts, verifier results,
 environment identity, transformations, generation metadata, reward observations, and
-accepted provenance. Each optional metadata value is paired with an explicit
-`AVAILABLE`, `UNAVAILABLE`, or `UNKNOWN` state; an unavailable field cannot carry a
-fabricated value. Reward assessments bind the same accepted trace and retain every
-invalidating finding. High reward cannot erase verifier failure, environment tampering,
+accepted provenance. Metadata availability states: `AVAILABLE`, `UNAVAILABLE`, and
+`NOT_APPLICABLE`. `AVAILABLE` requires a value and its exact retained evidence;
+`UNAVAILABLE` means the metadata applies but the provider or workflow does not expose it;
+`NOT_APPLICABLE` means the field does not apply to that trace or operation. The latter two
+states cannot carry a fabricated value or evidence. Reward assessments bind the same
+accepted trace and retain every invalidating finding. High reward cannot erase verifier
+failure, environment tampering,
 answer leakage, trace inconsistency, proxy gaming, cherry-picking, contamination,
 premature termination, or resource evasion. The trace/reward adversarial test command
 above verifies rejection and unchanged authoritative heads.

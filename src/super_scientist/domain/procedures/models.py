@@ -6,7 +6,7 @@ import json
 from contextlib import suppress
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal, Self, cast
 
 from pydantic import (
     AfterValidator,
@@ -1012,14 +1012,16 @@ def parse_untrusted_procedure_compilation_envelope(
 ) -> OpaqueProcedureCompilationEnvelope:
     """Fresh-validate a complete envelope without retaining input diagnostics."""
 
-    supplied_envelope = value if isinstance(value, OpaqueProcedureCompilationEnvelope) else None
+    supplied_envelope = value if type(value) is OpaqueProcedureCompilationEnvelope else None
     envelope: OpaqueProcedureCompilationEnvelope | None = None
     with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
-        if isinstance(value, BaseModel):
-            value = value.model_dump(mode="python", warnings=False)
-        if isinstance(value, (str, bytes, bytearray)):
+        if supplied_envelope is not None:
+            value = _trusted_exact_model_payload(value, OpaqueProcedureCompilationEnvelope)
+        elif type(value) not in (dict, str, bytes):
+            raise TypeError("unsupported procedure compilation envelope input")
+        if type(value) in (str, bytes):
             envelope = OpaqueProcedureCompilationEnvelope.model_validate_json(
-                value,
+                cast(str | bytes, value),
                 strict=True,
             )
         else:
@@ -1041,15 +1043,19 @@ def parse_untrusted_procedure_compilation_result(
 ) -> ProcedureCompilationResult:
     """Parse an untrusted result without exposing Pydantic input diagnostics."""
 
-    supplied_result = value if isinstance(value, ProcedureCompilationResult) else None
+    supplied_result = value if type(value) is ProcedureCompilationResult else None
     result: ProcedureCompilationResult | None = None
     with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
-        if isinstance(value, OpaqueProcedureCompilationEnvelope):
+        if type(value) is OpaqueProcedureCompilationEnvelope:
             value = parse_untrusted_procedure_compilation_envelope(value).result_json_bytes()
-        elif isinstance(value, BaseModel):
-            value = value.model_dump(mode="python", warnings=False)
-        if isinstance(value, (str, bytes, bytearray)):
-            result = ProcedureCompilationResult.model_validate_json(value, strict=True)
+        elif supplied_result is not None:
+            value = _trusted_exact_model_payload(value, ProcedureCompilationResult)
+        elif type(value) not in (dict, str, bytes):
+            raise TypeError("unsupported procedure compilation result input")
+        if type(value) in (str, bytes):
+            result = ProcedureCompilationResult.model_validate_json(
+                cast(str | bytes, value), strict=True
+            )
         else:
             result = ProcedureCompilationResult.model_validate(value, strict=True)
         if supplied_result is not None and result != supplied_result:
@@ -1059,6 +1065,30 @@ def parse_untrusted_procedure_compilation_result(
             "procedure compilation result failed validation"
         ) from None
     return result
+
+
+def _trusted_exact_model_payload[ModelT: BaseModel](
+    value: object,
+    model_type: type[ModelT],
+) -> dict[str, object]:
+    """Serialize an exact trusted model without consulting instance dispatch state."""
+
+    if type(value) is not model_type:
+        raise TypeError("model type does not match trusted boundary type")
+    state = object.__getattribute__(value, "__dict__")
+    fields = type.__getattribute__(model_type, "model_fields")
+    if (
+        type(state) is not dict
+        or type(fields) is not dict
+        or set(state) != set(fields)
+        or any(type(key) is not str for key in state)
+    ):
+        raise TypeError("model state does not match trusted boundary schema")
+    serializer = type.__getattribute__(model_type, "__pydantic_serializer__")
+    dumped = serializer.to_python(value, mode="python", warnings=False)
+    if type(dumped) is not dict or any(type(key) is not str for key in dumped):
+        raise TypeError("trusted boundary serializer returned an invalid payload")
+    return dumped
 
 
 class _ProcedureCompilationRecordPayload(_StrictFrozenModel):

@@ -108,10 +108,12 @@ each receipt must bind the accepted proposal hash, audit event identifier, audit
 hash, governing policy, and required earlier audit order. A later replacement in the
 same source-snapshot family makes the older receipt stale.
 
-Generation metadata uses three explicit states. `AVAILABLE` requires a value plus exact
-retained evidence. `UNAVAILABLE` requires neither a value nor fake evidence. `UNKNOWN`
-records that the workflow cannot determine availability. Missing metadata is not zero,
-false, or an empty observation. Model-by-harness analysis retains confounds rather than
+Metadata availability states: `AVAILABLE`, `UNAVAILABLE`, and `NOT_APPLICABLE`.
+`AVAILABLE` requires a value plus exact retained evidence. `UNAVAILABLE` means the
+metadata applies but the provider or workflow does not expose it. `NOT_APPLICABLE` means
+the field does not apply to that trace or operation. The latter two states carry neither a
+value nor fake evidence. Missing metadata is not zero, false, or an empty observation.
+Model-by-harness analysis retains confounds rather than
 normalizing them away; cross-protocol, ambiguous, surplus, missing, stale, or invalid
 reward evidence produces `UNMATCHED_EVALUATION` or the more specific fixed rejection.
 Run `python -m pytest tests/integration/application/test_harness_eval_extensions.py

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from super_scientist.application.cognition import service as cognition_service
 from super_scientist.application.cognition.service import (
@@ -143,18 +143,23 @@ class _CohortReads:
     active_policy: PolicySnapshot
     profiles: dict[str, CapabilityProfile]
     existing: CohortPlan | None = None
+    resolution_calls: int = 0
+    lookup_calls: int = 0
 
     def policy_snapshot(self) -> PolicySnapshot:
         return self.active_policy
 
     def get_cohort_plan(self, cohort_plan_id: str) -> CohortPlan | None:
         del cohort_plan_id
+        self.lookup_calls += 1
         return self.existing
 
-    def resolve_profile_receipt(
-        self, reference: CapabilityProfileReceiptRef
-    ) -> CapabilityProfile | None:
-        return self.profiles.get(reference.proposal_id)
+    def resolve_profile_receipts(
+        self,
+        references: tuple[CapabilityProfileReceiptRef, ...],
+    ) -> tuple[CapabilityProfile | None, ...]:
+        self.resolution_calls += 1
+        return tuple(self.profiles.get(reference.proposal_id) for reference in references)
 
 
 @dataclass
@@ -164,11 +169,19 @@ class _DiversityReads(_CohortReads):
 
     def get_diversity_assessment(self, diversity_assessment_id: str) -> DiversityAssessment | None:
         del diversity_assessment_id
+        self.lookup_calls += 1
         return self.assessment
 
-    def resolve_cohort_receipt(self, reference: CohortPlanReceiptRef) -> CohortPlan | None:
-        del reference
-        return self.cohort
+    def resolve_source_receipts(
+        self,
+        cohort_reference: CohortPlanReceiptRef,
+        profile_references: tuple[CapabilityProfileReceiptRef, ...],
+    ) -> tuple[CohortPlan | None, tuple[CapabilityProfile | None, ...]]:
+        del cohort_reference
+        self.resolution_calls += 1
+        return self.cohort, tuple(
+            self.profiles.get(reference.proposal_id) for reference in profile_references
+        )
 
 
 @dataclass
@@ -261,6 +274,32 @@ def test_cohort_handler_rejects_forged_or_stale_profile_receipt(
     assert decision.reasons[0].code is RejectionCode.STALE_REFERENCE
 
 
+def test_cohort_handler_rejects_duplicate_receipts_before_resolution(
+    v2_policy_snapshot: PolicySnapshot,
+) -> None:
+    retained = profile("peer-a")
+    request = _request("peer-a")
+    duplicate = _receipt("record-profile")
+    proposal = RecordCohortPlan.model_construct(
+        proposal_id="record-cohort-duplicate",
+        idempotency_key="record-cohort-duplicate",
+        proposer=_model_actor("proposer"),
+        approval=_approval(),
+        proposal_type="record_cohort_plan",
+        request=request,
+        profile_receipts=(duplicate, duplicate),
+        plan=build_cohort(request, (retained,)),
+    )
+    reads = _CohortReads(v2_policy_snapshot, {"record-profile": retained})
+    handler = RecordCohortPlanHandler()
+
+    decision = handler.decide(proposal, handler.build_context(proposal, reads))
+
+    assert decision.reasons[0].code is RejectionCode.STALE_REFERENCE
+    assert reads.resolution_calls == 0
+    assert reads.lookup_calls == 0
+
+
 def test_diversity_handler_resolves_receipts_and_recomputes_assessment(
     v2_policy_snapshot: PolicySnapshot,
 ) -> None:
@@ -285,20 +324,55 @@ def test_diversity_handler_resolves_receipts_and_recomputes_assessment(
         assessment=assessment,
     )
     handler = RecordDiversityAssessmentHandler()
+    reads = _DiversityReads(
+        v2_policy_snapshot,
+        {"record-profile": retained},
+        cohort=cohort,
+    )
 
     decision = handler.decide(
         proposal,
-        handler.build_context(
-            proposal,
-            _DiversityReads(
-                v2_policy_snapshot,
-                {"record-profile": retained},
-                cohort=cohort,
-            ),
-        ),
+        handler.build_context(proposal, reads),
     )
 
     assert decision.accepted is True
+    assert reads.resolution_calls == 1
+
+
+def test_diversity_handler_rejects_duplicate_receipts_before_resolution(
+    v2_policy_snapshot: PolicySnapshot,
+) -> None:
+    retained = profile("peer-a")
+    cohort = build_cohort(_request("peer-a"), (retained,))
+    assessment = assess_diversity(cohort, (retained,), ())
+    duplicate_id = "record-profile"
+    proposal = RecordDiversityAssessment(
+        proposal_id="record-diversity-duplicate",
+        idempotency_key="record-diversity-duplicate",
+        proposer=_model_actor("proposer"),
+        approval=_approval(),
+        cohort_plan_receipt=CohortPlanReceiptRef(
+            proposal_id=duplicate_id,
+            proposal_hash="c" * 64,
+            audit_event_id="audit-record-cohort",
+            audit_event_hash="d" * 64,
+        ),
+        profile_receipts=(_receipt(duplicate_id),),
+        error_correlations=(),
+        assessment=assessment,
+    )
+    reads = _DiversityReads(
+        v2_policy_snapshot,
+        {duplicate_id: retained},
+        cohort=cohort,
+    )
+    handler = RecordDiversityAssessmentHandler()
+
+    decision = handler.decide(proposal, handler.build_context(proposal, reads))
+
+    assert decision.reasons[0].code is RejectionCode.STALE_REFERENCE
+    assert reads.resolution_calls == 0
+    assert reads.lookup_calls == 0
 
 
 @pytest.mark.parametrize(
@@ -839,3 +913,192 @@ def test_cognition_capabilities_resolve_exact_accepted_receipt_and_project_plan(
             assert CohortPlanRepository(connection).list_all() == (cohort_proposal.plan,)
     finally:
         engine.dispose()
+
+
+def test_profile_receipt_resolution_has_constant_query_count_and_preserves_order(
+    tmp_path,
+    v2_policy_snapshot: PolicySnapshot,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'bulk-cognition.db').as_posix()}"
+    upgrade_database(database_url)
+    engine = create_database_engine(database_url)
+    retained_profiles = (profile("peer-a"), profile("peer-b"))
+    proposals = tuple(
+        RecordCapabilityProfile(
+            proposal_id=f"record-profile-{retained.actor_id}",
+            idempotency_key=f"record-profile-{retained.actor_id}",
+            proposer=_model_actor("proposer"),
+            approval=_approval(),
+            profile=retained,
+        )
+        for retained in retained_profiles
+    )
+    receipts: list[CapabilityProfileReceiptRef] = []
+    try:
+        with engine.connect() as connection, connection.begin():
+            connection.execute(
+                text(
+                    "INSERT INTO governance_policies "
+                    "(policy_hash, policy_json, created_at) "
+                    "VALUES (:policy_hash, :policy_json, :created_at)"
+                ),
+                {
+                    "policy_hash": POLICY_HASH,
+                    "policy_json": v2_policy_snapshot.policy.model_dump_json(),
+                    "created_at": NOW.isoformat(),
+                },
+            )
+            repositories = RepositorySet(connection)
+            previous_event = None
+            for proposal in proposals:
+                handler = RecordCapabilityProfileHandler()
+                capability = cognition_capabilities(
+                    proposal,
+                    connection,
+                    v2_policy_snapshot,
+                    current_transaction_created_at=NOW,
+                )
+                decision = handler.decide(
+                    proposal,
+                    handler.build_context(proposal, capability),
+                )
+                handler.project(proposal, decision, capability)
+                repositories.transactions.add(proposal, decision, NOW)
+                current_event = append_event(
+                    previous_event,
+                    "transaction_decision",
+                    {
+                        "proposal": proposal.model_dump(mode="json"),
+                        "decision": decision.model_dump(mode="json"),
+                        "policy_hash": POLICY_HASH,
+                        "stored_policy_hash": POLICY_HASH,
+                        "transaction_persisted": True,
+                    },
+                    NOW,
+                )
+                repositories.audit.add(current_event)
+                stored = repositories.transactions.get_by_proposal_id(proposal.proposal_id)
+                assert stored is not None
+                receipts.append(
+                    CapabilityProfileReceiptRef(
+                        proposal_id=proposal.proposal_id,
+                        proposal_hash=stored.proposal_hash,
+                        audit_event_id=current_event.event_id,
+                        audit_event_hash=current_event.event_hash,
+                    )
+                )
+                previous_event = current_event
+
+            for index in range(32):
+                current_event = append_event(
+                    previous_event,
+                    "unrelated_cognition_history",
+                    {"index": index},
+                    NOW,
+                )
+                repositories.audit.add(current_event)
+                previous_event = current_event
+
+        query_counts: list[int] = []
+        resolved_orders: list[tuple[str | None, ...]] = []
+        for count in (1, 2):
+            request = _request(*(profile.actor_id for profile in retained_profiles[:count]))
+            proposal = RecordCohortPlan(
+                proposal_id=f"record-cohort-{count}",
+                idempotency_key=f"record-cohort-{count}",
+                proposer=_model_actor("proposer"),
+                approval=_approval(),
+                request=request,
+                profile_receipts=tuple(reversed(receipts[:count])),
+                plan=build_cohort(request, retained_profiles[:count]),
+            )
+            statements: list[str] = []
+
+            def count_selects(
+                _connection: object,
+                _cursor: object,
+                statement: str,
+                _parameters: object,
+                _context: object,
+                _executemany: bool,
+                captured: list[str] = statements,
+            ) -> None:
+                if statement.lstrip().upper().startswith("SELECT"):
+                    captured.append(statement)
+
+            event.listen(engine, "before_cursor_execute", count_selects)
+            try:
+                with engine.connect() as connection:
+                    capability = cognition_capabilities(
+                        proposal,
+                        connection,
+                        v2_policy_snapshot,
+                        current_transaction_created_at=NOW,
+                    )
+                    context = RecordCohortPlanHandler().build_context(proposal, capability)
+            finally:
+                event.remove(engine, "before_cursor_execute", count_selects)
+            query_counts.append(len(statements))
+            resolved_orders.append(
+                tuple(None if item is None else item.actor_id for item in context.resolved_profiles)
+            )
+
+        assert query_counts == [4, 4]
+        assert resolved_orders == [
+            ("peer-a",),
+            ("peer-b", "peer-a"),
+        ]
+    finally:
+        engine.dispose()
+
+
+def test_maximum_duplicate_receipt_collection_rejects_without_sql_reads(
+    tmp_path,
+    v2_policy_snapshot: PolicySnapshot,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'duplicate-cognition.db').as_posix()}"
+    upgrade_database(database_url)
+    engine = create_database_engine(database_url)
+    retained = profile("peer-a")
+    request = _request("peer-a")
+    duplicate = _receipt("record-profile")
+    proposal = RecordCohortPlan.model_construct(
+        proposal_id="record-cohort-maximum-duplicates",
+        idempotency_key="record-cohort-maximum-duplicates",
+        proposer=_model_actor("proposer"),
+        approval=_approval(),
+        proposal_type="record_cohort_plan",
+        request=request,
+        profile_receipts=(duplicate,) * 256,
+        plan=build_cohort(request, (retained,)),
+    )
+    statements: list[str] = []
+
+    def count_selects(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", count_selects)
+    try:
+        with engine.connect() as connection:
+            capability = cognition_capabilities(
+                proposal,
+                connection,
+                v2_policy_snapshot,
+                current_transaction_created_at=NOW,
+            )
+            handler = RecordCohortPlanHandler()
+            decision = handler.decide(proposal, handler.build_context(proposal, capability))
+    finally:
+        event.remove(engine, "before_cursor_execute", count_selects)
+        engine.dispose()
+
+    assert decision.reasons[0].code is RejectionCode.STALE_REFERENCE
+    assert statements == []

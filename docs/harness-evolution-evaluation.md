@@ -112,12 +112,12 @@ than imputing absent or invalid observations. The implementation bounds a protoc
 256 cells, loads one frozen resolution snapshot, and indexes trace/reward coordinates so
 duplicate evidence remains an explicit ambiguity rather than a last-write-wins choice.
 
-Trace metadata records availability separately from value. When a provider exposes a
-token ID, log probability, sampling hash, stop reason, request ID, context hash,
-environment event, transformation, or tool event, the recorder binds that value to its
-retained evidence. When the provider does not expose the value, the recorder uses
-`UNAVAILABLE` and supplies no fabricated value. `UNKNOWN` means availability itself is
-not known. The transaction coordinator uses one owned exact trace proposal snapshot for
+Trace metadata records availability separately from value. Metadata availability states:
+`AVAILABLE`, `UNAVAILABLE`, and `NOT_APPLICABLE`. `AVAILABLE` binds an applicable value to
+its exact retained evidence. `UNAVAILABLE` means the metadata applies but the provider or
+workflow does not expose it. `NOT_APPLICABLE` means the field does not apply to that trace
+or operation. The latter two states supply neither a value nor fabricated evidence. The
+transaction coordinator uses one owned exact trace proposal snapshot for
 admission, projection, transaction, and audit, preventing staged caller mutation.
 
 A reward assessment cannot authorize promotion. Its validity is recomputed from the

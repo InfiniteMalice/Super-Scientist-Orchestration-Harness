@@ -143,9 +143,12 @@ tests/adversarial/test_procedure_escalation.py -q` to verify the lifecycle.
 When an evaluation cell is retained, its handler must match the exact protocol,
 condition, model, harness, budget, trace, output, verifier, and reward evidence. Missing,
 stale, ambiguous, surplus, or cross-protocol evidence produces a fixed rejection and no
-evaluation projection. Generation metadata records `AVAILABLE`, `UNAVAILABLE`, or
-`UNKNOWN`; an unavailable value cannot carry fabricated token, log-probability, request,
-or context data. A high numeric reward is valid promotion evidence only when its exact
+evaluation projection. Metadata availability states: `AVAILABLE`, `UNAVAILABLE`, and
+`NOT_APPLICABLE`. `AVAILABLE` requires a value and its exact retained evidence;
+`UNAVAILABLE` means the metadata applies but the provider or workflow does not expose it;
+`NOT_APPLICABLE` means the field does not apply to that trace or operation. The latter two
+states carry neither a value nor fabricated token, log-probability, request, or context
+data. A high numeric reward is valid promotion evidence only when its exact
 trace is current and every invalidating reward-hacking finding is absent. Run
 `python -m pytest tests/integration/application/test_harness_eval_extensions.py
 tests/adversarial/test_trace_reward_tampering.py -q` to verify these results.

@@ -33,6 +33,8 @@ from super_scientist.providers.storage.cognitive_records import (
     CapabilityProfileRepository,
     CohortPlanRepository,
     DiversityAssessmentRepository,
+    GovernedProvenanceSnapshot,
+    build_governed_provenance_snapshot,
 )
 from super_scientist.providers.storage.repositories import (
     AuditRepository,
@@ -51,45 +53,71 @@ class _AcceptedCognitiveReceiptReader:
         self._audit = AuditRepository(connection)
         self._active_policy = active_policy
 
-    def resolve_profile(
+    def resolve_many(
         self,
-        reference: CapabilityProfileReceiptRef,
-    ) -> RecordCapabilityProfile | None:
-        resolved = self._resolve(reference)
-        return resolved if isinstance(resolved, RecordCapabilityProfile) else None
-
-    def resolve_cohort(
-        self,
-        reference: CohortPlanReceiptRef,
-    ) -> RecordCohortPlan | None:
-        resolved = self._resolve(reference)
-        return resolved if isinstance(resolved, RecordCohortPlan) else None
-
-    def _resolve(
-        self,
-        reference: CapabilityProfileReceiptRef | CohortPlanReceiptRef,
-    ) -> Proposal | None:
+        references: tuple[CapabilityProfileReceiptRef | CohortPlanReceiptRef, ...],
+    ) -> tuple[tuple[Proposal | None, ...], GovernedProvenanceSnapshot]:
+        empty_snapshot = build_governed_provenance_snapshot((), ())
         try:
-            exact_reference = type(reference).model_validate(
-                reference.model_dump(mode="python", warnings=False)
+            exact_references = tuple(
+                _fresh_cognitive_receipt(reference) for reference in references
             )
-            transaction = self._transactions.get_by_proposal_id(exact_reference.proposal_id)
-            if (
-                transaction is None
-                or not transaction.decision.accepted
-                or transaction.proposal_hash != exact_reference.proposal_hash
-            ):
-                return None
-            matches = tuple(
-                event
-                for event in self._audit.list_all()
-                if event.event_id == exact_reference.audit_event_id
-                and event.event_hash == exact_reference.audit_event_hash
-                and _audit_matches_transaction(event, transaction, self._active_policy.policy_hash)
+            transactions = self._transactions.get_many_by_proposal_ids(
+                tuple(reference.proposal_id for reference in exact_references)
+            )
+            audit_events = self._audit.list_all()
+            provenance = build_governed_provenance_snapshot(transactions, audit_events)
+            transactions_by_id = {
+                transaction.proposal.proposal_id: transaction for transaction in transactions
+            }
+            audits_by_receipt: dict[tuple[str, str], list[AuditEvent]] = {}
+            for event in audit_events:
+                audits_by_receipt.setdefault((event.event_id, event.event_hash), []).append(event)
+            resolved = tuple(
+                self._resolve_from_snapshot(
+                    reference,
+                    transactions_by_id.get(reference.proposal_id),
+                    audits_by_receipt,
+                )
+                for reference in exact_references
             )
         except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
+            return (None,) * len(references), empty_snapshot
+        return resolved, provenance
+
+    def _resolve_from_snapshot(
+        self,
+        reference: CapabilityProfileReceiptRef | CohortPlanReceiptRef,
+        transaction: StoredTransaction | None,
+        audits_by_receipt: dict[tuple[str, str], list[AuditEvent]],
+    ) -> Proposal | None:
+        if (
+            transaction is None
+            or not transaction.decision.accepted
+            or transaction.proposal_hash != reference.proposal_hash
+        ):
             return None
+        matches = tuple(
+            event
+            for event in audits_by_receipt.get(
+                (reference.audit_event_id, reference.audit_event_hash), ()
+            )
+            if _audit_matches_transaction(event, transaction, self._active_policy.policy_hash)
+        )
         return transaction.proposal if len(matches) == 1 else None
+
+
+def _fresh_cognitive_receipt(
+    reference: CapabilityProfileReceiptRef | CohortPlanReceiptRef,
+) -> CapabilityProfileReceiptRef | CohortPlanReceiptRef:
+    model_type = type(reference)
+    if model_type not in (CapabilityProfileReceiptRef, CohortPlanReceiptRef):
+        raise TypeError("unsupported cognitive receipt type")
+    state = object.__getattribute__(reference, "__dict__")
+    fields = type.__getattribute__(model_type, "model_fields")
+    if type(state) is not dict or set(state) != set(fields):
+        raise TypeError("cognitive receipt state does not match schema")
+    return model_type.model_validate(dict(state), strict=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,15 +163,27 @@ class CohortPlanCapabilities:
     def get_cohort_plan(self, cohort_plan_id: str) -> CohortPlan | None:
         return self.plans.get(cohort_plan_id)
 
-    def resolve_profile_receipt(
+    def resolve_profile_receipts(
         self,
-        reference: CapabilityProfileReceiptRef,
-    ) -> CapabilityProfile | None:
-        proposal = self.receipts.resolve_profile(reference)
-        if proposal is None:
-            return None
-        retained = self.profiles.get(proposal.profile.profile_id)
-        return retained if retained == proposal.profile else None
+        references: tuple[CapabilityProfileReceiptRef, ...],
+    ) -> tuple[CapabilityProfile | None, ...]:
+        proposals, provenance = self.receipts.resolve_many(references)
+        retained = self.profiles.get_many_with_provenance(
+            tuple(
+                proposal.profile.profile_id
+                for proposal in proposals
+                if isinstance(proposal, RecordCapabilityProfile)
+            ),
+            provenance,
+        )
+        retained_by_id = {profile.profile_id: profile for profile in retained}
+        return tuple(
+            retained_by_id.get(proposal.profile.profile_id)
+            if isinstance(proposal, RecordCapabilityProfile)
+            and retained_by_id.get(proposal.profile.profile_id) == proposal.profile
+            else None
+            for proposal in proposals
+        )
 
     def append_authoritative(self, record: BaseModel) -> None:
         if type(record) is not CohortPlan or record != self.proposal.plan:
@@ -182,25 +222,45 @@ class DiversityAssessmentCapabilities:
     ) -> DiversityAssessment | None:
         return self.assessments.get(diversity_assessment_id)
 
-    def resolve_profile_receipt(
+    def resolve_source_receipts(
         self,
-        reference: CapabilityProfileReceiptRef,
-    ) -> CapabilityProfile | None:
-        proposal = self.receipts.resolve_profile(reference)
-        if proposal is None:
-            return None
-        retained = self.profiles.get(proposal.profile.profile_id)
-        return retained if retained == proposal.profile else None
-
-    def resolve_cohort_receipt(
-        self,
-        reference: CohortPlanReceiptRef,
-    ) -> CohortPlan | None:
-        proposal = self.receipts.resolve_cohort(reference)
-        if proposal is None:
-            return None
-        retained = self.plans.get(proposal.plan.cohort_plan_id)
-        return retained if retained == proposal.plan else None
+        cohort_reference: CohortPlanReceiptRef,
+        profile_references: tuple[CapabilityProfileReceiptRef, ...],
+    ) -> tuple[CohortPlan | None, tuple[CapabilityProfile | None, ...]]:
+        proposals, provenance = self.receipts.resolve_many((cohort_reference, *profile_references))
+        cohort_proposal, *profile_proposals = proposals
+        retained_cohorts = self.plans.get_many_with_provenance(
+            (
+                (cohort_proposal.plan.cohort_plan_id,)
+                if isinstance(cohort_proposal, RecordCohortPlan)
+                else ()
+            ),
+            provenance,
+        )
+        resolved_cohort = (
+            retained_cohorts[0]
+            if isinstance(cohort_proposal, RecordCohortPlan)
+            and len(retained_cohorts) == 1
+            and retained_cohorts[0] == cohort_proposal.plan
+            else None
+        )
+        retained_profiles = self.profiles.get_many_with_provenance(
+            tuple(
+                proposal.profile.profile_id
+                for proposal in profile_proposals
+                if isinstance(proposal, RecordCapabilityProfile)
+            ),
+            provenance,
+        )
+        retained_profiles_by_id = {profile.profile_id: profile for profile in retained_profiles}
+        resolved_profiles = tuple(
+            retained_profiles_by_id.get(proposal.profile.profile_id)
+            if isinstance(proposal, RecordCapabilityProfile)
+            and retained_profiles_by_id.get(proposal.profile.profile_id) == proposal.profile
+            else None
+            for proposal in profile_proposals
+        )
+        return resolved_cohort, resolved_profiles
 
     def append_authoritative(self, record: BaseModel) -> None:
         if type(record) is not DiversityAssessment or record != self.proposal.assessment:

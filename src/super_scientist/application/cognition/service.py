@@ -50,10 +50,10 @@ class CohortPlanReadCapability(Protocol):
 
     def get_cohort_plan(self, cohort_plan_id: str) -> CohortPlan | None: ...
 
-    def resolve_profile_receipt(
+    def resolve_profile_receipts(
         self,
-        reference: CapabilityProfileReceiptRef,
-    ) -> CapabilityProfile | None: ...
+        references: tuple[CapabilityProfileReceiptRef, ...],
+    ) -> tuple[CapabilityProfile | None, ...]: ...
 
 
 class DiversityAssessmentReadCapability(CohortPlanReadCapability, Protocol):
@@ -62,10 +62,11 @@ class DiversityAssessmentReadCapability(CohortPlanReadCapability, Protocol):
         diversity_assessment_id: str,
     ) -> DiversityAssessment | None: ...
 
-    def resolve_cohort_receipt(
+    def resolve_source_receipts(
         self,
-        reference: CohortPlanReceiptRef,
-    ) -> CohortPlan | None: ...
+        cohort_reference: CohortPlanReceiptRef,
+        profile_references: tuple[CapabilityProfileReceiptRef, ...],
+    ) -> tuple[CohortPlan | None, tuple[CapabilityProfile | None, ...]]: ...
 
 
 class _CapabilityProfileContext(BaseModel):
@@ -80,6 +81,7 @@ class _CohortPlanContext(BaseModel):
 
     active_policy: PolicySnapshot
     existing_plan: CohortPlan | None
+    duplicate_receipts: bool = False
     resolved_profiles: tuple[CapabilityProfile | None, ...]
 
 
@@ -88,6 +90,7 @@ class _DiversityAssessmentContext(BaseModel):
 
     active_policy: PolicySnapshot
     existing_assessment: DiversityAssessment | None
+    duplicate_receipts: bool = False
     resolved_cohort: CohortPlan | None
     resolved_profiles: tuple[CapabilityProfile | None, ...]
 
@@ -149,12 +152,21 @@ class RecordCohortPlanHandler:
         reads: HandlerReadCapability,
     ) -> _CohortPlanContext:
         capability = cast(CohortPlanReadCapability, reads)
+        duplicate_receipts = len(
+            {reference.proposal_id for reference in proposal.profile_receipts}
+        ) != len(proposal.profile_receipts)
         return _CohortPlanContext(
             active_policy=capability.policy_snapshot(),
-            existing_plan=capability.get_cohort_plan(proposal.plan.cohort_plan_id),
-            resolved_profiles=tuple(
-                capability.resolve_profile_receipt(reference)
-                for reference in proposal.profile_receipts
+            existing_plan=(
+                None
+                if duplicate_receipts
+                else capability.get_cohort_plan(proposal.plan.cohort_plan_id)
+            ),
+            duplicate_receipts=duplicate_receipts,
+            resolved_profiles=(
+                ()
+                if duplicate_receipts
+                else capability.resolve_profile_receipts(proposal.profile_receipts)
             ),
         )
 
@@ -175,13 +187,16 @@ class RecordCohortPlanHandler:
                 RejectionCode.POLICY_HASH_MISMATCH,
                 "cohort request and plan must name the exact active governance policy",
             )
-        if any(profile is None for profile in context.resolved_profiles):
-            return _stale_reference(proposal.proposal_id, "capability profile receipt")
-        resolved = cast(tuple[CapabilityProfile, ...], context.resolved_profiles)
-        if len({reference.proposal_id for reference in proposal.profile_receipts}) != len(
-            proposal.profile_receipts
+        duplicate_receipts = len(
+            {reference.proposal_id for reference in proposal.profile_receipts}
+        ) != len(proposal.profile_receipts)
+        if (
+            context.duplicate_receipts
+            or duplicate_receipts
+            or any(profile is None for profile in context.resolved_profiles)
         ):
             return _stale_reference(proposal.proposal_id, "capability profile receipt")
+        resolved = cast(tuple[CapabilityProfile, ...], context.resolved_profiles)
         try:
             expected = build_cohort(proposal.request, resolved)
         except (MemoryError, OverflowError, RecursionError, TypeError, UnicodeError, ValueError):
@@ -219,16 +234,30 @@ class RecordDiversityAssessmentHandler:
         reads: HandlerReadCapability,
     ) -> _DiversityAssessmentContext:
         capability = cast(DiversityAssessmentReadCapability, reads)
+        references = (
+            proposal.cohort_plan_receipt.proposal_id,
+            *(reference.proposal_id for reference in proposal.profile_receipts),
+        )
+        duplicate_receipts = len(set(references)) != len(references)
+        resolved_cohort: CohortPlan | None = None
+        resolved_profiles: tuple[CapabilityProfile | None, ...] = ()
+        if not duplicate_receipts:
+            resolved_cohort, resolved_profiles = capability.resolve_source_receipts(
+                proposal.cohort_plan_receipt,
+                proposal.profile_receipts,
+            )
         return _DiversityAssessmentContext(
             active_policy=capability.policy_snapshot(),
-            existing_assessment=capability.get_diversity_assessment(
-                proposal.assessment.diversity_assessment_id
+            existing_assessment=(
+                None
+                if duplicate_receipts
+                else capability.get_diversity_assessment(
+                    proposal.assessment.diversity_assessment_id
+                )
             ),
-            resolved_cohort=capability.resolve_cohort_receipt(proposal.cohort_plan_receipt),
-            resolved_profiles=tuple(
-                capability.resolve_profile_receipt(reference)
-                for reference in proposal.profile_receipts
-            ),
+            duplicate_receipts=duplicate_receipts,
+            resolved_cohort=resolved_cohort,
+            resolved_profiles=resolved_profiles,
         )
 
     def decide(
@@ -245,15 +274,17 @@ class RecordDiversityAssessmentHandler:
                 RejectionCode.POLICY_HASH_MISMATCH,
                 "diversity assessment must name the exact active governance policy",
             )
-        if context.resolved_cohort is None or any(
-            profile is None for profile in context.resolved_profiles
-        ):
-            return _stale_reference(proposal.proposal_id, "diversity source receipt")
         references = (
             proposal.cohort_plan_receipt.proposal_id,
             *(reference.proposal_id for reference in proposal.profile_receipts),
         )
-        if len(set(references)) != len(references):
+        duplicate_receipts = len(set(references)) != len(references)
+        if (
+            context.duplicate_receipts
+            or duplicate_receipts
+            or context.resolved_cohort is None
+            or any(profile is None for profile in context.resolved_profiles)
+        ):
             return _stale_reference(proposal.proposal_id, "diversity source receipt")
         profiles = cast(tuple[CapabilityProfile, ...], context.resolved_profiles)
         try:
