@@ -558,6 +558,81 @@ def test_untrusted_result_boundary_rejects_mapping_subclass() -> None:
     )
 
 
+def test_untrusted_result_boundary_does_not_dispatch_nested_model_equality() -> None:
+    result = compile_method(valid_request())
+    calls: list[str] = []
+
+    class HostileProcedure(type(result.procedure)):
+        def __eq__(self, other: object) -> bool:
+            del other
+            calls.append(PRIVATE_MARKER)
+            raise RuntimeError(PRIVATE_MARKER)
+
+    hostile_procedure = HostileProcedure.model_construct(**result.procedure.__dict__)
+    hostile_result = result.model_copy(update={"procedure": hostile_procedure})
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_result(hostile_result)
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation result failed validation",
+    )
+    assert calls == []
+
+
+def test_untrusted_result_boundary_rejects_nested_string_subclass_without_hooks() -> None:
+    result = compile_method(valid_request())
+    calls: list[str] = []
+
+    class HostileString(str):
+        def strip(self, chars: str | None = None) -> str:
+            del chars
+            calls.append(PRIVATE_MARKER)
+            raise RuntimeError(PRIVATE_MARKER)
+
+    hostile_procedure = result.procedure.model_copy(
+        update={"procedure_id": HostileString(result.procedure.procedure_id)}
+    )
+    hostile_result = result.model_copy(update={"procedure": hostile_procedure})
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_result(hostile_result)
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation result failed validation",
+    )
+    assert calls == []
+
+
+def test_untrusted_result_boundary_checks_state_key_type_before_hash_or_equality() -> None:
+    result = compile_method(valid_request())
+    calls: list[str] = []
+
+    class HostileKey:
+        def __hash__(self) -> int:
+            calls.append(PRIVATE_MARKER)
+            return 1
+
+        def __eq__(self, other: object) -> bool:
+            del other
+            calls.append(PRIVATE_MARKER)
+            raise RuntimeError(PRIVATE_MARKER)
+
+    result.__dict__[HostileKey()] = PRIVATE_MARKER
+    calls.clear()
+
+    with pytest.raises(ProcedureBoundaryValidationError) as caught:
+        parse_untrusted_procedure_compilation_result(result)
+
+    _assert_sanitized_boundary_error(
+        caught.value,
+        "procedure compilation result failed validation",
+    )
+    assert calls == []
+
+
 def test_proposal_parser_keeps_schema_invalid_result_opaque_until_safe_boundary() -> None:
     result = compile_method(valid_request())
     payload = result.model_dump(mode="json")

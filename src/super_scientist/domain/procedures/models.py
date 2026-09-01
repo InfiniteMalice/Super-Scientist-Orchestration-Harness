@@ -3,10 +3,13 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from collections.abc import Callable
 from contextlib import suppress
+from datetime import UTC, datetime
 from decimal import Decimal
-from enum import StrEnum
-from typing import Annotated, Any, Literal, Self, cast
+from enum import Enum, StrEnum
+from types import UnionType
+from typing import Annotated, Any, Literal, Self, Union, cast, get_args, get_origin
 
 from pydantic import (
     AfterValidator,
@@ -1013,11 +1016,14 @@ def parse_untrusted_procedure_compilation_envelope(
     """Fresh-validate a complete envelope without retaining input diagnostics."""
 
     supplied_envelope = value if type(value) is OpaqueProcedureCompilationEnvelope else None
+    supplied_payload: dict[str, object] | None = None
     envelope: OpaqueProcedureCompilationEnvelope | None = None
     with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
-        if supplied_envelope is not None:
+        if supplied_envelope is not None or type(value) is dict:
             value = _trusted_exact_model_payload(value, OpaqueProcedureCompilationEnvelope)
-        elif type(value) not in (dict, str, bytes):
+            if supplied_envelope is not None:
+                supplied_payload = value
+        elif type(value) not in (str, bytes):
             raise TypeError("unsupported procedure compilation envelope input")
         if type(value) in (str, bytes):
             envelope = OpaqueProcedureCompilationEnvelope.model_validate_json(
@@ -1029,7 +1035,11 @@ def parse_untrusted_procedure_compilation_envelope(
                 value,
                 strict=True,
             )
-        if supplied_envelope is not None and envelope != supplied_envelope:
+        if (
+            supplied_payload is not None
+            and _trusted_exact_model_payload(envelope, OpaqueProcedureCompilationEnvelope)
+            != supplied_payload
+        ):
             envelope = None
     if envelope is None:
         raise ProcedureBoundaryValidationError(
@@ -1044,13 +1054,16 @@ def parse_untrusted_procedure_compilation_result(
     """Parse an untrusted result without exposing Pydantic input diagnostics."""
 
     supplied_result = value if type(value) is ProcedureCompilationResult else None
+    supplied_payload: dict[str, object] | None = None
     result: ProcedureCompilationResult | None = None
     with suppress(MemoryError, OverflowError, RecursionError, TypeError, ValueError):
         if type(value) is OpaqueProcedureCompilationEnvelope:
             value = parse_untrusted_procedure_compilation_envelope(value).result_json_bytes()
-        elif supplied_result is not None:
+        elif supplied_result is not None or type(value) is dict:
             value = _trusted_exact_model_payload(value, ProcedureCompilationResult)
-        elif type(value) not in (dict, str, bytes):
+            if supplied_result is not None:
+                supplied_payload = value
+        elif type(value) not in (str, bytes):
             raise TypeError("unsupported procedure compilation result input")
         if type(value) in (str, bytes):
             result = ProcedureCompilationResult.model_validate_json(
@@ -1058,7 +1071,10 @@ def parse_untrusted_procedure_compilation_result(
             )
         else:
             result = ProcedureCompilationResult.model_validate(value, strict=True)
-        if supplied_result is not None and result != supplied_result:
+        if (
+            supplied_payload is not None
+            and _trusted_exact_model_payload(result, ProcedureCompilationResult) != supplied_payload
+        ):
             result = None
     if result is None:
         raise ProcedureBoundaryValidationError(
@@ -1071,24 +1087,212 @@ def _trusted_exact_model_payload[ModelT: BaseModel](
     value: object,
     model_type: type[ModelT],
 ) -> dict[str, object]:
-    """Serialize an exact trusted model without consulting instance dispatch state."""
+    """Rebuild a bounded plain payload without consulting caller-owned hooks."""
 
-    if type(value) is not model_type:
+    rebuilt = _rebuild_declared_procedure_value(
+        value,
+        model_type,
+        depth=0,
+        active_container_ids=set(),
+        remaining_nodes=[100_000],
+    )
+    if type(rebuilt) is not dict:
+        raise TypeError("trusted boundary reconstruction returned an invalid payload")
+    return rebuilt
+
+
+def _rebuild_declared_procedure_value(
+    value: object,
+    annotation: object,
+    *,
+    depth: int,
+    active_container_ids: set[int],
+    remaining_nodes: list[int],
+) -> object:
+    if depth > 64 or remaining_nodes[0] <= 0:
+        raise TypeError("trusted boundary model graph exceeds reconstruction bounds")
+    remaining_nodes[0] -= 1
+
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+    if origin is Annotated:
+        return _rebuild_declared_procedure_value(
+            value,
+            arguments[0],
+            depth=depth,
+            active_container_ids=active_container_ids,
+            remaining_nodes=remaining_nodes,
+        )
+    if origin is Literal:
+        if not any(type(value) is type(expected) and value == expected for expected in arguments):
+            raise TypeError("trusted boundary literal does not match declared schema")
+        return value
+    if origin in (Union, UnionType):
+        if value is None and type(None) in arguments:
+            return None
+        non_none = tuple(candidate for candidate in arguments if candidate is not type(None))
+        if len(non_none) != 1:
+            raise TypeError("trusted boundary union is not an exact optional field")
+        return _rebuild_declared_procedure_value(
+            value,
+            non_none[0],
+            depth=depth,
+            active_container_ids=active_container_ids,
+            remaining_nodes=remaining_nodes,
+        )
+    if origin is tuple:
+        if type(value) is not tuple or len(value) > remaining_nodes[0]:
+            raise TypeError("trusted boundary tuple does not match declared schema")
+        if len(arguments) == 2 and arguments[1] is Ellipsis:
+            item_annotations = (arguments[0],) * len(value)
+        elif len(arguments) == len(value):
+            item_annotations = arguments
+        else:
+            raise TypeError("trusted boundary tuple arity does not match declared schema")
+        return _rebuild_declared_procedure_container(
+            value,
+            lambda: tuple(
+                _rebuild_declared_procedure_value(
+                    item,
+                    item_annotation,
+                    depth=depth + 1,
+                    active_container_ids=active_container_ids,
+                    remaining_nodes=remaining_nodes,
+                )
+                for item, item_annotation in zip(value, item_annotations, strict=True)
+            ),
+            active_container_ids,
+        )
+    if origin is dict:
+        if type(value) is not dict or len(value) > remaining_nodes[0] or len(arguments) != 2:
+            raise TypeError("trusted boundary mapping does not match declared schema")
+
+        def rebuild_mapping() -> dict[object, object]:
+            rebuilt_mapping: dict[object, object] = {}
+            for key, item in dict.items(value):
+                rebuilt_key = _rebuild_declared_procedure_value(
+                    key,
+                    arguments[0],
+                    depth=depth + 1,
+                    active_container_ids=active_container_ids,
+                    remaining_nodes=remaining_nodes,
+                )
+                rebuilt_item = _rebuild_declared_procedure_value(
+                    item,
+                    arguments[1],
+                    depth=depth + 1,
+                    active_container_ids=active_container_ids,
+                    remaining_nodes=remaining_nodes,
+                )
+                rebuilt_mapping[rebuilt_key] = rebuilt_item
+            return rebuilt_mapping
+
+        return _rebuild_declared_procedure_container(
+            value,
+            rebuild_mapping,
+            active_container_ids,
+        )
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return _rebuild_declared_procedure_model(
+            value,
+            annotation,
+            depth=depth,
+            active_container_ids=active_container_ids,
+            remaining_nodes=remaining_nodes,
+        )
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        if type(value) is not annotation or not any(value is member for member in annotation):
+            raise TypeError("trusted boundary enum does not match declared schema")
+        return value
+    if annotation is datetime:
+        if type(value) is not datetime or value.tzinfo is not UTC:
+            raise TypeError("trusted boundary timestamp does not match declared schema")
+        return value
+    if annotation in (str, int, float, bool, Decimal, type(None)):
+        if type(value) is not annotation:
+            raise TypeError("trusted boundary primitive does not match declared schema")
+        return value
+    raise TypeError("trusted boundary annotation is outside the declared model graph")
+
+
+def _rebuild_declared_procedure_model(
+    value: object,
+    model_type: type[BaseModel],
+    *,
+    depth: int,
+    active_container_ids: set[int],
+    remaining_nodes: list[int],
+) -> dict[str, object]:
+    if type(value) is model_type:
+        state = object.__getattribute__(value, "__dict__")
+        if (
+            object.__getattribute__(value, "__pydantic_extra__") is not None
+            or object.__getattribute__(value, "__pydantic_private__") is not None
+        ):
+            raise TypeError("trusted boundary model contains unexpected state")
+        fields_set = object.__getattribute__(value, "__pydantic_fields_set__")
+        if type(fields_set) is not set:
+            raise TypeError("trusted boundary model field state is invalid")
+        supplied_field_names = tuple(fields_set)
+        if any(type(field_name) is not str for field_name in supplied_field_names):
+            raise TypeError("trusted boundary model field state is invalid")
+    elif type(value) is dict:
+        state = value
+        supplied_field_names = ()
+    else:
         raise TypeError("model type does not match trusted boundary type")
-    state = object.__getattribute__(value, "__dict__")
+    if type(state) is not dict:
+        raise TypeError("trusted boundary model state is invalid")
     fields = type.__getattribute__(model_type, "model_fields")
-    if (
-        type(state) is not dict
-        or type(fields) is not dict
-        or set(state) != set(fields)
-        or any(type(key) is not str for key in state)
+    if type(fields) is not dict:
+        raise TypeError("trusted boundary model schema is invalid")
+    state_keys = tuple(dict.keys(state))
+    field_names = tuple(dict.keys(fields))
+    if any(type(key) is not str for key in state_keys) or any(
+        type(key) is not str for key in field_names
     ):
-        raise TypeError("model state does not match trusted boundary schema")
-    serializer = type.__getattribute__(model_type, "__pydantic_serializer__")
-    dumped = serializer.to_python(value, mode="python", warnings=False)
-    if type(dumped) is not dict or any(type(key) is not str for key in dumped):
-        raise TypeError("trusted boundary serializer returned an invalid payload")
-    return dumped
+        raise TypeError("trusted boundary model state contains an invalid key")
+    if len(state_keys) != len(field_names):
+        raise TypeError("trusted boundary model state does not match declared schema")
+    if any(not dict.__contains__(fields, key) for key in state_keys) or any(
+        not dict.__contains__(state, field_name) for field_name in field_names
+    ):
+        raise TypeError("trusted boundary model state does not match declared schema")
+    if any(not dict.__contains__(fields, field_name) for field_name in supplied_field_names):
+        raise TypeError("trusted boundary model field state does not match declared schema")
+
+    def rebuild_model() -> dict[str, object]:
+        return {
+            field_name: _rebuild_declared_procedure_value(
+                dict.__getitem__(state, field_name),
+                dict.__getitem__(fields, field_name).annotation,
+                depth=depth + 1,
+                active_container_ids=active_container_ids,
+                remaining_nodes=remaining_nodes,
+            )
+            for field_name in field_names
+        }
+
+    return _rebuild_declared_procedure_container(
+        value,
+        rebuild_model,
+        active_container_ids,
+    )
+
+
+def _rebuild_declared_procedure_container[ValueT](
+    value: object,
+    rebuild: Callable[[], ValueT],
+    active_container_ids: set[int],
+) -> ValueT:
+    container_id = id(value)
+    if container_id in active_container_ids:
+        raise TypeError("trusted boundary model graph contains a cycle")
+    active_container_ids.add(container_id)
+    try:
+        return rebuild()
+    finally:
+        active_container_ids.remove(container_id)
 
 
 class _ProcedureCompilationRecordPayload(_StrictFrozenModel):
