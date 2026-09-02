@@ -23,6 +23,9 @@ _VENV_BIN_DIRECTORY = "Scripts" if IS_WINDOWS else "bin"
 _TEMP_PREFIX = "ssoh-wheel-smoke-"
 _VENV_PYTHON_PLACEHOLDER = "{venv-python}"
 _COMMAND_TIMEOUT_SECONDS = 300.0
+_COGNITIVE_EXAMPLE_MEMBER = PurePosixPath(
+    "super_scientist_examples/governed_cognitive_procedure_vertical_slice.py"
+)
 
 CommandRunner = Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]]
 TemporaryDirectoryFactory = Callable[..., str]
@@ -304,6 +307,13 @@ def _verify_project_wheel(wheel: Path) -> None:
             )
             if len(entry_points) != 1:
                 raise ValueError("built wheel has no unique entry-point metadata")
+            examples = tuple(
+                entry
+                for entry in entries
+                if PurePosixPath(entry.filename) == _COGNITIVE_EXAMPLE_MEMBER
+            )
+            if len(examples) != 1 or examples[0].is_dir():
+                raise ValueError("built wheel has no unique governed cognitive example")
             parser = configparser.ConfigParser(interpolation=None)
             parser.read_string(archive.read(entry_points[0]).decode("utf-8"))
     except (OSError, UnicodeError, zipfile.BadZipFile, configparser.Error) as error:

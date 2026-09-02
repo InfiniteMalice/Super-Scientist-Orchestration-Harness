@@ -97,6 +97,42 @@ these nine prohibited patterns:
 Collapse findings are diagnostic only. They cannot authorize promotion and no aggregate
 score can hide a catastrophic dimension.
 
+## 0.3.0 guidance, trace, and reward evidence
+
+A `GuidanceEvaluationProtocol` declares all four conditions: no guidance, descriptive
+method direction, procedure without framework integration, and compiled procedure with
+framework integration. A guidance cell is current only when its exact protocol version,
+protocol hash, condition, output artifact, verifier result, trace, and reward assessment
+resolve to one accepted evidence chain. Cross-protocol, later-only, missing, ambiguous,
+or stale evidence is `UNMATCHED_EVALUATION`; the handler creates no cell projection.
+
+A `ModelHarnessProtocol` declares an exact model by harness by partition grid and a
+budget for each model. Analysis retains each expected cell and reports confounds rather
+than imputing absent or invalid observations. The implementation bounds a protocol to
+256 cells, loads one frozen resolution snapshot, and indexes trace/reward coordinates so
+duplicate evidence remains an explicit ambiguity rather than a last-write-wins choice.
+
+Trace metadata records availability separately from value. Metadata availability states:
+`AVAILABLE`, `UNAVAILABLE`, and `NOT_APPLICABLE`. `AVAILABLE` binds an applicable value to
+its exact retained evidence. `UNAVAILABLE` means the metadata applies but the provider or
+workflow does not expose it. `NOT_APPLICABLE` means the field does not apply to that trace
+or operation. The latter two states supply neither a value nor fabricated evidence. The
+transaction coordinator uses one owned exact trace proposal snapshot for
+admission, projection, transaction, and audit, preventing staged caller mutation.
+
+A reward assessment cannot authorize promotion. Its validity is recomputed from the
+exact accepted trace, reward observation, checker/verifier result, environment, budget,
+termination, contamination, and every retained finding. Any invalidating finding makes
+`promotion_evidence` false even when the numeric reward is high. Run
+`python -m pytest tests/integration/application/test_harness_eval_extensions.py
+tests/adversarial/test_trace_reward_tampering.py -q` to verify matching, availability,
+single-snapshot admission, and reward validity.
+
+The offline 0.3.0 example registers a deterministic toy validator as a `TOOL` actor. The
+validator compares bounded artifact bytes with one declared SHA-256 digest and never
+executes the artifact. The installed-wheel test runs that workflow from a fresh wheel
+environment; it does not fall back to repository source.
+
 ## Limitations
 
 The implementation proves capability separation and durable lineage, not that a particular

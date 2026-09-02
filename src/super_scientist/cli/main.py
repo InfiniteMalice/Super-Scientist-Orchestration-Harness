@@ -23,6 +23,7 @@ from super_scientist.cli.adaptation import (
     trail_app,
     verifier_app,
 )
+from super_scientist.cli.cognitive import cognitive_app
 from super_scientist.cli.handbook import handbook_app
 from super_scientist.cli.harness_eval import harness_eval_app
 from super_scientist.cli.kernel import (
@@ -36,6 +37,7 @@ from super_scientist.cli.output import emit
 from super_scientist.quality.runner import QualityCheckResult, run_quality_gate
 
 _COMMAND_PATHS = (
+    ("cognitive", "inspect"),
     ("rule", "review", "import"),
     ("research-run", "create"),
     ("governance", "propose"),
@@ -141,6 +143,7 @@ app.add_typer(model_app, name="model")
 app.add_typer(verifier_app, name="verifier")
 app.add_typer(handbook_app, name="handbook")
 app.add_typer(harness_eval_app, name="harness-eval")
+app.add_typer(cognitive_app, name="cognitive")
 
 
 def _quality_result_payload(result: QualityCheckResult) -> dict[str, object]:

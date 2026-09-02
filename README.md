@@ -1,11 +1,11 @@
 # Super Scientist Orchestration Harness
 
-Version 0.2.0 is a **governed-adaptation vertical slice**, not a complete scientific
-research system. It provides typed evidence and claim records, deterministic proposal
-admission, governed policy transitions, research/progress/evidence-trail records,
-behavioral-rule and hypothesis contracts, matched-budget harness evaluation,
-content-addressed local artifacts, a tamper-evident audit chain, and a stable local CLI.
-It does not claim to establish scientific truth.
+Version 0.3.0 is a **governed cognitive-orchestration vertical slice**, not a complete
+scientific research system. It retains the 0.2.0 governed-adaptation surface and adds
+typed capability, cohort, collaboration, procedure, guidance, model-by-harness, trace,
+and reward evidence. The shared transaction coordinator admits every durable change,
+and the cognitive plane has no claim, policy, promotion, execution, or protected-answer
+authority. Passing admission does not establish scientific truth.
 
 ## Why This Exists
 
@@ -58,13 +58,40 @@ research state, not a claim that automation can replace scientific judgment.
 - Verify the audit chain, stored policy, projections, and artifact bytes.
 - Export an integrity-checked canonical workspace bundle and reconstruct it in an empty
   workspace through the same coordinator intents.
+- Record verified, self-reported, and unknown capabilities; form a bounded cohort;
+  retain peer contributions and topology events; and diagnose diversity without
+  treating diversity as reviewer independence.
+- Compile accepted method evidence into immutable `VALID` or `INVALID` procedure
+  history, retain either status in an accepted transaction, and bind only a `VALID`
+  compilation to one canonical `ProgressPlan`. Attempting to bind an `INVALID`
+  compilation is rejected with transaction code `INVALID_PROCEDURE`.
+- Retain all four guidance conditions, exact model-by-harness cells, generation-metadata
+  availability, matched execution traces, and reward-hacking findings without granting
+  those records promotion authority.
+- Inspect one of the 18 fixed cognitive record kinds through the read-only CLI after
+  whole-workspace integrity verification.
 - Run the deterministic 21-step governed-adaptation example with synthetic
   thermal-chamber and equipment-incident data.
+- Run the model-free governed cognitive/procedure example, including verify, export,
+  fresh import, and exact replay.
 - Run the repository quality gate that CI uses.
+
+Run this focused command to verify the `INVALID` domain-status and rejection-code
+distinction:
+
+```powershell
+python -m pytest `
+  tests/integration/application/test_procedure_service.py::test_invalid_compilation_is_history_but_creates_no_plan `
+  tests/integration/application/test_procedure_service.py::test_binding_rejects_invalid_compilation_without_projecting_plan `
+  tests/integration/application/test_harness_eval_extensions.py::test_invalid_reward_is_retained_but_excluded_from_positive_evidence `
+  -q
+```
 
 See `docs/examples/kernel-vertical-slice.md` for the original byte-compatible kernel
 walk-through and `docs/examples/governed-adaptation-vertical-slice.md` for the 0.2.0
 offline demonstration.
+See `docs/examples/governed-cognitive-procedure-vertical-slice.md` for the 0.3.0
+workflow and its explicit limitations.
 
 See the [User Manual](docs/USER_MANUAL.md) for installation, roles, authority limits,
 workflow stages, troubleshooting, security boundaries, and LLM assignment guidance.
@@ -110,11 +137,14 @@ Initialize a local kernel workspace and verify its empty audit chain:
 ```bash
 scientist-harness init --root .kernel --json
 scientist-harness audit verify --root .kernel --json
+scientist-harness cognitive inspect --root .kernel --kind capability-profile --id profile-1 --json
 ```
 
 The second command reports `valid: true` and `checked_events: 0`. See
 `docs/examples/kernel-vertical-slice.md` for the deterministic offline evidence and
-claim example. `init` activates a policy only for a genuinely empty kernel database.
+claim example. The inspect command reports `not_found` until an accepted transaction
+admits `profile-1`; initialization alone does not create a capability profile. `init`
+activates a policy only for a genuinely empty kernel database.
 If durable state exists but its active governance pointer is missing, initialization
 fails closed; `audit verify` still opens that storage and reports the integrity error.
 
@@ -138,8 +168,11 @@ ingestions.
 
 ## Security Boundaries
 
-The kernel runtime has no model, network, or arbitrary shell authority. Retrieved or
-local evidence content remains untrusted data. Artifact paths are content-derived and
+The control plane owns policy checks, transactions, audit, storage, artifacts, and
+protected evaluation. The cognitive plane submits typed evidence through a stateless
+service and cannot retain the coordinator or its capabilities. The kernel runtime has
+no model, network, or arbitrary shell authority. Retrieved or local evidence content
+remains untrusted data. Artifact paths are content-derived and
 must remain beneath a private local artifact root; static traversal, symlink, and
 Windows reparse-point escapes fail closed. Submitted evidence begins unverified; the
 application service rehashes it before projecting a hash-verified record. Audit
@@ -157,14 +190,18 @@ identical stable intents replay, while changed content under an existing identit
 produces an audited conflict.
 
 The quality command is a development operation, separate from scientific runtime
-authority. It executes only the eight source-controlled checks in its fixed registry:
+authority. It executes only these nine source-controlled checks, in order: `format`,
+`lint`, `types`, `tests`, `security`, `dependencies`, `build`, `package`, and
+`wheel-install`:
 
 ```bash
 scientist-harness quality-gate
 ```
 
 There are no command, path, selection, skip, or threshold options. `--json` changes only
-reporting and records every fixed check and result.
+reporting and records every fixed check and result. `wheel-install` verifies the exact
+built wheel in a fresh environment and runs its installed governed cognitive example;
+`tests/unit/quality/test_runner.py` verifies the nine-entry registry.
 
 ## Sources And Attribution
 
@@ -196,14 +233,25 @@ Socratic agents for falsification pressure [S09], QLoRA for optional procedural 
 training [S18], and others listed in the register. These are roadmap inspirations unless
 the implementation docs explicitly say otherwise.
 
+S30-S35 inform the 0.3.0 method/procedure, cognitive-cohort, capability-grounding,
+guidance, trace, and reward contracts. All six entries are `not_reproduced`; no source
+code is imported or reused. In particular, Co-RL agreement [S33] is not truth,
+DeAR-style routing [S34] does not decentralize governance, and LEGO-RL [S35] contributes
+trace-fidelity concepts without live reinforcement learning.
+
 ## Roadmap
 
 The implemented slice is local, deterministic, and offline. Its built-in simulators,
 metadata-only training fixture, and synthetic examples are deterministic fakes for
 testing authority boundaries; they are not empirical scientific reproduction.
-Representational-primitives admission, open-ended orchestration, live experiment
-control, provider integrations, arbitrary model execution, and real training remain
-experimental, interface-only, or deferred as documented by each subsystem.
+Strict cognitive contracts, pure analyses, governed persistence, replay, bundles, and
+single-record inspection are implemented. Fixed in-memory peers, synthetic capability
+evidence, deterministic procedure execution, synthetic guidance, and model-by-harness
+cells are example only. Operational-diversity, guidance-gradient, interaction, and
+reward-hacking analyses are experimental diagnostics. Live model grounding, live peer
+adapters, provider-native generation metadata, training-payload handoff, reinforcement
+learning, arbitrary external harnesses, learned admission, and self-modifying governance
+remain interface-only or deferred.
 
 The implemented architecture, governance, claim lifecycle, and security limits are
 documented in `ARCHITECTURE.md`, `GOVERNANCE.md`, `CLAIM_LEDGER.md`, and `SECURITY.md`.

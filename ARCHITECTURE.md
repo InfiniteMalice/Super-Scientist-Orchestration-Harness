@@ -2,11 +2,11 @@
 
 ## Scope
 
-This document describes the implemented transactional epistemic-kernel slice. The
-slice accepts typed evidence, claim, governed-adaptation, and hypothesis-loop proposals,
-makes deterministic decisions, and persists records locally. It has no autonomous
-orchestration loop, live experiment control, arbitrary model provider, learned memory,
-or training subsystem.
+This document describes the implemented transactional epistemic-kernel and governed
+cognitive-orchestration slice in version 0.3.0. The slice accepts typed evidence, claim,
+governed-adaptation, hypothesis-loop, cognitive, procedure, and evaluation proposals,
+makes deterministic decisions, and persists records locally. It has no live experiment
+control, arbitrary model provider, learned memory, or training subsystem.
 
 ## Dependency Rule
 
@@ -35,12 +35,45 @@ projections is informed by raw-record-preserving projected-view concepts [S07]. 
 implementation uses project-specific, deterministic SQLite projections; it contains no
 learned projection and does not reproduce HarnessBridge.
 
+## Control Plane And Cognitive Plane
+
+The control plane owns `TransactionCoordinator`, active-policy evaluation, SQLite units
+of work, audit events, artifact stores, protected-answer readers, integrity verification,
+workspace exchange, and every authoritative projection. The cognitive plane owns typed
+proposal construction and pure analyses. `CognitiveOrchestrationService` and
+`ResearchCoordinator` are exact, sealed, stateless facades: each call receives the exact
+coordinator as a local argument, and neither facade retains a callable, token, registry,
+repository, connection, artifact store, or protected evaluator.
+
+Package ownership follows this flow:
+
+```text
+domain/cognition + domain/procedures + domain/harness_eval
+    -> pure records, hashes, grounding, diversity, compilation, validation, analysis
+application/cognitive + application/procedures + application/harness_eval
+    -> fixed typed handlers and narrow capabilities
+application/transactions/coordinator.py
+    -> exact routing, one admitted proposal snapshot, policy, transaction, audit
+providers/storage
+    -> append-only cognitive/evaluation repositories and rebuildable projections
+cli/cognitive.py
+    -> integrity-first, read-only lookup for exactly 18 record kinds
+```
+
+When a caller submits a governed proposal, the coordinator reconstructs one exact,
+hook-free owned snapshot before handler admission. The coordinator uses that same
+snapshot for capability construction, context, decision, projection, transaction JSON,
+and audit JSON. For a harness trace, this single-snapshot rule prevents a caller from
+mutating a validated object between decision and projection. Run
+`python -m pytest tests/integration/application/test_transaction_coordinator.py
+tests/adversarial/test_trace_reward_tampering.py -q` to verify the boundary.
+
 ## Storage Boundaries
 
 SQLite stores policy snapshots, the active policy reference, evidence metadata, claim
 versions and heads, governed-adaptation records, hypothesis/model/checker/revision
-records and hypothesis heads, proposals and decisions, and audit events. Alembic owns
-the schema.
+records and hypothesis heads, the 18 governed cognitive/evaluation record families,
+proposals and decisions, and audit events. Alembic owns the schema.
 Each application submission opens `BEGIN IMMEDIATE`; accepted projection changes, the
 transaction decision, and the audit append commit or roll back together. Append-only
 tables have SQLite triggers that reject update and delete. Claim heads and the active
@@ -179,6 +212,17 @@ exception classes. Typer's documented custom `cls` extension still requires its
 Source metadata for [S07] and [S12] is maintained in
 `docs/sources/source-register.yaml`.
 
+For the 0.3.0 records, workspace verification processes accepted transactions in audit
+order, validates every embedded proposal/audit receipt against the exact earlier event,
+recomputes pure domain outputs, and compares stable record/hash expectations. Procedure
+compilation reparses the opaque envelope and repeats compiler equality. Guidance cells
+join one exact protocol, condition, trace, output, verifier, and reward chain. Harness
+analysis uses bounded indexed snapshots rather than per-cell history scans. A missing,
+later, stale, cross-protocol, ambiguous, or tampered reference fails verification before
+new mutation. Run `python -m pytest tests/integration/application/test_cognitive_workspace_integrity.py
+tests/integration/application/test_cognitive_workspace_exchange.py -q` to verify these
+reconstruction rules.
+
 ## Workspace Exchange
 
 `export_workspace()` first runs whole-workspace integrity verification, then builds a
@@ -208,14 +252,16 @@ to exactly the source bundle.
 Implemented components include transactional proposal admission, V1-to-V2 and governed
 V2 policy transitions, deterministic workspace verification and exchange, progress and
 evidence-trail contracts, append-only behavioral-rule records, fixed simulator
-execution, hypothesis admission contracts, deterministic handbook generation, and
-matched-budget harness decisions.
+execution, hypothesis admission contracts, deterministic handbook generation,
+capability/cohort/collaboration records, procedure compilation and progress binding,
+guidance and model-by-harness evidence, exact trace/reward matching, and read-only
+cognitive record inspection.
 
 The vertical-slice simulator, measurement report, and metadata-only adapter records are
 deterministic fakes used to test contracts. Each new schema-v2 measurement report
 explicitly lists its `unmeasured_coverage_gaps`, including live behavior outside the
 deterministic fixture; immutable schema-v1 records remain byte-stable and readable.
 Learned evaluation, primitive evolution, live model providers, experiment control, and
-training are interface-only,
-experimental, or deferred. S21-S29 are source inspirations marked not reproduced; no
-general improvement or compatibility with S29 follows from this architecture.
+training are interface-only, experimental, or deferred. S21-S35 are source inspirations
+marked not reproduced; no general improvement, external-source compatibility, or code
+reuse follows from this architecture.

@@ -4,10 +4,16 @@ import json
 from collections.abc import Mapping
 from datetime import datetime
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 from sqlalchemy import Connection, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+if TYPE_CHECKING:
+    from super_scientist.providers.storage.cognitive_records import (
+        GovernedProvenanceSnapshot,
+    )
 
 from super_scientist.config.loader import policy_hash
 from super_scientist.config.models import PolicyDocument, PolicySnapshot
@@ -22,22 +28,44 @@ from super_scientist.domain.primitives import (
 )
 from super_scientist.kernel.audit.chain import append_event, verify_chain
 from super_scientist.kernel.audit.models import AuditEvent
-from super_scientist.kernel.transactions.models import Proposal, TransactionDecision
+from super_scientist.kernel.transactions.models import (
+    GOVERNED_PROPOSAL_CLASSES,
+    Proposal,
+    TransactionDecision,
+    parse_untrusted_proposal_json,
+)
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
+    CognitiveIntegritySnapshot,
+    CognitiveWorkspaceIntegritySnapshot,
+    EvaluationExtensionIntegritySnapshot,
+    HandbookIntegritySnapshot,
+    HarnessIntegritySnapshot,
     HypothesisIntegritySnapshot,
     ProgressIntegritySnapshot,
     RepresentationIntegritySnapshot,
     RuleIntegritySnapshot,
     TrailIntegritySnapshot,
 )
+from super_scientist.providers.storage.query_bounds import sqlite_in_chunks
 from super_scientist.providers.storage.schema import (
     audit_events,
+    behavior_rule_link_versions,
+    behavioral_rule_heads,
+    behavioral_rule_version_incidents,
+    behavioral_rule_version_supersessions,
+    behavioral_rule_versions,
+    capability_profiles,
     claim_heads,
     claim_versions,
+    cohort_plans,
+    collaboration_sessions,
+    collaboration_terminations,
+    compiled_progress_plan_bindings,
     completion_decisions,
     configuration_versions,
     counterexample_records,
+    diversity_assessments,
     evaluator_audits,
     evaluator_collapse_records,
     evaluator_heads,
@@ -53,13 +81,32 @@ from super_scientist.providers.storage.schema import (
     executable_model_specs,
     governance_policies,
     governance_state,
+    guidance_cells,
+    guidance_protocols,
+    handbook_verification_records,
+    harness_budgets,
+    harness_campaign_heads,
+    harness_campaigns,
+    harness_confounds,
+    harness_decisions,
+    harness_execution_traces,
+    harness_metrics,
+    harness_observations,
+    harness_partition_manifests,
     hypothesis_admission_decisions,
     hypothesis_heads,
     hypothesis_revisions,
     hypothesis_versions,
+    method_direction_outcomes,
+    model_harness_analyses,
+    model_harness_cells,
+    model_harness_protocols,
+    peer_contributions,
+    peer_requests,
     primitive_evaluations,
     primitive_heads,
     primitive_versions,
+    procedure_compilations,
     progress_events,
     progress_heads,
     progress_plans,
@@ -68,10 +115,21 @@ from super_scientist.providers.storage.schema import (
     research_run_events,
     research_run_heads,
     research_runs,
+    reviewer_assessment_incidents,
+    reviewer_assessment_rule_versions,
+    reviewer_assessments,
+    reward_assessments,
+    rule_consolidation_assessments,
+    rule_consolidation_decisions,
+    rule_consolidation_incidents,
+    rule_incidents,
+    rule_regression_case_incidents,
+    rule_regression_cases,
     run_budgets,
     run_checkpoints,
     self_improvement_measurements,
     simulation_results,
+    topology_events,
     transactions,
     verification_mechanism_specs,
     verification_results,
@@ -127,6 +185,11 @@ _STRICT_JSON_PROPOSAL_TYPES = frozenset(
         "admit_hypothesis",
     }
 )
+_GOVERNED_PROPOSAL_TYPES = frozenset(
+    proposal_type.model_fields["proposal_type"].default
+    for proposal_type in GOVERNED_PROPOSAL_CLASSES
+)
+_STRICT_JSON_PROPOSAL_TYPES |= _GOVERNED_PROPOSAL_TYPES
 
 
 class StorageIntegrityError(ValueError):
@@ -323,6 +386,7 @@ def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
     proposal_json = _stored_str(row, "proposal_json")
     decision_json = _stored_str(row, "decision_json")
     created_at = _stored_str(row, "created_at")
+    governed_proposal = False
     try:
         intent_fingerprint = (
             None
@@ -332,6 +396,12 @@ def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
         raw_proposal = json.loads(proposal_json)
         if (
             isinstance(raw_proposal, dict)
+            and raw_proposal.get("proposal_type") in _GOVERNED_PROPOSAL_TYPES
+        ):
+            governed_proposal = True
+            proposal = parse_untrusted_proposal_json(proposal_json)
+        elif (
+            isinstance(raw_proposal, dict)
             and raw_proposal.get("proposal_type") in _STRICT_JSON_PROPOSAL_TYPES
         ):
             proposal = PROPOSAL_ADAPTER.validate_json(proposal_json)
@@ -339,10 +409,16 @@ def _decode_transaction_row(row: Mapping[str, object]) -> StoredTransaction:
             proposal = PROPOSAL_ADAPTER.validate_python(_decode_storage_value(raw_proposal))
         decision = TransactionDecision.model_validate_json(decision_json)
         validated_created_at = _validated_timestamp(datetime.fromisoformat(created_at))
-    except (TypeError, ValueError) as error:
-        raise StorageIntegrityError(
-            "storage integrity error: invalid transaction record"
-        ) from error
+    except (TypeError, ValueError):
+        invalid_transaction = True
+    else:
+        invalid_transaction = False
+    if invalid_transaction:
+        raise StorageIntegrityError("storage integrity error: invalid transaction record") from None
+    if governed_proposal and proposal_json != canonical_json_bytes(
+        proposal.model_dump(mode="json", warnings="none")
+    ).decode("utf-8"):
+        raise StorageIntegrityError("storage integrity error: invalid transaction record") from None
     _require_integrity(
         stored_hash == _proposal_hash(proposal),
         "proposal_hash does not match canonical proposal JSON",
@@ -458,6 +534,24 @@ class EvidenceRepository:
                 evidence_records.c.created_at,
             ).order_by(evidence_records.c.evidence_id)
         ).mappings()
+        return tuple(_decode_evidence_row(dict(row)) for row in rows)
+
+    def get_many(self, evidence_ids: tuple[str, ...]) -> tuple[EvidenceRecord, ...]:
+        rows: list[Mapping[str, object]] = []
+        for identifiers in sqlite_in_chunks(evidence_ids):
+            rows.extend(
+                dict(row)
+                for row in self._connection.execute(
+                    select(
+                        evidence_records.c.evidence_id,
+                        evidence_records.c.content_hash,
+                        evidence_records.c.record_json,
+                        evidence_records.c.created_at,
+                    )
+                    .where(evidence_records.c.evidence_id.in_(identifiers))
+                    .order_by(evidence_records.c.evidence_id)
+                ).mappings()
+            )
         return tuple(_decode_evidence_row(dict(row)) for row in rows)
 
     def add(self, record: EvidenceRecord) -> None:
@@ -706,6 +800,30 @@ class TransactionRepository:
             .one_or_none()
         )
         return None if row is None else _decode_transaction_row(dict(row))
+
+    def get_many_by_proposal_ids(
+        self,
+        proposal_ids: tuple[str, ...],
+    ) -> tuple[StoredTransaction, ...]:
+        rows: list[Mapping[str, object]] = []
+        for identifiers in sqlite_in_chunks(proposal_ids):
+            rows.extend(
+                dict(row)
+                for row in self._connection.execute(
+                    select(
+                        transactions.c.proposal_id,
+                        transactions.c.idempotency_key,
+                        transactions.c.intent_fingerprint,
+                        transactions.c.proposal_json,
+                        transactions.c.proposal_hash,
+                        transactions.c.decision_json,
+                        transactions.c.created_at,
+                    )
+                    .where(transactions.c.proposal_id.in_(identifiers))
+                    .order_by(transactions.c.proposal_id)
+                ).mappings()
+            )
+        return tuple(_decode_transaction_row(dict(row)) for row in rows)
 
     def list_all(self) -> tuple[StoredTransaction, ...]:
         rows = self._connection.execute(
@@ -1035,6 +1153,38 @@ class RepositorySet:
             heads=BehavioralRuleHeadRepository(self._connection).list_all(),
         )
 
+    def harness_integrity_snapshot(self) -> HarnessIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            HarnessBudgetRepository,
+            HarnessCampaignHeadRepository,
+            HarnessCampaignRepository,
+            HarnessConfoundRepository,
+            HarnessDecisionRepository,
+            HarnessMetricRepository,
+            HarnessObservationRepository,
+            HarnessPartitionManifestRepository,
+        )
+
+        return HarnessIntegritySnapshot(
+            campaigns=HarnessCampaignRepository(self._connection).list_all(),
+            partitions=HarnessPartitionManifestRepository(self._connection).list_all(),
+            budgets=HarnessBudgetRepository(self._connection).list_all(),
+            observations=HarnessObservationRepository(self._connection).list_all(),
+            metrics=HarnessMetricRepository(self._connection).list_all(),
+            confounds=HarnessConfoundRepository(self._connection).list_all(),
+            decisions=HarnessDecisionRepository(self._connection).list_all(),
+            heads=HarnessCampaignHeadRepository(self._connection).list_all(),
+        )
+
+    def handbook_integrity_snapshot(self) -> HandbookIntegritySnapshot:
+        from super_scientist.providers.storage.domain_records import (
+            HandbookVerificationRepository,
+        )
+
+        return HandbookIntegritySnapshot(
+            verifications=HandbookVerificationRepository(self._connection).list_all(),
+        )
+
     def representation_integrity_snapshot(self) -> RepresentationIntegritySnapshot:
         from super_scientist.providers.storage.domain_records import (
             PrimitiveEvaluationRepository,
@@ -1079,6 +1229,127 @@ class RepositorySet:
             heads=HypothesisHeadRepository(self._connection).list_all(),
         )
 
+    def cognitive_integrity_snapshot(
+        self,
+        *,
+        _provenance: GovernedProvenanceSnapshot | None = None,
+    ) -> CognitiveIntegritySnapshot:
+        from super_scientist.providers.storage.cognitive_records import (
+            CapabilityProfileRepository,
+            CohortPlanRepository,
+            CollaborationSessionRepository,
+            CollaborationTerminationRepository,
+            CompiledProgressPlanBindingRepository,
+            DiversityAssessmentRepository,
+            MethodDirectionOutcomeRepository,
+            PeerContributionRepository,
+            PeerRequestRepository,
+            ProcedureCompilationRepository,
+            TopologyEventRepository,
+            _load_governed_provenance_snapshot,
+        )
+
+        provenance = (
+            _load_governed_provenance_snapshot(self._connection)
+            if _provenance is None
+            else _provenance
+        )
+        return CognitiveIntegritySnapshot(
+            capability_profiles=CapabilityProfileRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            cohort_plans=CohortPlanRepository(self._connection)._list_all_with_provenance(
+                provenance
+            ),
+            diversity_assessments=DiversityAssessmentRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            collaboration_sessions=CollaborationSessionRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            peer_requests=PeerRequestRepository(self._connection)._list_all_with_provenance(
+                provenance
+            ),
+            peer_contributions=PeerContributionRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            topology_events=TopologyEventRepository(self._connection)._list_all_with_provenance(
+                provenance
+            ),
+            terminations=CollaborationTerminationRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            compilations=ProcedureCompilationRepository(self._connection)._list_all_with_provenance(
+                provenance
+            ),
+            method_outcomes=MethodDirectionOutcomeRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            bindings=CompiledProgressPlanBindingRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+        )
+
+    def evaluation_extension_integrity_snapshot(
+        self,
+        *,
+        _provenance: GovernedProvenanceSnapshot | None = None,
+    ) -> EvaluationExtensionIntegritySnapshot:
+        from super_scientist.providers.storage.cognitive_records import (
+            _load_governed_provenance_snapshot,
+        )
+        from super_scientist.providers.storage.evaluation_records import (
+            GuidanceCellRepository,
+            GuidanceEvaluationProtocolRepository,
+            HarnessExecutionTraceRepository,
+            ModelHarnessAnalysisRepository,
+            ModelHarnessCellRepository,
+            ModelHarnessProtocolRepository,
+            RewardAssessmentRepository,
+        )
+
+        provenance = (
+            _load_governed_provenance_snapshot(self._connection)
+            if _provenance is None
+            else _provenance
+        )
+        return EvaluationExtensionIntegritySnapshot(
+            guidance_protocols=GuidanceEvaluationProtocolRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            guidance_cells=GuidanceCellRepository(self._connection)._list_all_with_provenance(
+                provenance
+            ),
+            model_harness_protocols=ModelHarnessProtocolRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            model_harness_cells=ModelHarnessCellRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            model_harness_analyses=ModelHarnessAnalysisRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            harness_execution_traces=HarnessExecutionTraceRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+            reward_assessments=RewardAssessmentRepository(
+                self._connection
+            )._list_all_with_provenance(provenance),
+        )
+
+    def cognitive_workspace_integrity_snapshot(self) -> CognitiveWorkspaceIntegritySnapshot:
+        from super_scientist.providers.storage.cognitive_records import (
+            _load_governed_provenance_snapshot,
+        )
+
+        provenance = _load_governed_provenance_snapshot(self._connection)
+        return CognitiveWorkspaceIntegritySnapshot(
+            cognitive=self.cognitive_integrity_snapshot(_provenance=provenance),
+            evaluation_extension=self.evaluation_extension_integrity_snapshot(
+                _provenance=provenance
+            ),
+        )
+
     def has_durable_state(self) -> bool:
         tables = (
             governance_policies,
@@ -1112,6 +1383,19 @@ class RepositorySet:
             evidence_trail_assessments,
             report_sentence_bindings,
             evidence_trail_heads,
+            rule_incidents,
+            behavioral_rule_versions,
+            reviewer_assessments,
+            rule_consolidation_decisions,
+            rule_regression_cases,
+            behavioral_rule_version_incidents,
+            behavioral_rule_version_supersessions,
+            reviewer_assessment_rule_versions,
+            reviewer_assessment_incidents,
+            rule_consolidation_assessments,
+            rule_consolidation_incidents,
+            rule_regression_case_incidents,
+            behavioral_rule_heads,
             primitive_versions,
             primitive_evaluations,
             primitive_heads,
@@ -1124,6 +1408,34 @@ class RepositorySet:
             hypothesis_revisions,
             hypothesis_admission_decisions,
             hypothesis_heads,
+            behavior_rule_link_versions,
+            handbook_verification_records,
+            harness_campaigns,
+            harness_partition_manifests,
+            harness_budgets,
+            harness_observations,
+            harness_metrics,
+            harness_confounds,
+            harness_decisions,
+            harness_campaign_heads,
+            capability_profiles,
+            cohort_plans,
+            diversity_assessments,
+            collaboration_sessions,
+            peer_requests,
+            peer_contributions,
+            topology_events,
+            collaboration_terminations,
+            procedure_compilations,
+            method_direction_outcomes,
+            compiled_progress_plan_bindings,
+            guidance_protocols,
+            guidance_cells,
+            model_harness_protocols,
+            model_harness_cells,
+            model_harness_analyses,
+            harness_execution_traces,
+            reward_assessments,
         )
         return any(
             self._connection.execute(select(table).limit(1)).first() is not None for table in tables

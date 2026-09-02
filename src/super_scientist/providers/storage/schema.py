@@ -1,6 +1,7 @@
 from sqlalchemy import (
     CheckConstraint,
     Column,
+    Constraint,
     ForeignKey,
     ForeignKeyConstraint,
     Integer,
@@ -1831,5 +1832,292 @@ harness_campaign_heads = Table(
             "harness_decisions.campaign_id",
             "harness_decisions.status",
         ],
+    ),
+)
+
+MAX_PHASE_A_CANONICAL_RECORD_BYTES = 64 * 1024 * 1024
+MAX_GOVERNED_STORAGE_ENVELOPE_OVERHEAD_BYTES = 64 * 1024
+MAX_GOVERNED_RECORD_JSON_BYTES = (
+    MAX_PHASE_A_CANONICAL_RECORD_BYTES + MAX_GOVERNED_STORAGE_ENVELOPE_OVERHEAD_BYTES
+)
+GOVERNED_APPEND_ONLY_TRIGGER_SUFFIXES = ("no_update", "no_delete", "no_replace")
+
+
+def _governed_record_table(
+    name: str,
+    id_column: Column[str],
+    relationship_columns: tuple[Column[str], ...] = (),
+    table_constraints: tuple[Constraint, ...] = (),
+) -> Table:
+    identifier_columns = (id_column, *relationship_columns)
+    return Table(
+        name,
+        metadata,
+        id_column,
+        *relationship_columns,
+        Column("schema_version", Integer, nullable=False),
+        Column("record_json", Text, nullable=False),
+        Column("content_hash", String(64), nullable=False),
+        Column(
+            "transaction_id",
+            String(200),
+            ForeignKey(
+                "transactions.proposal_id",
+                deferrable=True,
+                initially="DEFERRED",
+            ),
+            nullable=False,
+            index=True,
+        ),
+        Column(
+            "governing_policy_hash",
+            String(64),
+            ForeignKey(
+                "governance_policies.policy_hash",
+                deferrable=True,
+                initially="DEFERRED",
+            ),
+            nullable=False,
+            index=True,
+        ),
+        Column("created_at", String(40), nullable=False),
+        *table_constraints,
+        *(
+            CheckConstraint(
+                f"typeof({column.name}) = 'text' "
+                f"AND length({column.name}) BETWEEN 1 AND 200 "
+                f"AND length(CAST({column.name} AS BLOB)) BETWEEN 1 AND 800 "
+                f"AND instr({column.name}, char(0)) = 0",
+                name=f"ck_{name}_{column.name}",
+            )
+            for column in identifier_columns
+        ),
+        CheckConstraint(
+            "typeof(transaction_id) = 'text' "
+            "AND length(transaction_id) BETWEEN 1 AND 200 "
+            "AND length(CAST(transaction_id AS BLOB)) BETWEEN 1 AND 800 "
+            "AND instr(transaction_id, char(0)) = 0",
+            name=f"ck_{name}_transaction_id",
+        ),
+        CheckConstraint(
+            "typeof(schema_version) = 'integer' AND schema_version = 1",
+            name=f"ck_{name}_schema_version",
+        ),
+        CheckConstraint(
+            "typeof(record_json) = 'text' "
+            f"AND length(record_json) BETWEEN 1 AND {MAX_GOVERNED_RECORD_JSON_BYTES} "
+            "AND length(CAST(record_json AS BLOB)) BETWEEN 1 "
+            f"AND {MAX_GOVERNED_RECORD_JSON_BYTES} "
+            "AND instr(record_json, char(0)) = 0",
+            name=f"ck_{name}_record_json",
+        ),
+        CheckConstraint(
+            "typeof(content_hash) = 'text' "
+            "AND length(content_hash) = 64 "
+            "AND length(CAST(content_hash AS BLOB)) = 64 "
+            "AND instr(content_hash, char(0)) = 0 "
+            "AND content_hash NOT GLOB '*[^0-9a-f]*'",
+            name=f"ck_{name}_content_hash",
+        ),
+        CheckConstraint(
+            "typeof(governing_policy_hash) = 'text' "
+            "AND length(governing_policy_hash) = 64 "
+            "AND length(CAST(governing_policy_hash AS BLOB)) = 64 "
+            "AND instr(governing_policy_hash, char(0)) = 0 "
+            "AND governing_policy_hash NOT GLOB '*[^0-9a-f]*'",
+            name=f"ck_{name}_governing_policy_hash",
+        ),
+        CheckConstraint(
+            "typeof(created_at) = 'text' "
+            "AND length(created_at) BETWEEN 1 AND 40 "
+            "AND length(CAST(created_at AS BLOB)) BETWEEN 1 AND 40 "
+            "AND instr(created_at, char(0)) = 0",
+            name=f"ck_{name}_created_at",
+        ),
+        sqlite_with_rowid=False,
+    )
+
+
+capability_profiles = _governed_record_table(
+    "capability_profiles",
+    Column("profile_id", String(200), primary_key=True),
+)
+cohort_plans = _governed_record_table(
+    "cohort_plans",
+    Column("cohort_plan_id", String(200), primary_key=True),
+    (Column("request_id", String(200), nullable=False, index=True),),
+)
+diversity_assessments = _governed_record_table(
+    "diversity_assessments",
+    Column("diversity_assessment_id", String(200), primary_key=True),
+    (
+        Column(
+            "cohort_plan_id",
+            String(200),
+            ForeignKey("cohort_plans.cohort_plan_id"),
+            nullable=False,
+            index=True,
+        ),
+    ),
+)
+collaboration_sessions = _governed_record_table(
+    "collaboration_sessions",
+    Column("session_id", String(200), primary_key=True),
+    (
+        Column(
+            "cohort_plan_id",
+            String(200),
+            ForeignKey("cohort_plans.cohort_plan_id"),
+            nullable=False,
+            index=True,
+        ),
+    ),
+)
+peer_requests = _governed_record_table(
+    "peer_requests",
+    Column("request_id", String(200), primary_key=True),
+    (
+        Column(
+            "session_id",
+            String(200),
+            ForeignKey("collaboration_sessions.session_id"),
+            nullable=False,
+            index=True,
+        ),
+    ),
+    (
+        UniqueConstraint(
+            "request_id",
+            "session_id",
+            name="uq_peer_requests_session_scope",
+        ),
+    ),
+)
+peer_contributions = _governed_record_table(
+    "peer_contributions",
+    Column("contribution_id", String(200), primary_key=True),
+    (
+        Column("session_id", String(200), nullable=False, index=True),
+        Column("request_id", String(200), nullable=False, index=True),
+    ),
+    (
+        ForeignKeyConstraint(
+            ["request_id", "session_id"],
+            ["peer_requests.request_id", "peer_requests.session_id"],
+        ),
+    ),
+)
+topology_events = _governed_record_table(
+    "topology_events",
+    Column("event_id", String(200), primary_key=True),
+    (
+        Column(
+            "session_id",
+            String(200),
+            ForeignKey("collaboration_sessions.session_id"),
+            nullable=False,
+            index=True,
+        ),
+    ),
+)
+collaboration_terminations = _governed_record_table(
+    "collaboration_terminations",
+    Column(
+        "session_id",
+        String(200),
+        ForeignKey("collaboration_sessions.session_id"),
+        primary_key=True,
+    ),
+)
+procedure_compilations = _governed_record_table(
+    "procedure_compilations",
+    Column("compilation_id", String(200), primary_key=True),
+)
+method_direction_outcomes = _governed_record_table(
+    "method_direction_outcomes",
+    Column("outcome_id", String(200), primary_key=True),
+    (
+        Column(
+            "compilation_id",
+            String(200),
+            ForeignKey("procedure_compilations.compilation_id"),
+            nullable=False,
+            index=True,
+        ),
+    ),
+)
+compiled_progress_plan_bindings = _governed_record_table(
+    "compiled_progress_plan_bindings",
+    Column("binding_id", String(200), primary_key=True),
+    (
+        Column(
+            "compilation_id",
+            String(200),
+            ForeignKey("procedure_compilations.compilation_id"),
+            nullable=False,
+            index=True,
+        ),
+    ),
+)
+guidance_protocols = _governed_record_table(
+    "guidance_protocols",
+    Column("protocol_id", String(200), primary_key=True),
+)
+guidance_cells = _governed_record_table(
+    "guidance_cells",
+    Column("cell_id", String(200), primary_key=True),
+    (
+        Column(
+            "protocol_id",
+            String(200),
+            ForeignKey("guidance_protocols.protocol_id"),
+            nullable=False,
+            index=True,
+        ),
+    ),
+)
+model_harness_protocols = _governed_record_table(
+    "model_harness_protocols",
+    Column("protocol_id", String(200), primary_key=True),
+)
+model_harness_cells = _governed_record_table(
+    "model_harness_cells",
+    Column("cell_id", String(200), primary_key=True),
+    (
+        Column(
+            "protocol_id",
+            String(200),
+            ForeignKey("model_harness_protocols.protocol_id"),
+            nullable=False,
+            index=True,
+        ),
+    ),
+)
+model_harness_analyses = _governed_record_table(
+    "model_harness_analyses",
+    Column(
+        "protocol_id",
+        String(200),
+        ForeignKey("model_harness_protocols.protocol_id"),
+        primary_key=True,
+    ),
+)
+harness_execution_traces = _governed_record_table(
+    "harness_execution_traces",
+    Column("trace_id", String(200), primary_key=True),
+    (Column("protocol_id", String(200), nullable=False, index=True),),
+)
+reward_assessments = _governed_record_table(
+    "reward_assessments",
+    Column("assessment_id", String(200), primary_key=True),
+    (
+        Column(
+            "trace_id",
+            String(200),
+            ForeignKey("harness_execution_traces.trace_id"),
+            nullable=False,
+            index=True,
+        ),
+        Column("observation_id", String(200), nullable=False, index=True),
     ),
 )

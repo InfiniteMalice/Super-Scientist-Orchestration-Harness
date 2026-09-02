@@ -9,6 +9,24 @@ The source, tests, governance policy, and active rules remain authoritative. A h
 entry cannot override any of them, authorize a proposal, promote an evaluator, or
 change durable state.
 
+## 0.3.0 document-control boundary
+
+Version 0.3.0 adds governed cognitive, procedure, guidance, trace, and reward behavior.
+This narrative describes that capability, but Task 19 does not rewrite the controlled
+manifest or generated handbook artifacts. Task 20 binds
+`docs/handbook/behaviors.json`, `docs/handbook/handbook.json`, and
+`docs/handbook/handbook.md` to the exact Task 19 implementation commit and regenerates
+their projections. Until that binding is committed, readers must use the source modules
+and tests named in the 0.3.0 public documentation for the new behavior; the older
+generated projection does not grant or deny runtime authority.
+
+When Task 20 updates a cognitive behavior entry, the handbook builder must validate its
+exact source commit, source hash, symbol, tests, governing rule version, and generated
+bytes. A stale or missing binding must produce a failed verification rather than a
+partial 0.3.0 map. The Task 20 command will be
+`python -m pytest tests/unit/docs/test_user_manual.py tests/unit/handbook -q`; Task 19
+intentionally leaves those controlled inputs and outputs byte-identical.
+
 ## Source-controlled inputs and outputs
 
 - [`docs/handbook/behaviors.json`](handbook/behaviors.json) is the strict behavior

@@ -9,3 +9,6 @@ src/super_scientist/application/transactions/coordinator.py text eol=lf
 src/super_scientist/application/workspace_integrity.py text eol=lf
 src/super_scientist/providers/storage/artifacts.py text eol=lf
 src/super_scientist/providers/storage/protected_evaluation.py text eol=lf
+docs/superpowers/plans/2026-08-23-governed-cognitive-cohorts-procedure-compilation.md text eol=lf
+tests/property/test_adaptation_append_only.py text eol=lf
+tests/property/test_progress_trail_append_only.py text eol=lf

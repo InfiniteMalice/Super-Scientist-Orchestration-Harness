@@ -22,6 +22,11 @@ from super_scientist.domain.behavioral_rules.models import (
     ReviewerRole,
     RuleAction,
 )
+from super_scientist.domain.cognition import (
+    DiversityAssessment,
+    DiversityAxisStatus,
+    assess_diversity,
+)
 from super_scientist.domain.identity import ActorKind
 from tests.rule_fixtures import (
     NOW,
@@ -33,6 +38,7 @@ from tests.rule_fixtures import (
     regression,
     rule,
 )
+from tests.unit.cognition.test_diversity import _cohort, _profile
 
 
 def test_reviewer_capability_has_no_rule_head_governance_or_quality_writer() -> None:
@@ -200,6 +206,19 @@ def test_fixed_rule_classification_is_not_a_generic_authority_grant() -> None:
     assert FIXED_RULE_CLASSIFICATION.verification_level.value == ("INDEPENDENT_DETERMINISTIC_CHECK")
     assert FIXED_RULE_CLASSIFICATION.grounding.value == "PRIMARY_SOURCE"
     assert FIXED_RULE_CLASSIFICATION.signal.value == "EXTRINSIC_GROUNDED_EXPERIENCE"
+
+
+def test_same_model_prompt_diversity_does_not_grant_reviewer_independence() -> None:
+    left = _profile("reviewer-a", prompt_strategy="critique-first")
+    right = _profile("reviewer-b", prompt_strategy="direct")
+
+    assessment = assess_diversity(_cohort(left, right), (left, right), ())
+
+    assert assessment.axes.prompt_strategy is DiversityAxisStatus.DIFFERENT
+    assert assessment.axes.model_family is DiversityAxisStatus.SAME
+    assert rule_actors_are_independent(left.actor, right.actor) is False
+    assert "is_independent" not in DiversityAssessment.model_fields
+    assert "governance_authority" not in DiversityAssessment.model_fields
 
 
 def _build_candidate(

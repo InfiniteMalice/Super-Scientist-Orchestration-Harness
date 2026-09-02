@@ -97,3 +97,37 @@ policy and verifies the resulting heads and history; it does not trust the expor
 projection expectation as authority. Exact content may replay idempotently. Changed
 content under an existing identity is an audited conflict and cannot revise claim
 history.
+
+## Governed Cognitive Evidence Boundary
+
+The 0.3.0 test suite supports these implementation claims and no broader scientific
+claims:
+
+- When unanimous peer contributions are accepted and later cited without the required
+  authoritative claim evidence, the claim-transition handler rejects the transition
+  and leaves the claim head unchanged. Verify with
+  `python -m pytest tests/adversarial/test_cognitive_authority.py -q`.
+- When same-model prompt variants produce different contributions, the diversity
+  analyzer may record operational diversity, but the authority checks do not count the
+  variants as independent reviewers. Verify with
+  `python -m pytest tests/adversarial/test_cognitive_authority.py -q`.
+- When a recomputed procedure compilation has domain status `INVALID`, the coordinator
+  accepts and retains that compilation history but creates no progress plan or binding.
+  A later binding attempt is rejected with transaction code `INVALID_PROCEDURE`. Verify
+  with `python -m pytest tests/integration/application/test_procedure_service.py
+  tests/adversarial/test_procedure_escalation.py -q`.
+- When a trace or reward proposal contains fabricated, stale, or derivation-mismatched
+  evidence, the harness handlers reject the proposal and leave claim, policy, harness,
+  and progress heads unchanged. When a correctly recomputed reward assessment contains
+  invalidating evidence, the handler accepts and retains domain status `INVALID` but
+  excludes the assessment from positive and promotion evidence. Verify the invalidating
+  finding matrix with `python -m pytest
+  tests/adversarial/test_trace_reward_tampering.py::test_reward_spoof_families_never_produce_promotion_evidence
+  -q`. Verify accepted retention with `python -m pytest
+  tests/integration/application/test_harness_eval_extensions.py::test_invalid_reward_is_retained_but_excluded_from_positive_evidence
+  -q`.
+
+Capability profiles, cohort agreement, topology, compiled procedures, guidance cells,
+model-by-harness analyses, traces, and rewards are not `AtomicClaim` evidence links by
+themselves. Findings reported by S30-S35 remain external source evidence marked
+`not_reproduced`; this ledger does not claim those findings as project results.

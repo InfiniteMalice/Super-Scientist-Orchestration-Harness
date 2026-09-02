@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 
 from pydantic import TypeAdapter
@@ -103,6 +104,13 @@ from super_scientist.domain.evidence_trails.validation import (
     validate_report_binding,
     validate_trail,
 )
+from super_scientist.domain.harness_eval.models import (
+    CampaignPartitionManifest,
+    HarnessCampaign,
+    HarnessDecisionStatus,
+    ProtectedCheckerResult,
+    harness_campaign_hash,
+)
 from super_scientist.domain.hypotheses.models import (
     AcceptedHypothesisReceiptRef,
     ExecutableModelSpec,
@@ -126,7 +134,12 @@ from super_scientist.domain.improvement.models import (
     EvaluatorAuditRecord,
     SelfImprovementMeasurementRecord,
 )
-from super_scientist.domain.primitives import Sha256Hex, UtcTimestamp, canonical_json_bytes
+from super_scientist.domain.primitives import (
+    Sha256Hex,
+    UtcTimestamp,
+    canonical_json_bytes,
+    sha256_hex,
+)
 from super_scientist.domain.progress.calculations import (
     calculate_progress,
     current_progress_plan,
@@ -160,6 +173,7 @@ from super_scientist.domain.representations.models import (
 from super_scientist.domain.research_runs.models import ResearchRun, ResearchRunEvent
 from super_scientist.evaluation.claim_drift.deterministic import run_deterministic_checks
 from super_scientist.evaluation.claim_drift.models import CheckOutcome
+from super_scientist.handbook import BehaviorManifest, verify_handbook
 from super_scientist.kernel.audit.models import (
     AuditEvent,
     AuditVerification,
@@ -171,11 +185,14 @@ from super_scientist.kernel.transactions.models import (
     AdmitPrimitiveVersion,
     AppendProgressEvent,
     AppendResearchRunEvent,
+    BindCompiledProgressPlan,
     BindReportSentence,
     ConsolidateBehavioralRule,
+    CreateHarnessCampaign,
     CreateResearchRun,
     DecideCompletion,
     DecideEvaluatorSuccession,
+    DecideHarnessCampaign,
     ImportReviewerAssessment,
     Proposal,
     ProposeBehavioralRule,
@@ -190,6 +207,9 @@ from super_scientist.kernel.transactions.models import (
     RecordCounterexample,
     RecordEvaluatorAudit,
     RecordEvidenceTrailVersion,
+    RecordHarnessConfound,
+    RecordHarnessIteration,
+    RecordHarnessProtectedResult,
     RecordPrimitiveEvaluation,
     RecordProgressPlan,
     RecordRuleIncident,
@@ -204,15 +224,25 @@ from super_scientist.kernel.transactions.models import (
     ReviseHypothesis,
     TransactionDecision,
     TransitionClaim,
+    expected_hash_verified_evidence,
+    parse_untrusted_proposal_json,
 )
 from super_scientist.providers.storage.artifacts import ArtifactStore
 from super_scientist.providers.storage.domain_records import (
     CounterexampleRecord,
     ExecutableModelSpecRecord,
+    HarnessBudgetRecord,
+    HarnessCampaignRecord,
+    HarnessConfoundRecord,
+    HarnessDecisionRecord,
+    HarnessMetricRecord,
+    HarnessObservationRecord,
+    HarnessPartitionManifestRecord,
     HypothesisAdmissionDecisionRecord,
     HypothesisAdmissionStatus,
     HypothesisRevisionRecord,
     HypothesisVersionRecord,
+    MetricValueRecord,
     PrimitiveEvaluationRecord,
     PrimitiveVersionRecord,
     SimulationResultRecord,
@@ -224,11 +254,16 @@ from super_scientist.providers.storage.domain_records import (
 )
 from super_scientist.providers.storage.integrity_records import (
     AdaptationIntegritySnapshot,
+    HandbookIntegritySnapshot,
+    HarnessIntegritySnapshot,
     HypothesisIntegritySnapshot,
     ProgressIntegritySnapshot,
     RepresentationIntegritySnapshot,
     RuleIntegritySnapshot,
     TrailIntegritySnapshot,
+)
+from super_scientist.providers.storage.procedure_sources import (
+    procedure_source_snapshot_audit_metadata_from_store,
 )
 from super_scientist.providers.storage.repositories import (
     RepositorySet,
@@ -244,7 +279,6 @@ from super_scientist.quality.imported_pattern_firewall import (
     quality_policy_hash as _quality_policy_hash,
 )
 
-PROPOSAL_ADAPTER: TypeAdapter[Proposal] = TypeAdapter(Proposal)
 SHA256_ADAPTER: TypeAdapter[Sha256Hex] = TypeAdapter(Sha256Hex)
 
 
@@ -624,6 +658,12 @@ def verify_workspace(
     *,
     quality_policy_binding: QualityPolicyBinding | None = None,
 ) -> AuditVerification:
+    from super_scientist.application.cognitive.integrity import (
+        build_cognitive_reconstruction_history,
+        expected_cognitive_snapshot,
+        expected_evaluation_extension_snapshot,
+    )
+
     events: tuple[AuditEvent, ...] = ()
     try:
         approved_quality_policy = approved_quality_policy_binding()
@@ -644,6 +684,8 @@ def verify_workspace(
         progress = repositories.progress_integrity_snapshot()
         trails = repositories.trail_integrity_snapshot()
         rules = repositories.rule_integrity_snapshot()
+        harness = repositories.harness_integrity_snapshot()
+        handbook = repositories.handbook_integrity_snapshot()
         representations = repositories.representation_integrity_snapshot()
         hypotheses = repositories.hypothesis_integrity_snapshot()
         transactions = repositories.transactions.list_all()
@@ -652,8 +694,40 @@ def verify_workspace(
             active_policy is not None or not repositories.has_durable_state(),
             "durable workspace state requires an active registered policy",
         )
-        audit_records = _validated_audit_records(events, repositories)
+        audit_records = _validated_audit_records(events, repositories, artifact_store)
         _require_transaction_audit_consistency(transactions, audit_records)
+        ordered_transactions_by_id = {
+            transaction.proposal.proposal_id: transaction for transaction in transactions
+        }
+        accepted_transactions_in_audit_order = tuple(
+            ordered_transactions_by_id[record.proposal.proposal_id]
+            for record in audit_records
+            if record.transaction_persisted and record.decision.accepted
+        )
+        cognitive_history = build_cognitive_reconstruction_history(
+            accepted_transactions_in_audit_order,
+            events,
+        )
+        cognitive_workspace = repositories.cognitive_workspace_integrity_snapshot()
+        _require(
+            cognitive_workspace.cognitive
+            == expected_cognitive_snapshot(
+                accepted_transactions_in_audit_order,
+                events,
+                artifact_store,
+                history=cognitive_history,
+            ),
+            "cognitive projections do not match accepted transactions",
+        )
+        _require(
+            cognitive_workspace.evaluation_extension
+            == expected_evaluation_extension_snapshot(
+                accepted_transactions_in_audit_order,
+                events,
+                history=cognitive_history,
+            ),
+            "evaluation extension projections do not match accepted transactions",
+        )
         _require_projection_consistency(
             repositories,
             audit_records,
@@ -663,6 +737,7 @@ def verify_workspace(
             progress,
             trails,
             rules,
+            harness,
             representations,
             hypotheses,
             policies,
@@ -671,6 +746,7 @@ def verify_workspace(
             transactions,
             events,
         )
+        _require_handbook_verification_consistency(handbook, policies)
         _require_artifact_consistency(evidence, artifact_store)
         _require_claim_evidence_consistency(repositories, heads, evidence)
     except (KeyError, OSError, SQLAlchemyError, TypeError, ValueError) as error:
@@ -719,12 +795,13 @@ def _require_quality_policy_binding(
 def _validated_audit_records(
     events: tuple[AuditEvent, ...],
     repositories: RepositorySet,
+    artifact_store: ArtifactStore,
 ) -> tuple[_ValidatedAuditRecord, ...]:
     records: list[_ValidatedAuditRecord] = []
     for event in events:
         _require(event.event_type == "transaction_decision", "unexpected audit event type")
         payload = json_compatible_payload(event.payload)
-        proposal = PROPOSAL_ADAPTER.validate_json(
+        proposal = parse_untrusted_proposal_json(
             canonical_json_bytes(_mapping_value(payload, "proposal"))
         )
         decision = TransactionDecision.model_validate_json(
@@ -757,6 +834,13 @@ def _validated_audit_records(
             proposal.proposal_id == decision.proposal_id,
             "audit proposal and decision identifiers do not match",
         )
+        _require_procedure_source_snapshot_metadata(
+            proposal,
+            decision,
+            transaction_persisted,
+            payload,
+            artifact_store,
+        )
         if isinstance(proposal, ProposeGovernancePolicyTransition):
             _require(
                 _optional_policy_hash(payload, "prior_policy_hash") == proposal.prior_policy_hash,
@@ -784,6 +868,46 @@ def _validated_audit_records(
             )
         )
     return tuple(records)
+
+
+def _require_procedure_source_snapshot_metadata(
+    proposal: Proposal,
+    decision: TransactionDecision,
+    transaction_persisted: bool,
+    payload: Mapping[str, object],
+    artifact_store: ArtifactStore,
+) -> None:
+    metadata_key = "procedure_source_snapshot"
+    if type(proposal) is not AddEvidence or not decision.accepted or not transaction_persisted:
+        _require(
+            metadata_key not in payload,
+            "non-snapshot audit event contains procedure source snapshot metadata",
+        )
+        return
+    if proposal.evidence.evidence_type != "procedure-source":
+        _require(
+            metadata_key not in payload,
+            "non-snapshot audit event contains procedure source snapshot metadata",
+        )
+        return
+    expected = procedure_source_snapshot_audit_metadata_from_store(
+        proposal.evidence,
+        artifact_store,
+    )
+    if expected is None:
+        _require(
+            metadata_key not in payload,
+            "non-snapshot procedure source contains snapshot metadata",
+        )
+        return
+    _require(
+        metadata_key in payload,
+        "procedure source snapshot audit metadata is missing",
+    )
+    _require(
+        payload[metadata_key] == expected,
+        "procedure source snapshot audit metadata does not match its artifact",
+    )
 
 
 def _require_transaction_audit_consistency(
@@ -843,6 +967,7 @@ def _require_projection_consistency(
     progress: ProgressIntegritySnapshot,
     trails: TrailIntegritySnapshot,
     rules: RuleIntegritySnapshot,
+    harness: HarnessIntegritySnapshot,
     representations: RepresentationIntegritySnapshot,
     hypotheses: HypothesisIntegritySnapshot,
     policies: tuple[PolicySnapshot, ...],
@@ -883,6 +1008,14 @@ def _require_projection_consistency(
     expected_rule_regressions: dict[str, RuleRegressionCase] = {}
     expected_rule_heads: dict[str, tuple[str, str, RuleStatus]] = {}
     accepted_rule_proposals: dict[str, ProposeBehavioralRule] = {}
+    expected_harness_campaigns: dict[str, HarnessCampaignRecord] = {}
+    expected_harness_partitions: dict[str, HarnessPartitionManifestRecord] = {}
+    expected_harness_budgets: dict[str, HarnessBudgetRecord] = {}
+    expected_harness_observations: dict[str, HarnessObservationRecord] = {}
+    expected_harness_metrics: dict[str, HarnessMetricRecord] = {}
+    expected_harness_confounds: dict[str, HarnessConfoundRecord] = {}
+    expected_harness_decisions: dict[str, HarnessDecisionRecord] = {}
+    expected_harness_heads: dict[str, tuple[str, HarnessDecisionStatus]] = {}
     expected_primitive_versions: dict[str, PrimitiveVersionRecord] = {}
     expected_primitive_evaluations: dict[str, PrimitiveEvaluationRecord] = {}
     expected_primitive_heads: dict[str, tuple[str, str, PrimitiveStatus]] = {}
@@ -924,9 +1057,7 @@ def _require_projection_consistency(
             raise StorageIntegrityError("accepted audit transaction is unavailable")
         historical_policy = policy_by_hash[audit_record.governing_policy_hash]
         if isinstance(proposal, AddEvidence):
-            projected = proposal.evidence.model_copy(
-                update={"verification_state": VerificationState.HASH_VERIFIED}
-            )
+            projected = expected_hash_verified_evidence(proposal)
             _add_unique(expected_evidence, projected.evidence_id, projected, "evidence projection")
         elif isinstance(proposal, ProposeClaim):
             _add_unique(
@@ -966,7 +1097,7 @@ def _require_projection_consistency(
                 "research run event projection",
             )
             expected_run_heads[proposal.event.run_id] = proposal.event.run_event_id
-        elif isinstance(proposal, RecordProgressPlan):
+        elif isinstance(proposal, (BindCompiledProgressPlan, RecordProgressPlan)):
             plan = proposal.plan
             _require_governing_hash(
                 plan.governing_policy_hash,
@@ -1218,13 +1349,10 @@ def _require_projection_consistency(
             )
             if completion_plan is None:  # pragma: no cover - narrowed by fail-closed check above
                 raise StorageIntegrityError("completion plan is unavailable")
-            completion_summary = calculate_progress(
-                completion_plan,
-                tuple(
-                    event
-                    for event in expected_progress_events.values()
-                    if event.plan_version_id == completion.plan_version_id
-                ),
+            completion_events = tuple(
+                event
+                for event in expected_progress_events.values()
+                if event.plan_version_id == completion.plan_version_id
             )
             completion_budgets = tuple(
                 budget
@@ -1243,7 +1371,8 @@ def _require_projection_consistency(
                 voluntary_termination=completion.voluntary_termination,
                 claims_completion=completion.claims_completion,
                 final_validator_result=final_validation.result,
-                validated_weight=completion_summary.official_weight,
+                plan=completion_plan,
+                events=completion_events,
                 unused_budget=has_unused_budget(latest_completion_budget),
             )
             _require(
@@ -1600,6 +1729,28 @@ def _require_projection_consistency(
             _require(
                 hypothesis_decision.accepted,
                 "hypothesis historical authority validation failed",
+            )
+        elif isinstance(
+            proposal,
+            (
+                CreateHarnessCampaign,
+                RecordHarnessIteration,
+                RecordHarnessProtectedResult,
+                RecordHarnessConfound,
+                DecideHarnessCampaign,
+            ),
+        ):
+            _replay_harness_projection(
+                proposal,
+                audit_record.governing_policy_hash,
+                campaigns=expected_harness_campaigns,
+                partitions=expected_harness_partitions,
+                budgets=expected_harness_budgets,
+                observations=expected_harness_observations,
+                metrics=expected_harness_metrics,
+                confounds=expected_harness_confounds,
+                decisions=expected_harness_decisions,
+                heads=expected_harness_heads,
             )
         elif isinstance(
             proposal,
@@ -1994,6 +2145,41 @@ def _require_projection_consistency(
         "behavioral rule heads do not match accepted transactions",
     )
     _require(
+        {record.campaign_id: record for record in harness.campaigns} == expected_harness_campaigns,
+        "harness campaign projections do not match accepted transactions",
+    )
+    _require(
+        {record.partition_manifest_id: record for record in harness.partitions}
+        == expected_harness_partitions,
+        "harness partition projections do not match accepted transactions",
+    )
+    _require(
+        {record.budget_id: record for record in harness.budgets} == expected_harness_budgets,
+        "harness budget projections do not match accepted transactions",
+    )
+    _require(
+        {record.observation_id: record for record in harness.observations}
+        == expected_harness_observations,
+        "harness observation projections do not match accepted transactions",
+    )
+    _require(
+        {record.result_id: record for record in harness.metrics} == expected_harness_metrics,
+        "harness metric projections do not match accepted transactions",
+    )
+    _require(
+        {record.confound_id: record for record in harness.confounds} == expected_harness_confounds,
+        "harness confound projections do not match accepted transactions",
+    )
+    _require(
+        {record.decision_id: record for record in harness.decisions} == expected_harness_decisions,
+        "harness decision projections do not match accepted transactions",
+    )
+    _require(
+        {campaign_id: (decision_id, status) for campaign_id, decision_id, status in harness.heads}
+        == expected_harness_heads,
+        "harness campaign heads do not match accepted transactions",
+    )
+    _require(
         {record.primitive_version_id: record for record in representations.versions}
         == expected_primitive_versions,
         "primitive version projections do not match accepted transactions",
@@ -2142,6 +2328,262 @@ def _require_projection_consistency(
         policies,
         active_policy,
         tuple(transitions),
+    )
+
+
+def _replay_harness_projection(
+    proposal: (
+        CreateHarnessCampaign
+        | RecordHarnessIteration
+        | RecordHarnessProtectedResult
+        | RecordHarnessConfound
+        | DecideHarnessCampaign
+    ),
+    governing_policy_hash: str,
+    *,
+    campaigns: dict[str, HarnessCampaignRecord],
+    partitions: dict[str, HarnessPartitionManifestRecord],
+    budgets: dict[str, HarnessBudgetRecord],
+    observations: dict[str, HarnessObservationRecord],
+    metrics: dict[str, HarnessMetricRecord],
+    confounds: dict[str, HarnessConfoundRecord],
+    decisions: dict[str, HarnessDecisionRecord],
+    heads: dict[str, tuple[str, HarnessDecisionStatus]],
+) -> None:
+    """Rebuild released harness rows only from accepted transaction payloads."""
+
+    if isinstance(proposal, CreateHarnessCampaign):
+        campaign = proposal.campaign
+        _require_governing_hash(
+            campaign.governing_policy_hash,
+            governing_policy_hash,
+            "harness campaign",
+        )
+        _add_unique(
+            campaigns,
+            campaign.campaign_id,
+            _harness_campaign_record(campaign),
+            "harness campaign projection",
+        )
+        for campaign_manifest in campaign.partitions:
+            _require_governing_hash(
+                campaign_manifest.governing_policy_hash,
+                governing_policy_hash,
+                "harness partition manifest",
+            )
+            _add_unique(
+                partitions,
+                campaign_manifest.partition_manifest_id,
+                _harness_partition_record(campaign_manifest),
+                "harness partition projection",
+            )
+        for item in campaign.budgets:
+            _add_unique(
+                budgets,
+                item.budget_id,
+                HarnessBudgetRecord(
+                    budget_id=item.budget_id,
+                    campaign_id=campaign.campaign_id,
+                    variant=item.variant,
+                    budget_hash=sha256_hex(
+                        canonical_json_bytes(item.budget.model_dump(mode="json"))
+                    ),
+                    **item.budget.model_dump(mode="python"),
+                    created_at=campaign.created_at,
+                    governing_policy_hash=campaign.governing_policy_hash,
+                ),
+                "harness budget projection",
+            )
+        return
+    if isinstance(proposal, RecordHarnessIteration):
+        iteration = proposal.iteration
+        _require_governing_hash(
+            proposal.governing_policy_hash,
+            governing_policy_hash,
+            "harness iteration",
+        )
+        stored_manifest = partitions.get(iteration.partition_manifest_id)
+        _require(
+            stored_manifest is not None,
+            "harness iteration references an unprojected manifest",
+        )
+        if stored_manifest is None:  # pragma: no cover - narrowed by fail-closed check above
+            raise StorageIntegrityError("harness iteration manifest is unavailable")
+        _require(
+            iteration.task_id in stored_manifest.task_ids
+            and iteration.partition is stored_manifest.partition
+            and stored_manifest.campaign_id in campaigns
+            and iteration.budget_id in budgets
+            and budgets[iteration.budget_id].campaign_id == stored_manifest.campaign_id
+            and budgets[iteration.budget_id].variant is iteration.variant,
+            "harness iteration does not bind its replay-derived manifest and budget",
+        )
+        _add_unique(
+            observations,
+            iteration.observation_id,
+            HarnessObservationRecord(
+                observation_id=iteration.observation_id,
+                campaign_id=stored_manifest.campaign_id,
+                partition_manifest_id=iteration.partition_manifest_id,
+                task_id=iteration.task_id,
+                variant=iteration.variant,
+                iteration_index=iteration.iteration_index,
+                budget_id=iteration.budget_id,
+                candidate_output_hash=iteration.candidate_output_hash,
+                attempt=iteration.attempt,
+                negative_result=iteration.negative_result,
+                result_id=iteration.result_id,
+                outcome=iteration.outcome,
+                evaluator_version_id=iteration.evaluator_version_id,
+                observed_at=iteration.observed_at,
+                governing_policy_hash=governing_policy_hash,
+            ),
+            "harness observation projection",
+        )
+        return
+    if isinstance(proposal, RecordHarnessProtectedResult):
+        result = proposal.result
+        _require_governing_hash(
+            proposal.governing_policy_hash,
+            governing_policy_hash,
+            "harness protected result",
+        )
+        observation = observations.get(proposal.observation_id)
+        stored_manifest = partitions.get(proposal.partition_manifest_id)
+        _require(
+            observation is not None
+            and stored_manifest is not None
+            and stored_manifest.campaign_id == result.campaign_id
+            and observation.campaign_id == result.campaign_id
+            and observation.partition_manifest_id == proposal.partition_manifest_id
+            and observation.task_id == result.task_id
+            and observation.variant is proposal.variant
+            and observation.candidate_output_hash == result.candidate_output_hash
+            and observation.result_id == result.result_id
+            and observation.outcome is result.outcome,
+            "harness protected result does not bind its replay-derived observation and manifest",
+        )
+        _add_unique(
+            metrics,
+            result.result_id,
+            _harness_metric_record(result),
+            "harness metric projection",
+        )
+        return
+    if isinstance(proposal, RecordHarnessConfound):
+        confound = proposal.confound
+        _require_governing_hash(
+            confound.governing_policy_hash,
+            governing_policy_hash,
+            "harness confound",
+        )
+        _require(
+            confound.campaign_id in campaigns,
+            "harness confound references an unprojected campaign",
+        )
+        _add_unique(
+            confounds,
+            confound.confound_id,
+            HarnessConfoundRecord(
+                confound_id=confound.confound_id,
+                campaign_id=confound.campaign_id,
+                code=confound.code.value,
+                description=confound.description,
+                affected_variant=confound.affected_variant,
+                resolved=confound.resolved,
+                independent_analysis_id=confound.independent_analysis_id,
+                recorded_at=confound.recorded_at,
+                governing_policy_hash=confound.governing_policy_hash,
+            ),
+            "harness confound projection",
+        )
+        return
+    decision = proposal.decision
+    _require_governing_hash(
+        decision.governing_policy_hash,
+        governing_policy_hash,
+        "harness decision",
+    )
+    report = proposal.report
+    _require(
+        report.campaign.campaign_id in campaigns
+        and decision.campaign_id == report.campaign.campaign_id
+        and _harness_campaign_record(report.campaign) == campaigns[report.campaign.campaign_id]
+        and all(
+            result_id in metrics for metric in report.metrics for result_id in metric.result_ids
+        )
+        and all(item.confound_id in confounds for item in report.confounds),
+        "harness decision does not bind replay-derived campaign evidence",
+    )
+    _add_unique(
+        decisions,
+        decision.decision_id,
+        HarnessDecisionRecord(
+            decision_id=decision.decision_id,
+            campaign_id=decision.campaign_id,
+            status=decision.status,
+            admitted=decision.admitted,
+            rationale=decision.rationale,
+            authority_id=decision.authority.actor_id,
+            rollback_target_id=decision.rollback_target_id,
+            evaluator_audit_id=decision.evaluator_audit_id,
+            measurement_id=decision.measurement_id,
+            metric_result_ids=tuple(
+                result_id for metric in report.metrics for result_id in metric.result_ids
+            ),
+            confound_ids=tuple(item.confound_id for item in report.confounds),
+            decided_at=decision.decided_at,
+            governing_policy_hash=decision.governing_policy_hash,
+        ),
+        "harness decision projection",
+    )
+    heads[decision.campaign_id] = (decision.decision_id, decision.status)
+
+
+def _harness_campaign_record(campaign: HarnessCampaign) -> HarnessCampaignRecord:
+    return HarnessCampaignRecord(
+        campaign_id=campaign.campaign_id,
+        version=campaign.version,
+        variants=campaign.variants,
+        model_id=campaign.model_id,
+        model_version=campaign.model_version,
+        adapter_id=campaign.adapter_id,
+        baseline_variant=campaign.baseline_variant,
+        candidate_variant=campaign.candidate_variant,
+        baseline_harness_version_id=campaign.baseline_harness_version_id,
+        candidate_harness_version_id=campaign.candidate_harness_version_id,
+        rollback_harness_version_id=campaign.rollback_harness_version_id,
+        evaluator_id=campaign.evaluator.actor_id,
+        evaluator_version_id=campaign.evaluator_version_id,
+        candidate_producer_id=campaign.candidate_producer.actor_id,
+        canonical_campaign_hash=harness_campaign_hash(campaign),
+        created_by=campaign.coordinator.actor_id,
+        created_at=campaign.created_at,
+        governing_policy_hash=campaign.governing_policy_hash,
+    )
+
+
+def _harness_partition_record(
+    manifest: CampaignPartitionManifest,
+) -> HarnessPartitionManifestRecord:
+    return HarnessPartitionManifestRecord.model_validate(manifest.model_dump(mode="python"))
+
+
+def _harness_metric_record(result: ProtectedCheckerResult) -> HarnessMetricRecord:
+    return HarnessMetricRecord(
+        result_id=result.result_id,
+        campaign_id=result.campaign_id,
+        task_id=result.task_id,
+        expected_output_hash=result.expected_output_hash,
+        candidate_output_hash=result.candidate_output_hash,
+        checker_id=result.checker_id,
+        checker_version=result.checker_version,
+        outcome=result.outcome,
+        metric_values=tuple(
+            MetricValueRecord(metric_id=item.metric_id, value=item.value)
+            for item in result.metric_values
+        ),
+        evaluated_at=result.evaluated_at,
     )
 
 
@@ -2615,6 +3057,46 @@ def _require_artifact_consistency(
             f"authoritative evidence {record.evidence_id} is not hash verified",
         )
         verify_artifact_binding(record, artifact_store)
+
+
+def _require_handbook_verification_consistency(
+    handbook: HandbookIntegritySnapshot,
+    policies: tuple[PolicySnapshot, ...],
+) -> None:
+    """Verify non-transaction handbook records against retained source bindings."""
+
+    if not handbook.verifications:
+        return
+    repository_root = Path(__file__).resolve().parents[3]
+    handbook_root = repository_root / "docs" / "handbook"
+    manifest = BehaviorManifest.model_validate_json((handbook_root / "behaviors.json").read_bytes())
+    expected_json_bytes = (handbook_root / "handbook.json").read_bytes()
+    expected_markdown_bytes = (handbook_root / "handbook.md").read_bytes()
+    registered_policy_hashes = {policy.policy_hash for policy in policies}
+    for record in handbook.verifications:
+        result = verify_handbook(
+            repository_root,
+            manifest,
+            repository_commit=record.repository_commit,
+            expected_json_bytes=expected_json_bytes,
+            expected_markdown_bytes=expected_markdown_bytes,
+        )
+        _require(
+            record.governing_policy_hash in registered_policy_hashes,
+            "handbook verification names an unregistered governance policy",
+        )
+        _require(
+            result.provenance_verified
+            and record.manifest_hash == result.manifest_hash
+            and record.repository_commit == result.repository_commit
+            and record.source_hashes == result.source_hashes
+            and record.generated_artifact_hash == result.generated_artifact_hash
+            and record.stale_locations == result.stale_locations
+            and record.missing_symbols == result.missing_symbols
+            and record.outcome
+            is (AssessmentOutcome.PASSED if result.valid else AssessmentOutcome.FAILED),
+            "handbook verification does not match its canonical source and manifest bindings",
+        )
 
 
 def _require_claim_evidence_consistency(

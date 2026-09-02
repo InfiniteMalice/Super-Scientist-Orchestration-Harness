@@ -5,12 +5,15 @@ from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from tempfile import TemporaryDirectory
 from types import TracebackType
-from typing import Literal, Protocol, cast
+from typing import Annotated, Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from sqlalchemy import Connection
 
-from super_scientist.application.transactions.coordinator import TransactionCoordinator
+from super_scientist.application.transactions.coordinator import (
+    TransactionCoordinator,
+    _WorkspaceReplayProposalFactory,
+)
 from super_scientist.application.workspace_integrity import require_workspace_integrity
 from super_scientist.config.models import PolicySnapshot
 from super_scientist.domain.evidence.models import ArtifactRef
@@ -27,8 +30,10 @@ from super_scientist.kernel.transactions.models import (
     Proposal,
     ProposalAttempt,
     ProposalKind,
+    RecordCollaborationTermination,
     RejectionCode,
     TransactionDecision,
+    parse_untrusted_proposal_json,
 )
 from super_scientist.providers.storage.artifacts import ArtifactStore, FileArtifactStore
 from super_scientist.providers.storage.database import (
@@ -36,7 +41,6 @@ from super_scientist.providers.storage.database import (
     create_database_engine,
     upgrade_database,
 )
-from super_scientist.providers.storage.domain_records import HarnessCampaignHeadRepository
 from super_scientist.providers.storage.repositories import RepositorySet, StoredTransaction
 
 type UnitOfWorkFactory = Callable[[], DatabaseUnitOfWork]
@@ -113,14 +117,36 @@ class WorkspaceArtifactReference(_StrictFrozenModel):
         )
 
 
+def _parse_workspace_proposal(value: object) -> object:
+    if type(value) is dict:
+        return parse_untrusted_proposal_json(canonical_json_bytes(value))
+    return value
+
+
+type WorkspaceProposal = Annotated[Proposal, BeforeValidator(_parse_workspace_proposal)]
+
+
+class WorkspaceReplayIntent(_StrictFrozenModel):
+    """Source identity used to verify, never authorize, deterministic replay."""
+
+    schema_version: Literal[1] = 1
+    intent_fingerprint: Sha256Hex | None
+    audit_event_id: StableIdentifier
+    audit_event_hash: Sha256Hex
+
+
 class WorkspaceRecord(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     stable_identity: StableIdentifier
     replay_order: int = Field(strict=True, ge=0)
     governing_policy_hash: Sha256Hex
     proposal_hash: Sha256Hex
-    proposal: Proposal
+    proposal: WorkspaceProposal
     expected_decision: TransactionDecision
+    replay_intent: WorkspaceReplayIntent | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def require_exact_identity_and_hash(self) -> WorkspaceRecord:
@@ -234,6 +260,7 @@ def _export_workspace_snapshot(
     events = repositories.audit.list_all()
     governing_hashes = _governing_policy_hashes(events)
     replay_orders = _transaction_replay_orders(events)
+    transaction_events = _transaction_audit_events(events)
     records = tuple(
         sorted(
             (
@@ -244,6 +271,15 @@ def _export_workspace_snapshot(
                     proposal_hash=_proposal_hash(transaction.proposal),
                     proposal=transaction.proposal,
                     expected_decision=transaction.decision.model_copy(update={"replayed": False}),
+                    replay_intent=WorkspaceReplayIntent(
+                        intent_fingerprint=transaction.intent_fingerprint,
+                        audit_event_id=transaction_events[
+                            transaction.proposal.proposal_id
+                        ].event_id,
+                        audit_event_hash=transaction_events[
+                            transaction.proposal.proposal_id
+                        ].event_hash,
+                    ),
                 )
                 for transaction in transactions
             ),
@@ -425,7 +461,7 @@ def _commit_workspace(
                     _active_connection(unit_of_work.connection),
                     artifact_store,
                 )
-                if rebuilt != workspace:
+                if not _rebuilt_workspace_matches(workspace, rebuilt):
                     raise WorkspaceImportError(
                         "rebuilt workspace export does not match canonical bundle"
                     )
@@ -454,7 +490,9 @@ def _replay_records(
     imported = 0
     replayed = 0
     conflicts: list[WorkspaceImportConflict] = []
+    repositories = unit_of_work.repositories()
     for record in sorted(workspace.records, key=lambda item: item.replay_order):
+        prior = repositories.transactions.get_by_idempotency_key(record.proposal.idempotency_key)
         coordinator = TransactionCoordinator(
             borrowed_uow_factory,
             policies[record.governing_policy_hash],
@@ -464,8 +502,16 @@ def _replay_records(
         attempt = _proposal_attempt(record)
         decision = coordinator.submit_intent(
             attempt,
-            _constant_proposal_factory(record.proposal),
+            _replay_proposal_factory(record),
         )
+        if (
+            prior is not None
+            and prior.proposal_hash == record.proposal_hash
+            and prior.proposal == record.proposal
+            and prior.decision != record.expected_decision
+            and _identity_conflict_code(decision) is not None
+        ):
+            raise WorkspaceImportError(f"replayed decision changed for {record.stable_identity}")
         if decision.replayed:
             replayed += 1
             if decision.model_copy(update={"replayed": False}) != record.expected_decision:
@@ -519,7 +565,7 @@ def _commit_conflicts(
                 artifact_store,
             ).submit_intent(
                 _proposal_attempt(record),
-                _constant_proposal_factory(record.proposal),
+                _replay_proposal_factory(record),
             )
             actual_code = _identity_conflict_code(decision)
             if actual_code is not expected_code:
@@ -553,10 +599,55 @@ def _constant_proposal_factory(proposal: Proposal) -> Callable[[], Proposal]:
     return factory
 
 
+def _replay_proposal_factory(record: WorkspaceRecord) -> Callable[[], Proposal]:
+    if record.replay_intent is None:
+        return _constant_proposal_factory(record.proposal)
+    return _WorkspaceReplayProposalFactory(
+        proposal=record.proposal,
+        proposal_hash=record.proposal_hash,
+        intent_fingerprint=record.replay_intent.intent_fingerprint,
+        governing_policy_hash=record.governing_policy_hash,
+        expected_decision=record.expected_decision,
+        audit_event_id=record.replay_intent.audit_event_id,
+        audit_event_hash=record.replay_intent.audit_event_hash,
+    )
+
+
 def _workspace_export_hash(workspace: WorkspaceExport) -> str:
     payload = workspace.model_dump(mode="json")
     del payload["bundle_hash"]
     return sha256_hex(canonical_json_bytes(payload))
+
+
+def _rebuilt_workspace_matches(
+    source: WorkspaceExport,
+    rebuilt: WorkspaceExport,
+) -> bool:
+    """Compare a rebuild while preserving legacy records without intent metadata."""
+
+    if source == rebuilt:
+        return True
+    if all(record.replay_intent is not None for record in source.records):
+        return False
+    if (
+        source.schema_version != rebuilt.schema_version
+        or source.bootstrap_policy_hash != rebuilt.bootstrap_policy_hash
+        or source.active_policy_hash != rebuilt.active_policy_hash
+        or source.policies != rebuilt.policies
+        or source.projection_expectations != rebuilt.projection_expectations
+        or source.artifacts != rebuilt.artifacts
+        or len(source.records) != len(rebuilt.records)
+    ):
+        return False
+    return all(
+        source_record == rebuilt_record
+        or (
+            source_record.replay_intent is None
+            and source_record.model_copy(update={"replay_intent": rebuilt_record.replay_intent})
+            == rebuilt_record
+        )
+        for source_record, rebuilt_record in zip(source.records, rebuilt.records, strict=True)
+    )
 
 
 def _governing_policy_hashes(events: tuple[AuditEvent, ...]) -> dict[str, str]:
@@ -590,6 +681,20 @@ def _transaction_replay_orders(events: tuple[AuditEvent, ...]) -> dict[str, int]
             raise ValueError("transaction has more than one persisted audit event")
         replay_orders[proposal_id] = len(replay_orders)
     return replay_orders
+
+
+def _transaction_audit_events(events: tuple[AuditEvent, ...]) -> dict[str, AuditEvent]:
+    retained: dict[str, AuditEvent] = {}
+    for event in events:
+        payload = json_compatible_payload(event.payload)
+        proposal = payload.get("proposal")
+        if not isinstance(proposal, Mapping) or not payload.get("transaction_persisted"):
+            continue
+        proposal_id = proposal.get("proposal_id")
+        if not isinstance(proposal_id, str) or proposal_id in retained:
+            raise ValueError("transaction lacks one unique persisted audit event")
+        retained[proposal_id] = event
+    return retained
 
 
 def _governing_hash(
@@ -673,9 +778,9 @@ def _projection_expectations(
     )
     values.extend(
         ("harness_campaign_head", item[0], item[1:])
-        for item in HarnessCampaignHeadRepository(connection).list_all()
+        for item in repositories.harness_integrity_snapshot().heads
     )
-    return tuple(
+    existing = tuple(
         sorted(
             (
                 WorkspaceProjectionExpectation(
@@ -691,6 +796,120 @@ def _projection_expectations(
             ),
             key=lambda item: (item.projection_kind, item.stable_identity),
         )
+    )
+    return tuple(
+        sorted(
+            (*existing, *_governed_projection_expectations(repositories)),
+            key=lambda item: (item.projection_kind, item.stable_identity),
+        )
+    )
+
+
+def _governed_projection_expectations(
+    repositories: RepositorySet,
+) -> tuple[WorkspaceProjectionExpectation, ...]:
+    governed = repositories.cognitive_workspace_integrity_snapshot()
+    cognitive = governed.cognitive
+    evaluation = governed.evaluation_extension
+    termination_ids = tuple(
+        sorted(
+            transaction.proposal.session_id
+            for transaction in repositories.transactions.list_all()
+            if transaction.decision.accepted
+            and isinstance(transaction.proposal, RecordCollaborationTermination)
+        )
+    )
+    if len(termination_ids) != len(cognitive.terminations):
+        raise ValueError("collaboration termination projection identities do not match records")
+    values = [
+        *(
+            ("capability_profile_record", item.profile_id, item.content_hash)
+            for item in cognitive.capability_profiles
+        ),
+        *(
+            ("cohort_plan_record", item.cohort_plan_id, item.content_hash)
+            for item in cognitive.cohort_plans
+        ),
+        *(
+            (
+                "diversity_assessment_record",
+                item.diversity_assessment_id,
+                item.content_hash,
+            )
+            for item in cognitive.diversity_assessments
+        ),
+        *(
+            ("collaboration_session_record", item.session_id, item.content_hash)
+            for item in cognitive.collaboration_sessions
+        ),
+        *(
+            ("peer_request_record", item.request_id, item.content_hash)
+            for item in cognitive.peer_requests
+        ),
+        *(
+            ("peer_contribution_record", item.contribution_id, item.content_hash)
+            for item in cognitive.peer_contributions
+        ),
+        *(
+            ("topology_event_record", item.event_id, item.content_hash)
+            for item in cognitive.topology_events
+        ),
+        *(
+            (
+                "collaboration_termination_record",
+                identity,
+                sha256_hex(canonical_json_bytes(item.model_dump(mode="json"))),
+            )
+            for identity, item in zip(termination_ids, cognitive.terminations, strict=True)
+        ),
+        *(
+            ("procedure_compilation_record", item.compilation_id, item.content_hash)
+            for item in cognitive.compilations
+        ),
+        *(
+            ("method_direction_outcome_record", item.outcome_id, item.content_hash)
+            for item in cognitive.method_outcomes
+        ),
+        *(
+            ("compiled_progress_plan_binding_record", item.binding_id, item.content_hash)
+            for item in cognitive.bindings
+        ),
+        *(
+            ("guidance_protocol_record", item.protocol_id, item.content_hash)
+            for item in evaluation.guidance_protocols
+        ),
+        *(
+            ("guidance_cell_record", item.cell_id, item.content_hash)
+            for item in evaluation.guidance_cells
+        ),
+        *(
+            ("model_harness_protocol_record", item.protocol_id, item.content_hash)
+            for item in evaluation.model_harness_protocols
+        ),
+        *(
+            ("model_harness_cell_record", item.cell_id, item.content_hash)
+            for item in evaluation.model_harness_cells
+        ),
+        *(
+            ("model_harness_analysis_record", item.protocol_id, item.content_hash)
+            for item in evaluation.model_harness_analyses
+        ),
+        *(
+            ("harness_execution_trace_record", item.trace_id, item.content_hash)
+            for item in evaluation.harness_execution_traces
+        ),
+        *(
+            ("reward_assessment_record", item.assessment_id, item.content_hash)
+            for item in evaluation.reward_assessments
+        ),
+    ]
+    return tuple(
+        WorkspaceProjectionExpectation(
+            projection_kind=kind,
+            stable_identity=identity,
+            content_hash=content_hash,
+        )
+        for kind, identity, content_hash in values
     )
 
 

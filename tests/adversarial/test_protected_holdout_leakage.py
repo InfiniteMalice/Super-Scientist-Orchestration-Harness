@@ -26,6 +26,16 @@ from super_scientist.domain.harness_eval.models import (
     PublicTaskInput,
     fixed_checker_configuration_hash,
 )
+from super_scientist.domain.harness_eval.traces import (
+    AvailableValue,
+    EnvironmentEvent,
+    EnvironmentEventKind,
+    HarnessExecutionTrace,
+    MetadataAvailability,
+    ObservableArtifactRef,
+    ToolObservation,
+    ToolObservationStatus,
+)
 from super_scientist.domain.improvement.models import AssessmentOutcome
 from super_scientist.domain.primitives import sha256_hex
 from super_scientist.providers.storage.protected_evaluation import (
@@ -73,6 +83,85 @@ def test_candidate_graph_contains_only_public_input_and_immutable_budget_authori
     assert ProtectedResultGateway not in graph_types
     assert OutputOnlyEvaluatorExecutor not in graph_types
     assert context.budget.model_config.get("frozen") is True
+
+
+def test_trace_contract_has_no_raw_or_reversible_protected_surfaces() -> None:
+    forbidden_fields = {
+        "answer",
+        "answer_bytes",
+        "answer_reference",
+        "protected_answer",
+        "protected_data",
+        "protected_store_path",
+        "relative_path",
+        "command",
+        "arguments",
+        "raw_request",
+        "raw_response",
+        "provider_payload",
+        "reasoning",
+        "chain_of_thought",
+        "scratchpad",
+        "token_stream",
+        "logprobs_payload",
+    }
+
+    assert not forbidden_fields & set(HarnessExecutionTrace.model_fields)
+    assert not forbidden_fields & set(ToolObservation.model_fields)
+    assert not forbidden_fields & set(EnvironmentEvent.model_fields)
+    assert not forbidden_fields & set(ObservableArtifactRef.model_fields)
+
+
+def test_trace_records_reject_adversarial_protected_and_execution_payloads() -> None:
+    artifact = ObservableArtifactRef.build(
+        artifact_id="output",
+        sha256="a" * 64,
+        size_bytes=len(SECRET),
+        media_type="application/octet-stream",
+    ).model_dump(mode="python")
+    tool = ToolObservation.build(
+        sequence=0,
+        tool_id="fixture",
+        tool_version="v1",
+        request_hash="a" * 64,
+        response_hash=AvailableValue[str](
+            status=MetadataAvailability.AVAILABLE,
+            value="b" * 64,
+            evidence_id="event",
+        ),
+        status=ToolObservationStatus.SUCCEEDED,
+        evidence_id="event",
+    ).model_dump(mode="python")
+    event = EnvironmentEvent.build(
+        sequence=0,
+        environment_id="environment",
+        environment_version="v1",
+        kind=EnvironmentEventKind.CRASHED,
+        evidence_id="event",
+    ).model_dump(mode="python")
+    for model, base_payload, unexpected_key, injected_payload in (
+        (
+            ObservableArtifactRef,
+            artifact,
+            "relative_path",
+            artifact | {"relative_path": "protected/answer.bin"},
+        ),
+        (
+            ToolObservation,
+            tool,
+            "command",
+            tool | {"command": "type protected\\answer.bin"},
+        ),
+        (
+            EnvironmentEvent,
+            event,
+            "exception_text",
+            event | {"exception_text": SECRET.decode()},
+        ),
+    ):
+        model.model_validate(base_payload)
+        with pytest.raises(ValidationError, match=unexpected_key):
+            model.model_validate(injected_payload)
 
 
 def test_public_reader_exposes_input_only_for_the_bound_campaign_and_task() -> None:

@@ -107,6 +107,28 @@ approval cannot replace these gates. Admission is not a scientific-truth guarant
 is a deterministic statement that the recorded candidate satisfied this policy and
 evidence boundary.
 
+## Cognitive procedure and checker boundary
+
+A compiled cognitive procedure may describe artifact production and deterministic
+validation, but it does not add an execution backend to the hypothesis loop. Procedure
+steps cannot name Python imports, shell commands, model providers, dynamic entry points,
+arbitrary tools, hidden reasoning, or protected evaluators. Only fixed catalog entries
+and exact current source receipts can appear in an accepted compilation.
+
+The 0.3.0 offline example registers `DeterministicToyValidator` with `ActorKind.TOOL`.
+When the validator receives bounded artifact bytes and the declared SHA-256 expectation,
+it computes the actual digest and emits a typed pass/fail result. It does not accept a
+caller-authored `invalid` flag, execute artifact bytes, or claim human provenance. A
+tampered artifact therefore causes deterministic validation failure and an invalid
+reward assessment. Run `python -m pytest
+tests/e2e/test_governed_cognitive_procedure_vertical_slice.py -q` to verify both the
+positive and tampered cases.
+
+Observable outputs, artifacts, checks, failures, and provenance may be retained. Hidden
+chain-of-thought and private-reasoning fields are absent from the schemas. A peer or
+model may contribute bounded conclusions and diagnostics, but those contributions do
+not satisfy hypothesis admission, claim review, or human authority.
+
 ## Transfer Evaluation
 
 The offline evaluation exercises the same domain-neutral loop on five independently

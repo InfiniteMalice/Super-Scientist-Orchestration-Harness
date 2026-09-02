@@ -1,4 +1,8 @@
-from super_scientist.domain.progress.calculations import calculate_progress, detect_false_finish
+from super_scientist.domain.progress.calculations import (
+    ProgressBoundaryValidationError,
+    calculate_progress,
+    detect_false_finish,
+)
 from super_scientist.domain.progress.models import (
     BudgetAllocation,
     BudgetReserves,
@@ -30,6 +34,7 @@ __all__ = [
     "ExecutionTelemetry",
     "FalseFinishFinding",
     "FalseFinishResult",
+    "ProgressBoundaryValidationError",
     "ProgressPlan",
     "ProgressStatus",
     "ProgressSubtask",

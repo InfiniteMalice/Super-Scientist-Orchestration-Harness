@@ -802,3 +802,217 @@ sources:
     limitations:
       - not peer reviewed; public results have no independent verification
       - no code reuse: source code, benchmark-specific implementation, and hidden task assumptions are not imported
+
+  - id: S30
+    title: "Spark-to-Paper: End-to-End Research Paper Generation as a Composable Skill"
+    authors:
+      - "Zhuoyang Qian"
+      - "Biao Wu"
+      - "Yiran Wang"
+      - "Chris D Yan"
+      - "Desan Dai"
+      - "Liangwei Zheng"
+      - "Jin Jiang"
+      - "Junsheng Zhang"
+      - "Wenhao Wang"
+    year: 2026
+    source_type: paper_and_code_repository
+    canonical_locator: "https://arxiv.org/abs/2608.11924v1"
+    version_consulted: "arXiv:2608.11924v1"
+    accessed_at: "2026-08-23"
+    repository: "https://github.com/Spark-To-Paper-Skills/spark-to-paper-skills/commit/c17149def034bc777462de612926c8e3b6d01b8c"
+    license: "paper: arXiv non-exclusive distribution; repository: MIT"
+    source_proposal: "Compose research-paper generation from stage-shaped method-development skills and persistent procedure artifacts."
+    source_evidence: "The paper reports end-to-end system results on a small generated-topic evaluation; SSOH has not reproduced those results."
+    project_adaptation: "Separate model judgment from deterministic checking, retain artifact interfaces, plan before result observation, revise claims from evidence, and bound self-refutation."
+    project_original_synthesis: "Compile accepted method evidence into immutable procedures whose validators, resources, termination rules, and progress bindings are independently governed."
+    adoption_status: adapted
+    reproduction_status: not_reproduced
+    limitations:
+      - the small generated-topic evaluation does not establish general scientific validity
+      - reported system results and companion-repository behavior are not reproduced
+    notes:
+      - no source code was imported or reused
+
+  - id: S31
+    title: "Modular Cognitive Architecture Emerges in Large Language Models"
+    authors:
+      - "Pengrui Han"
+      - "Jacob Andreas"
+      - "Evelina Fedorenko"
+      - "Andrea Gregor de Varda"
+    year: 2026
+    source_type: paper_and_code_repository
+    canonical_locator: "https://arxiv.org/abs/2608.13567v1"
+    version_consulted: "arXiv:2608.13567v1"
+    accessed_at: "2026-08-23"
+    repository: "https://github.com/Pengrui-Han/LLM_Modularity_Final/commit/e3ac7fbb3a6caea05c88343a8de6ec04a4035db8"
+    license: "paper: CC BY 4.0; repository: MIT"
+    source_proposal: "Analyze functional specialization and query-conditioned modular organization in large language models."
+    source_evidence: "The paper reports internal neuronal modularity findings; SSOH has not reproduced the analysis or established external-agent benefits."
+    project_adaptation: "Represent bounded cognitive roles, query-conditioned routing, topology, and operational-diversity axes as evidence-only records."
+    project_original_synthesis: "Keep operational diversity separate from reviewer independence and keep all cognitive routing subordinate to centralized control-plane admission."
+    adoption_status: adapted
+    reproduction_status: not_reproduced
+    limitations:
+      - modular roles do not establish independent governance or correctness
+      - external agent modules are a project inference, not a reproduced source finding
+    notes:
+      - no source code was imported or reused
+
+  - id: S32
+    title: "ASI-Bench: At the Dawn of Artificial Superintelligence"
+    authors:
+      - "Junwei Zhou"
+      - "Zhen Sun"
+      - "Binyu Li"
+      - "Jiangyu Zhou"
+      - "Yuexi Pan"
+      - "Hengyu Wang"
+      - "Honghe Ren"
+      - "Xiaohan Jia"
+      - "Xueyang Zhou"
+      - "Xiaoyu Cao"
+      - "Yongchao Chen"
+      - "Yuanning Feng"
+      - "Junhao Wu"
+      - "Cheng Zhang"
+      - "Sijia Chen"
+      - "Haoyu Xue"
+      - "Chengsong You"
+      - "Huan Wang"
+      - "Koutian Wu"
+      - "Peigan Gao"
+      - "Jiakun Wu"
+      - "Wenzhe Li"
+      - "Ergan Shang"
+      - "Qingyuan Zheng"
+      - "Jingjing Zhou"
+      - "Ruixuan Jia"
+      - "Yan Xu"
+      - "Hongrui Zhang"
+      - "Xiao-Han Ma"
+      - "Zhengxiang Cheng"
+      - "Yuexing Hao"
+      - "Liting Mai"
+      - "Xianglin Ji"
+      - "Wenjun Zhang"
+      - "Zhuofan Chen"
+      - "Yixiao Huang"
+      - "Chi Wang"
+      - "Wenyue Hua"
+      - "Yilun Hao"
+      - "Yuantao Zhai"
+      - "Ziyan Zhao"
+      - "Jingyan Xie"
+    year: 2026
+    source_type: paper_and_code_repository
+    canonical_locator: "https://arxiv.org/abs/2608.17271v1"
+    version_consulted: "arXiv:2608.17271v1"
+    accessed_at: "2026-08-23"
+    repository: "https://github.com/apexin-ai/ASI-Bench/commit/9a86de643331d2b3a3d95744040881a95aa3fdc6"
+    license: "paper: CC BY 4.0; repository: Apache-2.0"
+    source_proposal: "Ground capability claims in explicit task-fit evidence and distinguish method selection from operational guidance."
+    source_evidence: "The paper reports benchmark performance; SSOH has not reproduced the benchmark and treats scores as contextual evidence only."
+    project_adaptation: "Record verified, self-reported, and unknown capabilities; represent guidance conditions; and evaluate exact model-by-harness cells with resource consequences."
+    project_original_synthesis: "Require accepted provenance for capability grounding and exact protocol, trace, condition, and reward joins before descriptive evaluation is retained."
+    adoption_status: adapted
+    reproduction_status: not_reproduced
+    limitations:
+      - benchmark scores are contextual evidence rather than universal capability truth
+      - SSOH does not adopt the paper's ASI framing or infer safe autonomy
+    notes:
+      - no source code was imported or reused
+
+  - id: S33
+    title: "Co-RL: Unsupervised Reasoning Emerges from Diverse Cohort in Multi-agent RL"
+    authors:
+      - "Yunhao Yang"
+      - "Yuexin Bian"
+      - "Yunjie Tian"
+      - "Di Fu"
+      - "Tianjin Huang"
+      - "Yuanyuan Shi"
+      - "Ziang Xiao"
+      - "Nuno Vasconcelos"
+      - "Yijiang Li"
+    year: 2026
+    source_type: paper_and_code_repository
+    canonical_locator: "https://arxiv.org/abs/2608.17253v1"
+    version_consulted: "arXiv:2608.17253v1"
+    accessed_at: "2026-08-23"
+    repository: "https://github.com/DrStranded/Co-RL/commit/ff476f06e42eeca4d5c198b93eadd7547876e5e5"
+    license: "paper: arXiv non-exclusive distribution; repository: Apache-2.0"
+    source_proposal: "Use heterogeneous cohorts, peer interaction, and contribution-aware feedback to study collaborative reasoning."
+    source_evidence: "The paper reports multi-agent reinforcement-learning results; SSOH has not reproduced them and implements no training loop."
+    project_adaptation: "Retain bounded peer contributions, correlated-error diagnostics, behavioral diversity, and diversity-aware evaluation."
+    project_original_synthesis: "Deny peer rewards and cohort agreement any claim, policy, procedure, progress, or promotion authority."
+    adoption_status: adapted
+    reproduction_status: not_reproduced
+    limitations:
+      - peer reward and cohort agreement are not truth or admission authority
+      - no live reinforcement learning, policy update, or training loop is adopted
+    notes:
+      - no source code was imported or reused
+
+  - id: S34
+    title: "DeAR: Decentralized Agentic Reasoning via Capability Grounding and Collaborative Thought Navigation"
+    authors:
+      - "Xing Wei"
+      - "Changmeng Zheng"
+      - "XiaoYong Wei"
+      - "Xiufen Ye"
+      - "Qing Li"
+    year: 2026
+    source_type: paper
+    canonical_locator: "https://arxiv.org/abs/2608.17282v1"
+    version_consulted: "arXiv:2608.17282v1"
+    accessed_at: "2026-08-23"
+    repository: null
+    license: "paper: arXiv non-exclusive distribution; code unavailable until acceptance"
+    source_proposal: "Use task-conditioned capability grounding, peer-to-peer routing, and adaptive local topology for collaborative reasoning."
+    source_evidence: "The paper reports reasoning and question-answering evaluation; its code was unavailable and SSOH has not reproduced the results."
+    project_adaptation: "Represent capability-grounded cohort selection, bounded peer routing, challenges, and topology updates as append-only evidence."
+    project_original_synthesis: "Keep governance centralized in the control plane and forbid hidden reasoning, decentralized admission, and peer-derived authority."
+    adoption_status: inspired
+    reproduction_status: not_reproduced
+    limitations:
+      - unavailable code cannot be inspected or reused
+      - reasoning and question-answering evaluation does not cover scientific governance
+    notes:
+      - code unavailable until acceptance
+      - no source code was imported or reused
+
+  - id: S35
+    title: "LEGO-RL: Harness-Native Reinforcement Learning for Coding Agents"
+    authors:
+      - "Yiming Du"
+      - "Yuxin Jiang"
+      - "Tao Yuan"
+      - "Jianbo Dai"
+      - "Shaowei Wang"
+      - "Jierun Chen"
+      - "Chaofan Tao"
+      - "Xianzhi Yu"
+      - "Lifeng Shang"
+      - "Kam-Fai Wong"
+      - "Xiaohui Li"
+      - "Haoli Bai"
+    year: 2026
+    source_type: paper_and_code_repository
+    canonical_locator: "https://arxiv.org/abs/2608.17393v1"
+    version_consulted: "arXiv:2608.17393v1"
+    accessed_at: "2026-08-23"
+    repository: "https://github.com/LegoX/Lego-RL/commit/58f89aa039373afc962ad836d67eca8436b48af6"
+    license: "paper: CC0 1.0; repository: Apache-2.0"
+    source_proposal: "Represent reusable procedure structure and harness-native execution metadata for coding-agent reinforcement learning."
+    source_evidence: "The paper reports coding-agent training and benchmark results; SSOH has not reproduced those results."
+    project_adaptation: "Retain harness-native trace fidelity, generation-metadata availability, environment identity, reward diagnostics, and reusable procedure structure."
+    project_original_synthesis: "Bind immutable compiled procedures to canonical progress plans and admit matched trace and reward evidence without granting training or promotion authority."
+    adoption_status: adapted
+    reproduction_status: not_reproduced
+    limitations:
+      - coding-agent reinforcement-learning results are not generalized to scientific training
+      - this release implements no live reinforcement learning or online weight update
+    notes:
+      - no source code was imported or reused

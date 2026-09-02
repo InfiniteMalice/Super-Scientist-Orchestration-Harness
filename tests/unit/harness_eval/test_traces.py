@@ -1,0 +1,1275 @@
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from decimal import Decimal
+
+import pytest
+from pydantic import ValidationError
+from pydantic_core import PydanticSerializationError
+
+import super_scientist.domain.harness_eval as harness_eval
+from super_scientist.domain.evidence.models import ArtifactRef
+from super_scientist.domain.harness_eval.guidance import (
+    GuidanceCondition,
+    GuidanceEvaluationProtocol,
+)
+from super_scientist.domain.harness_eval.receipts import (
+    EvidenceReceipt,
+    ResolvedEvidenceInventory,
+    ResolvedEvidenceKind,
+    ResolvedEvidenceRecord,
+)
+from super_scientist.domain.harness_eval.traces import (
+    AvailableValue,
+    CaptureRewardValidityStatus,
+    ContextTransformation,
+    ContextTransformationKind,
+    EnvironmentEvent,
+    EnvironmentEventKind,
+    ExecutionStatus,
+    GenerationMetadata,
+    GenerationStopReason,
+    HarnessExecutionTrace,
+    MetadataAvailability,
+    ObservableArtifactRef,
+    RewardObservation,
+    ToolObservation,
+    ToolObservationStatus,
+    TraceBinding,
+    TraceBindingMismatch,
+    TraceExpectation,
+    TraceExpectationResolutionAttestation,
+    TraceFreshnessStatus,
+    artifact_collection_hash,
+    context_transformation_hash,
+    generation_metadata_hash,
+    reward_observation_hash,
+    trace_binding_hash,
+    trace_expectation_snapshot_hash,
+    trace_freshness,
+    trace_hash,
+)
+from super_scientist.domain.improvement.models import ResourceUsage
+from tests.unit.harness_eval.test_guidance import _protocol as guidance_protocol
+from tests.unit.harness_eval.test_model_harness_matrix import _protocol as matrix_protocol
+
+NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+HASH_A = "a" * 64
+HASH_B = "b" * 64
+HASH_C = "c" * 64
+HASH_D = "d" * 64
+
+
+def test_available_value_truthfully_couples_status_value_and_evidence() -> None:
+    available = AvailableValue[int](
+        status=MetadataAvailability.AVAILABLE,
+        value=0,
+        evidence_id="counter-evidence",
+    )
+    assert available.value == 0
+
+    for payload in (
+        {
+            "status": MetadataAvailability.UNAVAILABLE,
+            "value": 1,
+            "evidence_id": None,
+        },
+        {
+            "status": MetadataAvailability.NOT_APPLICABLE,
+            "value": None,
+            "evidence_id": "fabricated-evidence",
+        },
+        {
+            "status": MetadataAvailability.AVAILABLE,
+            "value": None,
+            "evidence_id": "partial-evidence",
+        },
+    ):
+        with pytest.raises(ValidationError, match="metadata"):
+            AvailableValue[int].model_validate(payload)
+
+
+def test_unavailable_log_probabilities_cannot_carry_values() -> None:
+    with pytest.raises(ValidationError):
+        AvailableValue[tuple[Decimal, ...]](
+            status=MetadataAvailability.UNAVAILABLE,
+            value=(Decimal("0.5"),),
+            evidence_id=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "evidence_id",
+    (
+        "protected://store/answer",
+        "PROTECTED://store/answer",
+        "artifact://store/answer",
+        "ArTiFaCt://store/answer",
+    ),
+)
+def test_trace_identifiers_cannot_encode_reversible_locations(evidence_id: str) -> None:
+    with pytest.raises(ValidationError):
+        AvailableValue[str](
+            status=MetadataAvailability.AVAILABLE,
+            value=HASH_A,
+            evidence_id=evidence_id,
+        )
+
+
+@pytest.mark.parametrize("evidence_id", ("fixture/path", "evidence-Δ"))
+def test_trace_identifiers_retain_opaque_slashes_and_unicode(evidence_id: str) -> None:
+    value = AvailableValue[str](
+        status=MetadataAvailability.AVAILABLE,
+        value=HASH_A,
+        evidence_id=evidence_id,
+    )
+
+    assert value.evidence_id == evidence_id
+
+
+def test_observable_artifact_conversion_discards_reversible_location() -> None:
+    artifact = ArtifactRef(
+        sha256=HASH_A,
+        size_bytes=12,
+        media_type="Application/JSON",
+        relative_path="protected/store/answer.json",
+    )
+
+    observable = ObservableArtifactRef.from_artifact_ref("public-context", artifact)
+
+    assert observable.sha256 == HASH_A
+    assert observable.media_type == "application/json"
+    serialized = observable.model_dump_json()
+    assert "relative_path" not in serialized
+    assert "protected/store" not in serialized
+
+
+def test_context_transformations_require_an_ordered_contiguous_hash_chain() -> None:
+    trace = valid_trace(with_transformations=True)
+    first, second = trace.context_transformations
+
+    assert first.kind is ContextTransformationKind.CONTEXT_COMPACTION
+    assert second.kind is ContextTransformationKind.RESERIALIZATION
+    assert first.output_context_hash == second.input_context_hash
+    assert trace.final_context_hash == second.output_context_hash
+
+    broken = second.model_dump(mode="python") | {"input_context_hash": HASH_D}
+    broken["content_hash"] = context_transformation_hash(broken)
+    payload = trace.model_dump(mode="python") | {
+        "context_transformations": (first, broken),
+    }
+    payload["content_hash"] = trace_hash(payload)
+    with pytest.raises(ValidationError, match="context transformation chain"):
+        HarnessExecutionTrace.model_validate(payload)
+
+
+def test_tool_and_environment_observations_are_typed_hash_only_surfaces() -> None:
+    trace = valid_trace()
+    tool_fields = set(ToolObservation.model_fields)
+    event_fields = set(EnvironmentEvent.model_fields)
+
+    assert not {
+        "command",
+        "arguments",
+        "raw_request",
+        "raw_response",
+        "provider_payload",
+        "protected_answer",
+        "exception_text",
+    } & (tool_fields | event_fields)
+    dumped = trace.model_dump_json()
+    assert "command" not in dumped
+    assert "protected://" not in dumped
+    assert "literal-held-out-answer" not in dumped
+
+
+def test_succeeded_tool_requires_observed_response_evidence() -> None:
+    with pytest.raises(ValidationError, match="successful tool observation"):
+        ToolObservation.build(
+            sequence=0,
+            tool_id="fixture",
+            tool_version="v1",
+            request_hash=HASH_A,
+            response_hash=unavailable(),
+            status=ToolObservationStatus.SUCCEEDED,
+            evidence_id="tool-call-1",
+        )
+
+
+def test_tool_response_hash_evidence_must_match_the_observation() -> None:
+    with pytest.raises(ValidationError, match="response hash evidence"):
+        ToolObservation.build(
+            sequence=0,
+            tool_id="fixture",
+            tool_version="v1",
+            request_hash=HASH_A,
+            response_hash=available(HASH_B, "different-evidence"),
+            status=ToolObservationStatus.SUCCEEDED,
+            evidence_id="tool-call-1",
+        )
+
+
+def test_environment_crash_and_completion_state_cannot_contradict_each_other() -> None:
+    with pytest.raises(ValidationError, match="crash event"):
+        valid_trace(
+            execution_status=ExecutionStatus.COMPLETED,
+            event_kinds=(EnvironmentEventKind.STARTED, EnvironmentEventKind.CRASHED),
+        )
+
+
+def test_environment_history_rejects_repeated_terminal_events() -> None:
+    with pytest.raises(ValidationError, match="exactly one terminal"):
+        valid_trace(
+            event_kinds=(
+                EnvironmentEventKind.STARTED,
+                EnvironmentEventKind.COMPLETED,
+                EnvironmentEventKind.COMPLETED,
+            )
+        )
+
+
+def test_trace_rejects_duplicate_artifact_identifiers_even_with_distinct_hashes() -> None:
+    first = ObservableArtifactRef.build(
+        artifact_id="same-artifact",
+        sha256=HASH_A,
+        size_bytes=1,
+        media_type="application/json",
+    )
+    second = ObservableArtifactRef.build(
+        artifact_id="same-artifact",
+        sha256=HASH_B,
+        size_bytes=2,
+        media_type="application/json",
+    )
+    trace = valid_trace()
+    payload = trace.model_dump(mode="python") | {
+        "output_artifacts": (first, second),
+    }
+
+    with pytest.raises(ValidationError, match="artifact identifiers"):
+        HarnessExecutionTrace.build(
+            **{key: value for key, value in payload.items() if key != "content_hash"}
+        )
+
+
+def test_trace_hash_binds_every_observable_hash_family() -> None:
+    trace = valid_trace()
+    baseline = trace.content_hash
+
+    mutations = (
+        {"tool_observations_hash": HASH_D},
+        {"environment_events_hash": HASH_D},
+        {"output_artifacts_hash": HASH_D},
+        {"resource_usage_hash": HASH_D},
+        {"provenance_hash": HASH_D},
+        {
+            "reward_observation_hash": AvailableValue[str](
+                status=MetadataAvailability.AVAILABLE,
+                value=HASH_D,
+                evidence_id=trace.reward_observation.observation_id,
+            )
+        },
+    )
+    for mutation in mutations:
+        with pytest.raises(ValidationError):
+            HarnessExecutionTrace.model_validate(trace.model_dump(mode="python") | mutation)
+    assert trace.content_hash == baseline
+
+
+def test_direct_parse_rejects_rehashed_contradictory_trace_state() -> None:
+    trace = valid_trace()
+    payload = trace.model_dump(mode="python") | {"final_context_hash": HASH_D}
+    observed = trace.observed_binding.model_dump(mode="python") | {"context_hash": HASH_D}
+    observed["content_hash"] = trace_binding_hash(observed)
+    payload["observed_binding"] = observed
+    payload["content_hash"] = trace_hash(payload)
+
+    with pytest.raises(ValidationError, match="final context hash"):
+        HarnessExecutionTrace.model_validate(payload)
+
+
+def test_trace_freshness_is_exact_hash_identity_not_time() -> None:
+    current = valid_trace()
+    later = valid_trace(observed_at=datetime(2099, 1, 1, tzinfo=UTC))
+    expectation, inventory = trace_expectation_bundle()
+
+    assert (
+        trace_freshness(expectation, current, inventory=inventory).status
+        is TraceFreshnessStatus.CURRENT
+    )
+    assert (
+        trace_freshness(expectation, later, inventory=inventory).status
+        is TraceFreshnessStatus.CURRENT
+    )
+
+    stale = valid_trace(observed_binding_updates={"harness_hash": HASH_D})
+    freshness = trace_freshness(expectation, stale, inventory=inventory)
+    assert freshness.status is TraceFreshnessStatus.STALE
+    assert freshness.mismatches == (TraceBindingMismatch.HARNESS,)
+
+
+def test_freshness_compares_task_model_procedure_environment_context_validator_artifacts() -> None:
+    current = valid_trace()
+    expectation, inventory = trace_expectation_bundle()
+    guidance = current.observed_binding.guidance_protocol
+    assert guidance is not None
+    changed_protocol_values = guidance.model_dump(mode="python")
+    changed_protocol_values.pop("content_hash")
+    changed_protocol_values["task_input_hash"] = HASH_D
+    changed_protocol = GuidanceEvaluationProtocol.build(**changed_protocol_values)
+    stale_task = valid_trace(
+        include_reward=False,
+        observed_binding_updates={
+            "guidance_protocol": changed_protocol,
+            "protocol_hash": changed_protocol.content_hash,
+            "task_input_hash": HASH_D,
+        },
+    )
+    assert (
+        TraceBindingMismatch.TASK
+        in trace_freshness(expectation, stale_task, inventory=inventory).mismatches
+    )
+
+    expected = {
+        "model_hash": TraceBindingMismatch.MODEL,
+        "procedure_hash": TraceBindingMismatch.PROCEDURE,
+        "environment_hash": TraceBindingMismatch.ENVIRONMENT,
+        "context_hash": TraceBindingMismatch.CONTEXT,
+        "validator_hash": TraceBindingMismatch.VALIDATOR,
+        "artifact_hashes": TraceBindingMismatch.ARTIFACTS,
+    }
+    for field, mismatch in expected.items():
+        if field in {"context_hash", "artifact_hashes"}:
+            expectation_values = expectation.model_dump(
+                mode="python",
+                exclude={"content_hash"},
+            )
+            if field == "context_hash":
+                expectation_values["context"] = EvidenceReceipt(
+                    record_id="context-a",
+                    schema_version=1,
+                    content_hash=HASH_D,
+                )
+            else:
+                expectation_values["artifacts"] = (
+                    EvidenceReceipt(
+                        record_id="public-context",
+                        schema_version=1,
+                        content_hash=HASH_D,
+                    ),
+                )
+            expectation_values["resolution"] = TraceExpectationResolutionAttestation.build(
+                attestation_id="expectation-resolution-1",
+                expectation_source=EvidenceReceipt(
+                    record_id="accepted-expectation-1",
+                    schema_version=1,
+                    content_hash=trace_expectation_snapshot_hash(expectation_values),
+                ),
+                resolver=EvidenceReceipt(
+                    record_id="expectation-resolver-v1",
+                    schema_version=1,
+                    content_hash=HASH_B,
+                ),
+                resolved_snapshot_hash=trace_expectation_snapshot_hash(expectation_values),
+                provenance=(
+                    EvidenceReceipt(
+                        record_id="expectation-resolution-evidence-1",
+                        schema_version=1,
+                        content_hash=HASH_C,
+                    ),
+                ),
+            )
+            changed_expectation = TraceExpectation.build(**expectation_values)
+            changed_resolution = changed_expectation.resolution
+            changed_inventory = resolved_evidence_inventory(
+                (
+                    (
+                        changed_resolution.expectation_source,
+                        ResolvedEvidenceKind.EXPECTATION_SOURCE,
+                    ),
+                    (changed_resolution.resolver, ResolvedEvidenceKind.RESOLVER),
+                    *(
+                        (
+                            item,
+                            ResolvedEvidenceKind.PROVENANCE,
+                        )
+                        for item in changed_resolution.provenance
+                    ),
+                ),
+                inventory_id=f"changed-expectation-{field}",
+            )
+            assert (
+                mismatch
+                in trace_freshness(
+                    changed_expectation,
+                    current,
+                    inventory=changed_inventory,
+                ).mismatches
+            )
+            continue
+        value: object = (HASH_D,) if field == "artifact_hashes" else HASH_D
+        stale = valid_trace(observed_binding_updates={field: value})
+        assert mismatch in trace_freshness(expectation, stale, inventory=inventory).mismatches
+
+
+def test_capture_reward_validity_is_diagnostic_and_bound_into_trace() -> None:
+    invalid_at_capture = valid_trace(
+        capture_status=CaptureRewardValidityStatus.INVALID,
+    )
+    valid_at_capture = valid_trace(
+        capture_status=CaptureRewardValidityStatus.VALID,
+    )
+
+    assert invalid_at_capture.capture_reward_validity.value is CaptureRewardValidityStatus.INVALID
+    assert invalid_at_capture.content_hash != valid_at_capture.content_hash
+    assert "reward_assessment" not in HarnessExecutionTrace.model_fields
+
+
+def test_categorical_reward_must_be_bounded_nonblank_metadata() -> None:
+    with pytest.raises(ValidationError, match="categorical reward"):
+        reward_observation(value="   ")
+
+
+def test_generation_metadata_rejects_unbounded_or_synthesized_evidence_shapes() -> None:
+    metadata = generation_metadata()
+    assert metadata.log_probabilities.status is MetadataAvailability.UNAVAILABLE
+    assert metadata.token_ids.status is MetadataAvailability.UNAVAILABLE
+
+    payload = metadata.model_dump(mode="python") | {
+        "provider_payload": {"reasoning": "hidden scratchpad"}
+    }
+    with pytest.raises(ValidationError):
+        GenerationMetadata.model_validate(payload)
+
+
+def test_trace_can_truthfully_record_an_unavailable_reward_observation() -> None:
+    trace = valid_trace(include_reward=False)
+
+    assert trace.reward_observation is None
+    assert trace.reward_observation_hash.status is MetadataAvailability.UNAVAILABLE
+    assert trace.reward_observation_hash.value is None
+    assert trace.reward_observation_hash.evidence_id is None
+
+
+def test_absent_reward_rejects_rehashed_not_applicable_observation_hash() -> None:
+    trace = valid_trace(include_reward=False)
+    payload = trace.model_dump(mode="python") | {
+        "reward_observation_hash": not_applicable(),
+    }
+    payload["content_hash"] = trace_hash(payload)
+
+    with pytest.raises(ValidationError, match="UNAVAILABLE"):
+        HarnessExecutionTrace.model_validate(payload)
+
+
+def test_available_generation_token_count_is_strict_nonnegative_without_token_ids() -> None:
+    metadata = generation_metadata()
+    payload = metadata.model_dump(mode="python") | {
+        "token_count": available(-1, "usage-meter"),
+    }
+    payload["content_hash"] = generation_metadata_hash(payload)
+
+    with pytest.raises(ValidationError, match="non-negative"):
+        GenerationMetadata.model_validate(payload)
+
+
+def test_rehashed_trace_rejects_caller_authored_expected_binding() -> None:
+    trace = valid_trace()
+    trace_payload = {
+        key: value
+        for key, value in trace.model_dump(mode="python").items()
+        if key != "content_hash"
+    } | {"expected_binding": trace.observed_binding}
+    trace_payload["content_hash"] = trace_hash(trace_payload)
+
+    with pytest.raises(ValidationError):
+        HarnessExecutionTrace.model_validate(trace_payload)
+
+
+def test_rehashed_binding_cannot_self_authorize_without_a_task_6_protocol() -> None:
+    trace = valid_trace()
+    payload = trace.observed_binding.model_dump(mode="python") | {
+        "guidance_protocol": None,
+        "model_harness_protocol_receipt": None,
+        "guidance_condition": None,
+        "authorized_artifact_ids": ("rogue-context",),
+        "artifact_ids": ("rogue-context",),
+    }
+    payload["content_hash"] = trace_binding_hash(payload)
+
+    with pytest.raises(ValidationError, match="exactly one Task 6 protocol"):
+        TraceBinding.model_validate(payload)
+
+
+def test_trace_public_api_is_exported_from_harness_eval_package() -> None:
+    assert harness_eval.HarnessExecutionTrace is HarnessExecutionTrace
+    assert harness_eval.AvailableValue is AvailableValue
+    assert harness_eval.trace_freshness is trace_freshness
+
+
+def test_safe_trace_parser_accepts_bounded_json_and_hides_untrusted_failures() -> None:
+    parser = getattr(harness_eval, "parse_untrusted_harness_execution_trace", None)
+    assert callable(parser)
+    trace = valid_trace()
+    payload = json.dumps(trace.model_dump(mode="json"))
+
+    assert parser(payload) == trace
+    assert parser(payload.encode("utf-8")) == trace
+
+    malformed = payload.replace(trace.trace_id, "untrusted-marker")
+    with pytest.raises(ValueError, match="untrusted harness execution trace") as raised:
+        parser(malformed)
+    assert "untrusted-marker" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    ("value", "wire_value", "value_type"),
+    (
+        (Decimal("0.9"), {"kind": "numeric", "value": "0.9"}, Decimal),
+        ("0.9", {"kind": "categorical", "value": "0.9"}, str),
+        ("PASS", {"kind": "categorical", "value": "PASS"}, str),
+    ),
+)
+def test_safe_trace_parser_preserves_the_tagged_reward_value_union(
+    value: Decimal | str,
+    wire_value: dict[str, str],
+    value_type: type[Decimal] | type[str],
+) -> None:
+    parser = getattr(harness_eval, "parse_untrusted_harness_execution_trace", None)
+    assert callable(parser)
+    trace = valid_trace(observation=reward_observation(value=value))
+    payload = trace.model_dump(mode="json")
+    reward = payload["reward_observation"]
+    assert isinstance(reward, dict)
+    assert reward["value"] == wire_value
+
+    parsed = parser(trace.model_dump_json())
+
+    assert parsed == trace
+    assert parsed.content_hash == trace.content_hash
+    assert parsed.reward_observation is not None
+    assert type(parsed.reward_observation.value) is value_type
+    assert parsed.reward_observation.value == value
+
+
+def test_safe_trace_parser_rejects_ambiguous_or_type_tampered_reward_wire_values() -> None:
+    parser = getattr(harness_eval, "parse_untrusted_harness_execution_trace", None)
+    assert callable(parser)
+    trace = valid_trace(observation=reward_observation(value=Decimal("0.9")))
+    type_tampered_payload = trace.model_dump(mode="json")
+    tampered_reward = type_tampered_payload["reward_observation"]
+    assert isinstance(tampered_reward, dict)
+    tampered_reward["value"] = {"kind": "categorical", "value": "0.9"}
+    legacy_payload = trace.model_dump(mode="json")
+    legacy_reward = legacy_payload["reward_observation"]
+    assert isinstance(legacy_reward, dict)
+    legacy_reward["value"] = "0.9"
+
+    for raw_payload in (type_tampered_payload, legacy_payload):
+        with pytest.raises(ValueError, match="untrusted harness execution trace") as raised:
+            parser(json.dumps(raw_payload))
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
+
+@pytest.mark.parametrize("value", (Decimal("0.9"), "PASS", "0.9", None))
+def test_reward_observation_hash_is_identical_for_model_and_python_mapping(
+    value: Decimal | str | None,
+) -> None:
+    observation = reward_observation(value=value)
+    python_payload = observation.model_dump(mode="python", exclude={"content_hash"})
+    tagged_payload = observation.model_dump(mode="json", exclude={"content_hash"})
+
+    assert reward_observation_hash(observation) == observation.content_hash
+    assert reward_observation_hash(python_payload) == observation.content_hash
+    assert reward_observation_hash(tagged_payload) == observation.content_hash
+
+
+@pytest.mark.parametrize("value", (Decimal("0.9"), "PASS", "0.9", None))
+def test_trace_hash_is_identical_for_model_and_nested_python_mapping(
+    value: Decimal | str | None,
+) -> None:
+    trace = valid_trace(observation=reward_observation(value=value))
+    python_payload = trace.model_dump(mode="python", exclude={"content_hash"})
+
+    assert trace_hash(trace) == trace.content_hash
+    assert trace_hash(python_payload) == trace.content_hash
+
+
+def test_hash_mapping_rejects_malformed_tagged_reward_values() -> None:
+    observation = reward_observation(value=Decimal("0.9"))
+    observation_payload = observation.model_dump(mode="python", exclude={"content_hash"})
+    observation_payload["value"] = {"kind": "numeric", "value": 0.9}
+    trace = valid_trace(observation=observation)
+    trace_payload = trace.model_dump(mode="python", exclude={"content_hash"})
+    nested_reward = trace_payload["reward_observation"]
+    assert isinstance(nested_reward, dict)
+    nested_reward["value"] = {"kind": "categorical", "value": "0.9", "extra": "tampered"}
+
+    with pytest.raises(ValueError, match="reward trace wire value tag and payload must match"):
+        reward_observation_hash(observation_payload)
+    with pytest.raises(ValueError, match="explicit tagged object"):
+        trace_hash(trace_payload)
+
+
+def test_safe_trace_parser_rejects_oversized_and_subclass_payloads_before_conversion() -> None:
+    parser = getattr(harness_eval, "parse_untrusted_harness_execution_trace", None)
+    assert callable(parser)
+    payload = json.dumps(valid_trace().model_dump(mode="json"))
+
+    class MarkerString(str):
+        def encode(self, *args: object, **kwargs: object) -> bytes:
+            raise RuntimeError("string-subclass-marker")
+
+    class MarkerBytes(bytes):
+        pass
+
+    class MarkerBytearray(bytearray):
+        pass
+
+    for untrusted_payload in (
+        "x" * 300_000,
+        MarkerString(payload),
+        MarkerBytes(payload.encode("utf-8")),
+        MarkerBytearray(payload.encode("utf-8")),
+    ):
+        with pytest.raises(ValueError, match="untrusted harness execution trace") as raised:
+            parser(untrusted_payload)
+        assert "marker" not in str(raised.value)
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
+
+def test_safe_trace_parser_rejects_quoted_strict_scalars_without_changing_hashes() -> None:
+    parser = getattr(harness_eval, "parse_untrusted_harness_execution_trace", None)
+    assert callable(parser)
+    trace = valid_trace()
+    mutations = (
+        ("resource_usage", "tokens", "20"),
+        ("resource_usage", "cost_usd", "0.2"),
+        ("generation_metadata", "token_count", "17"),
+        ("artifact_integrity", "value", "true"),
+    )
+
+    for parent_field, field_name, quoted_value in mutations:
+        payload = trace.model_dump(mode="json")
+        container = payload[parent_field]
+        assert isinstance(container, dict)
+        if parent_field == "generation_metadata":
+            token_count = container[field_name]
+            assert isinstance(token_count, dict)
+            token_count["value"] = quoted_value
+        else:
+            container[field_name] = quoted_value
+
+        with pytest.raises(ValueError, match="untrusted harness execution trace") as raised:
+            parser(json.dumps(payload))
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
+
+def test_trace_binding_consumes_exact_guidance_and_matrix_protocol_contracts() -> None:
+    guidance = guidance_protocol()
+    guidance_artifact = ObservableArtifactRef.build(
+        artifact_id="artifact-a",
+        sha256=HASH_A,
+        size_bytes=1,
+        media_type="application/json",
+    )
+    guidance_binding = TraceBinding.from_guidance_protocol(
+        guidance,
+        condition=GuidanceCondition.FULL_PROCEDURE_GUIDANCE,
+        artifacts=(guidance_artifact,),
+        model_hash=HASH_B,
+        harness_hash=HASH_C,
+        procedure_id="procedure-1",
+        procedure_version="v1",
+        procedure_hash=HASH_A,
+        environment_id="environment",
+        environment_version="v1",
+        environment_hash=HASH_B,
+        context_id="context-a",
+        context_hash=HASH_C,
+        output_schema_id="output-schema-a",
+        validator_hash=HASH_C,
+        checker_hash=HASH_D,
+    )
+    assert guidance_binding.protocol_hash == guidance.content_hash
+    assert guidance_binding.task_id == guidance.task_id
+    assert guidance_binding.checker_id == guidance.checker_id
+    assert guidance_binding.guidance_condition is GuidanceCondition.FULL_PROCEDURE_GUIDANCE
+    assert guidance_binding.artifact_ids == guidance.artifact_ids
+    assert guidance_binding.artifact_hashes == (HASH_A,)
+    rehashed = guidance_binding.model_dump(mode="python") | {
+        "authorized_artifact_ids": ("rogue-artifact",),
+    }
+    rehashed["content_hash"] = trace_binding_hash(rehashed)
+    with pytest.raises(ValidationError, match="authorized guidance artifacts"):
+        TraceBinding.model_validate(rehashed)
+
+    distractor = ObservableArtifactRef.build(
+        artifact_id="distractor-a",
+        sha256=HASH_B,
+        size_bytes=1,
+        media_type="application/json",
+    )
+    distractor_binding = TraceBinding.from_guidance_protocol(
+        guidance,
+        condition=GuidanceCondition.OBJECTIVE_DATA_WITH_DISTRACTORS,
+        artifacts=(guidance_artifact, distractor),
+        model_hash=HASH_B,
+        harness_hash=HASH_C,
+        procedure_id="procedure-1",
+        procedure_version="v1",
+        procedure_hash=HASH_A,
+        environment_id="environment",
+        environment_version="v1",
+        environment_hash=HASH_B,
+        context_id="context-a",
+        context_hash=HASH_C,
+        output_schema_id="output-schema-a",
+        validator_hash=HASH_C,
+        checker_hash=HASH_D,
+    )
+    assert distractor_binding.artifact_ids == ("artifact-a", "distractor-a")
+
+    rogue = ObservableArtifactRef.build(
+        artifact_id="rogue-artifact",
+        sha256=HASH_A,
+        size_bytes=1,
+        media_type="application/json",
+    )
+    with pytest.raises(ValueError, match="authorized guidance artifacts"):
+        TraceBinding.from_guidance_protocol(
+            guidance,
+            condition=GuidanceCondition.FULL_PROCEDURE_GUIDANCE,
+            artifacts=(rogue,),
+            model_hash=HASH_B,
+            harness_hash=HASH_C,
+            procedure_id="procedure-1",
+            procedure_version="v1",
+            procedure_hash=HASH_A,
+            environment_id="environment",
+            environment_version="v1",
+            environment_hash=HASH_B,
+            context_id="context-a",
+            context_hash=HASH_C,
+            output_schema_id="output-schema-a",
+            validator_hash=HASH_C,
+            checker_hash=HASH_D,
+        )
+
+    matrix = matrix_protocol()
+    coordinate = matrix.expected_grid[0]
+    matrix_artifact = ObservableArtifactRef.build(
+        artifact_id="artifact-a",
+        sha256=HASH_A,
+        size_bytes=1,
+        media_type="application/json",
+    )
+    matrix_binding = TraceBinding.from_model_harness_protocol(
+        matrix,
+        coordinate,
+        artifacts=(matrix_artifact,),
+        model_hash=HASH_B,
+        harness_hash=HASH_C,
+        procedure_id="procedure-1",
+        procedure_version="v1",
+        procedure_hash=HASH_A,
+        environment_id="environment",
+        environment_version="v1",
+        environment_hash=HASH_B,
+        context_id="context-a",
+        context_hash=HASH_C,
+        output_schema_id="output-schema-a",
+        validator_hash=HASH_C,
+        checker_hash=HASH_D,
+    )
+    assert matrix_binding.protocol_hash == matrix.content_hash
+    assert matrix_binding.task_id == matrix.task_set_id
+    assert matrix_binding.model == coordinate.model
+    assert matrix_binding.partition == coordinate.partition
+    assert matrix_binding.artifact_ids == matrix.artifact_ids
+
+    with pytest.raises(ValueError, match="authorized matrix artifacts"):
+        TraceBinding.from_model_harness_protocol(
+            matrix,
+            coordinate,
+            artifacts=(
+                ObservableArtifactRef.build(
+                    artifact_id="rogue-artifact",
+                    sha256=HASH_A,
+                    size_bytes=1,
+                    media_type="application/json",
+                ),
+            ),
+            model_hash=HASH_B,
+            harness_hash=HASH_C,
+            procedure_id="procedure-1",
+            procedure_version="v1",
+            procedure_hash=HASH_A,
+            environment_id="environment",
+            environment_version="v1",
+            environment_hash=HASH_B,
+            context_id="context-a",
+            context_hash=HASH_C,
+            output_schema_id="output-schema-a",
+            validator_hash=HASH_C,
+            checker_hash=HASH_D,
+        )
+
+
+def valid_trace(
+    *,
+    execution_status: ExecutionStatus = ExecutionStatus.COMPLETED,
+    with_transformations: bool = False,
+    observed_binding_updates: dict[str, object] | None = None,
+    artifact_integrity: AvailableValue[bool] | None = None,
+    protected_boundary_crossed: AvailableValue[bool] | None = None,
+    evaluator_succeeded: AvailableValue[bool] | None = None,
+    capture_status: CaptureRewardValidityStatus = CaptureRewardValidityStatus.INCONCLUSIVE,
+    tool_status: ToolObservationStatus = ToolObservationStatus.SUCCEEDED,
+    event_kinds: tuple[EnvironmentEventKind, ...] | None = None,
+    observation: RewardObservation | None = None,
+    observed_at: datetime = NOW,
+    include_reward: bool = True,
+    trace_id: str = "trace-1",
+    observed_binding: TraceBinding | None = None,
+    context_artifacts_override: tuple[ObservableArtifactRef, ...] | None = None,
+) -> HarnessExecutionTrace:
+    context_artifacts = context_artifacts_override or (
+        ObservableArtifactRef.build(
+            artifact_id="public-context",
+            sha256=HASH_A,
+            size_bytes=12,
+            media_type="application/json",
+        ),
+    )
+    initial_context_hash = artifact_collection_hash(context_artifacts)
+    transformations: tuple[ContextTransformation, ...] = ()
+    final_context_hash = initial_context_hash
+    if with_transformations:
+        transformations = (
+            ContextTransformation.build(
+                sequence=0,
+                kind=ContextTransformationKind.CONTEXT_COMPACTION,
+                input_context_hash=initial_context_hash,
+                output_context_hash=HASH_B,
+                evidence_id="compaction-evidence",
+            ),
+            ContextTransformation.build(
+                sequence=1,
+                kind=ContextTransformationKind.RESERIALIZATION,
+                input_context_hash=HASH_B,
+                output_context_hash=HASH_C,
+                evidence_id="reserialization-evidence",
+            ),
+        )
+        final_context_hash = HASH_C
+    base_binding = observed_binding or binding(
+        context_hash=final_context_hash,
+        artifact_hashes=tuple(item.sha256 for item in context_artifacts),
+        artifact_ids=tuple(item.artifact_id for item in context_artifacts),
+    )
+    observed_values = base_binding.model_dump(mode="python")
+    observed_values.pop("content_hash")
+    if observed_binding_updates:
+        observed_values.update(observed_binding_updates)
+    observed_binding = TraceBinding.build(**observed_values)
+    tool_observations = (
+        ToolObservation.build(
+            sequence=0,
+            tool_id="fixture",
+            tool_version="v1",
+            request_hash=HASH_A,
+            response_hash=(
+                available(HASH_B, "tool-call-1")
+                if tool_status is ToolObservationStatus.SUCCEEDED
+                else unavailable()
+            ),
+            status=tool_status,
+            evidence_id="tool-call-1",
+        ),
+    )
+    if event_kinds is None:
+        event_kinds = {
+            ExecutionStatus.COMPLETED: (
+                EnvironmentEventKind.STARTED,
+                EnvironmentEventKind.COMPLETED,
+            ),
+            ExecutionStatus.INCOMPLETE: (EnvironmentEventKind.STARTED,),
+            ExecutionStatus.CRASHED: (
+                EnvironmentEventKind.STARTED,
+                EnvironmentEventKind.CRASHED,
+            ),
+        }[execution_status]
+    events = tuple(
+        EnvironmentEvent.build(
+            sequence=index,
+            environment_id=observed_binding.environment_id,
+            environment_version=observed_binding.environment_version,
+            kind=kind,
+            evidence_id=f"environment-event-{index}",
+        )
+        for index, kind in enumerate(event_kinds)
+    )
+    output_artifacts = (
+        ObservableArtifactRef.build(
+            artifact_id="candidate-output",
+            sha256=HASH_B,
+            size_bytes=8,
+            media_type="application/json",
+        ),
+    )
+    reward = reward_observation() if observation is None else observation
+    embedded_reward = reward if include_reward else None
+    embedded_reward_hash = (
+        available(reward.content_hash, reward.observation_id) if include_reward else unavailable()
+    )
+    capture_validity = (
+        available(capture_status, "capture-validity-evidence")
+        if include_reward
+        else not_applicable()
+    )
+    return HarnessExecutionTrace.build(
+        trace_id=trace_id,
+        observed_binding=observed_binding,
+        context_artifacts=context_artifacts,
+        initial_context_hash=initial_context_hash,
+        context_transformations=transformations,
+        final_context_hash=final_context_hash,
+        tool_observations=tool_observations,
+        environment_events=events,
+        output_artifacts=output_artifacts,
+        output_hash=artifact_collection_hash(output_artifacts),
+        verifier_result_id="verifier-result-1",
+        verifier_result_hash=HASH_C,
+        checker_result_id="checker-result-1",
+        checker_result_hash=HASH_C,
+        reward_observation=embedded_reward,
+        reward_observation_hash=embedded_reward_hash,
+        capture_reward_validity=capture_validity,
+        generation_metadata=generation_metadata(),
+        resource_usage=resource_usage(),
+        execution_status=execution_status,
+        artifact_integrity=artifact_integrity or available(True, "artifact-integrity"),
+        protected_boundary_crossed=(
+            protected_boundary_crossed or available(False, "boundary-monitor")
+        ),
+        evaluator_succeeded=evaluator_succeeded or available(True, "evaluator-run"),
+        provenance_evidence_ids=("fixture-run", "protocol-receipt"),
+        observed_at=observed_at,
+    )
+
+
+def binding(
+    *,
+    context_hash: str,
+    artifact_hashes: tuple[str, ...],
+    artifact_ids: tuple[str, ...] = ("public-context",),
+) -> TraceBinding:
+    protocol = guidance_protocol(
+        task_id="task-1",
+        task_input_hash=HASH_A,
+        output_schema_hash=HASH_D,
+        model_id="model-1",
+        model_version="v1",
+        harness_id="harness-1",
+        harness_version="v1",
+        verifier_id="validator",
+        verifier_version="v1",
+        checker_id="checker",
+        checker_version="v1",
+        artifact_ids=artifact_ids,
+        declared_distractor_artifact_ids=(),
+    )
+    artifacts = tuple(
+        ObservableArtifactRef.build(
+            artifact_id=artifact_id,
+            sha256=artifact_hash,
+            size_bytes=0,
+            media_type="application/octet-stream",
+        )
+        for artifact_id, artifact_hash in zip(
+            artifact_ids,
+            artifact_hashes,
+            strict=True,
+        )
+    )
+    return TraceBinding.from_guidance_protocol(
+        protocol,
+        condition=GuidanceCondition.FULL_PROCEDURE_GUIDANCE,
+        artifacts=artifacts,
+        model_hash=HASH_B,
+        harness_hash=HASH_C,
+        procedure_id="procedure-1",
+        procedure_version="v1",
+        procedure_hash=HASH_A,
+        environment_id="environment",
+        environment_version="v1",
+        environment_hash=HASH_B,
+        context_id="context-a",
+        context_hash=context_hash,
+        output_schema_id="output-schema-a",
+        validator_hash=HASH_C,
+        checker_hash=HASH_D,
+    )
+
+
+def trace_expectation() -> TraceExpectation:
+    expectation, _ = trace_expectation_bundle()
+    return expectation
+
+
+def trace_expectation_bundle() -> tuple[TraceExpectation, ResolvedEvidenceInventory]:
+    context_artifacts = (
+        ObservableArtifactRef.build(
+            artifact_id="public-context",
+            sha256=HASH_A,
+            size_bytes=12,
+            media_type="application/json",
+        ),
+    )
+    expected_binding = binding(
+        context_hash=artifact_collection_hash(context_artifacts),
+        artifact_hashes=(HASH_A,),
+    )
+    return attested_trace_expectation_bundle(expected_binding)
+
+
+def attested_trace_expectation(
+    expected_binding: TraceBinding,
+    *,
+    suffix: str = "1",
+) -> TraceExpectation:
+    expectation, _ = attested_trace_expectation_bundle(expected_binding, suffix=suffix)
+    return expectation
+
+
+def resolved_evidence_inventory(
+    entries: tuple[tuple[EvidenceReceipt, ResolvedEvidenceKind], ...],
+    *,
+    inventory_id: str = "resolved-evidence-inventory-1",
+) -> ResolvedEvidenceInventory:
+    """Build a handler fixture only from explicitly declared accepted records."""
+    unique = {(receipt.record_id, kind): (receipt, kind) for receipt, kind in entries}
+    records = tuple(
+        sorted(
+            (
+                ResolvedEvidenceRecord.build(
+                    schema_version=1,
+                    receipt=receipt,
+                    kind=kind,
+                    snapshot_hash=receipt.content_hash,
+                )
+                for receipt, kind in unique.values()
+            ),
+            key=lambda item: (
+                item.receipt.record_id,
+                item.receipt.schema_version,
+                item.receipt.content_hash,
+                item.kind.value,
+            ),
+        )
+    )
+    return ResolvedEvidenceInventory.build(
+        schema_version=1,
+        inventory_id=inventory_id,
+        resolved_by=EvidenceReceipt(
+            record_id="committed-evidence-resolver",
+            schema_version=1,
+            content_hash=HASH_D,
+        ),
+        records=records,
+    )
+
+
+def attested_trace_expectation_bundle(
+    expected_binding: TraceBinding,
+    *,
+    suffix: str = "1",
+) -> tuple[TraceExpectation, ResolvedEvidenceInventory]:
+    values: dict[str, object] = {
+        "protocol": EvidenceReceipt(
+            record_id=expected_binding.protocol_id,
+            schema_version=1,
+            content_hash=expected_binding.protocol_hash,
+        ),
+        "task": EvidenceReceipt(
+            record_id=expected_binding.task_id,
+            schema_version=1,
+            content_hash=expected_binding.task_input_hash,
+        ),
+        "model": EvidenceReceipt(
+            record_id=expected_binding.model.model_id,
+            schema_version=1,
+            content_hash=expected_binding.model_hash,
+        ),
+        "harness": EvidenceReceipt(
+            record_id=expected_binding.harness.harness_id,
+            schema_version=1,
+            content_hash=expected_binding.harness_hash,
+        ),
+        "procedure": EvidenceReceipt(
+            record_id=expected_binding.procedure_id,
+            schema_version=1,
+            content_hash=expected_binding.procedure_hash,
+        ),
+        "environment": EvidenceReceipt(
+            record_id=expected_binding.environment_id,
+            schema_version=1,
+            content_hash=expected_binding.environment_hash,
+        ),
+        "context": EvidenceReceipt(
+            record_id=expected_binding.context_id,
+            schema_version=1,
+            content_hash=expected_binding.context_hash,
+        ),
+        "validator": EvidenceReceipt(
+            record_id=expected_binding.validator_id,
+            schema_version=1,
+            content_hash=expected_binding.validator_hash,
+        ),
+        "checker": EvidenceReceipt(
+            record_id=expected_binding.checker_id,
+            schema_version=1,
+            content_hash=expected_binding.checker_hash,
+        ),
+        "artifacts": tuple(
+            EvidenceReceipt(
+                record_id=artifact_id,
+                schema_version=1,
+                content_hash=artifact_hash,
+            )
+            for artifact_id, artifact_hash in zip(
+                expected_binding.artifact_ids,
+                expected_binding.artifact_hashes,
+                strict=True,
+            )
+        ),
+        "output_schema": EvidenceReceipt(
+            record_id=expected_binding.output_schema_id,
+            schema_version=1,
+            content_hash=expected_binding.output_schema_hash,
+        ),
+    }
+    resolution = TraceExpectationResolutionAttestation.build(
+        attestation_id=f"expectation-resolution-{suffix}",
+        expectation_source=EvidenceReceipt(
+            record_id=f"accepted-expectation-{suffix}",
+            schema_version=1,
+            content_hash=trace_expectation_snapshot_hash(values),
+        ),
+        resolver=EvidenceReceipt(
+            record_id="expectation-resolver-v1",
+            schema_version=1,
+            content_hash=HASH_B,
+        ),
+        resolved_snapshot_hash=trace_expectation_snapshot_hash(values),
+        provenance=(
+            EvidenceReceipt(
+                record_id=f"expectation-resolution-evidence-{suffix}",
+                schema_version=1,
+                content_hash=HASH_C,
+            ),
+        ),
+    )
+    values["resolution"] = resolution
+    expectation = TraceExpectation.build(**values)
+    inventory = resolved_evidence_inventory(
+        (
+            (resolution.expectation_source, ResolvedEvidenceKind.EXPECTATION_SOURCE),
+            (resolution.resolver, ResolvedEvidenceKind.RESOLVER),
+            *((item, ResolvedEvidenceKind.PROVENANCE) for item in resolution.provenance),
+        ),
+        inventory_id=f"expectation-inventory-{suffix}",
+    )
+    return expectation, inventory
+
+
+def reward_observation(
+    *,
+    value: Decimal | str | None = Decimal("0.9"),
+    verifier_id: str = "validator",
+    verifier_version: str = "v1",
+    checker_id: str = "checker",
+    checker_version: str = "v1",
+    evaluator_id: str = "evaluator",
+    evaluator_version: str = "v1",
+) -> RewardObservation:
+    return RewardObservation.build(
+        observation_id="reward-observation-1",
+        task_id="task-1",
+        task_input_hash=HASH_A,
+        verifier_id=verifier_id,
+        verifier_version=verifier_version,
+        checker_id=checker_id,
+        checker_version=checker_version,
+        checker_result_id="checker-result-1",
+        checker_result_hash=HASH_C,
+        evaluator_id=evaluator_id,
+        evaluator_version=evaluator_version,
+        value=value,
+        evidence_id="reward-evidence" if value is not None else None,
+        observed_at=NOW,
+    )
+
+
+@pytest.mark.parametrize("invalid_value", (1, object()))
+def test_reward_observation_wire_serializer_rejects_nonvalidating_value(
+    invalid_value: object,
+) -> None:
+    valid = reward_observation()
+    forged = RewardObservation.model_construct(**(valid.__dict__ | {"value": invalid_value}))
+
+    with pytest.raises(PydanticSerializationError, match="reward observation value"):
+        forged.model_dump_json(warnings=False)
+
+
+def generation_metadata() -> GenerationMetadata:
+    return GenerationMetadata.build(
+        token_ids=unavailable(),
+        token_count=available(17, "usage-meter"),
+        log_probabilities=unavailable(),
+        sampling_parameters_hash=available(HASH_A, "request-envelope"),
+        stop_reason=available(GenerationStopReason.COMPLETED, "response-envelope"),
+        provider_request_id=unavailable(),
+    )
+
+
+def resource_usage() -> ResourceUsage:
+    return ResourceUsage(
+        cost_usd=0.1,
+        compute_units=1.0,
+        tokens=17,
+        elapsed_seconds=0.5,
+        tool_calls=1,
+        human_interventions=0,
+    )
+
+
+def available[ValueT](value: ValueT, evidence_id: str) -> AvailableValue[ValueT]:
+    return AvailableValue[ValueT](
+        status=MetadataAvailability.AVAILABLE,
+        value=value,
+        evidence_id=evidence_id,
+    )
+
+
+def unavailable[ValueT]() -> AvailableValue[ValueT]:
+    return AvailableValue[ValueT](
+        status=MetadataAvailability.UNAVAILABLE,
+        value=None,
+        evidence_id=None,
+    )
+
+
+def not_applicable[ValueT]() -> AvailableValue[ValueT]:
+    return AvailableValue[ValueT](
+        status=MetadataAvailability.NOT_APPLICABLE,
+        value=None,
+        evidence_id=None,
+    )

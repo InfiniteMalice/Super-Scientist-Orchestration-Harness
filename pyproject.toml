@@ -1,10 +1,12 @@
 [build-system]
-requires = ["hatchling>=1.27"]
+# The fixed Twine 6.2 gate accepts Hatchling 1.31's Core Metadata 2.4 but rejects
+# Hatchling 1.32's default Core Metadata 2.5.
+requires = ["hatchling>=1.27,<1.32"]
 build-backend = "hatchling.build"
 
 [project]
 name = "super-scientist-orchestration-harness"
-version = "0.2.0"
+version = "0.3.0"
 description = "Transactional orchestration foundation for auditable scientific research"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -37,7 +39,10 @@ scientist-harness = "super_scientist.cli.bootstrap:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/super_scientist"]
-force-include = { "alembic" = "super_scientist/_migrations" }
+
+[tool.hatch.build.targets.wheel.force-include]
+alembic = "super_scientist/_migrations"
+"examples/governed_cognitive_procedure_vertical_slice.py" = "super_scientist_examples/governed_cognitive_procedure_vertical_slice.py"
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers --strict-config"

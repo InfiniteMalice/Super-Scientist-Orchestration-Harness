@@ -2,11 +2,11 @@
 
 ## Scope And Security Claims
 
-This model covers the local 0.2.0 runtime, SQLite workspace, content-addressed artifact
-store, deterministic simulators, governed proposals, audit chain, and workspace
-exchange. It assumes the Python interpreter, installed dependencies, operating system,
-process, database connection, and private local storage namespace are trusted while an
-operation runs.
+This model covers the local 0.3.0 runtime, SQLite workspace, content-addressed artifact
+store, deterministic simulators, governed proposals, cognitive/procedure/evaluation
+records, audit chain, and workspace exchange. It assumes the Python interpreter,
+installed dependencies, operating system, process, database connection, and private
+local storage namespace are trusted while an operation runs.
 
 The harness enforces typed authority and detects many integrity violations. It does not
 provide a hardened multi-user service, operating-system sandbox, malware scanner,
@@ -21,6 +21,8 @@ truth oracle, or proof of safe recursive self-improvement.
 - authoritative evidence metadata and content-addressed artifact bytes;
 - claim, research, progress, trail, rule, primitive, hypothesis, evaluator, and harness
   histories plus their rebuildable heads;
+- capability, cohort, collaboration, topology, procedure, guidance, model-by-harness,
+  trace, reward, and compilation/progress-binding histories;
 - protected evaluation separation, budgets, rollback lineage, and human authority; and
 - canonical workspace bundles and out-of-band artifact transfers.
 
@@ -31,6 +33,11 @@ simulation submissions, evaluator reports, manifests, benchmark data, and import
 workspace bundles are untrusted. A proposer may try to approve itself, smuggle
 executable configuration, alter a policy, expose a protected answer, forge provenance,
 reuse an idempotency key, omit failures, or turn a local gain into general authority.
+Peers may collude, route in loops, impersonate capability evidence, or manipulate local
+topology. Procedure authors may anchor a method, inject inputs, recurse, request
+unauthorized tools, or claim impossible governance authority. Trace and reward authors
+may fabricate token metadata, context hashes, environment state, verifier success,
+resource use, or a favorable evaluation partition.
 
 An ordinary local caller may control explicit input files and workspace paths but is not
 trusted to construct valid internal records. An attacker with administrator,
@@ -50,6 +57,12 @@ they do not prevent a fully privileged attacker from replacing code and state to
 | Database or projection tampering | Append-only triggers, audit hashes, transaction/audit reconciliation, deterministic replay, head/history checks | Privileged code-and-state replacement is outside scope |
 | Artifact traversal or replacement | Digest-derived paths, containment, regular-file and reparse checks, size/hash verification | Hostile concurrent namespace mutation remains a local-filesystem risk |
 | Arbitrary code execution from records | No record-supplied import, command, source, path, network, `eval`, or `exec`; fixed bounded simulator registry | The development toolchain and Python dependencies execute trusted code |
+| Peer consensus becomes authority | Peer records are evidence only; claim, policy, harness, and progress handlers require their own exact authoritative evidence | External identity administration may fail to detect real-world collusion |
+| Diversity is mistaken for independence | Operational diversity and actor independence are separately computed; same-model prompt variants never satisfy independent review | Declared provider/model/adapter identity can be false outside the local trust boundary |
+| Procedure escalation or input injection | Exact current source receipts, fixed catalogs, bounded DAG validation, forbidden-operation checks, and atomic progress binding | The fixed validator and catalog definitions may still be scientifically inadequate |
+| Trace mutation between admission stages | The coordinator uses one exact owned trace proposal snapshot for context, decision, projection, transaction, and audit | A compromised interpreter can replace code and state together |
+| Fabricated or missing generation metadata | Availability/value pairing, exact evidence receipts, content hashes, budgets, environment events, and protocol/cell matching | A provider can lie before evidence enters the trusted boundary |
+| Reward or verifier gaming | Exact trace binding, invalidating finding taxonomy, verifier/environment/tool checks, and no reward-derived promotion authority | A declared checker may be an inadequate scientific proxy |
 | Proxy gaming or false finish | Separate provisional/official progress, final-validator authority, full trajectory and failure retention, protected transfer | Declared metrics or holdouts may still be scientifically inadequate |
 | Benchmark overclaim | Matched budgets, partition separation, explicit confounds and transfer status, `BENCHMARK_SPECIFIC` rejection | One held-out fixture cannot demonstrate general improvement |
 | Workspace-bundle substitution | Strict canonical bundle and record hashes, policy/hash verification, artifact rehash, exact re-export | No signature or origin authentication is provided |
@@ -88,7 +101,17 @@ inputs. Evidence-trail coherence is not proof, model confidence is not independe
 evidence, a learned judge is not formal verification, and a deterministic fake is not
 an empirical reproduction. The project does not claim solved hallucination, open-ended
 autonomy, general improvement from local benchmarks, reproduction of S21-S29, or
-compatibility with S29.
+compatibility with S29. It also does not claim reproduction of S30-S35, decentralized
+governance, live peer agents, live reinforcement learning, provider-native trace truth,
+or scientific validity from a high reward.
+
+When an operator supplies untrusted cognitive, procedure, trace, or reward data, the
+hazard is unauthorized state or false evaluation evidence. The consequence can be a
+misleading local record even when its syntax is valid. The operator must retain source
+artifacts, independent identities, checker definitions, budgets, environment evidence,
+and failure observations, then run `scientist-harness audit verify --root <workspace>`
+before relying on the workspace. Verification detects implemented integrity violations;
+it does not prove the external statements true.
 
 Report vulnerabilities as described in `SECURITY.md`. Operational reproduction steps
 and evidence-retention guidance are in `REPRODUCIBILITY.md`.

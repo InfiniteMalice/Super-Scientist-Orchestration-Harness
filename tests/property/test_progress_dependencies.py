@@ -6,6 +6,14 @@ from decimal import Decimal
 import pytest
 
 from super_scientist.domain.identity import ActorIdentity, ActorKind
+from super_scientist.domain.procedures import (
+    ExecutableProcedure,
+    ProcedureCompilationResult,
+    ProcedureStep,
+    ProcedureValidationReport,
+    ProcedureValidationStatus,
+    procedure_to_progress_plan,
+)
 from super_scientist.domain.progress.calculations import calculate_progress
 from super_scientist.domain.progress.models import ProgressPlan, ProgressSubtask
 
@@ -92,3 +100,43 @@ def test_calculation_rejects_weights_that_do_not_reconcile_to_one() -> None:
 
     with pytest.raises(ValueError, match="weight"):
         calculate_progress(plan, ())
+
+
+@pytest.mark.property
+def test_forged_progress_result_cannot_bypass_compiler_revalidation() -> None:
+    validator = ActorIdentity(actor_id="validator", kind=ActorKind.HUMAN, created_at=NOW)
+
+    def compiled_step(step_id: str, dependency_id: str, order: int) -> ProcedureStep:
+        return ProcedureStep.model_construct(
+            step_id=step_id,
+            order=order,
+            objective=f"Complete {step_id}",
+            dependency_ids=(dependency_id,),
+            completion_criteria=("Criterion checked",),
+            validator=validator,
+            validator_version="validator-v1",
+            progress_weight=Decimal("0.50"),
+            evidence_requirements=("retained-evidence",),
+        )
+
+    procedure = ExecutableProcedure.model_construct(
+        steps=(compiled_step("first", "second", 1), compiled_step("second", "first", 2))
+    )
+    result = ProcedureCompilationResult.model_construct(
+        procedure=procedure,
+        report=ProcedureValidationReport(
+            status=ProcedureValidationStatus.VALID,
+            findings=(),
+            checks_run=tuple(range(1, 17)),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="deterministic compiler revalidation"):
+        procedure_to_progress_plan(
+            result,
+            run_id="run-1",
+            plan_version_id="plan-1",
+            version=1,
+            created_at=NOW,
+            governing_policy_hash="a" * 64,
+        )

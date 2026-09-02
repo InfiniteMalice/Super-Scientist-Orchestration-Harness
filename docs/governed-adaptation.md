@@ -92,9 +92,34 @@ active-policy pointer, while their audit payload must exactly bind prior, candid
 rollback hashes. The replay boundary is a fixed typed read-only storage snapshot and does
 not broaden any proposal handler's repository authority.
 
+## Cognitive-orchestration interlock
+
+The 0.3.0 cognitive plane may retain capability profiles, cohort plans, collaboration
+events, compiled procedures, guidance cells, model-by-harness evidence, traces, rewards,
+and diagnostics. None of those records is an adaptation decision. When a cognitive
+proposal is accepted, only its fixed append-only record family changes; claim, active
+policy, evaluator, harness-campaign, and progress heads remain unchanged unless a
+separate authorized handler performs that exact transition.
+
+A valid compiled procedure may bind one canonical `ProgressPlan`, but the binding
+handler delegates plan admission to the existing progress handler inside the same
+transaction. A compiler, peer, reward, or cognitive facade cannot bypass the progress
+policy. A high reward with any invalidating reward-hacking finding supplies no promotion
+evidence. Verify these outcomes with `python -m pytest
+tests/integration/application/test_procedure_service.py
+tests/adversarial/test_cognitive_authority.py
+tests/adversarial/test_trace_reward_tampering.py -q`.
+
+Operational diversity is a diagnostic and does not satisfy actor independence. When
+same-model prompt variants differ, the analyzer records the declared diversity axes and
+the authority checker still treats their shared provider/model/adapter identity as
+dependent. Peer consensus likewise cannot authorize an adapter, evaluator, policy,
+claim, or procedure promotion.
+
 ## Source and reproduction boundary
 
-S21 through S29 informed vocabulary and architecture. They are not reproduced. No source
+S21 through S35 informed vocabulary and architecture. They are not reproduced. No source
 code from those works is imported, and no benchmark gain, compatibility, or transfer claim
 is made. The source register distinguishes each source proposal and evidence from SSOH's
-adaptation and original synthesis.
+adaptation and original synthesis. S33 contributes cohort diagnostics without training
+authority, and S35 contributes trace/procedure concepts without reinforcement learning.

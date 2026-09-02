@@ -8,7 +8,24 @@ from typing import cast
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
-from sqlalchemy import Connection, delete, event, insert, select, update
+from sqlalchemy import (
+    Column,
+    Connection,
+    ForeignKey,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    Text,
+    delete,
+    event,
+    func,
+    insert,
+    select,
+    update,
+)
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 from super_scientist.config.models import GovernancePolicy, PolicySnapshot
 from super_scientist.domain.claims.models import AtomicClaim, ClaimStatus, EvidenceLink
@@ -24,11 +41,17 @@ from super_scientist.kernel.transactions.models import (
     TransactionDecision,
     TransitionClaim,
 )
+from super_scientist.providers.storage.append_only import (
+    OrderedReferenceBinding,
+    ReferencedAppendOnlyRecordRepository,
+    StrictFrozenStorageRecord,
+)
 from super_scientist.providers.storage.database import (
     DatabaseUnitOfWork,
     create_database_engine,
     upgrade_database,
 )
+from super_scientist.providers.storage.query_bounds import SQLITE_IN_PARAMETER_CHUNK
 from super_scientist.providers.storage.repositories import RepositorySet, StorageIntegrityError
 from super_scientist.providers.storage.schema import (
     audit_events,
@@ -42,6 +65,167 @@ from super_scientist.providers.storage.schema import (
 
 PROPOSAL_ADAPTER = TypeAdapter(Proposal)
 NOW = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+
+_fixture_metadata = MetaData()
+fixture_records = Table(
+    "fixture_records",
+    _fixture_metadata,
+    Column("record_id", String(128), primary_key=True),
+    Column("record_json", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("created_at", String(40), nullable=False),
+)
+fixture_reference_targets = Table(
+    "fixture_reference_targets",
+    _fixture_metadata,
+    Column("reference_id", String(128), primary_key=True),
+)
+fixture_record_references = Table(
+    "fixture_record_references",
+    _fixture_metadata,
+    Column("record_id", ForeignKey("fixture_records.record_id"), primary_key=True),
+    Column("position", Integer, primary_key=True),
+    Column(
+        "reference_id",
+        ForeignKey("fixture_reference_targets.reference_id"),
+        nullable=False,
+    ),
+)
+
+
+class FixtureRecord(StrictFrozenStorageRecord):
+    record_id: str
+    reference_ids: tuple[str, ...]
+
+
+class FixtureRepository(ReferencedAppendOnlyRecordRepository[FixtureRecord]):
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(
+            connection,
+            table=fixture_records,
+            model_type=FixtureRecord,
+            identifier_field="record_id",
+            reference_bindings=(
+                OrderedReferenceBinding(
+                    table=fixture_record_references,
+                    owner_column="record_id",
+                    record_field="reference_ids",
+                    reference_column="reference_id",
+                ),
+            ),
+        )
+
+    def insert_raw_payload(self, payload: str) -> None:
+        self._connection.execute(
+            insert(fixture_records).values(
+                record_id="record-1",
+                record_json=payload,
+                content_hash=sha256_hex(payload.encode("utf-8")),
+                created_at=NOW.isoformat(),
+            )
+        )
+
+
+@dataclass(frozen=True)
+class StorageRuntime:
+    engine: Engine
+
+    def uow(self) -> DatabaseUnitOfWork:
+        return DatabaseUnitOfWork(self.engine)
+
+    def referenced_repository(self, connection: Connection) -> FixtureRepository:
+        return FixtureRepository(connection)
+
+    def invalid_reference_record(self) -> FixtureRecord:
+        return FixtureRecord(record_id="record-1", reference_ids=("missing-reference",))
+
+    def count(self, table_name: str) -> int:
+        table = {
+            "fixture_records": fixture_records,
+            "fixture_record_references": fixture_record_references,
+        }[table_name]
+        with self.engine.begin() as connection:
+            return connection.execute(select(func.count()).select_from(table)).scalar_one()
+
+
+@pytest.fixture
+def storage_runtime(tmp_path: Path) -> Iterator[StorageRuntime]:
+    url = _database_url(tmp_path / "append-only.db")
+    upgrade_database(url)
+    engine = create_database_engine(url)
+    _fixture_metadata.create_all(engine)
+    yield StorageRuntime(engine)
+    engine.dispose()
+
+
+@pytest.fixture(name="runtime")
+def runtime_fixture(storage_runtime: StorageRuntime) -> StorageRuntime:
+    return storage_runtime
+
+
+def test_append_only_repository_rejects_unknown_payload_field(
+    storage_runtime: StorageRuntime,
+) -> None:
+    with storage_runtime.uow() as uow:
+        assert uow.connection is not None
+        repository = storage_runtime.referenced_repository(uow.connection)
+        repository.insert_raw_payload('{"record_id":"record-1","unknown":true}')
+        with pytest.raises(StorageIntegrityError, match="invalid record JSON"):
+            repository.list_all()
+
+
+def test_append_only_add_rolls_back_record_and_references(runtime: StorageRuntime) -> None:
+    with pytest.raises(IntegrityError), runtime.uow() as uow:
+        assert uow.connection is not None
+        runtime.referenced_repository(uow.connection).add(
+            "record-1",
+            runtime.invalid_reference_record(),
+            NOW,
+        )
+    assert runtime.count("fixture_records") == 0
+    assert runtime.count("fixture_record_references") == 0
+
+
+@pytest.mark.integration
+def test_variable_length_repository_reads_chunk_32767_identifiers(
+    runtime: StorageRuntime,
+) -> None:
+    identifiers = tuple(f"missing-{index:05d}" for index in range(32_767))
+    expected_queries = (
+        len(identifiers) + SQLITE_IN_PARAMETER_CHUNK - 1
+    ) // SQLITE_IN_PARAMETER_CHUNK
+
+    with runtime.uow() as unit_of_work:
+        assert unit_of_work.connection is not None
+        statements: list[str] = []
+
+        def record_statement(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: object,
+        ) -> None:
+            statements.append(statement.lower())
+
+        event.listen(unit_of_work.connection, "before_cursor_execute", record_statement)
+        try:
+            repositories = unit_of_work.repositories()
+            assert repositories.evidence.get_many(identifiers) == ()
+            assert sum("from evidence_records" in item for item in statements) == expected_queries
+
+            statements.clear()
+            assert repositories.transactions.get_many_by_proposal_ids(identifiers) == ()
+            assert sum("from transactions" in item for item in statements) == expected_queries
+
+            statements.clear()
+            assert (
+                runtime.referenced_repository(unit_of_work.connection)._get_many(identifiers) == ()
+            )
+            assert sum("from fixture_records" in item for item in statements) == expected_queries
+        finally:
+            event.remove(unit_of_work.connection, "before_cursor_execute", record_statement)
 
 
 def _evidence_record(evidence_id: str, now: datetime = NOW) -> EvidenceRecord:

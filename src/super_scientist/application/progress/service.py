@@ -137,7 +137,9 @@ class CompletionReadCapability(Protocol):
     def has_retained_evidence(self, evidence_id: str) -> bool: ...
 
 
-class _ProgressPlanContext(BaseModel):
+class ProgressPlanAdmissionContext(BaseModel):
+    """Immutable snapshot used when another fixed handler composes plan admission."""
+
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     active_policy: PolicySnapshot
@@ -199,9 +201,9 @@ class RecordProgressPlanHandler:
         self,
         proposal: RecordProgressPlan,
         reads: HandlerReadCapability,
-    ) -> _ProgressPlanContext:
+    ) -> ProgressPlanAdmissionContext:
         capability = cast(ProgressPlanReadCapability, reads)
-        return _ProgressPlanContext(
+        return ProgressPlanAdmissionContext(
             active_policy=capability.policy_snapshot(),
             run=capability.get_run(proposal.plan.run_id),
             existing_plan=capability.get_plan(proposal.plan.plan_version_id),
@@ -217,7 +219,7 @@ class RecordProgressPlanHandler:
     def decide(
         self,
         proposal: RecordProgressPlan,
-        context: _ProgressPlanContext,
+        context: ProgressPlanAdmissionContext,
     ) -> TransactionDecision:
         authority_rejection = progress_authority_rejection(proposal, context.active_policy)
         if authority_rejection is not None:
@@ -689,25 +691,25 @@ class DecideCompletionHandler:
                 RejectionCode.INDEPENDENT_REVIEW_REQUIRED,
                 "completion requires the declared independent final validator",
             )
+        latest_budget = max(
+            context.budgets,
+            key=lambda item: (item.recorded_at, item.budget_id),
+        )
         try:
-            summary = calculate_progress(plan, context.events)
+            finding = detect_false_finish(
+                voluntary_termination=completion.voluntary_termination,
+                claims_completion=completion.claims_completion,
+                final_validator_result=final_validation.result,
+                plan=plan,
+                events=context.events,
+                unused_budget=has_unused_budget(latest_budget),
+            )
         except ValueError:
             return _rejected(
                 proposal.proposal_id,
                 RejectionCode.INVALID_DEPENDENCY,
                 "completion progress history is invalid",
             )
-        latest_budget = max(
-            context.budgets,
-            key=lambda item: (item.recorded_at, item.budget_id),
-        )
-        finding = detect_false_finish(
-            voluntary_termination=completion.voluntary_termination,
-            claims_completion=completion.claims_completion,
-            final_validator_result=final_validation.result,
-            validated_weight=summary.official_weight,
-            unused_budget=has_unused_budget(latest_budget),
-        )
         if decision.false_finish != finding:
             return _rejected(
                 proposal.proposal_id,

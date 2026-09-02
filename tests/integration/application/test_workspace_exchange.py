@@ -34,6 +34,7 @@ from super_scientist.providers.storage.database import (
     create_database_engine,
     upgrade_database,
 )
+from super_scientist.providers.storage.procedure_sources import ProcedureSourceSnapshot
 
 NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
 
@@ -288,6 +289,60 @@ def test_workspace_export_import_is_protected_safe_canonical_and_replayable(
     assert replayed.replayed == 1
     assert replayed.projections_verified is True
     assert target_export == exported
+    with target.uow_factory() as unit_of_work:
+        assert unit_of_work.repositories().cognitive_workspace_integrity_snapshot().is_empty()
+
+
+def test_procedure_source_snapshot_audit_metadata_round_trips_through_replay(
+    runtimes: tuple[ExchangeRuntime, ExchangeRuntime],
+) -> None:
+    exchange = _exchange()
+    source, target = runtimes
+    snapshot = ProcedureSourceSnapshot(
+        snapshot_family_id="exchange-procedure-sources",
+        snapshot_id="exchange-procedure-snapshot",
+        source_bindings=(),
+    )
+    artifact = source.artifact_store.put(
+        canonical_json_bytes(snapshot.model_dump(mode="json")),
+        "application/json",
+    )
+    assert source.coordinator.submit(
+        AddEvidence(
+            proposal_id="exchange-procedure-snapshot-proposal",
+            idempotency_key="exchange-procedure-snapshot-proposal",
+            proposer=source.actor,
+            evidence=EvidenceRecord(
+                evidence_id=snapshot.snapshot_id,
+                evidence_type="procedure-source",
+                source_locator="fixture:exchange-procedure-snapshot",
+                retrieved_at=NOW,
+                artifact=artifact,
+                provenance={"fixture": "workspace-exchange-snapshot"},
+                ingestion_actor_id=source.actor.actor_id,
+            ),
+        )
+    ).accepted
+
+    exported = exchange.export_workspace(
+        uow_factory=source.uow_factory,
+        artifact_store=source.artifact_store,
+    )
+    imported = exchange.import_workspace(
+        exported,
+        uow_factory=target.uow_factory,
+        artifact_store=target.artifact_store,
+        source_artifact_store=source.artifact_store,
+        clock=FixedClock(),
+    )
+    target_export = exchange.export_workspace(
+        uow_factory=target.uow_factory,
+        artifact_store=target.artifact_store,
+    )
+
+    assert imported.imported == 1
+    assert imported.projections_verified is True
+    assert target_export == exported
 
 
 def test_authoritative_duplicate_evidence_rejection_round_trips_without_conflict(
@@ -378,12 +433,15 @@ def test_workspace_export_validates_every_record_identity_and_decision_binding(
     replay_marker["records"][0]["expected_decision"]["replayed"] = True
     policy_mismatch = copy.deepcopy(base)
     policy_mismatch["policies"][0]["policy_hash"] = "0" * 64
+    unknown_version = copy.deepcopy(base)
+    unknown_version["schema_version"] = 2
 
     for payload, message in (
         (identity_mismatch, "stable identity"),
         (decision_mismatch, "decision identity"),
         (replay_marker, "replay marker"),
         (policy_mismatch, "policy hash"),
+        (unknown_version, "schema_version"),
     ):
         with pytest.raises(ValueError, match=message):
             exchange.WorkspaceExport.model_validate_json(json.dumps(payload))

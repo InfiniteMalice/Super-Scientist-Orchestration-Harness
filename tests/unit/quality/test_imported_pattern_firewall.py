@@ -261,6 +261,24 @@ def test_firewall_does_not_reject_individual_generic_identifiers(
     assert result.findings == ()
 
 
+def test_firewall_does_not_merge_contract_identifiers_across_python_scopes(
+    tmp_path: Path,
+) -> None:
+    firewall = _firewall()
+    root = _minimal_repository(tmp_path)
+    (root / "src" / "safe.py").write_text(
+        "from pydantic import TypeAdapter\n"
+        "def test_grid_cell() -> None:\n    pass\n"
+        "def validate_schema() -> object:\n    return TypeAdapter(int)\n",
+        encoding="utf-8",
+    )
+
+    result = firewall.run_imported_pattern_firewall(root)
+
+    assert result.passed is True
+    assert result.findings == ()
+
+
 def test_git_inventory_scans_tracked_and_untracked_files_but_not_ignored_scratch(
     tmp_path: Path,
 ) -> None:

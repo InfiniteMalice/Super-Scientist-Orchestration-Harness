@@ -16,6 +16,11 @@ from super_scientist.application.improvement.service import (
     RecordEvaluatorAuditHandler,
     RecordSelfImprovementMeasurementHandler,
 )
+from super_scientist.application.research_runs.service import (
+    AppendResearchRunEventHandler,
+    CreateResearchRunHandler,
+    _ResearchRunContext,
+)
 from super_scientist.application.transactions.coordinator import TransactionCoordinator
 from super_scientist.application.workspace_integrity import verify_workspace
 from super_scientist.config.loader import policy_hash
@@ -382,6 +387,250 @@ def test_research_run_rejects_a_self_nominated_final_validator(tmp_path: Path) -
         assert unit_of_work.connection is not None
         assert ResearchRunRepository(unit_of_work.connection).get(run.run_id) is None
     engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    (
+        ("existing", RejectionCode.ENTITY_ALREADY_EXISTS),
+        ("creator", RejectionCode.ENTITY_ID_MISMATCH),
+        ("validator", RejectionCode.INDEPENDENT_REVIEW_REQUIRED),
+        ("policy", RejectionCode.POLICY_HASH_MISMATCH),
+    ),
+)
+def test_create_research_run_handler_rejects_each_record_boundary(
+    mutation: str,
+    expected_code: RejectionCode,
+) -> None:
+    snapshot = _phase_a_policy()
+    proposer = _human_actor("run-proposer")
+    run = _run().model_copy(
+        update={
+            "creator": proposer,
+            "active_governance_policy_hash": snapshot.policy_hash,
+        }
+    )
+    existing = None
+    if mutation == "existing":
+        existing = run
+    elif mutation == "creator":
+        run = run.model_copy(update={"creator": _human_actor("other-creator")})
+    elif mutation == "validator":
+        run = run.model_copy(update={"final_validator": proposer})
+    else:
+        run = run.model_copy(update={"active_governance_policy_hash": "e" * 64})
+    proposal = CreateResearchRun(
+        proposal_id=f"create-run-{mutation}",
+        idempotency_key=f"create-run-{mutation}",
+        proposer=proposer,
+        approval=Approval(approver=_human_actor("approver"), approved_at=NOW),
+        run=run,
+    )
+
+    decision = CreateResearchRunHandler().decide(
+        proposal,
+        _ResearchRunContext(active_policy=snapshot, existing_run=existing, events=()),
+    )
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is expected_code
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    (
+        ("missing", RejectionCode.MISSING_ENTITY),
+        ("policy", RejectionCode.POLICY_HASH_MISMATCH),
+        ("actor", RejectionCode.ENTITY_ID_MISMATCH),
+        ("sequence", RejectionCode.INVALID_LINEAGE),
+        ("first", RejectionCode.INVALID_STATUS_TRANSITION),
+        ("terminal", RejectionCode.INVALID_STATUS_TRANSITION),
+        ("validator", RejectionCode.INDEPENDENT_REVIEW_REQUIRED),
+        ("false-finish", RejectionCode.FALSE_FINISH),
+    ),
+)
+def test_append_research_run_handler_rejects_each_lifecycle_boundary(
+    mutation: str,
+    expected_code: RejectionCode,
+) -> None:
+    snapshot = _phase_a_policy()
+    proposer = _human_actor("run-proposer")
+    approval = Approval(approver=_human_actor("approver"), approved_at=NOW)
+    run = _run().model_copy(
+        update={
+            "creator": proposer,
+            "active_governance_policy_hash": snapshot.policy_hash,
+        }
+    )
+    events: tuple[ResearchRunEvent, ...] = ()
+    existing: ResearchRun | None = run
+    event_type = ResearchRunEventType.STARTED
+    sequence = 1
+    final_validation = None
+    if mutation == "missing":
+        existing = None
+    elif mutation in {"policy", "actor"}:
+        pass
+    elif mutation == "sequence":
+        sequence = 2
+    elif mutation == "first":
+        event_type = ResearchRunEventType.FAILED
+    else:
+        events = (
+            _run_event().model_copy(
+                update={
+                    "actor": proposer,
+                    "governing_policy_hash": snapshot.policy_hash,
+                }
+            ),
+        )
+        sequence = 2
+        if mutation == "terminal":
+            events = (events[0].model_copy(update={"event_type": ResearchRunEventType.FAILED}),)
+        elif mutation == "validator":
+            event_type = ResearchRunEventType.FINAL_VALIDATION_ACCEPTED
+            final_validation = _provenance("wrong-validator", human=True)
+        else:
+            event_type = ResearchRunEventType.SUCCEEDED
+    proposal = _event_proposal(
+        f"append-{mutation}",
+        proposer,
+        approval,
+        run,
+        sequence=sequence,
+        event_type=event_type,
+        final_validation=final_validation,
+    )
+    if mutation == "policy":
+        proposal = proposal.model_copy(
+            update={"event": proposal.event.model_copy(update={"governing_policy_hash": "e" * 64})}
+        )
+    elif mutation == "actor":
+        proposal = proposal.model_copy(
+            update={
+                "event": proposal.event.model_copy(update={"actor": _human_actor("other-actor")})
+            }
+        )
+
+    decision = AppendResearchRunEventHandler().decide(
+        proposal,
+        _ResearchRunContext(active_policy=snapshot, existing_run=existing, events=events),
+    )
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is expected_code
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    (
+        ("v1", RejectionCode.PERMISSION_DENIED),
+        ("missing-requirement", RejectionCode.PERMISSION_DENIED),
+        ("weak-grounding", RejectionCode.INSUFFICIENT_GROUNDING),
+        ("missing-approval", RejectionCode.INDEPENDENT_REVIEW_REQUIRED),
+        ("nonhuman-authority", RejectionCode.PERMISSION_DENIED),
+    ),
+)
+def test_research_run_handler_rejects_each_authority_boundary(
+    mutation: str,
+    expected_code: RejectionCode,
+) -> None:
+    requirement = AdaptationRequirement(
+        change_target=ChangeTarget.RESEARCH_PROCESS,
+        persistence=PersistenceScope.RUN_LOCAL,
+        minimum_verification=VerificationLevel.INDEPENDENT_DETERMINISTIC_CHECK,
+        permitted_grounding=frozenset({ExternalGrounding.HUMAN_JUDGMENT}),
+        required_approver_kind=ActorKind.HUMAN,
+        protected_evaluation_required=False,
+        rollback_required=False,
+    )
+    if mutation == "v1":
+        snapshot = _snapshot(GovernancePolicy(required_claim_checks=("source_exists",)))
+    else:
+        requirements: tuple[AdaptationRequirement, ...] = (requirement,)
+        if mutation == "missing-requirement":
+            requirements = (
+                requirement.model_copy(
+                    update={
+                        "change_target": ChangeTarget.PROMPT,
+                        "persistence": PersistenceScope.PERSISTENT_SKILL,
+                    }
+                ),
+            )
+        elif mutation == "weak-grounding":
+            requirements = (
+                requirement.model_copy(
+                    update={"minimum_verification": VerificationLevel.FORMAL_VERIFIER}
+                ),
+            )
+        elif mutation == "nonhuman-authority":
+            requirements = (
+                requirement.model_copy(update={"required_approver_kind": ActorKind.MODEL}),
+            )
+        snapshot = _snapshot(
+            GovernancePolicyV2(
+                required_claim_checks=("source_exists",),
+                human_approval_for=frozenset(),
+                adaptation_requirements=requirements,
+            )
+        )
+    proposer = _human_actor("run-proposer")
+    approver = (
+        _model_actor("model-approver")
+        if mutation == "nonhuman-authority"
+        else _human_actor("approver")
+    )
+    proposal = CreateResearchRun(
+        proposal_id=f"authority-{mutation}",
+        idempotency_key=f"authority-{mutation}",
+        proposer=proposer,
+        approval=None
+        if mutation == "missing-approval"
+        else Approval(approver=approver, approved_at=NOW),
+        run=_run().model_copy(
+            update={
+                "creator": proposer,
+                "active_governance_policy_hash": snapshot.policy_hash,
+            }
+        ),
+    )
+
+    decision = CreateResearchRunHandler().decide(
+        proposal,
+        _ResearchRunContext(active_policy=snapshot, existing_run=None, events=()),
+    )
+
+    assert decision.accepted is False
+    assert decision.reasons[0].code is expected_code
+
+
+def test_append_research_run_authority_and_rejected_projection_fail_closed() -> None:
+    snapshot = _snapshot(GovernancePolicy(required_claim_checks=("source_exists",)))
+    proposer = _human_actor("run-proposer")
+    approval = Approval(approver=_human_actor("approver"), approved_at=NOW)
+    run = _run().model_copy(
+        update={
+            "creator": proposer,
+            "active_governance_policy_hash": snapshot.policy_hash,
+        }
+    )
+    proposal = _event_proposal(
+        "append-v1-authority",
+        proposer,
+        approval,
+        run,
+        sequence=1,
+        event_type=ResearchRunEventType.STARTED,
+    )
+    handler = AppendResearchRunEventHandler()
+    decision = handler.decide(
+        proposal,
+        _ResearchRunContext(active_policy=snapshot, existing_run=run, events=()),
+    )
+
+    assert decision.reasons[0].code is RejectionCode.PERMISSION_DENIED
+    with pytest.raises(ValueError, match="rejected proposals cannot be projected"):
+        handler.project(proposal, decision, object())  # type: ignore[arg-type]
 
 
 def test_fixed_router_declares_all_phase_a_adaptation_handlers(tmp_path: Path) -> None:

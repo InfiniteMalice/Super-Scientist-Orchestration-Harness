@@ -6,7 +6,7 @@ import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import MetaData, create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from alembic import command
@@ -174,7 +174,12 @@ def test_runtime_metadata_exactly_contains_0006_tables(database_url: str) -> Non
     engine = create_engine(database_url)
     try:
         with engine.connect() as connection:
-            assert compare_metadata(MigrationContext.configure(connection), schema.metadata) == []
+            revision_metadata = MetaData()
+            for table_name in sorted(
+                set(inspect(connection).get_table_names()) - {"alembic_version"}
+            ):
+                schema.metadata.tables[table_name].to_metadata(revision_metadata)
+            assert compare_metadata(MigrationContext.configure(connection), revision_metadata) == []
     finally:
         engine.dispose()
 

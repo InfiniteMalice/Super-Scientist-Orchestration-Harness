@@ -28,9 +28,42 @@ Direct submission cannot replay an intent-owned transaction without that fingerp
 cross-mode key reuse is an audited conflict.
 
 `scientist-harness quality-gate` is a separate development command. It invokes only its
-eight fixed source-controlled argument vectors and exposes no arbitrary command, path,
-selection, skip, or threshold input. Its dependency audit may use network access. This
-fixed developer tooling is not research-run execution authority.
+nine fixed source-controlled argument vectors and exposes no arbitrary command, path,
+selection, skip, or threshold input. Its dependency audit may use network access. Its
+wheel-install check executes the installed model-free example in a fresh environment.
+This fixed developer tooling is not research-run execution authority.
+
+## Cognitive Authority Boundary
+
+The cognitive plane has no retained control-plane capability. The sealed stateless
+`CognitiveOrchestrationService` receives an exact coordinator only for the duration of
+one `submit` call. The sealed stateless `ResearchCoordinator` receives the service and
+coordinator only for one declared tuple and stops after the first rejection. Neither
+object retains a repository, unit of work, connection, artifact store, protected reader,
+callable, closure, registry token, tool executor, model provider, or command runner.
+
+When the coordinator receives any of the 18 governed proposal families, it classifies
+the exact family without invoking caller serializers or nested hooks. For a trace, the
+coordinator creates one fresh exact owned proposal snapshot and uses it for context,
+decision, projection, storage, and audit. A hostile caller therefore cannot mutate a
+validated trace into a different stored trace between stages. Run
+`python -m pytest tests/integration/application/test_transaction_coordinator.py
+tests/adversarial/test_cognitive_authority.py tests/adversarial/test_trace_reward_tampering.py -q`
+to verify these authority and single-snapshot properties.
+
+Procedure records cannot supply Python imports, module names, shell commands, providers,
+dynamic imports, arbitrary tools, protected evaluators, or self-selected governance.
+The compiler accepts only declared current evidence receipts and fixed catalog entries;
+the validator rejects forbidden operations, method anchoring, recursive delegation,
+undeclared artifacts, tools, validators, and resources. The deterministic example's toy
+validator reads bounded artifact bytes and compares an expected SHA-256 digest. Its
+actor provenance is `TOOL`, never `HUMAN`, and it never executes artifact content.
+
+Hidden chain-of-thought or private-reasoning fields are absent from the public cognitive,
+procedure, trace, and reward schemas. Callers may submit bounded observable outputs,
+artifacts, decisions, diagnostics, and provenance only. Static schema/import tests and
+handler-boundary attacks run with `python -m pytest tests/adversarial/test_cognitive_authority.py
+tests/adversarial/test_procedure_escalation.py -q`.
 
 ## Model Execution Boundary
 
@@ -131,6 +164,19 @@ hypothesis mutations using the same fixed handlers and compares rebuilt records 
 heads with storage. Deleted or altered stage records, forged receipts,
 non-reproducible simulations, unresolved counterexamples, and tampered hypothesis heads
 therefore fail closed.
+
+Harness traces bind exact protocol/cell coordinates, output artifacts, verifier results,
+environment identity, transformations, generation metadata, reward observations, and
+accepted provenance. Metadata availability states: `AVAILABLE`, `UNAVAILABLE`, and
+`NOT_APPLICABLE`. `AVAILABLE` requires a value and its exact retained evidence;
+`UNAVAILABLE` means the metadata applies but the provider or workflow does not expose it;
+`NOT_APPLICABLE` means the field does not apply to that trace or operation. The latter two
+states cannot carry a fabricated value or evidence. Reward assessments bind the same
+accepted trace and retain every invalidating finding. High reward cannot erase verifier
+failure, environment tampering,
+answer leakage, trace inconsistency, proxy gaming, cherry-picking, contamination,
+premature termination, or resource evasion. The trace/reward adversarial test command
+above verifies rejection and unchanged authoritative heads.
 
 The kernel has no secret store, credential broker, runtime redaction service, or
 dedicated secret scanner. Do not put API keys, credentials, private tokens, or regulated

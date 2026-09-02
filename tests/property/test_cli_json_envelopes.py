@@ -131,3 +131,23 @@ def test_existing_command_parse_errors_keep_the_same_envelope(tmp_path: Path) ->
     payload = _json_payload(result)
     assert payload["command"] == "claim propose"
     assert payload["errors"][0]["code"] == "INVALID_ARGUMENT"
+
+
+def test_cognitive_inspect_parse_errors_keep_the_same_envelope(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "cognitive",
+            "inspect",
+            "--root",
+            str(tmp_path),
+            "--kind",
+            "capability-profile",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 2
+    payload = _json_payload(result)
+    assert payload["command"] == "cognitive inspect"
+    assert payload["errors"][0]["code"] == "INVALID_ARGUMENT"
