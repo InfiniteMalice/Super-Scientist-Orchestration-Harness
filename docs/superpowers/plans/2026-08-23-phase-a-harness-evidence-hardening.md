@@ -304,11 +304,11 @@ available for collections at or below the bound.
 **Files:**
 - Modify: `src/super_scientist/domain/harness_eval/guidance.py`
 - Test: `tests/unit/harness_eval/test_guidance.py`
-- Create outside the worktree only as requested: `C:/Users/evanh/Documents/Codex/work/ss-oh-030/.superpowers/sdd/2026-08-23-governed-cognitive-cohorts-procedure-compilation/phase-a-harness-fix-report.md`
+- Create: `.superpowers/sdd/2026-08-23-governed-cognitive-cohorts-procedure-compilation/phase-a-harness-fix-report.md`
 
 - [x] Write boundary regressions for recovery attempt zero/maximum/overflow and trace numeric overflow.
 - [x] Run them and verify overflow is RED.
 - [x] Bound recovery attempts by `MAX_EVALUATION_ITEMS` and preserve event ordering/hash identity.
 - [x] Run focused harness, campaign, protected leakage, strict parsing, Phase A, Ruff, strict mypy, authority scan, and `git diff --check`.
 - [x] Self-review correctness, readability, safety, documentation precision, and mutation resistance.
-- [x] Write the requested report, commit the isolated branch, and return the SHA and exact checks.
+- [x] Write the requested report with the exact verification evidence needed for handoff.

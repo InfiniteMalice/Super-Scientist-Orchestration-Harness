@@ -27,6 +27,7 @@ from super_scientist.application.transactions import (
 from super_scientist.application.transactions.harness_extensions import (
     HarnessTraceCapabilities,
     ModelHarnessAnalysisCapabilities,
+    RewardAssessmentRecordCapabilities,
     _guidance_cell_evidence_is_current,
     _guidance_cell_evidence_matches,
     _receipt_is_current,
@@ -48,13 +49,21 @@ from super_scientist.domain.harness_eval.matrix import (
     ModelHarnessProtocol,
     ModelIdentity,
 )
-from super_scientist.domain.harness_eval.receipts import EvidenceReceipt
+from super_scientist.domain.harness_eval.receipts import EvidenceReceipt, ResolvedEvidenceKind
 from super_scientist.domain.harness_eval.rewards import (
     RewardValidityAssessment,
     RewardValidityStatus,
+    reward_validity_receipt,
     valid_reward_evidence,
 )
-from super_scientist.domain.harness_eval.traces import HarnessExecutionTrace, ToolObservation
+from super_scientist.domain.harness_eval.rewards import (
+    assess_reward_validity as assess_reward_validity_contract,
+)
+from super_scientist.domain.harness_eval.traces import (
+    HarnessExecutionTrace,
+    ToolObservation,
+    trace_freshness_receipt,
+)
 from super_scientist.domain.identity import ActorIdentity, ActorKind
 from super_scientist.kernel.audit.chain import append_event
 from super_scientist.kernel.transactions.models import (
@@ -103,7 +112,7 @@ from tests.unit.harness_eval.test_model_harness_matrix import (
     analyze_model_harness as matrix_analysis,
 )
 from tests.unit.harness_eval.test_rewards import assess_reward_validity
-from tests.unit.harness_eval.test_traces import valid_trace
+from tests.unit.harness_eval.test_traces import resolved_evidence_inventory, valid_trace
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 
@@ -352,6 +361,17 @@ class _LookupRepository:
 
     def get(self, record_id: str) -> object | None:
         return self._values.get(record_id)
+
+
+class _CountingRewardRepository(_LookupRepository):
+    def __init__(self, assessments: tuple[RewardValidityAssessment, ...]) -> None:
+        super().__init__({})
+        self._assessments = assessments
+        self.list_all_calls = 0
+
+    def list_all(self) -> tuple[RewardValidityAssessment, ...]:
+        self.list_all_calls += 1
+        return self._assessments
 
 
 def test_guidance_cell_currentness_rejects_a_trace_from_another_protocol() -> None:
@@ -832,6 +852,135 @@ def test_evidence_receipt_resolution_requires_the_exact_schema_version() -> None
     )
 
     assert _receipt_is_current(receipt, evidence=evidence) is False
+
+
+def test_reward_capability_materializes_reward_receipts_once() -> None:
+    trace = valid_trace(trace_id="primary-trace")
+    base = assess_reward_validity(
+        trace.reward_observation,
+        trace,
+        (),
+        verifier_succeeded=True,
+    )
+    auxiliary = tuple(
+        assess_reward_validity(
+            auxiliary_trace.reward_observation,
+            auxiliary_trace,
+            (),
+            verifier_succeeded=True,
+        )
+        for auxiliary_trace in (
+            valid_trace(trace_id="auxiliary-trace-1"),
+            valid_trace(trace_id="auxiliary-trace-2"),
+            valid_trace(trace_id="auxiliary-trace-3"),
+        )
+    )
+    direct_required = (
+        base.evidence_inventory.resolved_by,
+        base.expectation.resolution.expectation_source,
+        base.expectation.resolution.resolver,
+        *base.expectation.resolution.provenance,
+        *(item.receipt for item in base.evidence_inventory.records),
+    )
+    direct_rewards = _CountingRewardRepository(auxiliary)
+    direct_capability = RewardAssessmentRecordCapabilities(
+        active_policy=_policy(),
+        proposal=_proposal(
+            RecordRewardAssessment,
+            record_id="direct-reward-resolution",
+            observation=trace.reward_observation,
+            findings=base.findings,
+            assessment=base,
+        ),  # type: ignore[arg-type]
+        guidance_protocols=_LookupRepository({}),  # type: ignore[arg-type]
+        matrix_protocols=_LookupRepository({}),  # type: ignore[arg-type]
+        traces=_LookupRepository({trace.trace_id: trace}),  # type: ignore[arg-type]
+        rewards=direct_rewards,  # type: ignore[arg-type]
+        evidence=_LookupRepository(
+            {
+                item.record_id: SimpleNamespace(content_hash=item.content_hash)
+                for item in direct_required
+            }
+        ),  # type: ignore[arg-type]
+        created_at=NOW,
+    )
+
+    assert (
+        direct_capability.resolve_reward_assessment_capabilities(
+            trace_receipt=EvidenceReceipt(
+                record_id=trace.trace_id,
+                schema_version=trace.schema_version,
+                content_hash=trace.content_hash,
+            ),
+            assessment_receipt=reward_validity_receipt(base),
+            assessment=base,
+        )
+        is not None
+    )
+    assert direct_rewards.list_all_calls == 0
+
+    extra_receipts = tuple(trace_freshness_receipt(item.freshness) for item in auxiliary)
+    inventory = resolved_evidence_inventory(
+        (
+            *((item.receipt, item.kind) for item in base.evidence_inventory.records),
+            *((item, ResolvedEvidenceKind.PROVENANCE) for item in extra_receipts),
+        ),
+        inventory_id="reward-resolution-inventory",
+    )
+    assert trace.reward_observation is not None
+    assessment = assess_reward_validity_contract(
+        trace.reward_observation,
+        trace,
+        base.findings,
+        expectation=base.expectation,
+        verification=base.verification,
+        diagnostic_coverage=base.diagnostic_coverage,
+        inventory=inventory,
+    )
+    required = (
+        inventory.resolved_by,
+        assessment.expectation.resolution.expectation_source,
+        assessment.expectation.resolution.resolver,
+        *assessment.expectation.resolution.provenance,
+        *(item.receipt for item in inventory.records),
+    )
+    unresolved = set(extra_receipts)
+    retained = {
+        item.record_id: SimpleNamespace(content_hash=item.content_hash)
+        for item in required
+        if item not in unresolved
+    }
+    rewards = _CountingRewardRepository(auxiliary)
+    proposal = _proposal(
+        RecordRewardAssessment,
+        record_id="reward-resolution",
+        observation=trace.reward_observation,
+        findings=assessment.findings,
+        assessment=assessment,
+    )
+    capability = RewardAssessmentRecordCapabilities(
+        active_policy=_policy(),
+        proposal=proposal,  # type: ignore[arg-type]
+        guidance_protocols=_LookupRepository({}),  # type: ignore[arg-type]
+        matrix_protocols=_LookupRepository({}),  # type: ignore[arg-type]
+        traces=_LookupRepository({trace.trace_id: trace}),  # type: ignore[arg-type]
+        rewards=rewards,  # type: ignore[arg-type]
+        evidence=_LookupRepository(retained),  # type: ignore[arg-type]
+        created_at=NOW,
+    )
+
+    resolved = capability.resolve_reward_assessment_capabilities(
+        trace_receipt=EvidenceReceipt(
+            record_id=trace.trace_id,
+            schema_version=trace.schema_version,
+            content_hash=trace.content_hash,
+        ),
+        assessment_receipt=reward_validity_receipt(assessment),
+        assessment=assessment,
+    )
+
+    assert resolved is not None
+    assert rewards.list_all_calls == 1
 
 
 def test_invalid_reward_is_retained_but_excluded_from_positive_evidence() -> None:

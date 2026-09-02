@@ -1286,8 +1286,8 @@ def _require_safe_exact_value_shape(
         state = object.__getattribute__(value, "__dict__")
         if type(state) is not dict or any(type(key) is not str for key in state):
             raise ValueError("model boundary requires exact dictionary state")
-        if any(field_name not in annotation.model_fields for field_name in state):
-            raise ValueError("model boundary received unexpected instance state")
+        if frozenset(state) != frozenset(annotation.model_fields):
+            raise ValueError("model boundary requires complete declared instance state")
         for field_name, field_value in state.items():
             field = annotation.model_fields[field_name]
             _require_safe_exact_value_shape(

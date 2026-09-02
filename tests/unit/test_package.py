@@ -12,7 +12,8 @@ def test_package_exposes_version() -> None:
 
 
 def test_build_backend_range_preserves_twine_compatible_core_metadata() -> None:
-    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    project_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    project = tomllib.loads(project_path.read_text(encoding="utf-8"))
     build_requirements = tuple(
         Requirement(requirement) for requirement in project["build-system"]["requires"]
     )

@@ -311,6 +311,8 @@ class AppendPeerContributionHandler(_HistoryHandlerBase):
         writes: HandlerWriteCapability,
     ) -> None:
         _require_accepted(decision)
+        # The contribution repository retains the projected record; accepted
+        # transaction history retains the enclosing request for exact replay.
         writes.append_authoritative(proposal.contribution)
 
 

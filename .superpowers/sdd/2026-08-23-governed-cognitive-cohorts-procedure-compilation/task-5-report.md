@@ -36,8 +36,8 @@ Implemented Task 5 on `feat/governed-cognitive-cohorts-procedure-compilation` fr
 
 ## RED, GREEN, and Final Verification
 
-All commands used the required prefix:
-`uv run --isolated --python C:\Users\evanh\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe --extra dev`.
+All commands used the required isolated `uv run --python <python-runtime> --extra dev`
+prefix.
 
 1. Baseline: `python -m pytest tests/unit/progress tests/property/test_progress_dependencies.py -v`
    passed: `15 passed`.
@@ -127,8 +127,8 @@ None. Durable transaction handling and current-compilation freshness enforcement
 
 ### RED, GREEN, and Final Evidence
 
-All Python commands used the required prefix:
-`uv run --isolated --python C:\Users\evanh\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe --extra dev`.
+All Python commands used the required isolated `uv run --python <python-runtime>
+--extra dev` prefix.
 
 1. Cluster RED:
    `python -m pytest tests/unit/procedures/test_compiler.py tests/unit/procedures/test_validation.py -k "self_declared or compiled_metadata or downstream_unknown or duplicate_snapshot or noncanonical_snapshot" -v`

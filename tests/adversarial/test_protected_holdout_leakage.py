@@ -139,22 +139,29 @@ def test_trace_records_reject_adversarial_protected_and_execution_payloads() -> 
         kind=EnvironmentEventKind.CRASHED,
         evidence_id="event",
     ).model_dump(mode="python")
-    for model, payload in (
+    for model, base_payload, unexpected_key, injected_payload in (
         (
             ObservableArtifactRef,
+            artifact,
+            "relative_path",
             artifact | {"relative_path": "protected/answer.bin"},
         ),
         (
             ToolObservation,
+            tool,
+            "command",
             tool | {"command": "type protected\\answer.bin"},
         ),
         (
             EnvironmentEvent,
+            event,
+            "exception_text",
             event | {"exception_text": SECRET.decode()},
         ),
     ):
-        with pytest.raises(ValidationError):
-            model.model_validate(payload)
+        model.model_validate(base_payload)
+        with pytest.raises(ValidationError, match=unexpected_key):
+            model.model_validate(injected_payload)
 
 
 def test_public_reader_exposes_input_only_for_the_bound_campaign_and_task() -> None:

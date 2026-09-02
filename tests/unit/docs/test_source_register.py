@@ -5,9 +5,11 @@ from pathlib import Path
 
 import yaml
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
 
 def test_s21_through_s29_have_complete_non_reproduction_metadata() -> None:
-    text = Path("docs/sources/source-register.yaml").read_text(encoding="utf-8")
+    text = (REPO_ROOT / "docs/sources/source-register.yaml").read_text(encoding="utf-8")
     blocks = {
         match.group("id"): match.group("body")
         for match in re.finditer(
@@ -31,7 +33,7 @@ def test_s21_through_s29_have_complete_non_reproduction_metadata() -> None:
 
 
 def test_s21_through_s29_pin_exact_source_and_reuse_boundaries() -> None:
-    text = Path("docs/sources/source-register.yaml").read_text(encoding="utf-8")
+    text = (REPO_ROOT / "docs/sources/source-register.yaml").read_text(encoding="utf-8")
     blocks = {
         match.group("id"): match.group("body")
         for match in re.finditer(
@@ -73,8 +75,8 @@ def test_s21_through_s29_pin_exact_source_and_reuse_boundaries() -> None:
 
 
 def test_governed_adaptation_docs_deny_self_promotion_and_reproduction_claims() -> None:
-    governed = Path("docs/governed-adaptation.md").read_text(encoding="utf-8").lower()
-    inspirations = Path("docs/research-inspirations.md").read_text(encoding="utf-8").lower()
+    governed = (REPO_ROOT / "docs/governed-adaptation.md").read_text(encoding="utf-8").lower()
+    inspirations = (REPO_ROOT / "docs/research-inspirations.md").read_text(encoding="utf-8").lower()
 
     assert "candidate policy cannot authorize" in governed
     assert "no automatic promotion" in governed
@@ -83,7 +85,9 @@ def test_governed_adaptation_docs_deny_self_promotion_and_reproduction_claims() 
 
 
 def test_s30_through_s35_have_exact_ids_versions_and_research_boundaries() -> None:
-    register = yaml.safe_load(Path("docs/sources/source-register.yaml").read_text(encoding="utf-8"))
+    register = yaml.safe_load(
+        (REPO_ROOT / "docs/sources/source-register.yaml").read_text(encoding="utf-8")
+    )
     sources = register["sources"]
     new_sources = sources[-6:]
 

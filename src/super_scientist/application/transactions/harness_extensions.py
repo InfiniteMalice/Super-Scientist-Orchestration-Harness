@@ -110,6 +110,7 @@ def _receipt_is_current(
     matrix_protocols: ModelHarnessProtocolRepository | None = None,
     traces: HarnessExecutionTraceRepository | None = None,
     rewards: RewardAssessmentRepository | None = None,
+    reward_receipts: frozenset[EvidenceReceipt] | None = None,
 ) -> bool:
     retained = evidence.get(receipt.record_id)
     if (
@@ -126,6 +127,8 @@ def _receipt_is_current(
     )
     if any(item is not None and _receipt_matches_model(receipt, item) for item in candidates):
         return True
+    if reward_receipts is not None:
+        return receipt in reward_receipts
     if rewards is not None:
         return any(
             trace_freshness_receipt(item.freshness) == receipt
@@ -702,17 +705,33 @@ class RewardAssessmentRecordCapabilities:
             *assessment.expectation.resolution.provenance,
             *(item.receipt for item in inventory.records),
         )
-        if not all(
-            _receipt_is_current(
-                item,
+        direct_reward_receipts: frozenset[EvidenceReceipt] = frozenset()
+        reward_receipts: frozenset[EvidenceReceipt] | None = None
+
+        def receipt_is_current(receipt: EvidenceReceipt) -> bool:
+            nonlocal reward_receipts
+            if _receipt_is_current(
+                receipt,
                 evidence=self.evidence,
                 guidance_protocols=self.guidance_protocols,
                 matrix_protocols=self.matrix_protocols,
                 traces=self.traces,
                 rewards=self.rewards,
-            )
-            for item in required
-        ):
+                reward_receipts=direct_reward_receipts,
+            ):
+                return True
+            if reward_receipts is None:
+                reward_receipts = frozenset(
+                    retained_receipt
+                    for retained_assessment in self.rewards.list_all()
+                    for retained_receipt in (
+                        trace_freshness_receipt(retained_assessment.freshness),
+                        reward_validity_receipt(retained_assessment),
+                    )
+                )
+            return receipt in reward_receipts
+
+        if not all(receipt_is_current(item) for item in required):
             return None
         return RewardAssessmentCapabilities(
             expectation=assessment.expectation,

@@ -142,7 +142,9 @@ scientist-harness cognitive inspect --root .kernel --kind capability-profile --i
 
 The second command reports `valid: true` and `checked_events: 0`. See
 `docs/examples/kernel-vertical-slice.md` for the deterministic offline evidence and
-claim example. `init` activates a policy only for a genuinely empty kernel database.
+claim example. The inspect command reports `not_found` until an accepted transaction
+admits `profile-1`; initialization alone does not create a capability profile. `init`
+activates a policy only for a genuinely empty kernel database.
 If durable state exists but its active governance pointer is missing, initialization
 fails closed; `audit verify` still opens that storage and reports the integrity error.
 

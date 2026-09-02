@@ -1002,19 +1002,7 @@ def analyze_model_harness(
     comparisons_out = (
         () if confounds else _build_declared_comparisons(validated_protocol, validated_cells)
     )
-    analysis_values: dict[str, object] = {
-        "schema_version": 1,
-        "protocol": validated_protocol,
-        "protocol_id": validated_protocol.protocol_id,
-        "protocol_version": validated_protocol.version,
-        "protocol_hash": validated_protocol.content_hash,
-        "cell_ids": tuple(cell.cell_id for cell in ordered_cells),
-        "cell_hashes": tuple(cell.content_hash for cell in ordered_cells),
-        "comparisons": comparisons_out,
-        "confounds": confounds,
-        "causal_claim_permitted": False,
-    }
-    return ModelHarnessAnalysis.model_construct(
+    analysis = ModelHarnessAnalysis.model_construct(
         schema_version=1,
         protocol=validated_protocol,
         protocol_id=validated_protocol.protocol_id,
@@ -1025,8 +1013,9 @@ def analyze_model_harness(
         comparisons=comparisons_out,
         confounds=confounds,
         causal_claim_permitted=False,
-        content_hash=model_harness_analysis_hash(analysis_values),
+        content_hash="0" * 64,
     )
+    return analysis.model_copy(update={"content_hash": model_harness_analysis_hash(analysis)})
 
 
 __all__ = [

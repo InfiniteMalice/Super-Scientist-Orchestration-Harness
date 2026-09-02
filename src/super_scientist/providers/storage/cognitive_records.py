@@ -579,6 +579,8 @@ def _load_governed_provenance_snapshot(
             if transaction_ids is None
             else transaction_repository.get_many_by_proposal_ids(transaction_ids)
         )
+        # Even a targeted record read must verify the complete hash-linked audit
+        # chain. Batch readers reuse this operation-local provenance snapshot.
         audit_events = AuditRepository(connection).list_all()
     except StorageIntegrityError:
         invalid_provenance_storage = True

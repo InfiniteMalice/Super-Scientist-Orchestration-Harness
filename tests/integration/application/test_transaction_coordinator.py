@@ -388,6 +388,26 @@ def test_each_new_proposal_uses_only_its_focused_capability_factory(
 ) -> None:
     observed: list[tuple[str, type[Any]]] = []
 
+    def preserve_nonvalidating_routing_fixture(
+        proposal: Any,
+        governed_type: type[BaseModel] | None,
+        *,
+        state_is_safe: bool | None = None,
+    ) -> Any:
+        del governed_type, state_is_safe
+        return proposal
+
+    monkeypatch.setattr(
+        coordinator_module,
+        "_governed_proposal_state_is_safe",
+        lambda proposal, governed_type: True,
+    )
+    monkeypatch.setattr(
+        coordinator_module,
+        "_durable_proposal",
+        preserve_nonvalidating_routing_fixture,
+    )
+
     def capability_factory(factory_name: str) -> Callable[..., object]:
         def observe(proposal: object, *args: object, **kwargs: object) -> object:
             del args, kwargs
@@ -505,7 +525,7 @@ def test_governed_reward_copies_and_hostile_subclasses_reach_fixed_handler_decis
 
 
 @pytest.mark.integration
-def test_other_nonvalidating_governed_copies_fail_closed_without_crashing(
+def test_partial_governed_model_state_is_rejected_before_handler(
     runtime: Runtime,
 ) -> None:
     copied = RecordCapabilityProfile.model_construct(
@@ -513,7 +533,18 @@ def test_other_nonvalidating_governed_copies_fail_closed_without_crashing(
         idempotency_key="key-invalid-capability-copy",
         proposer=runtime.actor,
     )
+    proposal_type = RecordCapabilityProfile.model_fields["proposal_type"].default
+    runtime.coordinator._router = ProposalRouter(
+        ((proposal_type, _CapabilityProbeHandler(proposal_type)),)  # type: ignore[arg-type]
+    )
 
+    assert (
+        coordinator_module._governed_proposal_state_is_safe(
+            copied,
+            RecordCapabilityProfile,
+        )
+        is False
+    )
     decision = runtime.coordinator.submit(copied)
 
     assert decision.reasons[0].code is RejectionCode.DERIVATION_MISMATCH

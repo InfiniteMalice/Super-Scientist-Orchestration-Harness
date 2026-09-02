@@ -161,7 +161,6 @@ def _cell(
     *,
     score: str = "0.5",
     trace_current: bool = True,
-    reward_valid: bool = True,
 ) -> ModelHarnessCell:
     evidence = _validated_evidence(protocol, coordinate)
     from super_scientist.domain.harness_eval.evidence_chains import (
@@ -170,12 +169,6 @@ def _cell(
 
     chain_receipt = harness_cell_evidence_chain_receipt(evidence.chain)  # type: ignore[union-attr]
     if not trace_current:
-        chain_receipt = EvidenceReceipt(
-            record_id=chain_receipt.record_id,
-            schema_version=chain_receipt.schema_version,
-            content_hash=HASH_B,
-        )
-    if not reward_valid:
         chain_receipt = EvidenceReceipt(
             record_id=chain_receipt.record_id,
             schema_version=chain_receipt.schema_version,
@@ -430,11 +423,10 @@ def test_harness_identity_drift_is_a_typed_confound() -> None:
     assert ModelHarnessConfoundCode.HARNESS_IDENTITY_MISMATCH in analysis.confounds
 
 
-def test_stale_trace_and_invalid_reward_block_descriptive_analysis() -> None:
+def test_evidence_chain_receipt_mismatch_blocks_descriptive_analysis() -> None:
     protocol = _protocol()
     cells = list(_cells(protocol))
     cells[0] = _cell(protocol, protocol.expected_grid[0], trace_current=False)
-    cells[1] = _cell(protocol, protocol.expected_grid[1], reward_valid=False)
     analysis = analyze_model_harness(protocol, tuple(cells))
     assert ModelHarnessConfoundCode.TRACE_RECEIPT_MISMATCH in analysis.confounds
     assert ModelHarnessConfoundCode.REWARD_RECEIPT_MISMATCH in analysis.confounds
